@@ -238,6 +238,41 @@ uint32_t switch_bench_kernel_flags(void);
 // GetInfo's flags and zcull[12], and method 'ZC''s reply (zcull's layout), on a connection of its own: ZC's
 // kern_return_t, -1 where no connection opened
 int32_t switch_bench_zcull_info(uint32_t *flags, uint32_t info[12], uint32_t zc[12]);
+// GetInfo's GPC and TPC counts on a connection of its own: 0, -1 where no connection opened
+int32_t switch_bench_gpu_units(uint32_t *gpcs, uint32_t *tpcs);
+// The bytes of the bench device's interlock ticket buffer (the driver's Device::init allocation); 0 without a device
+uint64_t switch_bench_ticket_bytes(struct switch_bench *bench);
+
+// What follows the pattern pass of gpu.x1.l2_flush_writeback (bench_l2_flush.cpp), in a second pass of the same
+// command buffer: host methods ahead of its one draw, then the job's end
+enum switch_bench_l2_end {
+    SWITCH_BENCH_L2_NONE,      // no methods; the job ends Internal, which flushes nothing (the control)
+    SWITCH_BENCH_L2_BRACKET,   // WFI, FB_FLUSH, FB_FLUSH: the flush arms' bracket with no MEM_OP in it
+    SWITCH_BENCH_L2_MEM_OP_D,  // the bracket around MEM_OP_C 0, MEM_OP_D L2_FLUSH_DIRTY (the kernel's form)
+    SWITCH_BENCH_L2_MEM_OP_B,  // the bracket around MEM_OP_B L2_FLUSH_DIRTY alone (deko3d's form)
+    SWITCH_BENCH_L2_JOB_END,   // no methods; the job ends External, the kernel's flush (gpu_exec.c chan_fence_job)
+};
+
+// One round: the CPU fills a write-combined pitch target with `sentinel` under a lease, the 3D engine draws `pattern`
+// over all of it through the GPU's L2, the end runs, and once the fence passes the CPU reads the target through its
+// write-combined mapping with no lease, so nothing but the end itself can have written the L2 back
+struct switch_bench_l2_round {
+    uint32_t end;                      // switch_bench_l2_end
+    uint32_t pattern[4], sentinel[4];  // RGBA32Float texels, as bits
+    uint32_t width, height;
+    uint32_t *words;  // the caller's: width x height texels of 4 words, rows packed
+    size_t word_count;
+    uint32_t status;  // switch_bench_status
+    char why[160];
+    uint32_t exact_jobs;    // the kernel takes addressed jobs, so an Internal end can skip the flush
+    uint32_t wc;            // the target's CPU view is the write-combined mapping (never CPU-cached)
+    uint32_t block_linear;  // the target is block-linear (the round needs pitch rows)
+    uint32_t emitted;       // draws that carried the end's methods
+    uint32_t lost_error;
+    uint64_t fault_va;
+};
+
+void switch_bench_l2_round_run(struct switch_bench *bench, struct switch_bench_l2_round *r);
 
 #ifdef __cplusplus
 }

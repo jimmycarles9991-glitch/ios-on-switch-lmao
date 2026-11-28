@@ -24,7 +24,6 @@ def workspace_root(target):
 # their script's stem. run_tool(ctx, "corecrypto", ...) runs //tools/kernel:corecrypto.
 KERNEL_TOOLS = [
     "corecrypto",
-    "data_seed",
     "firehose",
     "host_c_binary",
     "im4p",
@@ -44,7 +43,7 @@ KERNEL_TOOL_ATTRS = {
     "_builder": attr.label(default = "//kernel/rules:builder"),
 }
 
-def run_tool(ctx, tool, arguments, inputs, outputs, mnemonic, progress, execution_requirements = None, env = None, xcode = True):
+def run_tool(ctx, tool, arguments, inputs, outputs, mnemonic, progress, execution_requirements = None, env = None, xcode = True, tools = None):
     """Runs a tool: a tools/kernel name ("corecrypto", or "corecrypto.py") or any executable target (a py_binary).
 
     xcode = False for a tool that runs nothing of Xcode's: its action then takes no Xcode input and runs without one.
@@ -59,6 +58,7 @@ def run_tool(ctx, tool, arguments, inputs, outputs, mnemonic, progress, executio
         executable = tool[DefaultInfo].files_to_run,
         arguments = arguments,
         inputs = depset([ctx.file._xcode_env, ctx.file._xcode_identity], transitive = [inputs]) if xcode else inputs,
+        tools = tools or [],
         outputs = outputs,
         mnemonic = mnemonic,
         progress_message = progress,

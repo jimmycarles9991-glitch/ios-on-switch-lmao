@@ -63,6 +63,7 @@ bool Device::createZetaView(const Texture &of, uint32_t format, Texture &t)
     }
     if (stencilWord0)
         reinterpret_cast<uint32_t *>(tic_.cpu + 32 * t.tic)[0] = stencilWord0;
+    noteTicWrite();
     return true;
 }
 
@@ -177,10 +178,12 @@ bool Device::createView(const Texture &of, uint32_t format, Texture &t)
         noteView(of, t);
         if (of.xrPlanes || of.converted()) {
             memcpy(tic_.cpu + 32 * t.tic, tic_.cpu + 32 * of.tic, of.xrPlanes ? 64 : 32);
+            noteTicWrite();
         } else if (of.chain) {
             uint32_t w[8];
             chainViewHeader(of, of.chain->layout, of.va, *f, 0, of.chain->layout.levels, of.type, w);
             memcpy(tic_.cpu + 32 * t.tic, w, 32);
+            noteTicWrite();
         } else if (!of.sampled) {
             writeTic(t);
         }
@@ -289,14 +292,18 @@ bool Device::createPartView(const Texture &parent, uint32_t format, uint32_t typ
             memcpy(tic_.cpu + 32 * t.tic, tic_.cpu + 32 * of.tic, of.xrPlanes ? 64 : 32);
             if (of.converted() && type != fx::kTexTwoD)  // a block-linear image's header (the planes' are pitch)
                 setField(reinterpret_cast<uint32_t *>(tic_.cpu + 32 * t.tic), 154, 151, type);
+            noteTicWrite();
         } else if (of.zeta && (of.chain || type != fx::kTexTwoD)) {
             memcpy(tic_.cpu + 32 * t.tic, zetaHeader, 32);
+            noteTicWrite();
         } else if (of.sampled) {
             // sampled through a view of its texture's pool image (viewCompanions)
         } else if (!of.chain) {
             writeTic(t);
-            if (of.samples > 1)
+            if (of.samples > 1) {
                 setField(reinterpret_cast<uint32_t *>(tic_.cpu + 32 * t.tic), 154, 151, type);
+                noteTicWrite();
+            }
         } else {
             fx::MipChain c = of.chain->layout;
             c.layers = layers;
@@ -305,6 +312,7 @@ bool Device::createPartView(const Texture &parent, uint32_t format, uint32_t typ
             if (chained)  // the conversion's channels (ycbcrImageHeader)
                 w[0] = reinterpret_cast<const uint32_t *>(tic_.cpu + 32 * of.tic)[0];
             memcpy(tic_.cpu + 32 * t.tic, w, 32);
+            noteTicWrite();
         }
     }
     if (of.zeta ||
@@ -354,14 +362,14 @@ bool Device::stencilTemp(Texture &t)
 {
     constexpr uint32_t kRG8Unorm = 30;
     const bool fifthByte = (t.zeta && t.format == kZetaFormat) || (twoPlaneXr(t.format) && t.bpp == 8 && !t.xrPlanes);
-    if (t.stencilTemp || !fifthByte)
-        return t.stencilTemp != nullptr;
+    if (__atomic_load_n(&t.stencilTemp, __ATOMIC_ACQUIRE) || !fifthByte)
+        return __atomic_load_n(&t.stencilTemp, __ATOMIC_ACQUIRE) != nullptr;
     Texture *temp = new Texture;
     if (!createTexture(t.width, t.height, kRG8Unorm, *temp)) {
         delete temp;
         return false;
     }
-    t.stencilTemp = temp;
+    __atomic_store_n(&t.stencilTemp, temp, __ATOMIC_RELEASE);
     return true;
 }
 
@@ -369,14 +377,14 @@ bool Device::sampleRows(Texture &t)
 {
     uint32_t gx = 0, gy = 0;
     sampleGrid(t.samples, gx, gy);
-    if (t.sampleRows || !gy)
+    if (__atomic_load_n(&t.sampleRows, __ATOMIC_ACQUIRE) || !gy)
         return true;
     Texture *rows = new Texture;
     if (!createTexture(t.width << gx, t.height << gy, t.format, *rows)) {
         delete rows;
         return false;
     }
-    t.sampleRows = rows;
+    __atomic_store_n(&t.sampleRows, rows, __ATOMIC_RELEASE);
     return true;
 }
 
@@ -421,6 +429,7 @@ uint32_t Device::attachmentTic(const Texture &t, const Texture &part, uint32_t l
         if (!tic)
             return 0;
         memcpy(tic_.cpu + 32 * tic, w, 32);
+        noteTicWrite();
         partTics_.emplace(t.tic, std::make_pair(key, tic));
         return tic;
     }
@@ -444,7 +453,8 @@ uint32_t Device::attachmentTic(const Texture &t, const Texture &part, uint32_t l
     const uint32_t tic = allocTic();
     if (!tic)
         return 0;
-    memcpy(tic_.cpu + 32 * tic, w, 32);  // visible at the next submission's header invalidate
+    memcpy(tic_.cpu + 32 * tic, w, 32);
+    noteTicWrite();
     partTics_.emplace(t.tic, std::make_pair(key, tic));
     views_.keep(t.tic, key, tic);
     return tic;
@@ -466,13 +476,14 @@ uint32_t Device::levelTic(const Texture &t, uint32_t level, bool codes)
         uint32_t w[8];
         fx::mipChainTic(t.chain->layout, t.chain->va, f ? f->tic0 : kZetaFormatInfo[z].tic0, f && f->srgb && !codes,
                         level, 1, w, t.type == fx::kTexThreeD ? fx::kTexThreeD : fx::kTexTwoD);
-        memcpy(tic_.cpu + 32 * tic, w, 32);  // visible at the next submission's header invalidate
+        memcpy(tic_.cpu + 32 * tic, w, 32);
+        noteTicWrite();
         __atomic_store_n(&slot, tic, __ATOMIC_RELEASE);
     }
     return tic;
 }
 
-uint32_t Device::viewTic(const Texture &t, uint32_t word0, ViewAccess access)
+uint32_t Device::viewTic(const Texture &t, uint32_t word0, ViewAccess access, bool asArray)
 {
     uint8_t sxLog2 = 0, syLog2 = 0;
     if (access == ViewAccess::Storage && t.samples > 1) {
@@ -482,7 +493,7 @@ uint32_t Device::viewTic(const Texture &t, uint32_t word0, ViewAccess access)
         sxLog2 = grid.sxLog2;
         syLog2 = grid.syLog2;
     }
-    const uint64_t key = word0 | uint64_t(sxLog2) << 32 | uint64_t(syLog2) << 40;
+    const uint64_t key = word0 | uint64_t(sxLog2) << 32 | uint64_t(syLog2) << 40 | (asArray ? 1ull << 48 : 0);
     if (!t.tic)
         return 0;
     if (const uint32_t seen = views_.find(t.tic, key))
@@ -499,10 +510,38 @@ uint32_t Device::viewTic(const Texture &t, uint32_t word0, ViewAccess access)
         return 0;
     uint32_t own[8], w[8];
     memcpy(own, headerNow(t.tic), 32);
-    viewHeader(own, word0, w, sxLog2, syLog2);
-    memcpy(tic_.cpu + 32 * tic, w, 32);  // visible at the next submission's header invalidate
+    viewHeader(own, word0, w, sxLog2, syLog2, asArray);
+    memcpy(tic_.cpu + 32 * tic, w, 32);
+    noteTicWrite();
     viewTics_.emplace(t.tic, std::make_pair(key, tic));
     views_.keep(t.tic, key, tic);
+    return tic;
+}
+
+uint32_t Device::arrayViewTic(const Texture &t)
+{
+    constexpr uint64_t kArrayViewKey = 1ull << 49;
+    if (!t.tic)
+        return 0;
+    if (const uint32_t seen = views_.find(t.tic, kArrayViewKey))
+        return seen;
+    SWITCH_METAL_ENCODE_LOCK(l, lock_);
+    const auto views = viewTics_.equal_range(t.tic);
+    for (auto v = views.first; v != views.second; ++v)
+        if (v->second.first == kArrayViewKey) {
+            views_.keep(t.tic, kArrayViewKey, v->second.second);
+            return v->second.second;
+        }
+    const uint32_t tic = allocTic();
+    if (!tic)
+        return 0;
+    uint32_t own[8], w[8];
+    memcpy(own, headerNow(t.tic), 32);
+    arrayViewHeader(own, w);
+    memcpy(tic_.cpu + 32 * tic, w, 32);
+    noteTicWrite();
+    viewTics_.emplace(t.tic, std::make_pair(kArrayViewKey, tic));
+    views_.keep(t.tic, kArrayViewKey, tic);
     return tic;
 }
 
@@ -538,7 +577,8 @@ uint32_t Device::attachmentViewTic(const Texture &owner, const AttachmentView &v
         *why = "no room for the framebuffer storage view";
         return 0;
     }
-    memcpy(tic_.cpu + 32 * tic, w, 32);  // visible at the next submission's header invalidate
+    memcpy(tic_.cpu + 32 * tic, w, 32);
+    noteTicWrite();
     attachmentViewTics_.emplace(owner.tic, std::make_pair(v, tic));
     return tic;
 }

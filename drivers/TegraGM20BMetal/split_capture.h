@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// DEVELOPMENT: the render server's split-draw capture (debug switch split-capture, TegraGM20BMetalGlassProbe.mm). For the first
+// DEVELOPMENT: the render server's split-draw capture (debug switch split-capture, TegraGM20BMetalRates.mm). For the first
 // kSplitCaptureDraws draws the split plan takes after an arming, what the bench's pack kind replays as one quad
 // (hw_test_app/bench/bench_pack.cpp, tools/benchloop/capture.py): the state's key, the target, the draw's box and
 // vertices, the root push words and every uniform block it binds, at its residual offset (its address & 255, which the

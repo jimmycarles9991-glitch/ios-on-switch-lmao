@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
+import HWTestKit
 import Metal
 
 /// Passes over one memoryless attachment's scratch memory open without a drain between them (gpu/ScratchOrder.swift):
@@ -40,14 +42,15 @@ struct ScratchOrderTest: HWTest {
 
     /// Texels off over every round: pass A's against the pattern of its seed, pass B's against `clearStored`
     static func off(_ read: ScratchOrder.Read) -> (a: Int, b: Int) {
+        let clearWord = ByteCompare.word(clearStored[0], clearStored[1], clearStored[2], clearStored[3])
         var a = 0, b = 0
         for (round, bytes) in read.a.enumerated() {
-            let want = ScratchOrder.pattern(seed: UInt32(round + 1))
-            a += stride(from: 0, to: bytes.count, by: 4).filter { bytes[$0 ..< ($0 + 4)] != want[$0 ..< ($0 + 4)] }
-                .count
+            a += ScratchOrderCheck.wrongA(
+                bytes, width: ScratchOrder.a.width, height: ScratchOrder.a.height, seed: UInt32(round + 1)
+            )
         }
         for bytes in read.b {
-            b += stride(from: 0, to: bytes.count, by: 4).filter { Array(bytes[$0 ..< ($0 + 4)]) != clearStored }.count
+            b += ScratchOrderCheck.wrongB(bytes, clearWord: clearWord)
         }
         return (a, b)
     }

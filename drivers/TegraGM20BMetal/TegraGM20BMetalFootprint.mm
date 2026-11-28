@@ -13,7 +13,7 @@
 #include <malloc/malloc.h>
 #include <unistd.h>
 
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+#if SWITCH_METAL_STATS
 namespace {
 
 // The ledger system call's records (XNU osfmk/kern/ledger.h, bsd/kern/sys_generic.c ledger())

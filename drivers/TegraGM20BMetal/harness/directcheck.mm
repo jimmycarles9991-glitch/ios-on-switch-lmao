@@ -16,6 +16,8 @@
 #include "../pack_scan.h"
 #include "TwoPlaneStandIn.h"
 #include "record_compare.h"
+#include "pipeline_capture.h"
+#include "../gm20b_cache.h"
 
 namespace {
 
@@ -89,14 +91,15 @@ void dumpRecord(const char *dir, const std::string &key, const gm20b::RuntimeRec
                     hexOf(v.program.image) + "\"}";
     }
     fprintf(f,
-            "{\"key\": %s, \"vs\": \"%s\", \"fs\": \"%s\", \"fs_gprs\": %u, \"fs_bound_textures\": %u, \"blob\": [%s], "
+            "{\"key\": %s, \"vs\": \"%s\", \"fs\": \"%s\", \"vs_gprs\": %u, \"fs_gprs\": %u, \"fs_bound_textures\": "
+            "%u, \"blob\": [%s], "
             "\"split_fs\": \"%s\", \"split_prologue\": \"%s\", \"residual_words\": [%s], \"variants\": [%s], "
             "\"storage_mask\": %u, \"storage_blend_mask\": %u, \"storage_blend_model\": %u, "
             "\"half_blend_color_word\": %u, \"free_rung\": %d, \"free_colour\": %u, \"free_program\": %s, "
             "\"uniform\": [%s], \"entries\": [%s], \"fs_set_banks\": [%s], \"storage_write_mask\": %u, "
             "\"fs_cbufs\": [%s], \"fs_data\": \"%s\"",
             jsonString(key).c_str(), hexOf(rec.programs[0].image).c_str(), hexOf(rec.programs[1].image).c_str(),
-            rec.programs[1].gprs, rec.programs[1].boundTextures, blob.c_str(),
+            rec.programs[0].gprs, rec.programs[1].gprs, rec.programs[1].boundTextures, blob.c_str(),
             rec.split ? hexOf(rec.splitPrograms[0].image).c_str() : "",
             rec.split ? hexOf(rec.splitPrograms[1].image).c_str() : "", residuals.c_str(), variants.c_str(),
             rec.pipeline.storageMask, rec.pipeline.storageBlendMask, rec.pipeline.storageBlendModel,
@@ -159,7 +162,7 @@ int main(int argc, char **argv)
                 return 1;
             }
         }
-        gm20b::Direct direct(gm20b::PackRules::of(pack), false, offline::translator());
+        gm20b::Direct direct(gm20b::PackRules::of(pack), false, pipeline_capture::translator());
         direct.makeVariants(true);
         FILE *met = getenv("DIRECTCHECK_MET") ? fopen(getenv("DIRECTCHECK_MET"), "a") : nullptr;
         uint32_t states = 0, same = 0, barriers = 0, refused = 0, bad = 0, splits = 0;
@@ -194,6 +197,23 @@ int main(int argc, char **argv)
             if (const char *dir = getenv("DIRECTCHECK_DUMP"); dir && *dir && outcome == gm20b::CompileOutcome::Made) {
                 dumpRecord(dir, key, rec);
                 dumpFetchFree(direct, s, line, key, textures, dir);
+            }
+            if (const char *dir = getenv("DIRECTCHECK_REPLAY_DIR");
+                dir && *dir && outcome == gm20b::CompileOutcome::Made) {
+                NSString *name = [NSString stringWithFormat:@"%016llx", (unsigned long long)gm20b::packKeyHash(key)];
+                gm20b::CacheKey identity = {};
+                identity.key = name.UTF8String;
+                const std::string bytes = gm20b::encodeEntry(identity, &rec, {});
+                std::string reflection;
+                if (!offline::renderReflection(s.d, reflection, why) || reflection.empty()) {
+                    fprintf(stderr, "directcheck: replay reflection: %s\n", why.c_str());
+                    exit(1);
+                }
+                NSString *file = [@(dir) stringByAppendingPathComponent:name];
+                pipeline_capture::writeData([NSData dataWithBytes:bytes.data() length:bytes.size()],
+                                            [file stringByAppendingPathExtension:@"rec"]);
+                pipeline_capture::writeData([NSData dataWithBytes:reflection.data() length:reflection.size()],
+                                            [file stringByAppendingPathExtension:@"reflection"]);
             }
             std::string verdict;
             if (outcome == gm20b::CompileOutcome::Failed) {

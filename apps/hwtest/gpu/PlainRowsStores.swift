@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import IOSurface
 import Metal
 

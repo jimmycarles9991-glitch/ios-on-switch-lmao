@@ -44,6 +44,565 @@ bool cpc_cpmu_supported = false;
 bool cpc_cpmu_supported = true;
 #endif
 
+#if defined(SWITCH_ARMV8_PMUV3)
+
+#include <switch/pmuv3.h>
+
+static void _cpc_pmuv3_apply_control(const struct _cpc_arm64_cpmu_regs *regs);
+
+cpc_counter_t
+cpc_cpmu_counters(void)
+{
+	struct cpc_cpu *cpu = &getCpuDatap()->cpu_cpc;
+	return cpu->ccp_cpmu_counters;
+}
+
+cpc_deadlines_t
+cpc_cpmu_deadlines(void)
+{
+	struct cpc_cpu *cpu = &getCpuDatap()->cpu_cpc;
+	return cpu->ccp_cpmu_deadlines;
+}
+
+cpc_counter_t
+cpc_hw_counter(
+	cpc_hw_t hw,
+	unsigned int id,
+	cpc_slot_t slot,
+	cpc_deadlines_t *deadlines_out)
+{
+	switch (hw) {
+	case CPC_HW_CPMU:;
+		struct cpc_cpu *cpu = &cpu_datap(id)->cpu_cpc;
+		*deadlines_out = &cpu->ccp_cpmu_deadlines[slot];
+		return &cpu->ccp_cpmu_counters[slot];
+	case CPC_HW_UPMU:
+		return NULL;
+	default:
+		panic("%s: unknown HW %d", __func__, hw);
+	}
+}
+
+unsigned int
+cpc_hw_unit_count(cpc_hw_t hw)
+{
+	switch (hw) {
+	case CPC_HW_CPMU:
+		return ml_get_cpu_count();
+	case CPC_HW_UPMU:
+		return 0;
+	default:
+		panic("%s: unknown HW %d", __func__, hw);
+	}
+}
+
+static inline void
+_cpc_pmuv3_counter_update(cpc_counter_t counter, cpc_slot_t slot, uint64_t raw)
+{
+	uint64_t masked = switch_pmuv3_mask_value((unsigned int)slot, raw);
+	uint64_t delta = switch_pmuv3_delta((unsigned int)slot, counter->cctr_prev_value, masked);
+#if MACH_ASSERT
+	if (masked < counter->cctr_prev_value) {
+		counter->cctr_wrap_count += 1;
+	}
+#endif // MACH_ASSERT
+	counter->cctr_sum += delta;
+	counter->cctr_prev_value = masked;
+}
+
+void
+cpc_counter_set_value(cpc_counter_t counter, cpc_slot_t slot, uint64_t value)
+{
+	uint64_t masked = switch_pmuv3_mask_value((unsigned int)slot, value);
+	counter->cctr_prev_value = masked;
+	if (slot < 0 || slot >= CPMU_PMC_COUNT) {
+#if MACH_ASSERT
+		panic("%s: unexpected counter write: %d", __func__, slot);
+#else
+		return;
+#endif
+	}
+	switch_pmuv3_write_slot((unsigned int)slot, masked);
+}
+
+void
+cpc_counters_resync(cpc_hw_t __assert_only hw,
+    unsigned int __unused unit_id,
+    cpc_counter_t counters)
+{
+	assert3u(hw, ==, CPC_HW_CPMU);
+	for (unsigned int i = 0; i < CPMU_PMC_COUNT; i++) {
+		cpc_counter_set_value(&counters[i], (cpc_slot_t)i, counters[i].cctr_prev_value);
+	}
+}
+
+uint64_t
+cpc_cpmu_counter_update(cpc_counter_t counter, cpc_slot_t slot)
+{
+	if (slot < 0 || slot >= CPMU_PMC_COUNT) {
+#if MACH_ASSERT
+		panic("%s: unexpected counter read: %d", __func__, slot);
+#else
+		return 0;
+#endif
+	}
+	uint64_t value = switch_pmuv3_read_slot((unsigned int)slot);
+	_cpc_pmuv3_counter_update(counter, slot, value);
+	return counter->cctr_sum;
+}
+
+void
+cpc_hw_update(cpc_hw_t __assert_only hw)
+{
+	assert3u(hw, ==, CPC_HW_CPMU);
+	__builtin_arm_isb(ISB_SY);
+	uint64_t raw_counts[CPMU_PMC_COUNT];
+	for (unsigned int i = 0; i < CPMU_PMC_COUNT; i++) {
+		raw_counts[i] = switch_pmuv3_read_slot(i);
+	}
+	cpc_counter_t counters = cpc_cpmu_counters();
+	for (unsigned int i = 0; i < CPMU_PMC_COUNT; i++) {
+		_cpc_pmuv3_counter_update(&counters[i], (cpc_slot_t)i, raw_counts[i]);
+	}
+}
+
+uint64_t
+cpc_cycles(void)
+{
+#ifndef __BUILDING_XNU_LIB_UNITTEST__
+	uint64_t cur_cycles = switch_pmuv3_read_pmccntr();
+#else
+	uint64_t cur_cycles = 0;
+#endif
+	cpc_counter_t counters = cpc_cpmu_counters();
+	_cpc_pmuv3_counter_update(&counters[0], 0, cur_cycles);
+	return counters[0].cctr_sum;
+}
+
+uint64_t
+cpc_instrs(void)
+{
+#ifndef __BUILDING_XNU_LIB_UNITTEST__
+	uint64_t cur_instrs = (uint64_t)switch_pmuv3_read_evcntr(0U);
+#else
+	uint64_t cur_instrs = 0;
+#endif
+	cpc_counter_t counters = cpc_cpmu_counters();
+	_cpc_pmuv3_counter_update(&counters[1], 1, cur_instrs);
+	return counters[1].cctr_sum;
+}
+
+struct cpc_cycles_instrs
+cpc_cycles_instrs(void)
+{
+	__builtin_arm_isb(ISB_SY);
+	return cpc_cycles_instrs_spec();
+}
+
+struct cpc_cycles_instrs
+cpc_cycles_instrs_spec(void)
+{
+	uint64_t cur_cycles = switch_pmuv3_read_pmccntr();
+	uint64_t cur_instrs = (uint64_t)switch_pmuv3_read_evcntr(0U);
+	cpc_counter_t counters = cpc_cpmu_counters();
+	_cpc_pmuv3_counter_update(&counters[0], 0, cur_cycles);
+	_cpc_pmuv3_counter_update(&counters[1], 1, cur_instrs);
+	return (struct cpc_cycles_instrs){
+		.cycles = counters[0].cctr_sum,
+		.instrs = counters[1].cctr_sum,
+	};
+}
+
+struct cpc_cycles_instrs
+cpc_cycles_instrs_raw_approx(void)
+{
+	cpc_counter_t counters = cpc_cpmu_counters();
+	return (struct cpc_cycles_instrs){
+		.cycles = counters[0].cctr_prev_value,
+		.instrs = counters[1].cctr_prev_value,
+	};
+}
+
+uint64_t
+cpc_hw_pmi_count(cpc_hw_t __assert_only hw)
+{
+	assert3u(hw, ==, CPC_HW_CPMU);
+
+	const ml_topology_info_t *topology_info = ml_get_topology_info();
+	uint64_t npmis = 0;
+	for (unsigned int i = 0; i < topology_info->num_cpus; i++) {
+		cpu_data_t *cpu = (cpu_data_t *)CpuDataEntries[topology_info->cpus[i].cpu_id].cpu_data_vaddr;
+		npmis += cpu->cpu_cpc.ccp_cpmu_pmi_count;
+	}
+	return npmis;
+}
+
+static void
+_cpc_cpmu_pmi(cpu_data_t *cpu_data)
+{
+	assert(cpu_data != NULL);
+	assert(ml_get_interrupts_enabled() == FALSE);
+
+	switch_pmuv3_stop();
+
+	uint32_t ovs_hw = switch_pmuv3_read_pmovs() & SWITCH_PMUV3_ALL_HW_MASK;
+	switch_pmuv3_clear_pmovs(ovs_hw);
+	__builtin_arm_isb(ISB_SY);
+
+	cpu_data->cpu_stat.pmi_cnt_wake += 1;
+	struct cpc_cpu *cpu = &cpu_data->cpu_cpc;
+	cpu->ccp_cpmu_pmi_count += 1;
+
+	uint32_t ovs_slots = switch_pmuv3_hw_mask_to_slots(ovs_hw);
+
+	for (unsigned int i = 0; i < CPMU_PMC_COUNT; i++) {
+		if ((ovs_slots & (1U << i)) == 0U) {
+			continue;
+		}
+
+		cpc_counter_t ctr = &cpu->ccp_cpmu_counters[i];
+		cpc_deadlines_t deadline = &cpu->ccp_cpmu_deadlines[i];
+
+		cpc_call_source_t source = CPC_CS_KERNEL;
+		uintptr_t pc = 0;
+		struct arm_saved_state *state = cpu_data->cpu_int_state;
+		if (state) {
+			if (PSR64_IS_USER(get_saved_state_cpsr(state))) {
+				source = CPC_CS_USER;
+			}
+			pc = get_saved_state_pc(state);
+			if (source == CPC_CS_KERNEL) {
+				pc = VM_KERNEL_UNSLIDE(pc);
+			}
+		}
+
+		cpc_counter_call(ctr, deadline, (cpc_slot_t)i, pc, source, CPC_CF_NONE);
+	}
+
+	for (unsigned int i = 0; i < CPMU_PMC_COUNT; i++) {
+		if ((ovs_slots & (1U << i)) != 0U) {
+			cpc_counter_t ctr = &cpu->ccp_cpmu_counters[i];
+			cpc_deadlines_t deadlines = &cpu->ccp_cpmu_deadlines[i];
+			cpc_deadlines_sync(deadlines, ctr, (cpc_slot_t)i);
+		}
+	}
+
+	const union cpc_machine_regs *regs = cpc_active_regs(CPC_HW_CPMU);
+	_cpc_pmuv3_apply_control(&regs->cmr_cpmu);
+}
+
+const union cpc_machine_regs cpc_machine_regs_init = {
+	.cmr_cpmu = {
+		.cacr_pmcnten = SWITCH_PMUV3_FIXED_HW_MASK,
+		.cacr_pminten = SWITCH_PMUV3_FIXED_HW_MASK,
+		.cacr_pmevtyper = {
+			[0] = SWITCH_PMUV3_EVENT_INST_RETIRED,
+		},
+		.cacr_has_events = true,
+	},
+};
+
+const union cpc_machine_regs cpc_machine_regs_base = {
+	.cmr_cpmu = {
+		.cacr_pmcnten = SWITCH_PMUV3_FIXED_HW_MASK,
+		.cacr_pminten = SWITCH_PMUV3_FIXED_HW_MASK,
+		.cacr_pmevtyper = {
+			[0] = SWITCH_PMUV3_EVENT_INST_RETIRED,
+		},
+	},
+};
+
+static void
+_cpc_pmuv3_apply_control(const struct _cpc_arm64_cpmu_regs *regs)
+{
+	uint32_t cnt_mask = regs->cacr_pmcnten & SWITCH_PMUV3_ALL_HW_MASK;
+	uint32_t int_mask = regs->cacr_pminten & SWITCH_PMUV3_ALL_HW_MASK;
+
+	switch_pmuv3_configure_fixed_filters();
+	switch_pmuv3_write_pmcntenclr(SWITCH_PMUV3_ALL_HW_MASK & ~cnt_mask);
+	switch_pmuv3_write_pmintenclr(SWITCH_PMUV3_ALL_HW_MASK & ~int_mask);
+	switch_pmuv3_write_pmintenset(int_mask);
+	switch_pmuv3_write_pmcntenset(cnt_mask);
+	switch_pmuv3_start();
+}
+
+void
+cpc_machine_regs_reset(const union cpc_machine_regs * __unused regs,
+    cpc_hw_t __assert_only hw)
+{
+	assert3u(hw, ==, CPC_HW_CPMU);
+	assert(ml_get_interrupts_enabled() == FALSE);
+
+	switch_pmuv3_stop();
+	cpc_counter_t counters = cpc_cpmu_counters();
+	for (unsigned int i = 2; i < CPMU_PMC_COUNT; i++) {
+		uint64_t idle = switch_pmuv3_idle_reload(i);
+		switch_pmuv3_write_evtyper(i - 1U, 0U);
+		switch_pmuv3_write_slot(i, idle);
+		counters[i].cctr_prev_value = idle;
+		counters[i].cctr_sum = 0;
+	}
+	switch_pmuv3_clear_pmovs(SWITCH_PMUV3_ALL_HW_MASK & ~SWITCH_PMUV3_FIXED_HW_MASK);
+	__builtin_arm_isb(ISB_SY);
+	_cpc_pmuv3_apply_control(&cpc_machine_regs_base.cmr_cpmu);
+}
+
+void
+cpc_machine_regs_apply(const union cpc_machine_regs *regs,
+    cpc_hw_t __assert_only hw)
+{
+	assert3u(hw, ==, CPC_HW_CPMU);
+	assert(ml_get_interrupts_enabled() == FALSE);
+
+	switch_pmuv3_stop();
+	if (regs->cmr_cpmu.cacr_has_events) {
+		for (unsigned int i = 1; i < SWITCH_PMUV3_EVENT_CTRS; i++) {
+			switch_pmuv3_write_evtyper(i, regs->cmr_cpmu.cacr_pmevtyper[i]);
+		}
+	}
+	__builtin_arm_isb(ISB_SY);
+	_cpc_pmuv3_apply_control(&regs->cmr_cpmu);
+}
+
+void
+cpc_hw_disable_pmis(cpc_hw_t __assert_only hw, const union cpc_machine_regs * __unused regs)
+{
+	assert3u(hw, ==, CPC_HW_CPMU);
+	switch_pmuv3_write_pmintenclr(SWITCH_PMUV3_ALL_HW_MASK);
+	__builtin_arm_isb(ISB_SY);
+}
+
+void
+cpc_hw_reenable_pmis(cpc_hw_t __assert_only hw, const union cpc_machine_regs *regs)
+{
+	assert3u(hw, ==, CPC_HW_CPMU);
+	switch_pmuv3_write_pmintenset(regs->cmr_cpmu.cacr_pminten & SWITCH_PMUV3_ALL_HW_MASK);
+	__builtin_arm_isb(ISB_SY);
+}
+
+void
+cpc_hw_slot_disable(cpc_hw_t __assert_only hw,
+    const union cpc_machine_regs * __unused regs,
+    cpc_slot_t slot)
+{
+	assert3u(hw, ==, CPC_HW_CPMU);
+	uint32_t mask = switch_pmuv3_slot_hw_mask((unsigned int)slot);
+	if (mask != 0U) {
+		switch_pmuv3_write_pmcntenclr(mask);
+		switch_pmuv3_write_pmintenclr(mask);
+		__builtin_arm_isb(ISB_SY);
+	}
+}
+
+void
+cpc_hw_slot_reenable(cpc_hw_t __assert_only hw,
+    const union cpc_machine_regs *regs,
+    cpc_slot_t slot)
+{
+	assert3u(hw, ==, CPC_HW_CPMU);
+	uint32_t mask = switch_pmuv3_slot_hw_mask((unsigned int)slot);
+	if (mask != 0U) {
+		if ((regs->cmr_cpmu.cacr_pminten & mask) != 0U) {
+			switch_pmuv3_write_pmintenset(mask);
+		}
+		if ((regs->cmr_cpmu.cacr_pmcnten & mask) != 0U) {
+			switch_pmuv3_write_pmcntenset(mask);
+		}
+		__builtin_arm_isb(ISB_SY);
+	}
+}
+
+static void
+_cpc_cpmu_broadcast_trampoline(void *arg)
+{
+	unsigned int cpu = cpu_number();
+	void (^block)(unsigned int cpu_id) = arg;
+	block(cpu);
+}
+
+void
+cpc_hw_broadcast(
+	cpc_hw_t __assert_only hw,
+	void (^block)(unsigned int unit_id))
+{
+	assert3u(hw, ==, CPC_HW_CPMU);
+	boolean_t const include_self = TRUE;
+	cpu_broadcast_xcall_simple(include_self,
+	    _cpc_cpmu_broadcast_trampoline, block);
+}
+
+__result_use_check bool
+cpc_machine_regs_event_select(
+	union cpc_machine_regs *regs,
+	cpc_hw_t __assert_only hw,
+	cpc_set_options_t __unused options,
+	const struct cpc_event_select *select)
+{
+	assert3u(hw, ==, CPC_HW_CPMU);
+
+	cpc_slot_t slot = select->ces_slot;
+	uint64_t selector = select->ces_selector;
+	if (slot < 2 || slot >= CPMU_PMC_COUNT) {
+		printf("CPC: invalid ARMv8 PMUv3 slot %d\n", slot);
+		return false;
+	}
+
+	cpc_event_t const event = cpc_find_event(CPC_HW_CPMU, (uint16_t)selector);
+	if (event == CPC_EVENT_INVALID) {
+		return false;
+	}
+
+	cpc_event_flags_t flags = select->ces_flags;
+	if ((flags & (CPC_EF_NO_KERNEL | CPC_EF_NO_USER)) ==
+	    (CPC_EF_NO_KERNEL | CPC_EF_NO_USER)) {
+		printf("CPC: event on %d cannot disable both kernel and user\n", slot);
+		return false;
+	}
+
+	uint32_t hw_mask = switch_pmuv3_slot_hw_mask((unsigned int)slot);
+	if ((regs->cmr_cpmu.cacr_pmcnten & hw_mask) != 0U) {
+		printf("CPC: event would conflict on %d\n", slot);
+		return false;
+	}
+
+	uint16_t hw_selector = (uint16_t)selector;
+	if (cpc_is_secure() && event < cpc_known_cpmu_events.cel_event_count) {
+		hw_selector = cpc_known_cpmu_events.cel_events[event].cev_selector;
+	}
+
+	regs->cmr_cpmu.cacr_pmcnten |= hw_mask;
+	regs->cmr_cpmu.cacr_pminten |= hw_mask;
+	regs->cmr_cpmu.cacr_pmevtyper[slot - 1] = switch_pmuv3_evtyper(
+		hw_selector,
+		(flags & CPC_EF_NO_USER) == 0,
+		(flags & CPC_EF_NO_KERNEL) == 0);
+	regs->cmr_cpmu.cacr_events[slot - 2] = event;
+	regs->cmr_cpmu.cacr_has_events = true;
+	return true;
+}
+
+void
+cpc_cpu_transition(cpc_cpu_event_t event, void *vcpu_data)
+{
+	struct cpu_data *cpu_data = vcpu_data;
+	struct cpc_cpu *cpu = &cpu_data->cpu_cpc;
+
+	switch (event) {
+	case CPC_CPU_EARLY_INIT:
+		for (unsigned int i = 0; i < CPMU_PMC_COUNT; i++) {
+			lck_spin_init(&cpu->ccp_cpmu_deadlines[i].cd_lock, &cpc_lock_grp, LCK_ATTR_NULL);
+			cpu->ccp_cpmu_counters[i].cctr_prev_value = switch_pmuv3_idle_reload(i);
+		}
+		break;
+
+	case CPC_CPU_INIT:
+		assert(cpu_data->cpu_kpc_buf[0] == NULL);
+		cpu_data->cpu_kpc_buf[0] = kalloc_data(sizeof(uint64_t) * CPMU_PMC_COUNT,
+		    Z_ZERO | Z_WAITOK);
+		assert(cpu_data->cpu_kpc_buf[1] == NULL);
+		cpu_data->cpu_kpc_buf[1] = kalloc_data(sizeof(uint64_t) * CPMU_PMC_COUNT,
+		    Z_ZERO | Z_WAITOK);
+		break;
+
+	case CPC_CPU_ONLINE:
+		switch_pmuv3_quiesce_hw();
+		cpc_hw_configure(CPC_HW_CPMU, cpu_data->cpu_number,
+		    cpu->ccp_cpmu_counters, cpu->ccp_cpmu_deadlines, true);
+		break;
+
+	case CPC_CPU_OFFLINE:
+		switch_pmuv3_stop();
+		switch_pmuv3_write_pmintenclr(SWITCH_PMUV3_ALL_HW_MASK);
+		cpc_hw_update(CPC_HW_CPMU);
+		switch_pmuv3_clear_pmovs(SWITCH_PMUV3_ALL_HW_MASK);
+		__builtin_arm_isb(ISB_SY);
+		break;
+
+	case CPC_CPU_IDLE:
+	case CPC_CPU_ACTIVE_WARM:
+		// WFI only clock-gates, so the PMU keeps counting across it. Before a C7 power-down, switch_idle_wfi
+		// (kernel/switch/idle/idle.c) saves the counters through CPC_CPU_OFFLINE.
+		break;
+
+	case CPC_CPU_ACTIVE_COLD:
+		switch_pmuv3_quiesce_hw();
+		cpc_hw_configure(CPC_HW_CPMU, cpu_data->cpu_number,
+		    cpu->ccp_cpmu_counters, cpu->ccp_cpmu_deadlines, false);
+		break;
+
+	default:
+		break;
+	}
+}
+
+#if CPMU_AIC_PMI
+extern void cpc_cpmu_aic_pmi(cpu_id_t source);
+void
+cpc_cpmu_aic_pmi(cpu_id_t source)
+{
+	struct cpu_data *curcpu = getCpuDatap();
+	if (source != curcpu->interrupt_nub) {
+		panic("CPC: PMI from IOCPU %p delivered to wrong IOCPU %p", source,
+		    curcpu->interrupt_nub);
+	}
+	_cpc_cpmu_pmi(curcpu);
+}
+#endif // CPMU_AIC_PMI
+
+void
+cpc_fiq(
+	void *cpu __unused,
+	uint64_t pmcr0 __unused,
+	uint64_t upmsr __unused)
+{
+}
+
+#if DEVELOPMENT || DEBUG
+
+size_t
+cpc_hw_print_regs(
+	cpc_hw_t __assert_only hw,
+	const char *indent,
+	const union cpc_machine_regs *regs,
+	char *output,
+	size_t available)
+{
+	assert3u(hw, ==, CPC_HW_CPMU);
+
+	size_t written = 0;
+	written += scnprintf(output + written, available - written,
+	    "%sPMCNTEN: 0x%08x  PMINTEN: 0x%08x\n",
+	    indent, regs->cmr_cpmu.cacr_pmcnten, regs->cmr_cpmu.cacr_pminten);
+	for (unsigned int i = 0; i < SWITCH_PMUV3_EVENT_CTRS; i++) {
+		written += scnprintf(output + written, available - written,
+		    "%s  PMEVTYPER%u: 0x%08x\n", indent, i, regs->cmr_cpmu.cacr_pmevtyper[i]);
+	}
+	return written;
+}
+
+void
+cpc_hw_read_regs(cpc_hw_t __assert_only hw,
+    union cpc_machine_regs *regs,
+    uint64_t *counter_values)
+{
+	assert3u(hw, ==, CPC_HW_CPMU);
+
+	regs->cmr_cpmu = (struct _cpc_arm64_cpmu_regs){
+		.cacr_pmcnten = switch_pmuv3_read_pmcnten() & SWITCH_PMUV3_ALL_HW_MASK,
+		.cacr_pminten = switch_pmuv3_read_pminten() & SWITCH_PMUV3_ALL_HW_MASK,
+	};
+	for (unsigned int i = 0; i < SWITCH_PMUV3_EVENT_CTRS; i++) {
+		regs->cmr_cpmu.cacr_pmevtyper[i] = switch_pmuv3_read_evtyper(i);
+	}
+	for (unsigned int i = 0; i < CPMU_PMC_COUNT; i++) {
+		counter_values[i] = switch_pmuv3_read_slot(i);
+	}
+}
+
+#endif // DEVELOPMENT || DEBUG
+
+#else // defined(SWITCH_ARMV8_PMUV3)
+
 static void _cpc_cpmu_control_disable(void);
 static void _cpc_cpmu_control_reenable(void);
 
@@ -1111,3 +1670,5 @@ cpc_hw_read_regs(cpc_hw_t __assert_only hw,
 }
 
 #endif // DEVELOPMENT || DEBUG
+
+#endif // !defined(SWITCH_ARMV8_PMUV3)

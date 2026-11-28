@@ -138,6 +138,8 @@
 #include <vm/vm_compressor_info.h>
 #endif /* DEVELOPMENT || DEBUG */
 #include <switch/prefetch_vm.h>
+#include <switch/vm_protect.h>
+#include <switch/vm_lazy_cow.h>
 #include <ptrcheck.h>
 #include <san/kasan.h>
 
@@ -1591,6 +1593,10 @@ LCK_GRP_DECLARE(vm_map_lck_grp, "vm_map");
 LCK_ATTR_DECLARE(vm_map_lck_attr, 0, 0);
 LCK_ATTR_DECLARE(vm_map_lck_rw_attr, 0, LCK_ATTR_DEBUG);
 
+static bool switch_vm_lazy_rw_has_active(vm_map_t map);
+static void switch_vm_lazy_rw_destroy(vm_map_t map);
+static void switch_vm_lazy_rw_materialize_overlap(vm_map_t map, vm_map_offset_t start, vm_map_offset_t end);
+
 #if XNU_TARGET_OS_OSX
 #define MALLOC_NO_COW_DEFAULT 1
 #define MALLOC_NO_COW_EXCEPT_FORK_DEFAULT 1
@@ -2440,6 +2446,8 @@ vm_map_destroy_options(vm_map_t map, vm_map_destroy_options_t options __unused)
 		vm_map_guard_object_slab_destroy(map);
 	}
 	assert(map->guard_object_user == NULL);
+
+	switch_vm_lazy_rw_destroy(map);
 
 	lck_rw_destroy(&map->ilock, &vm_map_lck_grp);
 
@@ -3404,6 +3412,14 @@ vm_map_enter(
 		    map, size, vmk_flags.vmkf_no_soft_limit))) {
 		vmlp_api_end(VM_MAP_ENTER, KERN_NO_SPACE);
 		return KERN_NO_SPACE;
+	}
+
+	if (__improbable(vmk_flags.vmf_fixed && vmk_flags.vmf_overwrite &&
+	    switch_vm_lazy_rw_has_active(map))) {
+		vm_map_offset_t ov_end;
+		if (!os_add_overflow(vmsr_start(rsv), size, &ov_end)) {
+			switch_vm_lazy_rw_materialize_overlap(map, vmsr_start(rsv), ov_end);
+		}
 	}
 
 	vm_map_ilk_lock(map);
@@ -5650,6 +5666,512 @@ vm_map_enter_mem_object_control(
 	MACRO_END
 
 
+/*
+ * Lock order: op_lock (outermost, before any VM map/range/entry lock) ->
+ * map->ilock / range locks -> dir_lock or table_lock (leaf spinlocks, never nested).
+ */
+#define SWITCH_VM_LAZY_RW_BUCKETS 64u
+
+struct switch_vm_lazy_rw {
+	struct switch_vm_lazy_rw       *next;
+	vm_map_t                        owner_map;
+	lck_mtx_t                       op_lock;
+	lck_spin_t                      table_lock;
+	uint32_t                        in_flight;
+	bool                            counted_active;
+	struct switch_vm_lazy_rw_table  table;
+};
+
+static LCK_SPIN_DECLARE(switch_vm_lazy_rw_dir_lock, &vm_map_lck_grp);
+static struct switch_vm_lazy_rw *switch_vm_lazy_rw_buckets[SWITCH_VM_LAZY_RW_BUCKETS];
+static uint32_t switch_vm_lazy_rw_total_allocated = 0u;
+uint32_t switch_vm_lazy_rw_global_active = 0u;
+
+static kern_return_t
+vm_map_protect_core(
+	vm_map_t                        original_map,
+	vm_map_offset_t                 start,
+	vm_map_offset_t                 end,
+	boolean_t                       set_max,
+	vm_prot_t                       new_prot,
+	struct switch_vm_lazy_rw       *clear_lrw);
+
+static inline uint32_t
+switch_vm_lazy_rw_bucket(vm_map_t map)
+{
+	uintptr_t h = (uintptr_t)map;
+	return (uint32_t)(((h >> 6) ^ (h >> 13)) & (SWITCH_VM_LAZY_RW_BUCKETS - 1u));
+}
+
+static inline void
+switch_vm_lazy_rw_sync_active_locked(struct switch_vm_lazy_rw *lrw)
+{
+	bool now_active = (lrw->table.count != 0u) || (lrw->in_flight != 0u);
+	if (now_active && !lrw->counted_active) {
+		lrw->counted_active = true;
+		os_atomic_inc(&switch_vm_lazy_rw_global_active, release);
+	} else if (!now_active && lrw->counted_active) {
+		lrw->counted_active = false;
+		os_atomic_dec(&switch_vm_lazy_rw_global_active, release);
+	}
+	os_atomic_store(&lrw->table.count, lrw->table.count, release);
+	os_atomic_store(&lrw->in_flight, lrw->in_flight, release);
+}
+
+static struct switch_vm_lazy_rw *
+switch_vm_lazy_rw_lookup(vm_map_t map)
+{
+	if (os_atomic_load(&switch_vm_lazy_rw_total_allocated, acquire) == 0u) {
+		return NULL;
+	}
+	uint32_t b = switch_vm_lazy_rw_bucket(map);
+	lck_spin_lock(&switch_vm_lazy_rw_dir_lock);
+	struct switch_vm_lazy_rw *cur = switch_vm_lazy_rw_buckets[b];
+	while (cur != NULL && cur->owner_map != map) {
+		cur = cur->next;
+	}
+	lck_spin_unlock(&switch_vm_lazy_rw_dir_lock);
+	return cur;
+}
+
+static bool
+switch_vm_lazy_rw_has_active(vm_map_t map)
+{
+	if (os_atomic_load(&switch_vm_lazy_rw_global_active, acquire) == 0u) {
+		return false;
+	}
+	struct switch_vm_lazy_rw *lrw = switch_vm_lazy_rw_lookup(map);
+	if (lrw == NULL) {
+		return false;
+	}
+	return os_atomic_load(&lrw->table.count, acquire) != 0u ||
+	       os_atomic_load(&lrw->in_flight, acquire) != 0u;
+}
+
+static struct switch_vm_lazy_rw *
+switch_vm_lazy_rw_ensure(vm_map_t map)
+{
+	struct switch_vm_lazy_rw *lrw = switch_vm_lazy_rw_lookup(map);
+	if (lrw != NULL) {
+		return lrw;
+	}
+	struct switch_vm_lazy_rw *alloc = kalloc_type(struct switch_vm_lazy_rw, Z_WAITOK | Z_ZERO);
+	if (alloc == NULL) {
+		return NULL;
+	}
+	alloc->owner_map = map;
+	lck_mtx_init(&alloc->op_lock, &vm_map_lck_grp, LCK_ATTR_NULL);
+	lck_spin_init(&alloc->table_lock, &vm_map_lck_grp, LCK_ATTR_NULL);
+
+	uint32_t b = switch_vm_lazy_rw_bucket(map);
+	lck_spin_lock(&switch_vm_lazy_rw_dir_lock);
+	struct switch_vm_lazy_rw *existing = switch_vm_lazy_rw_buckets[b];
+	while (existing != NULL && existing->owner_map != map) {
+		existing = existing->next;
+	}
+	if (existing == NULL) {
+		alloc->next = switch_vm_lazy_rw_buckets[b];
+		switch_vm_lazy_rw_buckets[b] = alloc;
+		os_atomic_inc(&switch_vm_lazy_rw_total_allocated, release);
+		existing = alloc;
+		alloc = NULL;
+	}
+	lck_spin_unlock(&switch_vm_lazy_rw_dir_lock);
+
+	if (alloc != NULL) {
+		lck_spin_destroy(&alloc->table_lock, &vm_map_lck_grp);
+		lck_mtx_destroy(&alloc->op_lock, &vm_map_lck_grp);
+		kfree_type(struct switch_vm_lazy_rw, alloc);
+	}
+	return existing;
+}
+
+static void
+switch_vm_lazy_rw_destroy(vm_map_t map)
+{
+	if (os_atomic_load(&switch_vm_lazy_rw_total_allocated, acquire) == 0u) {
+		return;
+	}
+	uint32_t b = switch_vm_lazy_rw_bucket(map);
+	struct switch_vm_lazy_rw *victim = NULL;
+	lck_spin_lock(&switch_vm_lazy_rw_dir_lock);
+	struct switch_vm_lazy_rw **pp = &switch_vm_lazy_rw_buckets[b];
+	while (*pp != NULL) {
+		if ((*pp)->owner_map == map) {
+			victim = *pp;
+			*pp = victim->next;
+			os_atomic_dec(&switch_vm_lazy_rw_total_allocated, release);
+			break;
+		}
+		pp = &(*pp)->next;
+	}
+	lck_spin_unlock(&switch_vm_lazy_rw_dir_lock);
+
+	if (victim != NULL) {
+		if (victim->counted_active) {
+			victim->counted_active = false;
+			os_atomic_dec(&switch_vm_lazy_rw_global_active, release);
+		}
+		lck_spin_destroy(&victim->table_lock, &vm_map_lck_grp);
+		lck_mtx_destroy(&victim->op_lock, &vm_map_lck_grp);
+		kfree_type(struct switch_vm_lazy_rw, victim);
+	}
+}
+
+static bool
+switch_vm_lazy_rw_object_valid(vm_object_t obj)
+{
+	if (obj == VM_OBJECT_NULL || is_kernel_object(obj) || obj == compressor_object) {
+		return false;
+	}
+#if HAS_MTE
+	if (vm_object_is_mte_mappable(obj)) {
+		return false;
+	}
+#endif
+	return true;
+}
+
+static bool
+switch_vm_lazy_rw_submap_slice_qualifies(
+	vm_map_t                map,
+	vm_map_entry_t          entry,
+	vm_map_offset_t         e_start,
+	vm_map_offset_t         e_end)
+{
+	vm_map_t submap = VME_SUBMAP(entry);
+	if (!switch_vm_lazy_cow_top_submap_qualifies(entry->is_sub_map, entry->needs_copy,
+	    entry->superpage_size != 0, entry->protection, submap->is_nested_map,
+	    vm_map_is_sealed(submap))) {
+		return false;
+	}
+	if (entry->vme_resilient_codesign || entry->translated_allow_execute) {
+		return false;
+	}
+
+	vm_map_offset_t sub_start = e_start - entry->vme_start + VME_OFFSET(entry);
+	vm_map_offset_t sub_end = e_end - entry->vme_start + VME_OFFSET(entry);
+	vm_map_offset_t sub_cursor = sub_start;
+	vm_map_entry_t sub_entry;
+
+	vm_map_lookup_or_next(submap, sub_start, &sub_entry);
+	for (;
+	    sub_entry != vm_map_to_entry(submap) && sub_entry->vme_start < sub_end;
+	    sub_entry = sub_entry->vme_next) {
+		if (sub_entry->vme_start > sub_cursor) {
+			return false;
+		}
+		bool used_for_tpro = false;
+#if __arm64e__
+		used_for_tpro = sub_entry->used_for_tpro;
+#endif
+		vm_object_t sub_obj = sub_entry->is_sub_map ? VM_OBJECT_NULL : VME_OBJECT(sub_entry);
+		if (!switch_vm_lazy_cow_submap_entry_qualifies(sub_entry->is_sub_map,
+		    sub_entry->protection, sub_entry->max_protection, sub_entry->vme_permanent,
+		    sub_entry->used_for_jit, sub_entry->csm_associated, used_for_tpro,
+		    sub_entry->vme_resilient_codesign, sub_entry->translated_allow_execute,
+		    sub_entry->wired_count != 0, switch_vm_lazy_rw_object_valid(sub_obj))) {
+			return false;
+		}
+		if (pmap_has_prot_policy(map->pmap, sub_entry->translated_allow_execute,
+		    VM_PROT_READ | VM_PROT_WRITE)) {
+			return false;
+		}
+		sub_cursor = MIN(sub_entry->vme_end, sub_end);
+	}
+	return sub_cursor == sub_end;
+}
+
+static bool
+switch_vm_lazy_rw_verify_range(
+	vm_map_t                        map,
+	vm_map_offset_t                 start,
+	vm_map_offset_t                 end,
+	struct switch_vm_lazy_rw       *commit_lrw)
+{
+	VM_MAP_LOCK_CTX_DECLARE(ctx);
+	vm_map_t tmp_map = map;
+	kern_return_t kr;
+	vm_map_entry_t entry;
+	vm_map_offset_t cursor = start;
+	bool saw_nested_pmap = false;
+	bool ok = true;
+
+	kr = vm_map_range_sh_lock(ctx, &tmp_map, start, end,
+	    VMRL_SH_STREAM_NO_HOLES | VMRL_SH_NO_MIN_MAX_CHECK | VMRL_SH_NO_DESCEND_TRANSPARENT);
+	if (kr != KERN_SUCCESS) {
+		return false;
+	}
+
+	while ((entry = vm_map_range_stream_next_with_error(ctx, &kr)) != VM_MAP_ENTRY_NULL) {
+		vm_map_offset_t e_start, e_end;
+		vm_map_lock_ctx_bounds(ctx, &e_start, &e_end, NULL);
+		if (e_start != cursor) {
+			ok = false;
+			break;
+		}
+		if (entry->is_sub_map) {
+			if (!switch_vm_lazy_rw_submap_slice_qualifies(map, entry, e_start, e_end)) {
+				ok = false;
+				break;
+			}
+			if (entry->use_pmap) {
+				saw_nested_pmap = true;
+			}
+		} else {
+			bool used_for_tpro = false;
+#if __arm64e__
+			used_for_tpro = entry->used_for_tpro;
+#endif
+			vm_object_t obj = VME_OBJECT(entry);
+			bool valid_obj = (obj == VM_OBJECT_NULL) || switch_vm_lazy_rw_object_valid(obj);
+			if (!switch_vm_lazy_cow_private_entry_qualifies(entry->is_sub_map,
+			    entry->superpage_size != 0, entry->is_shared, entry->protection,
+			    entry->max_protection, entry->vme_permanent, entry->used_for_jit,
+			    entry->csm_associated, used_for_tpro, entry->vme_resilient_codesign,
+			    entry->translated_allow_execute, entry->wired_count != 0, valid_obj) ||
+			    pmap_has_prot_policy(map->pmap, entry->translated_allow_execute,
+			    VM_PROT_READ | VM_PROT_WRITE)) {
+				ok = false;
+				break;
+			}
+		}
+		cursor = e_end;
+	}
+
+	if (kr != KERN_SUCCESS || cursor != end || !saw_nested_pmap) {
+		ok = false;
+	}
+
+	if (ok && commit_lrw != NULL) {
+		lck_spin_lock(&commit_lrw->table_lock);
+		ok = switch_vm_lazy_rw_table_add(&commit_lrw->table, start, end);
+		if (ok) {
+			switch_vm_lazy_rw_sync_active_locked(commit_lrw);
+		}
+		lck_spin_unlock(&commit_lrw->table_lock);
+	}
+
+	vm_map_range_sh_unlock(ctx, &tmp_map);
+	return ok;
+}
+
+static bool
+switch_vm_lazy_rw_try_defer(
+	vm_map_t                map,
+	vm_map_offset_t         start,
+	vm_map_offset_t         end)
+{
+	if (start >= end || start >= map->max_offset ||
+	    !vm_map_is_map_size_valid(map, end - start, false)) {
+		return false;
+	}
+	struct switch_vm_lazy_rw *lrw = switch_vm_lazy_rw_lookup(map);
+	if (lrw == NULL) {
+		if (!switch_vm_lazy_rw_verify_range(map, start, end, NULL)) {
+			return false;
+		}
+		lrw = switch_vm_lazy_rw_ensure(map);
+		if (lrw == NULL) {
+			return false;
+		}
+	}
+	lck_mtx_lock(&lrw->op_lock);
+	bool deferred = switch_vm_lazy_rw_verify_range(map, start, end, lrw);
+	lck_mtx_unlock(&lrw->op_lock);
+	return deferred;
+}
+
+static void
+switch_vm_lazy_rw_clear_locked(
+	struct switch_vm_lazy_rw       *lrw,
+	vm_map_offset_t                 start,
+	vm_map_offset_t                 end)
+{
+	lck_spin_lock(&lrw->table_lock);
+	(void)switch_vm_lazy_rw_table_subtract(&lrw->table, start, end);
+	switch_vm_lazy_rw_sync_active_locked(lrw);
+	lck_spin_unlock(&lrw->table_lock);
+}
+
+static void
+switch_vm_lazy_rw_clear_deleted(
+	vm_map_t                map,
+	vm_map_offset_t         start,
+	vm_map_offset_t         end)
+{
+	if (os_atomic_load(&switch_vm_lazy_rw_global_active, acquire) == 0u) {
+		return;
+	}
+	struct switch_vm_lazy_rw *lrw = switch_vm_lazy_rw_lookup(map);
+	if (lrw != NULL && os_atomic_load(&lrw->table.count, acquire) != 0u) {
+		switch_vm_lazy_rw_clear_locked(lrw, start, end);
+	}
+}
+
+static kern_return_t
+switch_vm_lazy_rw_materialize_slice_locked(
+	vm_map_t                        map,
+	struct switch_vm_lazy_rw       *lrw,
+	vm_map_offset_t                 slice_start,
+	vm_map_offset_t                 slice_end)
+{
+	lck_spin_lock(&lrw->table_lock);
+	lrw->in_flight += 1u;
+	switch_vm_lazy_rw_sync_active_locked(lrw);
+	lck_spin_unlock(&lrw->table_lock);
+
+	kern_return_t kr = vm_map_protect_core(map, slice_start, slice_end, FALSE,
+	    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY, NULL);
+
+	lck_spin_lock(&lrw->table_lock);
+	(void)switch_vm_lazy_rw_table_subtract(&lrw->table, slice_start, slice_end);
+	lrw->in_flight -= 1u;
+	switch_vm_lazy_rw_sync_active_locked(lrw);
+	lck_spin_unlock(&lrw->table_lock);
+
+	return kr;
+}
+
+static void
+switch_vm_lazy_rw_materialize_overlap_locked(
+	vm_map_t                        map,
+	struct switch_vm_lazy_rw       *lrw,
+	vm_map_offset_t                 start,
+	vm_map_offset_t                 end)
+{
+	for (;;) {
+		uint64_t ov_start = 0, ov_end = 0;
+		lck_spin_lock(&lrw->table_lock);
+		bool found = switch_vm_lazy_rw_table_first_overlap(&lrw->table, start, end,
+		    &ov_start, &ov_end);
+		if (found && switch_vm_lazy_rw_table_subtract_would_overflow(&lrw->table,
+		    ov_start, ov_end)) {
+			for (uint32_t i = 0; i < lrw->table.count; i++) {
+				if (lrw->table.ranges[i].start < ov_start &&
+				    ov_end < lrw->table.ranges[i].end) {
+					ov_start = lrw->table.ranges[i].start;
+					ov_end = lrw->table.ranges[i].end;
+					break;
+				}
+			}
+		}
+		lck_spin_unlock(&lrw->table_lock);
+		if (!found) {
+			break;
+		}
+		(void)switch_vm_lazy_rw_materialize_slice_locked(map, lrw, ov_start, ov_end);
+	}
+}
+
+static void
+switch_vm_lazy_rw_materialize_overlap(
+	vm_map_t                map,
+	vm_map_offset_t         start,
+	vm_map_offset_t         end)
+{
+	struct switch_vm_lazy_rw *lrw = switch_vm_lazy_rw_lookup(map);
+	if (lrw == NULL || start >= end) {
+		return;
+	}
+	lck_mtx_lock(&lrw->op_lock);
+	switch_vm_lazy_rw_materialize_overlap_locked(map, lrw, start, end);
+	lck_mtx_unlock(&lrw->op_lock);
+}
+
+static void
+switch_vm_lazy_rw_materialize_all(vm_map_t map)
+{
+	struct switch_vm_lazy_rw *lrw = switch_vm_lazy_rw_lookup(map);
+	if (lrw == NULL) {
+		return;
+	}
+	lck_mtx_lock(&lrw->op_lock);
+	for (;;) {
+		uint64_t r_start = 0, r_end = 0;
+		lck_spin_lock(&lrw->table_lock);
+		bool found = switch_vm_lazy_rw_table_first_range(&lrw->table, &r_start, &r_end);
+		lck_spin_unlock(&lrw->table_lock);
+		if (!found) {
+			break;
+		}
+		(void)switch_vm_lazy_rw_materialize_slice_locked(map, lrw, r_start, r_end);
+	}
+	lck_mtx_unlock(&lrw->op_lock);
+}
+
+static void
+switch_vm_lazy_rw_prepare_delete(
+	vm_map_t                map,
+	vm_map_offset_t         start,
+	vm_map_offset_t         end)
+{
+	struct switch_vm_lazy_rw *lrw = switch_vm_lazy_rw_lookup(map);
+	if (lrw == NULL || start >= end) {
+		return;
+	}
+	lck_spin_lock(&lrw->table_lock);
+	bool overflow = switch_vm_lazy_rw_table_subtract_would_overflow(&lrw->table, start, end);
+	lck_spin_unlock(&lrw->table_lock);
+	if (__improbable(overflow)) {
+		switch_vm_lazy_rw_materialize_overlap(map, start, end);
+	}
+}
+
+void
+switch_vm_lazy_rw_fault(vm_map_t map, vm_map_offset_t vaddr)
+{
+	if (os_atomic_load(&switch_vm_lazy_rw_global_active, acquire) == 0u) {
+		return;
+	}
+	struct switch_vm_lazy_rw *lrw = switch_vm_lazy_rw_lookup(map);
+	if (lrw == NULL) {
+		return;
+	}
+	if (os_atomic_load(&lrw->table.count, acquire) == 0u &&
+	    os_atomic_load(&lrw->in_flight, acquire) == 0u) {
+		return;
+	}
+	vm_map_offset_t page_start = vm_map_trunc_page(vaddr, VM_MAP_PAGE_MASK(map));
+	vm_map_offset_t page_end;
+	if (os_add_overflow(page_start, VM_MAP_PAGE_SIZE(map), &page_end)) {
+		return;
+	}
+
+	lck_mtx_lock(&lrw->op_lock);
+	uint64_t slice_start = 0, slice_end = 0;
+	lck_spin_lock(&lrw->table_lock);
+	bool hit = switch_vm_lazy_rw_table_fault_slice(&lrw->table, page_start, page_end,
+	    &slice_start, &slice_end);
+	lck_spin_unlock(&lrw->table_lock);
+	if (hit) {
+		(void)switch_vm_lazy_rw_materialize_slice_locked(map, lrw, slice_start, slice_end);
+	}
+	lck_mtx_unlock(&lrw->op_lock);
+}
+
+bool
+switch_vm_lazy_rw_page_active(vm_map_t map, vm_map_offset_t vaddr)
+{
+	if (os_atomic_load(&switch_vm_lazy_rw_global_active, acquire) == 0u) {
+		return false;
+	}
+	struct switch_vm_lazy_rw *lrw = switch_vm_lazy_rw_lookup(map);
+	if (lrw == NULL) {
+		return false;
+	}
+	vm_map_offset_t page_start = vm_map_trunc_page(vaddr, VM_MAP_PAGE_MASK(map));
+	vm_map_offset_t page_end;
+	if (os_add_overflow(page_start, VM_MAP_PAGE_SIZE(map), &page_end)) {
+		return false;
+	}
+	lck_spin_lock(&lrw->table_lock);
+	bool active = (lrw->in_flight != 0u) ||
+	    switch_vm_lazy_rw_table_contains_page(&lrw->table, page_start, page_end);
+	lck_spin_unlock(&lrw->table_lock);
+	return active;
+}
+
 static __attribute__((always_inline, warn_unused_result))
 kern_return_t
 vm_map_protect_sanitize(
@@ -5789,6 +6311,10 @@ vm_map_protect_preflight(
 			return KERN_PROTECTION_FAILURE;
 		}
 	}
+	if (switch_vm_protect_submap_noop(entry->is_sub_map, entry->use_pmap,
+	    entry->protection, entry->max_protection, new_prot, set_max)) {
+		return VMRL_ERR_SKIP_PREPARE;
+	}
 	return KERN_SUCCESS;
 }
 
@@ -5808,13 +6334,10 @@ vm_map_protect(
 	boolean_t               set_max,
 	vm_prot_ut              new_prot_u)
 {
-	vm_map_entry_t                  entry;
-	__block vm_prot_t               new_prot;
-	int                             pmap_options = 0;
-	kern_return_t                   kr;
-	vm_map_offset_t                 start;
-	vm_map_offset_t                 end;
-	VM_MAP_LOCK_CTX_DECLARE(ctx);
+	vm_prot_t               new_prot;
+	kern_return_t           kr;
+	vm_map_offset_t         start;
+	vm_map_offset_t         end;
 
 	vmlp_api_start(VM_MAP_PROTECT);
 
@@ -5831,6 +6354,56 @@ vm_map_protect(
 		return kr;
 	}
 
+	if (switch_vm_lazy_cow_request_qualifies(set_max, new_prot,
+	    original_map == kernel_map || original_map->pmap == kernel_pmap,
+	    vm_map_is_sealed(original_map)) &&
+	    switch_vm_lazy_rw_try_defer(original_map, start, end)) {
+		vmlp_api_end(VM_MAP_PROTECT, KERN_SUCCESS);
+		return KERN_SUCCESS;
+	}
+
+	if (__improbable(switch_vm_lazy_rw_has_active(original_map))) {
+		struct switch_vm_lazy_rw *lrw = switch_vm_lazy_rw_lookup(original_map);
+		if (lrw != NULL) {
+			lck_mtx_lock(&lrw->op_lock);
+			if (!set_max && new_prot == VM_PROT_READ) {
+				lck_spin_lock(&lrw->table_lock);
+				bool overflow = switch_vm_lazy_rw_table_subtract_would_overflow(&lrw->table, start, end);
+				lck_spin_unlock(&lrw->table_lock);
+				if (__improbable(overflow)) {
+					switch_vm_lazy_rw_materialize_overlap_locked(original_map, lrw, start, end);
+				}
+				kr = vm_map_protect_core(original_map, start, end, set_max, new_prot, lrw);
+			} else {
+				switch_vm_lazy_rw_materialize_overlap_locked(original_map, lrw, start, end);
+				kr = vm_map_protect_core(original_map, start, end, set_max, new_prot, NULL);
+			}
+			lck_mtx_unlock(&lrw->op_lock);
+			vmlp_api_end(VM_MAP_PROTECT, kr);
+			return kr;
+		}
+	}
+
+	kr = vm_map_protect_core(original_map, start, end, set_max, new_prot, NULL);
+	vmlp_api_end(VM_MAP_PROTECT, kr);
+	return kr;
+}
+
+static kern_return_t
+vm_map_protect_core(
+	vm_map_t                original_map,
+	vm_map_offset_t         start,
+	vm_map_offset_t         end,
+	boolean_t               set_max,
+	vm_prot_t               new_prot_in,
+	struct switch_vm_lazy_rw *clear_lrw)
+{
+	vm_map_entry_t                  entry;
+	__block vm_prot_t               new_prot = new_prot_in;
+	int                             pmap_options = 0;
+	kern_return_t                   kr;
+	VM_MAP_LOCK_CTX_DECLARE(ctx);
+
 	if (new_prot & VM_PROT_COPY) {
 		vm_map_offset_t         new_start;
 		vm_prot_t               cur_prot, max_prot;
@@ -5838,7 +6411,6 @@ vm_map_protect(
 
 		/* LP64todo - see below */
 		if (start >= original_map->max_offset) {
-			vmlp_api_end(VM_MAP_PROTECT, KERN_INVALID_ADDRESS);
 			return KERN_INVALID_ADDRESS;
 		}
 
@@ -5868,7 +6440,6 @@ vm_map_protect(
 			    (uint64_t)0,
 #endif /* DEVELOPMENT || DEBUG */
 			    new_prot);
-			vmlp_api_end(VM_MAP_PROTECT, KERN_PROTECTION_FAILURE);
 			return KERN_PROTECTION_FAILURE;
 		}
 
@@ -5901,7 +6472,6 @@ vm_map_protect(
 		    vm_sanitize_wrap_prot_ref(&max_prot), /* IN/OUT */
 		    VM_INHERIT_DEFAULT);
 		if (kr != KERN_SUCCESS) {
-			vmlp_api_end(VM_MAP_PROTECT, kr);
 			return kr;
 		}
 		new_prot &= ~VM_PROT_COPY;
@@ -5913,7 +6483,6 @@ vm_map_protect(
 
 	if (start >= original_map->max_offset) {
 		vm_map_ilk_unlock(original_map);
-		vmlp_api_end(VM_MAP_PROTECT, KERN_INVALID_ADDRESS);
 		return KERN_INVALID_ADDRESS;
 	}
 
@@ -5924,7 +6493,6 @@ vm_map_protect(
 	entry = vm_map_lookup(original_map, start);
 	if (entry == VM_MAP_ENTRY_NULL) {
 		vm_map_ilk_unlock(original_map);
-		vmlp_api_end(VM_MAP_PROTECT, KERN_INVALID_ADDRESS);
 		return KERN_INVALID_ADDRESS;
 	}
 	if (entry->superpage_size) {
@@ -5946,8 +6514,11 @@ vm_map_protect(
 	kr = vm_map_range_ex_lock(ctx, &original_map, start, end,
 	    VMRL_EX_ATOMIC | VMRL_EX_ILK_LOCKED | VMRL_EX_SIMPLIFY | VMRL_EX_NO_MIN_MAX_CHECK);
 	if (KERN_SUCCESS != kr) {
-		vmlp_api_end(VM_MAP_PROTECT, kr);
 		return kr;
+	}
+
+	if (__improbable(clear_lrw != NULL)) {
+		switch_vm_lazy_rw_clear_locked(clear_lrw, start, end);
 	}
 
 	/*
@@ -5981,6 +6552,11 @@ vm_map_protect(
 			    entry->max_protection);
 		}
 #endif /* DEVELOPMENT || DEBUG */
+
+		if (switch_vm_protect_submap_noop(entry->is_sub_map, entry->use_pmap,
+		    entry->protection, entry->max_protection, new_prot, set_max)) {
+			continue;
+		}
 
 		if (entry->is_sub_map) {
 			/* range lock did unnest if needed */
@@ -6123,7 +6699,6 @@ vm_map_protect(
 
 	vm_map_range_ex_unlock(ctx, &original_map);
 
-	vmlp_api_end(VM_MAP_PROTECT, KERN_SUCCESS);
 	return KERN_SUCCESS;
 }
 
@@ -6235,6 +6810,10 @@ vm_map_inherit(
 
 	VM_MAP_CLAMP_TO_MAP_BOUNDS(map, start, end);
 	vmlp_range_event(map, start, end - start);
+
+	if (__improbable(switch_vm_lazy_rw_has_active(map))) {
+		switch_vm_lazy_rw_materialize_overlap(map, start, end);
+	}
 
 	vm_map_lock_ctx_set_preflight(ctx, ^kern_return_t (vm_map_lock_ctx_t vctx, vm_map_entry_t vme) {
 		kern_return_t ret = vm_map_inherit_preflight(vctx->vmlc_map, vme, new_inheritance);
@@ -7148,6 +7727,10 @@ restart:
 		/* We wired what the caller asked for, zero pages */
 		vmlp_api_end(VM_MAP_WIRE_IMPL, KERN_SUCCESS);
 		return KERN_SUCCESS;
+	}
+
+	if (__improbable(switch_vm_lazy_rw_has_active(original_map))) {
+		switch_vm_lazy_rw_materialize_overlap(original_map, start, end);
 	}
 
 	/* We want an atomic lock that resolves CoW and unnests submaps */
@@ -8817,7 +9400,12 @@ vm_map_delete_and_iunlock_internal(
 				 */
 				panic("Attempt to delete through transparent submap.");
 			}
+			vm_map_offset_t del_start = entry->vme_start;
+			vm_map_offset_t del_end = entry->vme_end;
 			if (vm_map_delete_handle_entry(ctx->vmlc_map, entry, sentinel, flags)) {
+				if (ctx->vmlc_map == orig_map) {
+					switch_vm_lazy_rw_clear_deleted(orig_map, del_start, del_end);
+				}
 				if (ctx->vmlc_map != orig_map) {
 					/*
 					 * wait_for_space wakeup below does not
@@ -8836,6 +9424,9 @@ vm_map_delete_and_iunlock_internal(
 					vm_map_zap_append(zap, entry);
 				}
 			} else {
+				if (ctx->vmlc_map == orig_map) {
+					switch_vm_lazy_rw_clear_deleted(orig_map, del_start, del_end);
+				}
 				if (flags & VM_MAP_REMOVE_TO_OVERWRITE) {
 					panic("Fixed overwrite failed to delete entry.");
 				}
@@ -9047,6 +9638,9 @@ vm_map_remove_guard(
 {
 	kern_return_t ret;
 	vmlp_api_start(VM_MAP_REMOVE_GUARD);
+	if (__improbable(switch_vm_lazy_rw_has_active(map))) {
+		switch_vm_lazy_rw_prepare_delete(map, start, end);
+	}
 	vm_map_ilk_lock(map);
 	vmlp_range_event(map, start, end - start);
 
@@ -9910,6 +10504,10 @@ vm_map_copy_overwrite_impl(
 	dst_end_aligned = vm_map_round_page(dst_start_unaligned + copy->size,
 	    VM_MAP_PAGE_MASK(orig_dst_map));
 	dst_start_aligned = vm_map_trunc_page(dst_start_unaligned, VM_MAP_PAGE_MASK(orig_dst_map));
+
+	if (__improbable(switch_vm_lazy_rw_has_active(orig_dst_map))) {
+		switch_vm_lazy_rw_materialize_overlap(orig_dst_map, dst_start_aligned, dst_end_aligned);
+	}
 
 	vm_map_lock_ctx_set_preflight(ctx,
 	    ^kern_return_t (vm_map_lock_ctx_t vctx, vm_map_entry_t vme) {
@@ -12165,6 +12763,11 @@ vm_map_copy_extract(
 		return KERN_INVALID_ADDRESS;
 	}
 
+	if (__improbable(!vmk_flags.vmkf_remap_prot_copy &&
+	    switch_vm_lazy_rw_has_active(src_map))) {
+		switch_vm_lazy_rw_materialize_overlap(src_map, src_addr, src_addr + len);
+	}
+
 	if (VM_MAP_PAGE_SIZE(src_map) < PAGE_SIZE) {
 		DEBUG4K_SHARE("src_map %p src_addr 0x%llx src_end 0x%llx\n", src_map, (uint64_t)src_addr, (uint64_t)(src_addr + len));
 	}
@@ -12753,6 +13356,11 @@ vm_map_fork(
 	}
 
 	vm_map_reference(old_map);
+	if (__improbable(!old_map->corpse_source &&
+	    !(options & VM_MAP_FORK_CORPSE_FOOTPRINT) &&
+	    switch_vm_lazy_rw_has_active(old_map))) {
+		switch_vm_lazy_rw_materialize_all(old_map);
+	}
 	vm_map_ilk_lock(old_map);
 
 	/* Note that we're creating a map out of fork() */
@@ -13344,6 +13952,7 @@ vm_map_region_recurse_64(
 	                                                  *  Used to report the physical
 	                                                  *  footprint */
 	vmrl_sh_flags_t lock_flags;
+	vm_map_t        orig_map = map;
 	VM_MAP_LOCK_CTX_DECLARE(ctx);
 
 	vmlp_api_start(VM_MAP_REGION_RECURSE_64);
@@ -13548,12 +14157,36 @@ vm_map_region_recurse_64(
 
 	*size_u = vm_sanitize_wrap_size(region_end - region_start);
 
+	bool lazy_writable = false;
+	if (__improbable((ctx->__vmlc_descended != VMLC_NOT_DESCENDED || !curr_entry->is_sub_map) &&
+	    switch_vm_lazy_rw_has_active(orig_map))) {
+		struct switch_vm_lazy_rw *lrw = switch_vm_lazy_rw_lookup(orig_map);
+		if (lrw != NULL) {
+			vm_map_address_t parent_start = (ctx->__vmlc_descended != VMLC_NOT_DESCENDED)
+			    ? vm_map_lock_ctx_to_parent_address(ctx, region_start)
+			    : region_start;
+			vm_map_address_t parent_end = parent_start + (region_end - region_start);
+			uint64_t slice_start = parent_start;
+			uint64_t slice_end = parent_end;
+			lck_spin_lock(&lrw->table_lock);
+			lazy_writable = switch_vm_lazy_rw_table_region_slice(&lrw->table,
+			    parent_start, parent_end, user_address, &slice_start, &slice_end);
+			lck_spin_unlock(&lrw->table_lock);
+			if (slice_start != parent_start || slice_end != parent_end) {
+				region_start += (slice_start - parent_start);
+				region_end = region_start + (slice_end - slice_start);
+				*address_u = vm_sanitize_wrap_addr(slice_start);
+				*size_u = vm_sanitize_wrap_size(slice_end - slice_start);
+			}
+		}
+	}
+
 	if (look_for_pages) {
 		submap_info->user_tag = VME_ALIAS(curr_entry);
 		submap_info->offset = VME_OFFSET(curr_entry);
-		submap_info->protection = curr_entry->protection;
+		submap_info->protection = curr_entry->protection | (lazy_writable ? VM_PROT_WRITE : 0);
 		submap_info->inheritance = curr_entry->inheritance;
-		submap_info->max_protection = curr_entry->max_protection;
+		submap_info->max_protection = curr_entry->max_protection | (lazy_writable ? VM_PROT_WRITE : 0);
 		submap_info->behavior = curr_entry->behavior;
 		submap_info->user_wired_count = curr_entry->user_wired_count;
 		submap_info->is_submap = curr_entry->is_sub_map;
@@ -13566,9 +14199,9 @@ vm_map_region_recurse_64(
 	} else {
 		short_info->user_tag = VME_ALIAS(curr_entry);
 		short_info->offset = VME_OFFSET(curr_entry);
-		short_info->protection = curr_entry->protection;
+		short_info->protection = curr_entry->protection | (lazy_writable ? VM_PROT_WRITE : 0);
 		short_info->inheritance = curr_entry->inheritance;
-		short_info->max_protection = curr_entry->max_protection;
+		short_info->max_protection = curr_entry->max_protection | (lazy_writable ? VM_PROT_WRITE : 0);
 		short_info->behavior = curr_entry->behavior;
 		short_info->user_wired_count = curr_entry->user_wired_count;
 		short_info->is_submap = curr_entry->is_sub_map;
@@ -17536,6 +18169,10 @@ vm_map_relocate(
 		/* The source already satisfied the request; this is a no-op. */
 		*dst_inout = src;
 		return KERN_SUCCESS;
+	}
+
+	if (__improbable(switch_vm_lazy_rw_has_active(map))) {
+		switch_vm_lazy_rw_materialize_overlap(map, src, end_of_src);
 	}
 
 	/*

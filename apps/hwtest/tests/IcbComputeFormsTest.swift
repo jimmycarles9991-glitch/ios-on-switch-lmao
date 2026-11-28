@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Compute dispatches issued through an indirect command buffer (one concurrent dispatch, executed once by a compute

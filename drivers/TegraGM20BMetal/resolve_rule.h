@@ -56,11 +56,12 @@ constexpr TwodResolveFit twodResolveFit(uint16_t format, uint8_t samples)
     switch (format) {
     case 70:  // RGBA8Unorm
     case 80:  // BGRA8Unorm
-    case 71:  // RGBA8Unorm_sRGB: the engine decodes before its box and encodes after (fx::twodFormat)
-    case 81:  // BGRA8Unorm_sRGB
     case 90:  // RGB10A2Unorm, which the pack has no resolve state for
     case 92:  // RG11B10Float
         return TwodResolveFit::Near;
+    case 71:  // RGBA8Unorm_sRGB: 2x stays within one code; 4x lands two off on GM20B (gpu.gm20b.resolve_twod)
+    case 81:  // BGRA8Unorm_sRGB
+        return samples == 2 ? TwodResolveFit::Near : TwodResolveFit::None;
     case 115:  // RGBA16Float
         return samples == 2 ? TwodResolveFit::Exact : TwodResolveFit::Near;
     default:

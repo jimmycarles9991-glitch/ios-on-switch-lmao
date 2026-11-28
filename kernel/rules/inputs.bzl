@@ -17,7 +17,7 @@ def _tool_output(ctx, xcode):
         if xcode:
             a = a.replace("{xcode_env}", ctx.file._xcode_env.path)
         a = a.replace("{path_root}", setting(ctx, "_path_root")).replace("{bin_dir}", ctx.bin_dir.path)
-        args.append(ctx.expand_location(a, ctx.attr.srcs))
+        args.append(ctx.expand_location(a, ctx.attr.srcs + ctx.attr.tools))
     run_tool(
         ctx,
         ctx.attr.binary or ctx.attr.tool,
@@ -28,6 +28,7 @@ def _tool_output(ctx, xcode):
         ctx.attr.message or ("Making " + ", ".join(ctx.attr.outs + ctx.attr.out_dirs)),
         execution_requirements = {r: "" for r in ctx.attr.requirements} if ctx.attr.requirements else None,
         xcode = xcode,
+        tools = [t[DefaultInfo].files_to_run for t in ctx.attr.tools],
     )
     return [DefaultInfo(files = depset(outs))]
 
@@ -41,6 +42,7 @@ _ATTRS = {
     "tool": attr.string(doc = "a //tools/kernel tool name (kernel/rules/common.bzl KERNEL_TOOLS)"),
     "binary": attr.label(executable = True, cfg = "exec", doc = "or any executable target"),
     "srcs": attr.label_list(allow_files = True),
+    "tools": attr.label_list(cfg = "exec", allow_files = True),
     "outs": attr.string_list(),
     "out_dirs": attr.string_list(),
     "args": attr.string_list(),

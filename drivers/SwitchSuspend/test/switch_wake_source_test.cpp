@@ -76,4 +76,10 @@ TEST(SwitchWakeSource, BluetoothPeeksEveryPacket)
     EXPECT_THAT(wake, HasSubstr("switch_bt_reconnect_take("));  // the reconnect after a Bluetooth wake presses Home
     const std::string buttons = SourceText("../../SwitchButtons/SwitchButtons.cpp");
     EXPECT_THAT(buttons, HasSubstr("{SWITCH_BT_CAPTURE, kSwitchButtonSnapshot}"));
+    EXPECT_THAT(buttons, Not(HasSubstr("IOSleep")));
+    EXPECT_THAT(buttons, HasSubstr("btTimer->wakeAtTime("));
+    EXPECT_THAT(wake, HasSubstr("__atomic_load_n(&gButtonsStale, __ATOMIC_RELAXED)"));
+    const std::string gpio = SourceText("../../TegraGPIO/TegraGPIO.cpp");
+    EXPECT_THAT(gpio, Not(HasSubstr("IOSleep")));
+    EXPECT_THAT(gpio, HasSubstr("deliveryTimer->wakeAtTime("));
 }

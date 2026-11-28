@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
+import HWTestKit
 import Metal
 
 /// Commands recorded on an encoder after its endEncoding, each case its own command buffer (gpu/EndedEncoderCases.swift),

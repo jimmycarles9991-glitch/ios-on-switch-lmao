@@ -4,7 +4,7 @@
 // kernel's "SwitchFrame:" clock; tools/frames joins the two by time.
 #pragma once
 
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+#if (!defined(SWITCH_DEBUG) || SWITCH_DEBUG) && defined(SWITCH_STATS_FRAME) && SWITCH_STATS_FRAME
 #define SWITCH_FRAME_TIMELINE 1
 #else
 #define SWITCH_FRAME_TIMELINE 0

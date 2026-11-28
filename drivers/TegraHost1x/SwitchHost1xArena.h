@@ -88,6 +88,16 @@ public:
         count = 0;
     }
 
+    // Each fenced job in flight, oldest first: visit(syncpt, threshold).
+    template <class Visit> void forEachFenced(Visit visit) const
+    {
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto &entry = entries[(oldest + i) % kEntries];
+            if (entry.fenced)
+                visit(entry.syncpt, entry.threshold);
+        }
+    }
+
     const SwitchHost1xArenaEntry *oldestFenced() const
     {
         for (uint32_t i = 0; i < count; ++i)

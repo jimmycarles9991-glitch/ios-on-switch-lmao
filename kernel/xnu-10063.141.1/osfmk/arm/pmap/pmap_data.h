@@ -104,6 +104,14 @@ pa_index(pmap_paddr_t pa)
 /* See the definition of pv_head_table for more information. */
 extern pv_entry_t **pv_head_table;
 
+#if !__ARM_IC_NOALIAS_ICACHE__
+/* Per-managed-page I-cache generation: 0 = never exec, PMAP_ICACHE_EXEC_ACTIVE = active exec,
+ * 1..PMAP_ICACHE_GEN_MAX-1 = unmapped+TLBI'd at that ic_ialluis_started generation. */
+#define PMAP_ICACHE_EXEC_ACTIVE UINT32_MAX
+#define PMAP_ICACHE_GEN_MAX     (UINT32_MAX - 1u)
+extern uint32_t *pp_icache_gen;
+#endif
+
 /* Represents a NULL entry in the pv_head_table. */
 #define PV_ENTRY_NULL ((pv_entry_t *) 0)
 

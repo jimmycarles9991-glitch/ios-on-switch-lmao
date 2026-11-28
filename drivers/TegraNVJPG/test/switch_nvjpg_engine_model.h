@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // TegraNVJPG.cpp on the host against a model of the engine: a partition, its clamps, NVJPG's clock and reset, a
 // falcon that answers only once started on a powered, clocked, released engine, and host1x channel 3 whose OP_DONE
-// increments the model's syncpoint when the falcon answers. The idle gate's thread call is fired by hand. One test
-// binary includes it once.
+// increments the model's syncpoint when the falcon answers. The idle gate's thread call is fired by hand, and so is a
+// job's end (deliver(): the falcon's error line, or the job fence's callback). One test binary includes it once.
 #pragma once
 #include "switch_nvjpg_gate_stubs.h"
 #include <algorithm>
+#include <utility>
 #include <map>
 #define SWITCH_DCACHE_OP(op, address) ((void)(address))
 #define SWITCH_DCACHE_BARRIER()       ((void)0)
 #include "../TegraNVJPG.cpp"
+#include "../TegraNVJPGFlight.cpp"
 #include "../../../kits/SwitchFalcon/SwitchFalconInterrupt.cpp"
 
 // A falcon v1 image: magic, version 1, 0x200 bytes, the OS header at 0x100 naming 0x80 bytes of code and of data.
@@ -34,14 +36,18 @@ struct Engine {
     bool clampStuck = false;                 // REMOVE_CLAMPING_CMD never clears
     bool removeSticksWhenUnclamped = false;  // a command to a partition with no clamp leaves its bit set
     bool removePending = false;
-    bool falconErrorInDecode = false;  // the falcon raises MSDECOS_ERROR_APPLICATION and parks during a decode
-    std::string decodeWaitEnded;       // "falcon": the decode's wait ended on the error, not at its bound
+    bool falconErrorInDecode = false;      // the falcon raises MSDECOS_ERROR_APPLICATION and parks during a decode
+    std::string decodeEndedBy;             // "falcon": the error line took the job's fence back; "fence": its callback
+    switch_host1x_fence *armed = nullptr;  // the job's fence, until deliver() or the line takes it
+    int armError = 0;                      // what the next fence's arming answers
+    int releaseError = 0;                  // what a cancelled job's fence release answers
+    std::vector<uint32_t> released;        // the thresholds cancelled jobs' fences were released to
     std::vector<std::string> events;
     bool stallDecodes = false, deadAfterReset = false;
+    bool scrubNeverEnds = false;  // the falcon's IMEM/DMEM scrubbing never ends: no image loads, no proof is sent
     int boots = 0, partitionPowerOns = 0, teardowns = 0, restarts = 0;
-    // a job's host1x waits taken with gStateLock held; the power lock taken inside gStateLock
-    int waitsUnderStateLock = 0, powerUnderStateLock = 0;
     uint32_t syncpt = 369427729, lastBoundUs = 0;
+    uint32_t fenceBoundUs = 0;  // the last job fence's bound
     std::vector<std::vector<uint32_t>> streams;
     std::map<unsigned, bool> clocks, resets;
 
@@ -111,7 +117,7 @@ int tegra_host1x_start(void)
     return 0;
 }
 
-int tegra_host1x_syncpt_alloc(uint32_t *id)
+int tegra_host1x_syncpt_alloc_named(uint32_t *id, const char *)
 {
     *id = kSyncpt;
     return 0;
@@ -124,44 +130,52 @@ uint32_t tegra_host1x_syncpt_read(uint32_t)
 
 int tegra_host1x_syncpt_wait(uint32_t, uint32_t threshold, uint32_t boundUs)
 {
-    gEngine.waitsUnderStateLock += gStateLock && gStateLock->locked;
     gEngine.lastBoundUs = boundUs;
     return static_cast<int32_t>(gEngine.syncpt - threshold) >= 0 ? 0 : TEGRA_HOST1X_ETIMEDOUT;
 }
 
-void tegra_host1x_syncpt_kick(uint32_t)
+void switch_host1x_fence_init(switch_host1x_fence *fence, uint32_t syncpt, uint32_t threshold,
+                              void (*signaled)(switch_host1x_fence *, int))
 {
-    gEngine.events.push_back("kick");
+    *fence = {};
+    fence->syncpt = syncpt;
+    fence->threshold = threshold;
+    fence->signaled = signaled;
 }
 
-// A decode the falcon parks on: THI raises FALCON_INT on NVJPG's line while the job's wait sleeps.
-int tegra_host1x_syncpt_wait_unless(uint32_t id, uint32_t threshold, uint32_t boundUs, const uint32_t *errors,
-                                    uint32_t seen)
+int switch_host1x_fence_add(switch_host1x_fence *fence, uint32_t boundUs)
 {
-    if (gEngine.falconErrorInDecode && !gEngine.reachable())
-        ADD_FAILURE() << "an error raised by an engine that is off";
-    if (gEngine.falconErrorInDecode) {
-        auto reg = [](uint32_t offset) -> uint32_t & {
-            return *reinterpret_cast<uint32_t *>(gNvjpgRegisters.data() + offset);
-        };
-        reg(SWITCH_FALCON_THI_INT_STATUS) = 1;
-        reg(SWITCH_FALCON_ERR_IRQSTAT) = 1u << 6;
-        reg(SWITCH_FALCON_ERR_IRQDEST) = 0xfff0;
-        reg(SWITCH_FALCON_ERR_MAILBOX0) = 8;
-        reg(SWITCH_FALCON_ERR_MAILBOX1) = 0x77;
-        gEngine.events.push_back("falcon error");
-        EXPECT_TRUE(IOWorkLoop::last()->fire()) << "NVJPG's line must be on during a decode";
-    }
-    if (errors && __atomic_load_n(errors, __ATOMIC_ACQUIRE) != seen) {
-        gEngine.decodeWaitEnded = "falcon";
-        return TEGRA_HOST1X_EFALCON;
-    }
-    gEngine.decodeWaitEnded = "bound";
-    return tegra_host1x_syncpt_wait(id, threshold, boundUs);
+    gEngine.lastBoundUs = gEngine.fenceBoundUs = boundUs;
+    if (const int error = std::exchange(gEngine.armError, 0))
+        return error;
+    EXPECT_EQ(gEngine.armed, nullptr) << "one job on the engine at a time";
+    gEngine.armed = fence;
+    fence->state = SWITCH_HOST1X_FENCE_QUEUED;
+    return TEGRA_HOST1X_OK;
 }
 
-int tegra_host1x_syncpt_release_failed(uint32_t, uint32_t, uint32_t)
+bool switch_host1x_fence_remove(switch_host1x_fence *fence)
 {
+    if (gEngine.armed != fence)
+        return false;
+    gEngine.armed = nullptr;
+    fence->state = SWITCH_HOST1X_FENCE_IDLE;
+    gEngine.decodeEndedBy = "falcon";
+    return true;
+}
+
+// A cancelled job's fence, released by the CPU: only once channel 3 is torn down and the falcon stopped, so the
+// engine can no longer reach it after another engine went on.
+int tegra_host1x_syncpt_release_failed(uint32_t, uint32_t threshold, uint32_t increments)
+{
+    EXPECT_EQ(gEngine.teardowns, gEngine.restarts + 1) << "released with channel 3 running";
+    EXPECT_FALSE(gEngine.falconRunning) << "released while the falcon could still reach the fence";
+    gEngine.events.push_back("fence released");
+    gEngine.released.push_back(threshold);
+    if (gEngine.releaseError)
+        return gEngine.releaseError;
+    EXPECT_EQ(threshold - gEngine.syncpt, increments);
+    gEngine.syncpt = threshold;
     return 0;
 }
 
@@ -189,7 +203,6 @@ int tegra_host1x_submit_on(uint32_t channel, const uint32_t *words, uint32_t cou
 int switch_host1x_job_begin(uint32_t channel, uint32_t capacity, uint32_t **words)
 {
     static std::vector<uint32_t> arena;
-    gEngine.waitsUnderStateLock += gStateLock && gStateLock->locked;
     EXPECT_EQ(channel, uint32_t(TEGRA_HOST1X_CHANNEL_NVJPG));
     arena.assign(capacity, 0);
     *words = arena.data();
@@ -382,7 +395,7 @@ uint32_t switch_pmc_read(uint32_t offset)
 
 switch_falcon_result switch_falcon_load(volatile uint8_t *, uint64_t, const switch_falcon_image *)
 {
-    return gEngine.reachable() ? SWITCH_FALCON_OK : SWITCH_FALCON_SCRUBBING;
+    return gEngine.reachable() && !gEngine.scrubNeverEnds ? SWITCH_FALCON_OK : SWITCH_FALCON_SCRUBBING;
 }
 
 void switch_falcon_start(volatile uint8_t *)
@@ -440,6 +453,54 @@ namespace {
     return job;
 }
 
+// What ends the job on the engine, as NVJPG's line and host1x's work loop give it: a falcon that parks on an error
+// raises THI's FALCON_INT, whose handler takes the job's fence back; otherwise the fence's callback, 0 once the
+// syncpoint is at its threshold, TEGRA_HOST1X_ETIMEDOUT once past its bound.
+[[maybe_unused]] void deliver()
+{
+    if (gEngine.falconErrorInDecode && gEngine.armed) {
+        if (!gEngine.reachable())
+            ADD_FAILURE() << "an error raised by an engine that is off";
+        auto reg = [](uint32_t offset) -> uint32_t & {
+            return *reinterpret_cast<uint32_t *>(gNvjpgRegisters.data() + offset);
+        };
+        reg(SWITCH_FALCON_THI_INT_STATUS) = 1;
+        reg(SWITCH_FALCON_ERR_IRQSTAT) = 1u << 6;
+        reg(SWITCH_FALCON_ERR_IRQDEST) = 0xfff0;
+        reg(SWITCH_FALCON_ERR_MAILBOX0) = 8;
+        reg(SWITCH_FALCON_ERR_MAILBOX1) = 0x77;
+        gEngine.events.push_back("falcon error");
+        EXPECT_TRUE(switch_interrupt_nub(kErrorIntid, false)->fire()) << "NVJPG's line must be on during a decode";
+    }
+    switch_host1x_fence *fence = std::exchange(gEngine.armed, nullptr);
+    if (!fence)
+        return;
+    gEngine.decodeEndedBy = "fence";
+    fence->state = SWITCH_HOST1X_FENCE_IDLE;
+    fence->signaled(fence, static_cast<int32_t>(gEngine.syncpt - fence->threshold) >= 0 ? 0 : TEGRA_HOST1X_ETIMEDOUT);
+}
+
+// One decode as the engine thread runs it: started under the job lock, ended by deliver(), finished.
+[[maybe_unused]] int runDecode(const TegraNVJPGJob *job, nvjpg_dec_status *status)
+{
+    int ends = 0;
+    const TegraNVJPGSignal signal = {[](void *count) {
+                                         ++*static_cast<int *>(count);
+                                     },
+                                     &ends};
+    tegra_nvjpg_lock();
+    int ret = tegra_nvjpg_start(job, &signal);
+    if (!ret) {
+        deliver();
+        EXPECT_EQ(ends, 1) << "a started job's end is signalled once";
+        ret = tegra_nvjpg_finish(job, status, nullptr);
+    } else {
+        EXPECT_EQ(ends, 0) << "a job that never started signals nothing";
+    }
+    tegra_nvjpg_unlock();
+    return ret;
+}
+
 [[maybe_unused]] void idle()
 {
     thread_call_t timer = switch_test_calls().back();
@@ -466,6 +527,9 @@ protected:
     {
         gEngine.stallDecodes = false;
         gEngine.deadAfterReset = false;
+        gEngine.scrubNeverEnds = false;
+        gEngine.armError = gEngine.releaseError = 0;
+        gEngine.released.clear();
         switch_test_log().clear();
     }
 };

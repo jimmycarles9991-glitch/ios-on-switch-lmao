@@ -18,11 +18,11 @@
 #include <os/log.h>
 #include <string.h>
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED
 
 #define WATCH_LINES 20 /* a second */
 
-static uint32_t slots_freed, writer_dropped, writer_dropped_reported;
+static uint32_t writer_dropped, writer_dropped_reported;
 
 static long long ms_before(uint64_t then, uint64_t now)
 {
@@ -125,32 +125,7 @@ void switch_watch_write(__unused thread_call_param_t p0, __unused thread_call_pa
     }
 }
 
-/*
- * The slots of threads no longer on the system's list are freed. The ids are taken before the walk, and only those are
- * freed (slots.h): a slot taken during or after the walk is never freed under its thread.
- */
-static void free_gone(void)
-{
-    struct switch_slot_snap snap;
-    bool alive[SWITCH_SLOTS] = {false};
-    thread_t thread = THREAD_NULL;
-
-    switch_slot_snapshot(&switch_watch_table, &snap);
-    lck_mtx_lock(&tasks_threads_lock);
-    queue_iterate(&threads, thread, thread_t, threads)
-    {
-        const int i = switch_slot_snapshot_find(&snap, thread->thread_id);
-
-        if (i >= 0) {
-            alive[i] = true;
-        }
-    }
-    lck_mtx_unlock(&tasks_threads_lock);
-    os_atomic_add(&slots_freed, switch_slot_free_gone(&switch_watch_table, &snap, alive), relaxed);
-}
-
-/* stats.c's 10 s report, after its own lines: the window's events and the commit path. The report alone frees slots
- * and writes `reported`. */
+/* stats.c's 10 s report, after its own lines: the window's events and the commit path. */
 void switch_sched_watch_report(char *line, size_t size, uint64_t window_ns)
 {
     struct switch_watch_counts sum = {0};
@@ -183,11 +158,11 @@ void switch_sched_watch_report(char *line, size_t size, uint64_t window_ns)
     at += switch_watch_counts_format(line + at, size - at, &sum);
     (void)snprintf(line + at, size - at,
                    "; threads watched %u (%u taken, %u freed since boot; %u refused a slot, once a window each)", used,
-                   os_atomic_load(&switch_watch_claimed, relaxed), os_atomic_load(&slots_freed, relaxed),
+                   os_atomic_load(&switch_watch_claimed, relaxed), os_atomic_load(&switch_watch_freed, relaxed),
                    os_atomic_xchg(&switch_watch_refused, 0, relaxed));
     os_log(OS_LOG_DEFAULT, "%s", line);
     switch_sched_commit_report(line, size, window_ns);
-    free_gone();
+    switch_slot_prune_filter(&switch_watch_table);
 }
 
-#endif /* DEVELOPMENT || DEBUG */
+#endif /* (DEVELOPMENT || DEBUG) && SWITCH_STATS_SCHED */

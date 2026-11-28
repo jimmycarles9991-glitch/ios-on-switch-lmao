@@ -107,6 +107,15 @@ build:release --nokeep_going
 build:release --verbose_failures
 # dev: the old name of the default preset.
 build:dev --config=debug
+# measure: opt-in periodic counters across scheduler, power, frames, GPU and I/O (debug only; off by default).
+build:measure --config=debug
+build:measure --//bazel:stats_sched
+build:measure --//bazel:stats_power
+build:measure --//bazel:stats_frame
+build:measure --//bazel:stats_gpu
+build:measure --//bazel:stats_io
+# hwtest: include SwitchHWTest and its texture peer (on by default in debug, off by default in release).
+build:hwtest --//bazel:hwtest=true
 
 # The iOS the build is for, with its IPSW kind (ipsw/pins.bzl) and XNU: ios17 is the default (iPadOS 17.7.11 on
 # xnu-10063, iPad7,1), ios27 is iPadOS 27.2 on xnu-12377 for iPad12,1.

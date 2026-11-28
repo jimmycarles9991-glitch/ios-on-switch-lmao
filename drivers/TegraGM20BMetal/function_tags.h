@@ -227,6 +227,30 @@ inline bool listedFunction(const uint8_t *file, size_t length, std::string_view 
     return false;
 }
 
+// What `name`'s list entry and public metadata say of it outside the bitcode its HASH tag names, raw: its TYPE and TESS
+// bytes (0xff for none) and its public metadata record whole (its constants, attributes and their types among its tags).
+// A library could pair one bitcode with any of them, so the store keys a stage by them beside its AIR (store_key.h). Empty
+// where the library lists no such function.
+inline std::string listedFacts(const uint8_t *file, size_t length, std::string_view name)
+{
+    ListedFunction f;
+    if (!listedFunction(file, length, name, f))
+        return std::string();
+    std::string out = {char(f.type ? *f.type : 0xff), char(f.tess ? *f.tess : 0xff)};
+    uint64_t sectionAt = 0, sectionBytes = 0;
+    memcpy(&sectionAt, file + 40, 8);
+    memcpy(&sectionBytes, file + 48, 8);
+    if (!f.publicAt || sectionAt > length || sectionBytes > length - sectionAt || *f.publicAt > sectionBytes ||
+        sectionBytes - *f.publicAt < 4)
+        return out;
+    const uint8_t *record = file + sectionAt + *f.publicAt;
+    uint32_t size = 0;
+    memcpy(&size, record, 4);
+    out.append(reinterpret_cast<const char *>(record),
+               std::min<uint64_t>(4 + uint64_t(size), sectionBytes - *f.publicAt));
+    return out;
+}
+
 // `name`'s constants and attributes in a metallib (Metal's AIR slice of one); false where the library lists no such function or
 // its records are malformed (m2v refused such a library whole)
 inline bool functionTags(const uint8_t *file, size_t length, std::string_view name, FunctionTags &out)

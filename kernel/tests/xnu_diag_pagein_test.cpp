@@ -215,7 +215,8 @@ TEST(XnuDiagPageinSource, BothTreesReportEachFilePagerReadAfterIt)
         ASSERT_NE(hook, std::string::npos) << tree;
         EXPECT_LT(read, hook) << tree;
         // A release kernel times nothing here: the timing and both reports are the debug branch's.
-        const size_t debug = body.find("#if DEVELOPMENT || DEBUG\n");
+        const size_t debug = body.find("#if (DEVELOPMENT || DEBUG) && ((defined(SWITCH_KPROF) && SWITCH_KPROF) || "
+                                       "(defined(SWITCH_STATS_IO) && SWITCH_STATS_IO))\n");
         const size_t release = body.find(
             "#else\n\treturn vnode_pager_cluster_read(vnode_object, base_offset, offset, io_streaming, size);\n#endif");
         ASSERT_NE(debug, std::string::npos) << tree;

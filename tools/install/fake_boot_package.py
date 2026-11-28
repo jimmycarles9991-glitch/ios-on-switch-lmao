@@ -6,8 +6,11 @@ entry's text, //boot:ios_ini), overlay/<two files>. --generation changes bl33.bi
 that a rerun rewrites exactly the files that differ.
 """
 
+import hashlib
 import sys
 from pathlib import Path
+
+from tools.gpu import stage_format
 
 FILES = ['bl31.bin', 'bl33.bin']
 INI = (
@@ -22,11 +25,21 @@ def gpu_bundle(out: Path) -> None:
     bundle = out / 'ngpu/addons/TegraGM20BMetal.bundle'
     bundle.mkdir(parents=True)
     for name in ('TegraGM20BMetal', 'Info.plist'):
-        (bundle / name).write_bytes(b'fake ' + name.encode())
+        path = bundle / name
+        path.write_bytes(b'fake ' + name.encode())
+        path.chmod(0o755 if name == 'TegraGM20BMetal' else 0o644)
     replies = out / 'ngpu/addons/TegraGM20BMetal.seed/shared/msl'
     replies.mkdir(parents=True)
     (replies / ('0' * 64 + '.reply')).write_bytes(b'fake reply')
     (out / 'TegraGM20BMetal.trustcache').write_bytes(bytes(24))
+    lines = [stage_format.tree_header()]
+    for path in sorted(p for p in (out / 'ngpu').rglob('*') if p.is_file()):
+        name = path.relative_to(out).as_posix()
+        data = path.read_bytes()
+        mode = 0o755 if path.name == 'TegraGM20BMetal' else 0o644
+        lines.append(stage_format.file_record(name, hashlib.sha256(data).hexdigest(), len(data), mode, name))
+    lines += stage_format.pref_records()
+    (out / stage_format.TREE_MANIFEST).write_text(''.join(line + '\n' for line in lines))
 
 
 def main() -> None:

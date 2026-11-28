@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 from bootstrap import packages
+from bootstrap.development import read_package
 from bootstrap.launchctl.package import adapt_launchctl
 from bootstrap.signing import sign, sign_bundle
 from tools.common import macho
@@ -169,6 +170,20 @@ def control_package(package: str, version: str, text: str = '') -> dict:
     return result
 
 
+def register_development(entries: dict, directory: Path | None, zstd_lib: Path) -> dict | None:
+    if not directory:
+        return None
+    record = json.loads((directory / 'record.json').read_text())
+    for name, item in record['packages'].items():
+        control, files = read_package(directory / item['file'], zstd_lib)
+        if packages.register_package(entries, control, files) != name:
+            raise ValueError(f'{item["file"]}: not the {name} package')
+        packages.add_file(
+            entries, 'usr/share/Switch/bootstrap-packages/' + item['file'], (directory / item['file']).read_bytes()
+        )
+    return record
+
+
 def assemble(args: argparse.Namespace) -> None:
     provenance = base_provenance(args)
     entries = packages.read_bootstrap(args.base, args.zstd_lib)
@@ -237,6 +252,7 @@ def assemble(args: argparse.Namespace) -> None:
         sign(ellekit, work)
         packages.register_package(entries, control, ellekit)
         packages.write_deb(args.debs / 'ellekit.deb', control, ellekit)
+    development = register_development(entries, args.development, args.zstd_lib)
     for name in ('sileo.deb', 'ellekit.deb', 'uikittools.deb', 'launchctl.deb'):
         packages.add_file(entries, 'usr/share/Switch/bootstrap-packages/' + name, (args.debs / name).read_bytes())
     packages.add_file(entries, '.switch_strapped', b'1\n')
@@ -245,7 +261,7 @@ def assemble(args: argparse.Namespace) -> None:
     packages.ensure_directories(entries)
     validate_linkage(entries)
     args.out.write_bytes(packages.tar_bytes(entries))
-    managed = managed_package_manifest(args.debs)
+    managed = managed_package_manifest(args.debs, args.development, development)
     generation = hashlib.sha256(
         b'Switch bootstrap migration v1\n' + json.dumps(managed, sort_keys=True, separators=(',', ':')).encode('ascii')
     ).hexdigest()
@@ -255,23 +271,36 @@ def assemble(args: argparse.Namespace) -> None:
         'sileo_executable_sha256': hashlib.sha256(entries['Applications/Sileo.app/Sileo'][1]).hexdigest(),
         'managed_packages': managed,
         'managed_generation': generation,
-        'holds': ['org.coolstar.sileo', 'ellekit', 'uikittools', 'launchctl'],
+        'holds': [
+            'org.coolstar.sileo',
+            'ellekit',
+            'uikittools',
+            'launchctl',
+            *sorted((development or {'packages': {}})['packages']),
+        ],
         'license_notices': {'depictionkit': 'Pinned upstream README lists its license as TBD; LICENSE.md is absent.'},
         'sources': json.loads(args.sources.read_text()),
     }
     details['base'] = provenance
+    if development:
+        details['ssh'] = development['ssh']
     args.manifest.write_text(json.dumps(details, sort_keys=True, indent=2) + '\n')
 
 
-def managed_package_manifest(directory: Path) -> dict:
+def managed_package_manifest(directory: Path, development: Path | None = None, record: dict | None = None) -> dict:
+    """Return every image's four managed packages followed by a development image's packages."""
     result = {}
-    for package, filename in (
-        ('org.coolstar.sileo', 'sileo.deb'),
-        ('ellekit', 'ellekit.deb'),
-        ('uikittools', 'uikittools.deb'),
-        ('launchctl', 'launchctl.deb'),
-    ):
-        path = directory / filename
+    every = (
+        ('org.coolstar.sileo', directory / 'sileo.deb'),
+        ('ellekit', directory / 'ellekit.deb'),
+        ('uikittools', directory / 'uikittools.deb'),
+        ('launchctl', directory / 'launchctl.deb'),
+    )
+    added = tuple(
+        (name, development / item['file']) for name, item in sorted((record or {'packages': {}})['packages'].items())
+    )
+    for package, path in every + added:
+        filename = path.name
         text = read_control(path)['control'][1].decode()
         names = [line[9:] for line in text.splitlines() if line.startswith('Package: ')]
         versions = [line[9:] for line in text.splitlines() if line.startswith('Version: ')]
@@ -346,9 +375,10 @@ def main() -> None:
         'zstd-lib',
     ):
         parser.add_argument('--' + name, required=True, type=Path)
+    parser.add_argument('--development', type=Path)
     args = parser.parse_args()
     for name, path in vars(args).items():
-        setattr(args, name, path.resolve())
+        setattr(args, name, path.resolve() if path else None)
     assemble(args)
 
 

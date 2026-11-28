@@ -387,13 +387,20 @@ fn role_type(m: &Module, p: &ParamBinding, ty: TypeId, site: &Site) -> Result<()
     let space = m.types().ptr_space(ty);
     let ok = match &p.role {
         ParamRole::Buffer(b) | ParamRole::ArgumentBuffer(b) | ParamRole::Threadgroup(b) => {
-            space == Some(b.space) || space == Some(AddrSpace::Thread)
+            space == Some(b.space)
+                || matches!(space, Some(AddrSpace::Thread | AddrSpace::ArrayRef))
         }
         ParamRole::Texture(_) => {
-            space == Some(AddrSpace::Device) || space == Some(AddrSpace::Thread)
+            matches!(
+                space,
+                Some(AddrSpace::Device | AddrSpace::Thread | AddrSpace::ArrayRef)
+            )
         }
         ParamRole::Sampler { .. } => {
-            space == Some(AddrSpace::Constant) || space == Some(AddrSpace::Thread)
+            matches!(
+                space,
+                Some(AddrSpace::Constant | AddrSpace::Thread | AddrSpace::ArrayRef)
+            )
         }
         ParamRole::AccelerationStructure { .. }
         | ParamRole::FunctionTable(_)

@@ -84,6 +84,16 @@ CompileOutcome Direct::form(MTLRenderPipelineDescriptor *descriptor, bool barrie
         formats.push_back({t.slot, t.format, t.stage == kCubicVertex});
     for (const WrittenTexture &t : textures.written)
         formats.push_back({t.slot, t.format, false});
+    // Two-plane XR10 slots are rewritten into paired-plane textures after translation and must not receive
+    // m2v's 8-bit UNORM software linear-filter lowering (MTLPixelFormatASTC_4x4_LDR -> TexelFormat::OTHER).
+    for (uint32_t mask = textures.xrSlots; mask; mask &= mask - 1) {
+        const uint32_t slot = uint32_t(__builtin_ctz(mask));
+        const bool listed = std::any_of(formats.begin(), formats.end(), [&](const NmbDirectTextureFormat &f) {
+            return !f.vertex && f.slot == slot;
+        });
+        if (!listed)
+            formats.push_back({slot, 204u, false});
+    }
     const NmbDirectBinds binds = {cubic.data(),           uint32_t(cubic.size()),
                                   formats.data(),         uint32_t(formats.size()),
                                   textures.fragmentTests, textures.bindStride};
@@ -199,8 +209,14 @@ KernelDispatch::KernelDispatch(const uint32_t threads[3], const std::map<uint32_
 
 void KernelDispatch::texture(uint32_t slot, MTLTextureDescriptor *d, bool planes)
 {
-    textures_.push_back({slot, planes ? 1u : 0u, d.pixelFormat, d.textureType, d.usage, d.mipmapLevelCount,
-                         d.arrayLength, d.sampleCount});
+    const MTLTextureSwizzleChannels w = d.swizzle;
+    const uint32_t swizzle = NMB_DIRECT_BOUND_SWIZZLE_STATED |
+                             ((uint32_t(w.red) & 7u) << NMB_DIRECT_BOUND_SWIZZLE_SHIFT) |
+                             ((uint32_t(w.green) & 7u) << (NMB_DIRECT_BOUND_SWIZZLE_SHIFT + 3u)) |
+                             ((uint32_t(w.blue) & 7u) << (NMB_DIRECT_BOUND_SWIZZLE_SHIFT + 6u)) |
+                             ((uint32_t(w.alpha) & 7u) << (NMB_DIRECT_BOUND_SWIZZLE_SHIFT + 9u));
+    textures_.push_back({slot, (planes ? NMB_DIRECT_BOUND_TWO_PLANES : 0u) | swizzle, d.pixelFormat, d.textureType,
+                         d.usage, d.mipmapLevelCount, d.arrayLength, d.sampleCount});
 }
 
 void KernelDispatch::sampler(uint32_t slot, MTLSamplerDescriptor *d)

@@ -64,3 +64,23 @@ kernel void pieces_kernel(device uint4 *out [[buffer(0)]], constant uint &steps 
         v = fract(fma(v, 1.618034f, 0.1f));
     out[gid] = uint4(group, groups, threads, as_type<uint>(v));
 }
+
+// gpu.sched.band_planar_instanced: a widget draw as WidgetRenderer made it striped on 25 Nov: every instance over the whole
+// target, each sampling a BGRA image at its own offset and blending over the colour it reads of the target
+struct BandsInstanced {
+    float4 position [[position]];
+    uint instance [[flat]];
+};
+
+vertex BandsInstanced bands_instanced_vertex(uint vid [[vertex_id]], uint iid [[instance_id]])
+{
+    const float2 corner = float2(vid == 1 ? 3.0f : -1.0f, vid == 2 ? 3.0f : -1.0f);
+    return {float4(corner, 0, 1), iid};
+}
+
+fragment float4 bands_sample_over_fragment(BandsInstanced v [[stage_in]], float4 under [[color(0)]],
+                                           texture2d<float> image [[texture(0)]], sampler s [[sampler(0)]])
+{
+    const float2 uv = v.position.xy / float2(352.0f, 160.0f) + float(v.instance) * float2(0.011f, 0.007f);
+    return mix(under, image.sample(s, uv), 1.0f / float(v.instance + 2));
+}

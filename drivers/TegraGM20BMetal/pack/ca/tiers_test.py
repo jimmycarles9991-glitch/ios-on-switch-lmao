@@ -24,13 +24,21 @@ CORPUS = os.path.join(HERE, '..', '..', 'precompile', 'corpus.log')
 CA_NAMES = os.path.join(HERE, '..', '..', 'precompile', 'ca-names', '24B119.txt')
 
 
-class LaunchSet(unittest.TestCase):
+class _LaunchSetBase(unittest.TestCase):
+    BUILD: str
+    QC_FILE: str
+    CA_NAMES_FILE: str | None = None
+
     @classmethod
     def setUpClass(cls) -> None:
-        qc = os.path.join(HERE, 'qc-24B119.json')
+        if cls is _LaunchSetBase:
+            raise unittest.SkipTest('base class')
+        qc = os.path.join(HERE, cls.QC_FILE)
         cls.tables = caspec.Tables(qc)
-        with open(CA_NAMES) as f:
-            cls.names = f.read().split()
+        cls.names = []
+        if cls.CA_NAMES_FILE:
+            with open(cls.CA_NAMES_FILE) as f:
+                cls.names = f.read().split()
         cls.tiers = make_pack.ca_states(make_pack.Path(qc), make_pack.Path(CORPUS), cls.names)
         cls.launch = {
             make_pack.state_key(line) for tier, lines in cls.tiers if tier not in make_pack.COLD_TIERS for line in lines
@@ -43,8 +51,8 @@ class LaunchSet(unittest.TestCase):
             if m[0][0] == 'P'
             for form in [m[0], *deepcolour.asked(self.tables, m[0], None)]
         ]
-        named = [n for n in self.names if caset.makes(self.tables, n)] + closure.demand('24B119')
-        self.assertGreater(len(asked), 900)
+        named = [n for n in self.names if caset.makes(self.tables, n)] + closure.demand(self.BUILD)
+        self.assertGreater(len(asked), 800)
         missing = [
             n for n in asked + named if make_pack.state_key(caspec.state_line(self.tables, n)) not in self.launch
         ]
@@ -55,6 +63,17 @@ class LaunchSet(unittest.TestCase):
             marked = {' tier=1 ' in line for line in lines}
             self.assertEqual(marked, {tier in make_pack.COLD_TIERS} if lines else set(), tier)
         self.assertGreater(sum(len(lines) for tier, lines in self.tiers if tier in make_pack.COLD_TIERS), 50_000)
+
+
+class LaunchSet24B119(_LaunchSetBase):
+    BUILD = '24B119'
+    QC_FILE = 'qc-24B119.json'
+    CA_NAMES_FILE = CA_NAMES
+
+
+class LaunchSet21H461(_LaunchSetBase):
+    BUILD = '21H461'
+    QC_FILE = 'qc-21H461.json'
 
 
 if __name__ == '__main__':

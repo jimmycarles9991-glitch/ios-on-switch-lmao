@@ -29,7 +29,7 @@ void switch_emc_resume(void);
 // Thread context. Raise before arming a larger scanout; lower only after the old scanout retires.
 int switch_emc_display_reserve(uint64_t bytes_per_second);
 
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_POWER
 // The power stats line's EMC part since the last call: rate changes and the share of time at each rate.
 size_t switch_emc_stats(char *line, size_t size);
 #endif

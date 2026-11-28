@@ -63,6 +63,38 @@ static Decoder *storage(CMBaseObjectRef object)
     return CMBaseObjectGetDerivedStorage(object);
 }
 
+void avd_decoder_enter_slow(Decoder *d)
+{
+    pthread_mutex_lock(&d->lock);
+    d->waiters++;
+    for (;;) {
+        uint32_t cur = atomic_load_explicit(&d->owner, memory_order_relaxed);
+        if (cur == 0) {
+            const uint32_t next = d->waiters > 1 ? 2u : 1u;
+            if (atomic_compare_exchange_weak_explicit(&d->owner, &cur, next, memory_order_acquire,
+                                                      memory_order_relaxed))
+                break;
+            continue;
+        }
+        if (cur == 1u &&
+            !atomic_compare_exchange_weak_explicit(&d->owner, &cur, 2u, memory_order_relaxed, memory_order_relaxed))
+            continue;
+        pthread_cond_wait(&d->idle, &d->lock);
+    }
+    d->waiters--;
+    pthread_mutex_unlock(&d->lock);
+}
+
+void avd_decoder_leave_slow(Decoder *d)
+{
+    pthread_mutex_lock(&d->lock);
+    atomic_store_explicit(&d->owner, 0u, memory_order_release);
+    if (d->waiters)
+        pthread_cond_signal(&d->idle);
+    pthread_mutex_unlock(&d->lock);
+}
+
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
 static double ticksToMs(uint64_t ticks)
 {
     static mach_timebase_info_data_t base;
@@ -70,6 +102,7 @@ static double ticksToMs(uint64_t ticks)
         mach_timebase_info(&base);
     return (double)ticks * base.numer / base.denom / 1e6;
 }
+#endif
 
 static const VTPluginDecoderVTable *softwareVTable(const Decoder *d)
 {
@@ -168,7 +201,9 @@ static bool cpuReady(Decoder *d, Output *out, const H264Picture *picture)
 void avd_place_picture(Decoder *d, Output *out, const H264Picture *picture, CVPixelBufferRef image, uint32_t x,
                        uint32_t y)
 {
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     const uint64_t began = mach_absolute_time();
+#endif
     const uint32_t w = (uint32_t)CVPixelBufferGetWidth(image), h = (uint32_t)CVPixelBufferGetHeight(image);
     const uint32_t roomW = x < w ? w - x : 0, roomH = y < h ? h - y : 0;
     const uint32_t width = roomW < picture->width ? roomW : picture->width;
@@ -204,7 +239,9 @@ void avd_place_picture(Decoder *d, Output *out, const H264Picture *picture, CVPi
         CVPixelBufferUnlockBaseAddress(image, 0);
         d->copied++;
     }
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     d->copyTicks += mach_absolute_time() - began;
+#endif
 }
 
 static int switch_recycle_output(void *context, uint32_t handle, uint64_t bytes, void **address)
@@ -570,7 +607,7 @@ static OSStatus startHEVC(Decoder *d, VTVideoDecoderSession session, CMVideoForm
 static OSStatus startSession(VTVideoDecoderRef ref, VTVideoDecoderSession session, CMVideoFormatDescriptionRef format)
 {
     Decoder *d = storage(ref);
-    pthread_mutex_lock(&d->lock);
+    avd_decoder_enter(d);
     d->session = session;
     avd_emitter_set_session(d->emitter, session);
     if (d->vp9 || d->hevc || d->mpeg4 || d->mpeg2) {
@@ -578,7 +615,7 @@ static OSStatus startSession(VTVideoDecoderRef ref, VTVideoDecoderSession sessio
                                 : d->hevc  ? startHEVC(d, session, format)
                                 : d->mpeg4 ? avd_start_mpeg4(d, session, format)
                                            : avd_start_mpeg2(d, session, format);
-        pthread_mutex_unlock(&d->lock);
+        avd_decoder_leave(d);
         return status;
     }
     d->avcC = copyAvcC(format);
@@ -594,7 +631,7 @@ static OSStatus startSession(VTVideoDecoderRef ref, VTVideoDecoderSession sessio
         status = avd_start_software(d, session, format,
                                     configured == -3 ? "no NVDEC memory for its buffers (see the AVD alloc/map line)"
                                                      : "not decodable on NVDEC (4:2:0 8-bit up to 4096x4096 is)");
-        pthread_mutex_unlock(&d->lock);
+        avd_decoder_leave(d);
         return status;
     }
     d->width = (uint32_t)(sps->width_mbs * 16 - (int32_t)(sps->crop_left + sps->crop_right));
@@ -633,7 +670,7 @@ static OSStatus startSession(VTVideoDecoderRef ref, VTVideoDecoderSession sessio
                : sps->mb_adaptive_frame_field ? "interlaced, MBAFF"
                                               : "interlaced",
                d->present ? "VIC" : "the CPU");
-    pthread_mutex_unlock(&d->lock);
+    avd_decoder_leave(d);
     return status;
 }
 
@@ -672,10 +709,10 @@ static OSStatus decodeFrame(VTVideoDecoderRef ref, VTVideoDecoderFrame frame, CM
     size_t size = 0;
     if (!avd_sample_bytes(sample, &data, &size, &copy))
         return size ? kVTVideoDecoderMalfunctionErr : kVTVideoDecoderBadDataErr;
-    pthread_mutex_lock(&d->lock);
+    avd_decoder_enter(d);
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     const uint64_t began = mach_absolute_time(), copied = d->copyTicks;
     avd_emitter_frame_began(d->emitter, began);
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     avd_frame_begin(&d->timing, began);
 #endif
     // VP9: a superframe's hidden frames and its shown one; 0 when the sample showed none (answered like H.264's
@@ -688,9 +725,10 @@ static OSStatus decodeFrame(VTVideoDecoderRef ref, VTVideoDecoderFrame frame, CM
                                : h264_decoder_decode(d->h264, data, size, d->lengthSize, frame, reorder);
     if (ret == 1) {
         d->frames++;
-        d->decodeTicks += mach_absolute_time() - began - (d->copyTicks - copied);
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-        avd_frame_end(&d->timing, mach_absolute_time());
+        const uint64_t done = mach_absolute_time();
+        d->decodeTicks += done - began - (d->copyTicks - copied);
+        avd_frame_end(&d->timing, done);
 #endif
     }
     if (!ret)  // parameter sets only: answered without a picture, after the frames before it
@@ -703,7 +741,7 @@ static OSStatus decodeFrame(VTVideoDecoderRef ref, VTVideoDecoderFrame frame, CM
     const bool answered = error && (d->vp9 || d->hevc || d->mpeg4 || d->mpeg2);
     if (answered)
         answer(d, frame, error);
-    pthread_mutex_unlock(&d->lock);
+    avd_decoder_leave(d);
     free(copy);
     const bool asynchronous = flags & kVTDecodeFrame_EnableAsynchronousDecompression;
     if (asynchronous && info && (!error || answered))
@@ -801,12 +839,12 @@ static OSStatus finishDelayedFrames(VTVideoDecoderRef ref)
         const VTPluginDecoderClass *software = softwareVTable(d)->decoderClass;
         return software->finishDelayedFrames ? software->finishDelayedFrames(d->software) : noErr;
     }
-    pthread_mutex_lock(&d->lock);
+    avd_decoder_enter(d);
     if (d->h264)
         h264_decoder_flush(d->h264);  // VP9 frames go out as they are decoded
     if (d->hevc)
         hevc_decoder_flush(d->hevc);
-    pthread_mutex_unlock(&d->lock);
+    avd_decoder_leave(d);
     // VideoToolbox may return before they are emitted; VTDecompressionSessionWaitForAsynchronousFrames waits for them.
     avd_emitter_drain(d->emitter);
     return noErr;
@@ -819,17 +857,17 @@ static OSStatus invalidate(CMBaseObjectRef ref)
         const VTPluginBaseClass *software = softwareVTable(d)->baseClass;
         return software->invalidate ? software->invalidate(VTVideoDecoderGetCMBaseObject(d->software)) : noErr;
     }
-    pthread_mutex_lock(&d->lock);
+    avd_decoder_enter(d);
     if (d->h264)
         h264_decoder_flush(d->h264);
     if (d->hevc)
         hevc_decoder_flush(d->hevc);
-    pthread_mutex_unlock(&d->lock);
+    avd_decoder_leave(d);
     avd_emitter_settle(d->emitter, true);  // every frame decoded so far goes out, in decode order
-    pthread_mutex_lock(&d->lock);
+    avd_decoder_enter(d);
     d->session = NULL;
     avd_emitter_close(d->emitter);
-    pthread_mutex_unlock(&d->lock);
+    avd_decoder_leave(d);
     return noErr;
 }
 
@@ -837,7 +875,8 @@ static void finalize(CMBaseObjectRef ref)
 {
     Decoder *d = storage(ref);
     d->session = NULL;
-    if (d->frames)
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    if (d->frames) {
         os_log(gAVDLog,
                "AVD: session %ux%u in %{public}s ended: %u frames on NVDEC, %u with errors, mean %.2f ms decode + "
                "%.2f ms out (%u pictures exported as the surface's native NVDEC picture, %u placed by VIC, %u by the "
@@ -845,8 +884,6 @@ static void finalize(CMBaseObjectRef ref)
                d->width, d->height, getprogname(), d->frames, avd_emitter_errors(d->emitter),
                ticksToMs(d->decodeTicks) / d->frames, ticksToMs(d->copyTicks) / d->frames, d->exported,
                d->presented - d->exported, d->copied);
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-    if (d->frames) {
         const uint64_t *slowest = d->timing.slowest;
         os_log(gAVDLog,
                "AVD: session %ux%u in %{public}s slowest frame %.2f ms: %.2f ms before submit, %.2f ms submit to "
@@ -855,6 +892,13 @@ static void finalize(CMBaseObjectRef ref)
                ticksToMs(slowest[AVD_BEFORE_SUBMIT]), ticksToMs(slowest[AVD_SUBMIT_TO_FENCE]),
                ticksToMs(slowest[AVD_FENCE_TO_OUTPUT]));
     }
+#else
+    if (d->frames)
+        os_log(gAVDLog,
+               "AVD: session %ux%u in %{public}s ended: %u frames on NVDEC, %u with errors (%u pictures exported as "
+               "the surface's native NVDEC picture, %u placed by VIC, %u by the CPU)",
+               d->width, d->height, getprogname(), d->frames, avd_emitter_errors(d->emitter), d->exported,
+               d->presented - d->exported, d->copied);
 #endif
     if (d->software)
         CFRelease(d->software);
@@ -879,6 +923,7 @@ static void finalize(CMBaseObjectRef ref)
         CFRelease(d->chromaTop);
     if (d->chromaBottom)
         CFRelease(d->chromaBottom);
+    pthread_cond_destroy(&d->idle);
     pthread_mutex_destroy(&d->lock);
 }
 
@@ -978,6 +1023,8 @@ OSStatus avd_create_instance(FourCharCode codec, CFAllocatorRef allocator, VTVid
     Decoder *d = storage(object);
     memset(d, 0, sizeof(*d));
     pthread_mutex_init(&d->lock, NULL);
+    pthread_cond_init(&d->idle, NULL);
+    atomic_init(&d->owner, 0);
     d->client = client;
     d->codec = codec;
     d->planeAsked = -1;
@@ -992,7 +1039,8 @@ OSStatus avd_create_instance(FourCharCode codec, CFAllocatorRef allocator, VTVid
                                  .emit = emit,
                                  .discard = discard,
                                  .recycle = switch_recycle_output,
-                                 .inputs = nvdec_jobs_in_flight(client) + 1};
+                                 .inputs = nvdec_jobs_in_flight(client) + 1,
+                                 .submit_buffer = nvdec_submit_buffer(client)};
     const bool listening =
         d->emitter && nvdec_listen(client, avd_emitter_queue(d->emitter), avd_emitter_completed, d->emitter);
     if (!listening || (codec == kCMVideoCodecType_VP9          ? !(d->vp9 = vp9_decoder_create(&backend))

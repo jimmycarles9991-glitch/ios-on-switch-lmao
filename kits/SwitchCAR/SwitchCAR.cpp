@@ -51,46 +51,60 @@ constexpr uint32_t kToggleUs = 5000, kDpdUs = 250, kSequenceStepUs = 10, kClampU
 constexpr uint32_t kSlowestSclkKHz = 38400;  // CLK_M: SCLK runs from it or from a faster source
 
 volatile uint8_t *gCar, *gPmc, *gApbMisc;
-IOLock *gLock;
+IOLock *gLock, *gMapLock;
 
-// First use is in a driver's start (thread context); each pointer is published once and never changes. A losing
-// racer's spare mapping or lock is dropped: a page or a few bytes, at most once per boot.
-template <typename T, typename Make> T once(T *slot, Make make)
+IOLock *lockOnce(IOLock **slot)
 {
-    T value = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
-    if (value)
+    IOLock *value = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+    if (__builtin_expect(value != nullptr, 1))
         return value;
-    T made = make();
+    IOLock *made = IOLockAlloc();
     if (__atomic_compare_exchange_n(slot, &value, made, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return made;
+    if (made)
+        IOLockFree(made);
+    return value;
+}
+
+IOLock *lock()
+{
+    return lockOnce(&gLock);
+}
+
+template <typename Make> volatile uint8_t *mapOnce(volatile uint8_t **slot, Make make)
+{
+    volatile uint8_t *value = __atomic_load_n(slot, __ATOMIC_RELAXED);
+    if (__builtin_expect(value != nullptr, 1))
+        return value;
+    IOLock *guard = lockOnce(&gMapLock);
+    IOLockLock(guard);
+    value = __atomic_load_n(slot, __ATOMIC_RELAXED);
+    if (!value) {
+        value = make();
+        __atomic_store_n(slot, value, __ATOMIC_RELEASE);
+    }
+    IOLockUnlock(guard);
     return value;
 }
 
 volatile uint8_t *car()
 {
-    return once(&gCar, [] {
+    return mapOnce(&gCar, [] {
         return switch_mmio_map(SWITCH_CAR_PA, 0x1000);
     });
 }
 
 volatile uint8_t *pmc()
 {
-    return once(&gPmc, [] {
+    return mapOnce(&gPmc, [] {
         return switch_mmio_map(SWITCH_PMC_PA & ~0xfffULL, 0x1000) + 0x400;
     });
 }
 
 volatile uint8_t *apbMisc()
 {
-    return once(&gApbMisc, [] {
+    return mapOnce(&gApbMisc, [] {
         return switch_mmio_map(0x70000000, 0x1000);
-    });
-}
-
-IOLock *lock()
-{
-    return once(&gLock, [] {
-        return IOLockAlloc();
     });
 }
 

@@ -170,21 +170,22 @@ static int decodeVOP(MPEG4Decoder *d, const MPEG4VOP *vop, const uint8_t *data, 
     // NVDEC's slots: the reference a P-VOP predicts from, or a B-VOP's past and future; an I-VOP names itself.
     const int past = vop->coding_type == MPEG4_VOP_I ? current : vop->coding_type == MPEG4_VOP_P ? f->future : f->past;
     const int future = vop->coding_type == MPEG4_VOP_B ? f->future : current;
-    TegraNVDECSubmit submit;
-    memset(&submit, 0, sizeof(submit));
-    submit.codec = TEGRA_NVDEC_CODEC_MPEG4;
-    submit.setup_bytes = sizeof(nvdec_mpeg4_pic_s);
-    fillSetup(d, (nvdec_mpeg4_pic_s *)submit.setup, vop);
-    mpeg_frames_entry(&submit, NVC5B0_SET_APPLICATION_ID, TEGRA_NVDEC_ENTRY_VALUE, NVC5B0_SET_APPLICATION_ID_ID_MPEG4,
+    TegraNVDECSubmit stackSubmit;
+    TegraNVDECSubmit *submit = f->b.submit_buffer ? f->b.submit_buffer : &stackSubmit;
+    memset(submit, 0, sizeof(*submit));
+    submit->codec = TEGRA_NVDEC_CODEC_MPEG4;
+    submit->setup_bytes = sizeof(nvdec_mpeg4_pic_s);
+    fillSetup(d, (nvdec_mpeg4_pic_s *)submit->setup, vop);
+    mpeg_frames_entry(submit, NVC5B0_SET_APPLICATION_ID, TEGRA_NVDEC_ENTRY_VALUE, NVC5B0_SET_APPLICATION_ID_ID_MPEG4,
                       0);
     mpeg_frames_entry(
-        &submit, NVC5B0_SET_CONTROL_PARAMS, TEGRA_NVDEC_ENTRY_VALUE,
+        submit, NVC5B0_SET_CONTROL_PARAMS, TEGRA_NVDEC_ENTRY_VALUE,
         NVC5B0_SET_CONTROL_PARAMS_CODEC_TYPE_MPEG4 | (1u << 4) /* GPTIMER_ON */ | (1u << 6) /* ERR_CONCEAL_ON */, 0);
-    mpeg_frames_bind(f, &submit, current, past, future);
-    mpeg_frames_entry(&submit, NVC5B0_SET_COLOC_DATA_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->coloc_off);
-    mpeg_frames_entry(&submit, NVC5B0_SET_HISTORY_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->history_off);
-    mpeg_frames_entry(&submit, NVC5B0_SET_PIC_SCRATCH_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->scratch_off);
-    const int64_t fence = mpeg_frames_run(f, &submit, (TegraNVDECRange){0});
+    mpeg_frames_bind(f, submit, current, past, future);
+    mpeg_frames_entry(submit, NVC5B0_SET_COLOC_DATA_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->coloc_off);
+    mpeg_frames_entry(submit, NVC5B0_SET_HISTORY_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->history_off);
+    mpeg_frames_entry(submit, NVC5B0_SET_PIC_SCRATCH_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->scratch_off);
+    const int64_t fence = mpeg_frames_run(f, submit, (TegraNVDECRange){0});
     if (fence < 0)
         return (int)fence;
     *job = (uint32_t)fence;

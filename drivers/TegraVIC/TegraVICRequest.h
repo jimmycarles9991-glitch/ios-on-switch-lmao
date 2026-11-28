@@ -183,11 +183,15 @@ enum {
 
 static inline void tegra_vic_rgb_fill(TegraVICOp *op, uint32_t r8, uint32_t g8, uint32_t b8, uint32_t a8)
 {
+    const uint32_t r = r8 > 255 ? 255 : r8;
+    const uint32_t g = g8 > 255 ? 255 : g8;
+    const uint32_t b = b8 > 255 ? 255 : b8;
+    const uint32_t a = a8 > 255 ? 255 : a8;
     op->fill = 1;
-    op->fill10[0] = (r8 > 255 ? 255 : r8) << 2;
-    op->fill10[1] = (g8 > 255 ? 255 : g8) << 2;
-    op->fill10[2] = (b8 > 255 ? 255 : b8) << 2;
-    op->fillAlpha10 = a8 >= 255 ? 1023 : a8 << 2;
+    op->fill10[0] = (r << 2) | (r >> 6);
+    op->fill10[1] = (g << 2) | (g >> 6);
+    op->fill10[2] = (b << 2) | (b >> 6);
+    op->fillAlpha10 = (a << 2) | (a >> 6);
 }
 
 // A fill of a subsampled surface covers whole chroma samples: its rectangle widened to even coordinates on each

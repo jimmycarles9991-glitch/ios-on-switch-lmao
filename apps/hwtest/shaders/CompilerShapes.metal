@@ -57,3 +57,28 @@ fragment float4 float_classes(float4 position [[position]], device const float *
     bits |= uint(v > 0.0f) << 12 | uint(v == 0.0f) << 13 | uint(v != v) << 14 | uint(signbit(v)) << 15;
     return float4(float(bits), 0, 0, 1);
 }
+
+/// gpu.gm20b.powr_specials: powr of each half pair (pairs[i].x, pairs[i].y) as red; `shape` is the target's width and
+/// the pairs' count
+fragment float4 powr_specials(float4 position [[position]], device const half2 *pairs [[buffer(0)]],
+                              constant uint2 &shape [[buffer(1)]])
+{
+    const uint i = uint(position.y) * shape.x + uint(position.x);
+    if (i >= shape.y)
+        return float4(0);
+    return float4(float(powr(pairs[i].x, pairs[i].y)), 0, 0, 1);
+}
+
+/// gpu.gm20b.half_min_max: fmax and fmin of each half pair (pairs[i].x, pairs[i].y) as red and green, the clamp of x to
+/// [y, 1] as blue, and as alpha abs(x) < y plus two for x < 0 (a transfer curve's tests); `shape` is the target's width
+/// and the pairs' count
+fragment float4 half_min_max(float4 position [[position]], device const half2 *pairs [[buffer(0)]],
+                             constant uint2 &shape [[buffer(1)]])
+{
+    const uint i = uint(position.y) * shape.x + uint(position.x);
+    if (i >= shape.y)
+        return float4(0);
+    const half x = pairs[i].x, y = pairs[i].y;
+    const float tests = float(abs(x) < y) + 2 * float(x < half(0));
+    return float4(float(fmax(x, y)), float(fmin(x, y)), float(fmin(fmax(x, y), half(1))), tests);
+}

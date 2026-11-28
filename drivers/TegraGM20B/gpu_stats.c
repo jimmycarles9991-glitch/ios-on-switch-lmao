@@ -3,10 +3,16 @@
 #include "gpu_internal.h"
 #include "TegraGM20BCostHist.h"
 
+#if SWITCH_FRAME_TIMELINE
+/* The frame timeline (SwitchFrameTimeline.h): since the display last took them, the compositor's submissions and every
+ * other process's count, and every process's new-surface work (BoImport, VmBind, BoAlloc, BoFree, the imports' cache
+ * cleans). Callers on several connections at once: each field on its own atomics. */
+struct frame_gpu_state tgm_frame_gpu;
+#endif
+
 #if TGM_STATS
 struct stats_state tgm_stats;
 
-#endif
 /* stats: the "mem" line's window (tgm_stats_bo_alloc and the rest, in TegraGM20BGpu.h). Times in ns; every
  * field is summed atomically and taken (zeroed) when the window's line is logged. `recent` holds the last host imports
  * released, by first page, so an import of a surface released less than REIMPORT_NS ago counts as a re-import: what
@@ -26,10 +32,8 @@ static struct {
 
 /* Who paid the window's slowest cached BoAlloc made on its own thread (best effort: the raiser of cached_max writes it). */
 static char mstat_max_owner[17];
-#if TGM_STATS
 u64 tgm_compositor_pool; /* the compositor's pool BOs (tgm_stats_compositor_pool) */
 
-#endif
 static struct {
 	u64 pa, ns;
 } recent[REIMPORT_RING];
@@ -71,11 +75,6 @@ void tgm_stats_compositor_pool(int64_t bytes)
 		__atomic_fetch_add(&tgm_compositor_pool, (u64)bytes, __ATOMIC_RELAXED);
 }
 
-/* The frame timeline (SwitchFrameTimeline.h): since the display last took them, the compositor's submissions and every
- * other process's count, and every process's new-surface work (BoImport, VmBind, BoAlloc, BoFree, the imports' cache
- * cleans). Callers on several connections at once: each field on its own atomics. */
-struct frame_gpu_state tgm_frame_gpu;
-
 void tgm_stats_map(u64 small, u64 big, u64 could_be_big)
 {
 	if (!stats_on())
@@ -91,8 +90,10 @@ void tgm_stats_bo_alloc(uint64_t bytes, int kind, uint64_t ns, const uint64_t ph
 	int i = 0;
 	if (!stats_on())
 		return;
+#if SWITCH_FRAME_TIMELINE
 	__atomic_fetch_add(&tgm_frame_gpu.allocs, 1, __ATOMIC_RELAXED);
 	__atomic_fetch_add(&tgm_frame_gpu.alloc_ns, ns, __ATOMIC_RELAXED);
+#endif
 	__atomic_fetch_add(&tgm_stats.allocs, 1, __ATOMIC_RELAXED);
 	__atomic_fetch_add(&tgm_stats.alloc_bytes, bytes, __ATOMIC_RELAXED);
 	__atomic_fetch_add(&tgm_stats.alloc_ns, ns, __ATOMIC_RELAXED);
@@ -125,10 +126,12 @@ void tgm_stats_bo_import(uint64_t bytes, int read_only, int skipped, uint64_t ns
 	int i = 0;
 	if (!stats_on())
 		return;
+#if SWITCH_FRAME_TIMELINE
 	__atomic_fetch_add(&tgm_frame_gpu.imports, 1, __ATOMIC_RELAXED);
 	__atomic_fetch_add(&tgm_frame_gpu.import_ns, ns, __ATOMIC_RELAXED);
 	__atomic_fetch_add(&tgm_frame_gpu.clean_ns, phase_ns[3], __ATOMIC_RELAXED);
 	__atomic_fetch_add(&tgm_frame_gpu.clean_bytes, bytes, __ATOMIC_RELAXED);
+#endif
 	__atomic_fetch_add(&mstat.import_n, 1, __ATOMIC_RELAXED);
 	__atomic_fetch_add(&mstat.import_bytes, bytes, __ATOMIC_RELAXED);
 	__atomic_fetch_add(&mstat.import_ro, !!read_only, __ATOMIC_RELAXED);
@@ -137,7 +140,7 @@ void tgm_stats_bo_import(uint64_t bytes, int read_only, int skipped, uint64_t ns
 	for (i = 0; i < TGM_PHASES; i++)
 		__atomic_fetch_add(&mstat.import_phase[i], phase_ns[i], __ATOMIC_RELAXED);
 }
-#if TGM_STATS
+
 /* The "imports" line's histograms (TegraGM20BCostHist.h's buckets) and sums. */
 #define SLOW_IMPORT_NS (4 * NSEC_PER_MSEC)
 #define SLOW_IMPORT_LINES 8 /* a window's "slow import" lines at most */
@@ -253,17 +256,16 @@ static void stats_imports(u64 ms, u64 map_n)
 		    tgm_cost_percentile(bind, map_n, 500), tgm_cost_percentile(bind, map_n, 990));
 }
 
-#endif
 void tgm_stats_bind(int map, uint64_t pages, uint64_t ns)
 {
 	if (!stats_on())
 		return;
+#if SWITCH_FRAME_TIMELINE
 	__atomic_fetch_add(&tgm_frame_gpu.binds, 1, __ATOMIC_RELAXED);
 	__atomic_fetch_add(&tgm_frame_gpu.bind_ns, ns, __ATOMIC_RELAXED);
-	if (map) {
-#if TGM_STATS
-		__atomic_fetch_add(&icost.bind[tgm_cost_bucket(ns)], 1, __ATOMIC_RELAXED);
 #endif
+	if (map) {
+		__atomic_fetch_add(&icost.bind[tgm_cost_bucket(ns)], 1, __ATOMIC_RELAXED);
 		__atomic_fetch_add(&mstat.map_n, 1, __ATOMIC_RELAXED);
 		__atomic_fetch_add(&mstat.map_pages, pages, __ATOMIC_RELAXED);
 		stats_add(&mstat.map_ns, &mstat.map_max, ns);
@@ -277,7 +279,9 @@ void tgm_stats_bo_free(uint64_t ns)
 {
 	if (!stats_on())
 		return;
+#if SWITCH_FRAME_TIMELINE
 	__atomic_fetch_add(&tgm_frame_gpu.frees, 1, __ATOMIC_RELAXED);
+#endif
 	__atomic_fetch_add(&mstat.free_n, 1, __ATOMIC_RELAXED);
 	stats_add(&mstat.free_ns, &mstat.free_max, ns);
 }
@@ -305,7 +309,6 @@ void tgm_stats_wait(uint32_t waiter, int woken, int done)
 		__atomic_store_n(&tgm_wstat.lat_max, lat, __ATOMIC_RELAXED);
 }
 
-#if TGM_STATS
 void tgm_stats_loud(struct tgm_chan *chan, uint32_t reason)
 {
 	if (reason && reason < SWITCH_GPU_LOUD_REASONS)
@@ -425,7 +428,6 @@ void tgm_stats_waits(u64 ms)
 	nvxnu_stats("tegra-gm20b: waits %s", line);
 }
 
-#endif
 void tgm_stats_prefault(uint64_t bytes)
 {
 	if (!stats_on())
@@ -434,7 +436,6 @@ void tgm_stats_prefault(uint64_t bytes)
 	__atomic_fetch_add(&mstat.prefault_bytes, bytes, __ATOMIC_RELAXED);
 }
 
-#if TGM_STATS
 /* The window's "mem" line: BoAllocs (cached: mean/max and each phase's total; pool; how many were 64 KiB or less),
  * BoFrees, prefaulted views, and the system's page faults over the window (every vm_fault, and those that zero-filled a
  * page: XNU's own counters; with the kernel's user-fault timing, their mean and longest); and its "mem2" line: host
@@ -511,6 +512,11 @@ void tgm_stats_mem(u64 ms)
 #endif
 	if (tgm_owner_stats(line, sizeof(line)))
 		nvxnu_stats("tegra-gm20b: mem3 BoAllocs by process: %s", line);
+#if TGM_STATS
+	if (switch_gpu_concurrent_clean_line(line, sizeof(line)))
+		nvxnu_stats("tegra-gm20b: submits cleaned CPU-written surfaces a writer held: %s",
+			    line);
+#endif
 	last = f;
 #undef MS
 #undef US

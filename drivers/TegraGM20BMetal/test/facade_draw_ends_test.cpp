@@ -158,15 +158,7 @@ void aShadowStencilInAPassWithNoStencil()
     id<MTLRenderPipelineState> state = served(compiler, "shadow-stencil", device);
     ASSERT_TRUE(state != nil);
     ASSERT_TRUE(((SwitchMetalPipeline *)state)->_raw);
-    MTLTextureDescriptor *zd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
-                                                                                  width:64
-                                                                                 height:64
-                                                                              mipmapped:NO];
-    zd.storageMode = MTLStorageModePrivate;
-    zd.usage = MTLTextureUsageRenderTarget;
-    id<MTLTexture> depth = [device newTextureWithDescriptor:zd];
-    ASSERT_TRUE(depth != nil);
-    id<MTLCommandBuffer> cb = drawn(device, state, depth, ^(id<MTLRenderCommandEncoder> e) {
+    id<MTLCommandBuffer> cb = drawn(device, state, nil, ^(id<MTLRenderCommandEncoder> e) {
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     });
     EXPECT_EQ(cb.status, MTLCommandBufferStatusError);

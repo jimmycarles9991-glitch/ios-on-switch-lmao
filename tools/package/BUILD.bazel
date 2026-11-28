@@ -88,6 +88,7 @@ py_binary(
         ":loader_abi",
         ":native_oled_adt",
         ":native_xnu_layout",
+        "//tools/install:overlay_index",
         "//tools/trustcache",
     ],
 )
@@ -217,8 +218,8 @@ py_test(
         "//overlay:supplemental/com.brunostjohn.switch.shadercompiler.jetsam.plist",
     ],
     env = select({
-        "//bazel:debug": {"SWITCH_PROFILE": "debug"},
-        "//conditions:default": {"SWITCH_PROFILE": "release"},
+        "//overlay:with_hwtest": {"SWITCH_HWTEST": "1"},
+        "//conditions:default": {"SWITCH_HWTEST": "0"},
     }),
     imports = ["."],
 )

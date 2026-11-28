@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A fragment function's [[stencil]] output on the driver: GM20B's fragment program header has no stencil output, so

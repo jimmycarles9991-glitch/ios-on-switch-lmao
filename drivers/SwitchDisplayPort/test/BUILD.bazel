@@ -95,6 +95,7 @@ host_test(
 
 PLANES = [
     "//drivers/NativeMobileDisplay:NativePlanes.h",
+    "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
     "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
     "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
     "//drivers/SwitchDisplayPort:SwitchDPModes.h",

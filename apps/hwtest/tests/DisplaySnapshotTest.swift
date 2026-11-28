@@ -2,22 +2,26 @@ import Darwin
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import UIKit
 
 /// What a screenshot takes and shows. The render server's own render of the presented pattern (drawHierarchy, the
 /// render-to-surface path a screenshot's capture takes) has to match the CPU's drawing of it, and ScreenshotServices'
 /// flash over the pattern, sampled the same way while it runs, has to brighten the screen and never black it out (styles
 /// 0 and 2; style 1, a plus-darker flash, is only measured).
-struct DisplaySnapshotTest: HWTest {
-    let id = "display.snapshot"
-    let name = "Display snapshot and the screenshot flash"
-    let subsystem = Subsystem.compositor
+public struct DisplaySnapshotTest: HWTest {
+    public let id = "display.snapshot"
+    public let name = "Display snapshot and the screenshot flash"
+    public let subsystem = Subsystem.compositor
 
-    static let flashStyles: [UInt] = [0, 1, 2]
-    static let sampleDelays: [Double] = [0.1, 0.3, 0.6, 1.0]
-    static let nearBlack: Float = 0.06
+    public static let flashStyles: [UInt] = [0, 1, 2]
+    public static let sampleDelays: [Double] = [0.1, 0.3, 0.6, 1.0]
+    public static let nearBlack: Float = 0.06
 
-    func run(_ context: TestContext) async throws -> Outcome {
+    public init() {}
+
+    public func run(_ context: TestContext) async throws -> Outcome {
         var metrics = Metrics()
         var reasons: [String] = []
         let (pattern, check) = await UISceneTests.staged(context) { stage, screen -> UIView in
@@ -57,14 +61,16 @@ struct DisplaySnapshotTest: HWTest {
     }
 
     /// The render server's renders of `pattern` with ScreenshotServices' flash of `style` running over it, at
-    /// `sampleDelays` from its start; nil without the flash class.
+    /// `sampleDelays` from its start, the flash then awaited to its end (at most two seconds more); nil without the
+    /// flash class.
     static func flash(style: UInt, over pattern: UIView) async -> [Raster]? {
         guard let view = await MainActor.run(body: { flashView(style: style, frame: pattern.bounds) }) else {
             return nil
         }
+        let finished = Waiter<Bool>()
         await MainActor.run {
             pattern.addSubview(view)
-            let done: @convention(block) () -> Void = {}
+            let done: @convention(block) () -> Void = { finished.resume(true) }
             _ = view.perform(
                 NSSelectorFromString("flashWithCompletion:"), with: unsafeBitCast(done, to: AnyObject.self)
             )
@@ -76,7 +82,7 @@ struct DisplaySnapshotTest: HWTest {
             elapsed = delay
             samples.append(await MainActor.run { Snapshots.composited(pattern) })
         }
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        _ = await finished.wait(timeout: 2)
         await MainActor.run { view.removeFromSuperview() }
         return samples
     }
@@ -95,11 +101,11 @@ struct DisplaySnapshotTest: HWTest {
         return view
     }
 
-    static func mean(_ raster: Raster) -> Float {
+    public static func mean(_ raster: Raster) -> Float {
         raster.samples.reduce(0, +) / Float(max(raster.samples.count, 1))
     }
 
-    static func blackPercent(_ raster: Raster) -> Int {
+    public static func blackPercent(_ raster: Raster) -> Int {
         var black = 0
         for y in 0 ..< raster.height {
             for x in 0 ..< raster.width where raster.pixel(x, y).allSatisfy({ $0 < nearBlack }) { black += 1 }
@@ -107,12 +113,12 @@ struct DisplaySnapshotTest: HWTest {
         return black * 100 / max(raster.width * raster.height, 1)
     }
 
-    static func level(_ value: Float) -> Int { Int((value * 255).rounded()) }
+    public static func level(_ value: Float) -> Int { Int((value * 255).rounded()) }
 }
 
 /// Red, green, blue and white quadrants with a mid-grey band across them: no black anywhere, each channel half lit.
-final class SnapshotPattern: UIView {
-    override init(frame: CGRect) {
+public final class SnapshotPattern: UIView {
+    override public init(frame: CGRect) {
         super.init(frame: frame)
         let (w, h) = (frame.width / 2, frame.height / 2)
         let quadrants: [(CGRect, UIColor)] = [

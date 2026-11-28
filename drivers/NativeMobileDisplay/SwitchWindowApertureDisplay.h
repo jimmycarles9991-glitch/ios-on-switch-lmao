@@ -4,7 +4,7 @@
 // withdrawn, so no writer of window A comes between its stores and their restore, and never while a window A request is
 // out: LINE_STRIDE is double-buffered (TRM 24.5.4), so a boundary taking that request would latch its test value.
 
-#if SWITCH_FRAME_TIMELINE
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
 // From TegraVIC's user-client thread.
 IOReturn windowApertureCall(SwitchDisplayWindowApertureReply &reply)
 {

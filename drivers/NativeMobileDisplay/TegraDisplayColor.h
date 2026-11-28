@@ -7,9 +7,8 @@
 // asked for the CMU is bypassed and the picture is the one hekate set up.
 //
 // The IOMobileFramebuffer calls come from any thread and serialize on their own lock, which nothing at a frame end takes.
-// The tables change at frame ends (the filter) only where TegraDisplayColorSequence.h allows, and the enable bit latches
-// at a frame boundary through GENERAL_ACT_REQ from the work loop (the action); TegraDisplayColorPublish.h hands the
-// tables to the filter and the state between the three.
+// Whole-table LUT and window palette writes run on the work loop (the action) while the CMU is bypassed and latched off,
+// and only <=9-word CSC-only updates while the CMU is live run in the primary frame-end filter during vertical blanking.
 #pragma once
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
@@ -85,21 +84,25 @@ private:
         static void deviceWritesDone();
     };
 
-    void commit(bool paletteChanged);
+    void commit(bool paletteChanged, const uint32_t *newPalette = nullptr);
     template <typename Change> IOReturn change(Change body);
     void noteLock();
 
     IOLock *lock = nullptr;  // the setters' (and attach, detach, restoreAfterPowerUp): never at a frame end
     uint32_t takes = 0;
     uint32_t edrScaleCached = 0;
+    uint32_t correctionCached = 0;
+    uint32_t accessibilityScaleCached = 0;
+    uint32_t remapModeCached = 0;
+    uint32_t contrastCached = 0;
     SwitchMMIOWords dc;
     switch_color::ColourPublication<Platform> unit;
     bool announced = false;  // the last enable was logged (a blank alone is not); the action's
     switch_color::Inputs inputs;
     uint32_t gammaTable[switch_color::kGammaWords];
-    uint32_t palette[switch_color::kPaletteWords];
     bool paletteOn = false;
-#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+#if ((defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)) && defined(SWITCH_STATS_FRAME) && \
+    SWITCH_STATS_FRAME
     uint16_t loggedCsc[switch_color::kCscWords];
 #endif
 };

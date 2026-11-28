@@ -17,9 +17,9 @@ extern "C" {
 #include "diagnostics/switch/SwitchDiag.h"
 }
 
-#if !defined(switch_diag_user_syscall) || !defined(switch_diag_stage) || !defined(switch_diag_process_event) ||  \
-    !defined(switch_diag_console_active) || !defined(switch_diag_console_putc) || !defined(switch_root_event) || \
-    !defined(switch_root_data_ownership) || !defined(switch_root_record_begin) || !defined(switch_root_record_stage)
+#if !defined(switch_diag_stage) || !defined(switch_diag_process_event) || !defined(switch_diag_console_active) || \
+    !defined(switch_diag_console_putc) || !defined(switch_root_event) || !defined(switch_root_data_ownership) ||  \
+    !defined(switch_root_record_begin) || !defined(switch_root_record_stage)
 #error "a release kernel's debug hooks are macros"
 #endif
 #if defined(switch_diag_panic) || defined(switch_diag_init) || defined(switch_diag_early_stage) || \
@@ -41,7 +41,6 @@ int Evaluate()
 TEST(SwitchDiagRelease, DebugHooksNeverEvaluateTheirArguments)
 {
     evaluated = 0;
-    switch_diag_user_syscall(Evaluate(), Evaluate(), Evaluate(), uint64_t{0}, uint64_t{0}, Evaluate());
     switch_diag_stage(Evaluate() ? "stage" : "");
     switch_diag_process_event(Evaluate(), "launchd", "exec load_machfile enter", Evaluate());
     switch_diag_console_putc(static_cast<char>(Evaluate()));

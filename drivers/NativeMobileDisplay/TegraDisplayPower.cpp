@@ -68,9 +68,19 @@ constexpr unsigned kDpdDsiPad = 2, kDpdDsibPad = 32 + 7;  // Linux tegra210 io_p
 constexpr uint32_t kGpDsiPadControl = 0xAC0, kPinmuxLcdRst = 0x3000 + 0x204, kPinmuxPullDown = 1u << 2;
 constexpr unsigned kPanelReset = TEGRA_GPIO(V, 2);
 
+// DC_CMD_<client>_INCR_SYNCPT_CNTRL's NO_STALL (TRM 24.6.2).
+constexpr uint32_t kSyncptNoStall = 1u << 8;
+
 // Display controller A (words).
 enum : uint32_t {
     DC_CMD_GENERAL_INCR_SYNCPT_CNTRL = 0x001,
+    DC_CMD_GENERAL_INCR_SYNCPT_ERROR = 0x002,
+    DC_CMD_WIN_A_INCR_SYNCPT_CNTRL = 0x009,
+    DC_CMD_WIN_A_INCR_SYNCPT_ERROR = 0x00a,
+    DC_CMD_WIN_B_INCR_SYNCPT_CNTRL = 0x011,
+    DC_CMD_WIN_B_INCR_SYNCPT_ERROR = 0x012,
+    DC_CMD_WIN_C_INCR_SYNCPT_CNTRL = 0x019,
+    DC_CMD_WIN_C_INCR_SYNCPT_ERROR = 0x01a,
     DC_CMD_CONT_SYNCPT_VSYNC = 0x028,
     DC_CMD_DISPLAY_COMMAND_OPTION0 = 0x031,
     DC_CMD_DISPLAY_COMMAND = 0x032,
@@ -155,7 +165,11 @@ enum : uint32_t {
 };
 
 // _di_dc_init_config: assembly access, line-counter latching, pipeline power, syncpoints, all windows off, YUV CSC defaults,
-// 24-bit DSI output, black background, display stopped.
+// 24-bit DSI output, black background, display stopped. The general syncpoint client, which the display's host1x stream
+// raises (SwitchHost1xDisplayChannel.h), stalls that stream when its condition FIFO is full: NO_STALL would drop the
+// increment (TRM 24.6.2), which the stream's fence would only see as a lost interrupt. The window clients keep NO_STALL,
+// as hekate and L4T set it: only debug probes raise their conditions, and one that never comes must not stall DC A's
+// host interface. All are soft-reset together first, as the TRM orders, and their sticky overflow bits cleared.
 constexpr Reg kDcInit[] = {
     {DC_CMD_STATE_ACCESS, 0},
     {DC_CMD_REG_ACT_CONTROL, 0x454},
@@ -165,7 +179,18 @@ constexpr Reg kDcInit[] = {
     {DC_DISP_DISP_MEM_HIGH_PRIORITY, SwitchDisplayPriority::kThresholds},
     {DC_DISP_DISP_MEM_HIGH_PRIORITY_TIMER, SwitchDisplayPriority::kDelays},
     {DC_CMD_DISPLAY_POWER_CONTROL, 0x50155},
-    {DC_CMD_GENERAL_INCR_SYNCPT_CNTRL, 1u << 8},
+    {DC_CMD_GENERAL_INCR_SYNCPT_CNTRL, 1},
+    {DC_CMD_WIN_A_INCR_SYNCPT_CNTRL, 1},
+    {DC_CMD_WIN_B_INCR_SYNCPT_CNTRL, 1},
+    {DC_CMD_WIN_C_INCR_SYNCPT_CNTRL, 1},
+    {DC_CMD_GENERAL_INCR_SYNCPT_CNTRL, 0},
+    {DC_CMD_WIN_A_INCR_SYNCPT_CNTRL, kSyncptNoStall},
+    {DC_CMD_WIN_B_INCR_SYNCPT_CNTRL, kSyncptNoStall},
+    {DC_CMD_WIN_C_INCR_SYNCPT_CNTRL, kSyncptNoStall},
+    {DC_CMD_GENERAL_INCR_SYNCPT_ERROR, ~0u},
+    {DC_CMD_WIN_A_INCR_SYNCPT_ERROR, ~0u},
+    {DC_CMD_WIN_B_INCR_SYNCPT_ERROR, ~0u},
+    {DC_CMD_WIN_C_INCR_SYNCPT_ERROR, ~0u},
     {DC_CMD_CONT_SYNCPT_VSYNC, (1u << 8) | 9},
     {DC_CMD_STATE_CONTROL, kAllUpdate},
     {DC_CMD_STATE_CONTROL, kAllActReq},

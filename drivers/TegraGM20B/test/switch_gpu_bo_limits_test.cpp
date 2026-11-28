@@ -68,6 +68,39 @@ TEST(SwitchGpuBoLimits, AllocAdmitsLargePlainCachedBosAndKeepsFlaggedBosAt256MiB
 	EXPECT_FALSE(switch_gpu_bo_alloc_args_ok(4096, 12, 1u << 31));
 }
 
+// HW Test gpu.perf.fill's A/B of 72a0e9b01: a debug kernel takes TegraGM20BBoProbeDirect, a release one refuses it
+TEST(SwitchGpuBoLimits, TheDirectProbeFlagIsADebugKernelsAlone)
+{
+	EXPECT_TRUE(switch_gpu_bo_alloc_args_ok(4096, 12, TegraGM20BBoProbeDirect, true));
+	EXPECT_FALSE(switch_gpu_bo_alloc_args_ok(4096, 12, TegraGM20BBoProbeDirect, false));
+	EXPECT_FALSE(switch_gpu_bo_alloc_args_ok(SWITCH_GPU_BO_CHUNK_BYTES, 12,
+						 TegraGM20BBoCompressible | TegraGM20BBoProbeDirect,
+						 true))
+		<< "compressible memory takes no other flag";
+	EXPECT_EQ(switch_gpu_bo_flags_mask(true) & ~switch_gpu_bo_flags_mask(false),
+		  uint32_t(TegraGM20BBoProbeDirect));
+}
+
+TEST(SwitchGpuBoLimits, AnUncompressedBoTakesTheSmmusBigPagesUnlessItAsksForDirectAddresses)
+{
+	constexpr uint32_t kGranule = 16;
+	EXPECT_TRUE(switch_gpu_bo_big_smmu(0u, false, kGranule, kGranule, true));
+	EXPECT_FALSE(
+		switch_gpu_bo_big_smmu(TegraGM20BBoProbeDirect, false, kGranule, kGranule, true));
+	EXPECT_FALSE(
+		switch_gpu_bo_big_smmu(TegraGM20BBoCompressible, false, kGranule, kGranule, true));
+	EXPECT_FALSE(
+		switch_gpu_bo_big_smmu(TegraGM20BBoContiguous, false, kGranule, kGranule, true));
+	EXPECT_FALSE(switch_gpu_bo_big_smmu(0u, true, kGranule, kGranule, true)) << "a pool chunk";
+	EXPECT_FALSE(switch_gpu_bo_big_smmu(0u, false, kGranule - 1, kGranule, true));
+	EXPECT_FALSE(switch_gpu_bo_big_smmu(0u, false, kGranule, kGranule, false));
+
+	const CodeText alloc = Block(SourceText("../TegraGM20BUserClientBo.cpp"),
+				     "IOReturn AGXDeviceUserClient::boAlloc(");
+	EXPECT_TRUE(alloc.has("const bool bigSmmu = switch_gpu_bo_big_smmu(in->flags,"));
+	EXPECT_TRUE(alloc.has("out->reserved = replied;"));
+}
+
 TEST(SwitchGpuBoLimits, UserClientCallsPolicyWithExplicitRefusalsAndGuardsSpares)
 {
 	const CodeText import = Block(SourceText("../TegraGM20BUserClientImport.cpp"),

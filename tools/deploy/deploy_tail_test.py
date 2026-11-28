@@ -1,4 +1,8 @@
-"""deploy.main's tail: a step that fails once the card is being written leaves the rest and the eject to run."""
+"""deploy.main's tail: a step that fails once the card is being written leaves the rest, the boot entry and the eject.
+
+The boot entry comes last: a deploy stopped before it leaves this build's Data under the card's last boot entry, and a
+re-run completes it.
+"""
 
 import contextlib
 import errno
@@ -33,18 +37,21 @@ class DeployTailTest(unittest.TestCase):
 
         return mock.MagicMock(side_effect=run)
 
-    def deploy(self, **failing: Exception) -> tuple[int, list[str]]:
+    def deploy(self, *extra: str, **failing: Exception) -> tuple[int, list[str]]:
         """Run main() against a card of mocks; `failing` names the steps that raise. Return its status and log lines."""
         card, fat = mock.MagicMock(disk='disk9'), mock.MagicMock(identifier='disk9s1')
         spec = {'volumes': {'preboot': {'uuid': 'P'}, 'system': {'uuid': 'S'}, 'data': {'uuid': 'D'}}}
         log = self.root / 'deploy.log'
-        argv = ['disk9', '--yes', '--confirm', 'disk9', '--boot-package', 'p', '--spec', 's', '--log', str(log)]
-        steps = ('remove_stale_logging_profiles', '_stage_gpu', '_eject')
+        argv = ['disk9', '--yes', '--confirm', 'disk9', '--boot-package', 'p', '--spec', 's', '--log', str(log), *extra]
+        steps = ('remove_stale_logging_profiles', '_stage_gpu', '_update_system_cryptex', '_write_boot_entry', '_eject')
         with contextlib.ExitStack() as stack:
             for name in steps:
                 stack.enter_context(mock.patch.object(deploy, name, self.step(name, failing.get(name))))
             stack.enter_context(
-                mock.patch.object(deploy.icon_cache, 'present', self.step('icon_cache', failing.get('icon_cache')))
+                mock.patch.object(deploy.data_owner, 'ensure', self.step('Switch/ owner', failing.get('owner')))
+            )
+            stack.enter_context(
+                mock.patch.object(deploy.data_owner, 'authorize', self.step('sudo', failing.get('sudo')))
             )
             stack.enter_context(
                 mock.patch.object(deploy, '_checked', return_value=(card, spec, fat, mock.MagicMock(), 'disk10s2'))
@@ -66,25 +73,43 @@ class DeployTailTest(unittest.TestCase):
             status = deploy.main(argv)
         return status, [line.split(' ', 1)[1] for line in log.read_text().splitlines()]
 
-    def test_a_refused_icon_cache_still_ejects_and_fails_the_deploy(self):
-        error = denied('containers/Shared/SystemGroup/systemgroup.com.apple.lsd.iconscache/Library')
-        status, lines = self.deploy(icon_cache=error)
-        self.assertEqual(status, 1)
-        self.assertEqual(self.order, ['remove_stale_logging_profiles', '_stage_gpu', 'icon_cache', '_eject'])
-        self.assertIn(f'icon cache: NOT done: {error}', lines)
-        self.assertEqual(lines[-1], 'FAILED: not done: icon cache')
-        self.assertNotIn('deployed', lines)
+    def test_ios_27s_switch_owner_and_system_cryptex_come_before_the_boot_entry_and_a_failure_stops_the_deploy(self):
+        ios27 = ('--system-image', 'image', '--pretranslated-trust', 'trust')
+        status, _ = self.deploy(*ios27)
+        self.assertEqual(status, 0)
+        self.assertEqual(self.order[:2], ['sudo', 'Switch/ owner'], "sudo, then Switch/'s owner, before any Data write")
+        self.assertEqual(self.order[-3:], ['_update_system_cryptex', '_write_boot_entry', '_eject'])
+        self.order.clear()
+        status, lines = self.deploy(*ios27, sudo=deploy.host.HostError('sudo: a password is required'))
+        self.assertEqual((status, self.order), (1, ['sudo']))
+        self.assertEqual(lines[-1], 'FAILED: sudo: a password is required')
+        for failing in ('owner', '_update_system_cryptex'):
+            with self.subTest(failing=failing):
+                self.order.clear()
+                status, lines = self.deploy(*ios27, **{failing: deploy.host.HostError('no room')})
+                self.assertEqual(status, 1)
+                self.assertEqual(lines[-1], 'FAILED: no room')
+                self.assertNotIn('_write_boot_entry', self.order)
+                self.assertNotIn('_eject', self.order)
+                if failing == 'owner':
+                    self.assertEqual(self.order, ['sudo', 'Switch/ owner'], 'an owner that does not take stops first')
+
+    def test_ios_17_never_touches_the_system_cryptex(self):
+        status, _ = self.deploy()
+        self.assertEqual(status, 0)
+        self.assertNotIn('_update_system_cryptex', self.order)
+        self.assertNotIn('Switch/ owner', self.order)
 
     def test_a_refused_probe_before_the_gpu_bundle_does_not_keep_it_off_the_card(self):
         status, lines = self.deploy(remove_stale_logging_profiles=denied('preferences/Logging'))
         self.assertEqual(status, 1)
-        self.assertEqual(self.order, ['remove_stale_logging_profiles', '_stage_gpu', 'icon_cache', '_eject'])
+        self.assertEqual(self.order, ['remove_stale_logging_profiles', '_stage_gpu', '_write_boot_entry', '_eject'])
         self.assertEqual(lines[-1], 'FAILED: not done: stale logging profiles')
 
     def test_a_deploy_with_every_step_done_says_so(self):
         status, lines = self.deploy()
         self.assertEqual((status, lines[-1]), (0, 'deployed'))
-        self.assertEqual(self.order[-1], '_eject')
+        self.assertEqual(self.order[-2:], ['_write_boot_entry', '_eject'])
 
     def test_a_refused_overlay_stops_the_deploy_with_one_line(self):
         error = denied('Switch/overlay')

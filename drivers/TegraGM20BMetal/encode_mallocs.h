@@ -7,7 +7,7 @@
 #pragma once
 #include "encode_profile.h"
 
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+#if SWITCH_METAL_ENCODE_PROFILE
 #include <pthread.h>
 
 typedef void(malloc_logger_t)(uint32_t type, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t result,

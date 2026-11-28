@@ -202,6 +202,35 @@ TEST_F(GM20BDeviceImport, TwoThreadsImportingOneSurfaceShareOneImport)
     EXPECT_EQ(liveImports(pages[0]), 0u);
 }
 
+// The second thread's wait for the first's import sleeps on a word the importing thread owns, so the importer runs at
+// the waiter's priority while it binds (M19: a condition variable lent nothing)
+TEST_F(GM20BDeviceImport, AThreadWaitingForAnImportNamesTheImporter)
+{
+    gm20b::Texture first, second;
+    std::atomic<uint32_t> importer{0};
+    {
+        HeldImport hold;
+        hold.start([&] {
+            importer = gm20b::OwnedWord::currentOwner();
+            surfaceTexture(kHeldSurface, pages[0], first);
+        });
+        ASSERT_TRUE(hold.reached());
+        EXPECT_EQ(dev.surfaceImporter(kHeldSurface, pages[0], kBytes), importer.load());
+        hold.start([&] {
+            surfaceTexture(kHeldSurface, pages[0], second);
+        });
+        std::this_thread::sleep_for(50ms);
+        EXPECT_EQ(dev.surfaceImporter(kHeldSurface, pages[0], kBytes), importer.load())
+            << "the waiter leaves the importer's word as it is";
+        hold.release(KERN_SUCCESS);
+        hold.join();
+    }
+    EXPECT_EQ(dev.surfaceImporter(kHeldSurface, pages[0], kBytes), 0u);
+    EXPECT_EQ(first.import, second.import);
+    dev.destroyTexture(first);
+    dev.destroyTexture(second);
+}
+
 // A guard as above: the first import's BoImport is refused; the second import, which waited for it, finds nothing published
 // and makes its own
 TEST_F(GM20BDeviceImport, AFailedImportPublishesNothingAndTheWaitingImportMakesItsOwn)

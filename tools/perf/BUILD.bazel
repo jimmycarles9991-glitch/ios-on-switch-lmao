@@ -11,10 +11,14 @@ py_library(
         "cpu.py",
         "dumps.py",
         "gpu.py",
+        "host1x.py",
         "ips.py",
+        "kprof.py",
+        "kprof_fmt.py",
         "ktrace.py",
         "pacing.py",
         "perf.py",
+        "recfile.py",
         "report.py",
         "session.py",
         "source.py",
@@ -43,12 +47,44 @@ py_test(
     name = "perf_test",
     size = "small",
     srcs = ["perf_test.py"],
+    data = glob(["testdata/*"]),
     deps = [":lib"],
 )
 
 py_test(
+    name = "host1x_test",
+    size = "small",
+    srcs = ["host1x_test.py"],
+    deps = [":lib"],
+)
+
+py_test(
+    name = "cpu_test",
+    size = "small",
+    srcs = ["cpu_test.py"],
+    deps = [":lib"],
+)
+
+py_test(
+    name = "pacing_test",
+    size = "small",
+    srcs = ["pacing_test.py"],
+    deps = [":lib"],
+)
+
+py_test(
+    name = "vm_test",
+    size = "small",
+    srcs = ["vm_test.py"],
+    deps = [":lib"],
+)
+
+# testdata/Switch-recorder-3.*: one task and one thread's samples cut from a real iOS 27 dump pair.
+py_test(
     name = "dumps_test",
     size = "small",
     srcs = ["dumps_test.py"],
+    data = glob(["testdata/*"]) + ["@xnu_base//:tools/lldbmacros/kcdata.py"],
+    env = {"KCDATA": "$(rootpath @xnu_base//:tools/lldbmacros/kcdata.py)"},
     deps = [":lib"],
 )

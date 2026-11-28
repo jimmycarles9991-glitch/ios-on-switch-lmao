@@ -290,6 +290,7 @@ switch_compile_stage(const struct switch_nak_frozen *frozen,
    memcpy(push.words, info->const_push_words, sizeof(push.words));
    switch_nvk_const_push_current = push.mask ? &push : NULL;
    switch_nvk_half_targets_current = info->half_targets;
+   switch_nvk_unorm_targets_current = info->unorm_targets;
    switch_nvk_split_current = info->split;
    switch_nvk_center_frag_depth_current = info->center_frag_depth != 0;
    switch_nvk_texs_f16_current = info->texs_f16;
@@ -300,6 +301,7 @@ switch_compile_stage(const struct switch_nak_frozen *frozen,
    VkResult result = compile(frozen, info, &l, shader, &native_used);
    switch_nvk_const_push_current = NULL;
    switch_nvk_half_targets_current = 0;
+   switch_nvk_unorm_targets_current = 0;
    switch_nvk_split_current = false;
    switch_nvk_center_frag_depth_current = false;
    switch_nvk_texs_f16_current = false;

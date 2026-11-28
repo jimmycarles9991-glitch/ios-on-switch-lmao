@@ -7,24 +7,25 @@
 // (pass_hazard.h); its targets are the encoder's. Unknown where the range was not cached, a draw's uses are not
 // final, it waits for a fence, names a heap or another kind of object, or writes memory other than its attachments.
 __attribute__((objc_externally_retained)) inline void planPassUses(SwitchMetalCommandBuffer *cb, size_t begin,
-                                                                   gm20b::PassUses &uses)
+                                                                   gm20b::PassUses &uses, bool own = false)
 {
-    const size_t end = cb->_plan.encoderEnd(begin);
-    for (size_t i = begin + 1; i + 1 < end; ++i) {
-        const Op op = cb->_plan.operation(i).op;
-        if (op == OpWaitFence)
-            uses.known = false;
-        if (isPlanDraw(op) && !cb->_plan.renderStates[cb->_plan.draw(i).state].usesFinal) {
-            uses.known = false;
-            uses.shaderWrites = true;
-            uses.bufferWrites = true;
-        }
+    const auto &header = own ? cb->_plan.ownBegin(begin) : cb->_plan.begin(begin);
+    const size_t end = header.end;
+    if (header.hasWaitFence)
+        uses.known = false;
+    if (header.unfinalDraws) {
+        uses.known = false;
+        uses.shaderWrites = true;
+        uses.bufferWrites = true;
     }
-    const SwitchMetalPass &pass = cb->_passes[cb->_plan.legacy(begin).x];
+    const SwitchMetalPass &pass = own ? cb->_passes.own(header.pass) : cb->_passes[header.pass];
+    const uint8_t colorMask = pass.colorMask ? pass.colorMask : 0xffu;
     const auto attachment = [&](void *object) {
-        for (const SwitchMetalPass::Color &a : pass.color)
+        for (uint8_t m = colorMask; m; m &= uint8_t(m - 1)) {
+            const SwitchMetalPass::Color &a = pass.color[__builtin_ctz(m)];
             if ((__bridge void *)a.texture == object || (__bridge void *)a.resolve == object)
                 return true;
+        }
         return (__bridge void *)pass.depth == object || (__bridge void *)pass.depthResolve == object ||
                (__bridge void *)pass.stencilResolve == object;
     };

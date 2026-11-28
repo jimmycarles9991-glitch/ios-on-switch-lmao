@@ -34,6 +34,11 @@ ORDER = ('os', 'app_cryptex', 'system_cryptex')
 SystemStat = Callable[[str], os.stat_result]
 # What the boot package needs of a run (trust modules, the device tree's list of translated cache cdhashes).
 KEPT = ('{role}.trustcache', '{role}.cdhash-pairs', 'a64x-cache-pretranslated.bin')
+# The boot package's own translations of files the tree holds, {System path: CDHash}, pinned beside the trust modules
+# (ipsw/pretranslated/<kind>/os.updates.json): what a deploy puts under UPDATES (tools/deploy/translated_tree.py).
+UPDATES_PINS = '{role}.updates.json'
+UPDATES = renamed.DATA_FOLDER + '/pretranslated-updates'
+UPDATES_LIST = 'updates.json'
 
 
 def _cdhash(cdhash: list[str]) -> bytes:
@@ -55,6 +60,28 @@ def _place(root: Path, e: dict, original: os.stat_result) -> Path:
             raise host.HostError(f'{e["path"]}: the translated file does not match its manifest')
     target.chmod(original.st_mode & 0o7777)
     return target
+
+
+def carried_updates(delta_dir: Path, role: str, pinned: dict[str, str], out: Path) -> None:
+    """Copy the delta's translations of the files `pinned` names ({System path: CDHash}) to out/<path>, with the list.
+
+    A translation with any other CDHash means the pins are older than the edits: regenerate the update list.
+    """
+    entries = {e['path']: e for e in delta.load(Path(delta_dir) / f'{role}.manifest.json')}
+    for path, cdhash in sorted(pinned.items()):
+        e = entries.get(path)
+        if e is None:
+            raise host.HostError(f"{path}: {role}'s translation has no such file")
+        if e.get('cdhash') != [cdhash]:
+            raise host.HostError(
+                f"{path}: this translation's CDHash is {e.get('cdhash')}, the pinned update list says {cdhash}: "
+                f'regenerate ipsw/pretranslated/<kind>/{UPDATES_PINS.format(role=role)} with the trust modules'
+            )
+        target = Path(out) / path.lstrip('/')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(e['source'], target)
+        target.chmod(0o755)
+    (Path(out) / UPDATES_LIST).write_text(json.dumps(dict(sorted(pinned.items())), indent=1) + '\n')
 
 
 class Deltas:
@@ -95,10 +122,12 @@ class Deltas:
         A translation that made other trust modules or another cache list would not run on the kernel.
         """
         kept = {p.name: p for p in self.artifacts()}
+        # The update list is no delta's output: //install:pretranslated_updates checks it against the delta.
+        updates = {UPDATES_PINS.format(role=role) for role in ORDER}
         wrong = [
             name
             for name, digest in sorted(pins.items())
-            if name not in kept or hashing.sha256_file(kept[name]) != digest
+            if name not in updates and (name not in kept or hashing.sha256_file(kept[name]) != digest)
         ]
         if wrong:
             raise host.HostError(

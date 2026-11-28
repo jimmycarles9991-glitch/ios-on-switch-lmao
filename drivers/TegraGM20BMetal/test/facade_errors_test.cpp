@@ -764,10 +764,22 @@ void anMmuFaultInFlightIsAPageFault()
         return true;
     };
     kernel_model::model.inFlight = true;
+    // the kill comes once the kernel holds the job: an app's command buffer is scheduled before its submission
+    dispatch_semaphore_t submitted = dispatch_semaphore_create(0);
+    {
+        std::lock_guard<std::mutex> l(kernel_model::callLock);
+        kernel_model::model.jobAdded = [submitted] {
+            dispatch_semaphore_signal(submitted);
+        };
+    }
     id<MTLCommandBuffer> cb = [queue commandBuffer];
     drawInto(cb, pass(target(o.device, kPacked)), o.state);
     [cb commit];
-    [cb waitUntilScheduled];
+    ASSERT_FALSE(dispatch_semaphore_wait(submitted, dispatch_time(DISPATCH_TIME_NOW, 10 * int64_t(NSEC_PER_SEC))));
+    {
+        std::lock_guard<std::mutex> l(kernel_model::callLock);
+        kernel_model::model.jobAdded = nullptr;
+    }
     {
         std::lock_guard<std::mutex> l(kernel_model::callLock);
         for (uint32_t s = 0; s < kernel_model::kSlots; s++)

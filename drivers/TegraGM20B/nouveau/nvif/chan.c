@@ -52,11 +52,51 @@ nvif_chan_gpfifo_push(struct nvif_chan *chan, u64 addr, u32 size, bool no_prefet
 	chan->func->gpfifo.push(chan, false, addr, size, no_prefetch);
 }
 
+static int
+nvif_chan_wait_step(u32 *waited_us)
+{
+	const u32 limit_us = 1000000;
+	u32 rem;
+	u32 step;
+
+	if (*waited_us >= limit_us)
+		return -ETIMEDOUT;
+	rem = limit_us - *waited_us;
+	if (*waited_us < 16) {
+		udelay(1);
+		*waited_us += 1;
+		return 0;
+	}
+	if (!nvxnu_can_sleep()) {
+		step = rem < 20 ? rem : 20;
+		udelay(step);
+		*waited_us += step;
+		return 0;
+	}
+	if (*waited_us < 200)
+		step = 25;
+	else if (*waited_us < 2000)
+		step = 100;
+	else if (*waited_us < 20000)
+		step = 250;
+	else
+		step = 1000;
+	if (step > rem)
+		step = rem;
+	if (step < 20)
+		udelay(step);
+	else
+		usleep_range(step, step * 2 <= rem ? step * 2 : rem);
+	*waited_us += step;
+	return 0;
+}
+
 int
 nvif_chan_gpfifo_wait(struct nvif_chan *chan, u32 gpfifo_nr, u32 push_nr)
 {
 	struct nvif_push *push = &chan->push;
-	int ret = 0, time = 1000000;
+	int ret = 0;
+	u32 waited_us = 0;
 
 	if (gpfifo_nr) {
 		/* Account for pushbuf space needed by nvif_chan_gpfifo_post(),
@@ -84,9 +124,9 @@ nvif_chan_gpfifo_wait(struct nvif_chan *chan, u32 gpfifo_nr, u32 push_nr)
 			chan->gpfifo.free += chan->gpfifo.max + 1;
 
 		if (chan->gpfifo.free < gpfifo_nr) {
-			if (!time--)
-				return -ETIMEDOUT;
-			udelay(1);
+			ret = nvif_chan_wait_step(&waited_us);
+			if (ret)
+				return ret;
 		}
 	}
 
@@ -118,7 +158,8 @@ nvif_chan_dma_wait(struct nvif_chan *chan, u32 nr)
 {
 	struct nvif_push *push = &chan->push;
 	u32 cur = push->cur - (u32 *)push->mem.object.map.ptr;
-	u32 free, time = 1000000;
+	u32 free, waited_us = 0;
+	int ret;
 
 	nr += chan->func->gpfifo.post_size;
 
@@ -135,9 +176,9 @@ nvif_chan_dma_wait(struct nvif_chan *chan, u32 nr)
 			while (get == 0) {
 				get = chan->func->push.read_get(chan);
 				if (get == 0) {
-					if (!time--)
-						return -ETIMEDOUT;
-					udelay(1);
+					ret = nvif_chan_wait_step(&waited_us);
+					if (ret)
+						return ret;
 				}
 			}
 
@@ -147,9 +188,9 @@ nvif_chan_dma_wait(struct nvif_chan *chan, u32 nr)
 		free = get - cur - 1;
 
 		if (free < nr) {
-			if (!time--)
-				return -ETIMEDOUT;
-			udelay(1);
+			ret = nvif_chan_wait_step(&waited_us);
+			if (ret)
+				return ret;
 		}
 	} while (free < nr);
 

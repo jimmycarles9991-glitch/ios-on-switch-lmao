@@ -6,7 +6,9 @@
 //
 // Skipping the barrier where no written pixel is fetched is exact on uncompressed (pitch and generic block-linear)
 // targets: a texel's bytes change only where the ROP writes that pixel, so a fetch of any other pixel reads the same
-// bytes whether or not the earlier writes have landed, from the texture cache or from L2.
+// bytes whether or not the earlier writes have landed, from the texture cache or from L2. Compressed targets share
+// per-tile compression metadata, so elision requires disjoint 32x32 pixel tiles (meetsTiles), which align to GM20B
+// C32/C64/C128 compression tiles across 1x/2x/4x MSAA.
 #pragma once
 #include <algorithm>
 #include <array>
@@ -32,7 +34,11 @@ public:
         pending_.clear();
         overflowLimit_ = {};
         boxCount_ = 0;
-        tiles_.fill(0);
+        if (uint64_t rows = dirtyTileRows_) {
+            for (; rows; rows &= rows - 1)
+                tiles_[uint32_t(__builtin_ctzll(rows))] = 0;
+            dirtyTileRows_ = 0;
+        }
         tileOnly_ = false;
         outOfGrid_ = false;
         outOfGridBox_ = {};
@@ -121,6 +127,39 @@ public:
             return true;
         for (uint32_t i = boxCount_; i-- > 0;)
             if (boxes_[i].overlaps(box))
+                return true;
+        return false;
+    }
+
+    bool meetsTiles(const DrawGeometry &g)
+    {
+        Analysis analysis(g);
+        return meetsTiles(analysis);
+    }
+
+    bool meetsTiles(Analysis &analysis)
+    {
+        const DrawGeometry &g = analysis.geometry();
+        if (g.limit.empty())
+            return false;
+        if (!boxCount_ && pending_.empty() && overflowLimit_.empty() && !tileOnly_ && !outOfGrid_)
+            return false;
+        materializePending();
+        PixelBox box;
+        if (g.bounded)
+            box = analysis.bounds(box) ? box : g.limit;
+        else
+            box = g.limit;
+        if (box.empty())
+            return false;
+        if (tilesOverlap(box))
+            return true;
+        if (!outOfGrid_)
+            return false;
+        if (tileOnly_)
+            return boxesShareTile(outOfGridBox_, box);
+        for (uint32_t i = boxCount_; i-- > 0;)
+            if ((boxes_[i].x1 > kGridMax || boxes_[i].y1 > kGridMax) && boxesShareTile(boxes_[i], box))
                 return true;
         return false;
     }
@@ -228,6 +267,14 @@ public:
     }
 
 private:
+    static bool boxesShareTile(const PixelBox &a, const PixelBox &b)
+    {
+        return (a.x0 >> kTileShift) <= ((b.x1 - 1u) >> kTileShift) &&
+               (b.x0 >> kTileShift) <= ((a.x1 - 1u) >> kTileShift) &&
+               (a.y0 >> kTileShift) <= ((b.y1 - 1u) >> kTileShift) &&
+               (b.y0 >> kTileShift) <= ((a.y1 - 1u) >> kTileShift);
+    }
+
     static uint64_t rowMask(uint32_t tx0, uint32_t tx1)
     {
         return (~0ull >> (63u - (tx1 - tx0))) << tx0;
@@ -243,6 +290,7 @@ private:
             const uint32_t ty0 = box.y0 >> kTileShift;
             const uint32_t ty1 = std::min(box.y1 - 1, kGridMax - 1) >> kTileShift;
             const uint64_t mask = rowMask(tx0, tx1);
+            dirtyTileRows_ |= rowMask(ty0, ty1);
             for (uint32_t ty = ty0; ty <= ty1; ++ty)
                 tiles_[ty] |= mask;
         }
@@ -299,6 +347,7 @@ private:
     PixelBox overflowLimit_ = {};
     std::array<PixelBox, kMaxDraws> boxes_ = {};
     std::array<uint64_t, kTileGrid> tiles_ = {};
+    uint64_t dirtyTileRows_ = 0;
     PixelBox outOfGridBox_ = {};
     uint32_t boxCount_ = 0;
     bool tileOnly_ = false;

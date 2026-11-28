@@ -35,6 +35,9 @@
 #include <mach/mach_traps.h>
 #include <stdatomic.h>
 #include <sys/errno.h>
+#if defined(SWITCH_ARMV8_PMUV3)
+#include <switch/pmuv3.h>
+#endif /* defined(SWITCH_ARMV8_PMUV3) */
 
 bool mt_debug = false;
 _Atomic uint64_t mt_pmis = 0;
@@ -49,6 +52,11 @@ uint64_t
 mt_mtc_update_count(struct mt_cpu *mtc, unsigned int ctr)
 {
 	uint64_t snap = mt_core_snap(ctr);
+#if defined(SWITCH_ARMV8_PMUV3)
+	uint64_t count = switch_pmuv3_delta(ctr, mtc->mtc_snaps[ctr], snap);
+	mtc->mtc_snaps[ctr] = snap;
+	return count;
+#else /* defined(SWITCH_ARMV8_PMUV3) */
 	if (snap < mtc->mtc_snaps[ctr]) {
 		if (mt_debug) {
 			kprintf("monotonic: cpu %d: thread %#llx: "
@@ -66,6 +74,7 @@ mt_mtc_update_count(struct mt_cpu *mtc, unsigned int ctr)
 	mtc->mtc_snaps[ctr] = snap;
 
 	return count;
+#endif /* !defined(SWITCH_ARMV8_PMUV3) */
 }
 
 uint64_t
@@ -170,7 +179,27 @@ mt_cur_cpu_cycles(void)
 void
 mt_cur_cpu_cycles_instrs_speculative(uint64_t *cycles, uint64_t *instrs)
 {
-#if defined(__arm64__)
+#if defined(__arm64__) && defined(SWITCH_ARMV8_PMUV3)
+	if (!mt_core_supported) {
+		return;
+	}
+	struct mt_cpu *mtc = mt_cur_cpu();
+
+	uint64_t cur_cycles = switch_pmuv3_read_pmccntr();
+	uint64_t cur_instrs = (uint64_t)switch_pmuv3_read_evcntr(0U);
+
+	uint64_t cycles_sum = mtc->mtc_counts[MT_CORE_CYCLES] +
+	    switch_pmuv3_delta(MT_CORE_CYCLES, mtc->mtc_snaps[MT_CORE_CYCLES], cur_cycles);
+	uint64_t instrs_sum = mtc->mtc_counts[MT_CORE_INSTRS] +
+	    switch_pmuv3_delta(MT_CORE_INSTRS, mtc->mtc_snaps[MT_CORE_INSTRS], cur_instrs);
+
+	*cycles = cycles_sum;
+	*instrs = instrs_sum;
+	mtc->mtc_counts[MT_CORE_CYCLES] = cycles_sum;
+	mtc->mtc_counts[MT_CORE_INSTRS] = instrs_sum;
+	mtc->mtc_snaps[MT_CORE_CYCLES] = cur_cycles;
+	mtc->mtc_snaps[MT_CORE_INSTRS] = cur_instrs;
+#elif defined(__arm64__)
 	if (!mt_core_supported) {
 		return;
 	}

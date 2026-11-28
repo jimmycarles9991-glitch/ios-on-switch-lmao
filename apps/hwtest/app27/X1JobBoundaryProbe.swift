@@ -26,7 +26,9 @@ import Metal
 /// 2's entry follows job 1's end on the GPU, not seconds later. rule names no entry form: production's (rule_entries=
 /// the jobs it opened relaxed). Where entry_none never differs the hazard is unobservable at a job's entry and the line
 /// says so (observable=0): the end of each job (RELEASE_WFI, the kernel's WAIT_FOR_IDLE and L2 flush) leaves the entry
-/// nothing to find.
+/// nothing to find. Run All runs `quick` trials an arm a cell: bare's rop_tex race showed in 28 of 1,504 (24 Nov), and
+/// 376 catch a race that rare 99.9% of the time. HWTEST_LONG=1 runs 1,504. entry_none_cells= each cell's entry_none
+/// trials and how many differed.
 enum X1JobBoundaryProbe {
     static let probe = X1Probe(
         id: "gpu.x1.job_boundary_idle", name: "A job after the last one's fence needs no drain at its entry",
@@ -39,6 +41,7 @@ enum X1JobBoundaryProbe {
         ("rule", "pass=none switch=today"), ("injob_none", "pass=none switch=none"),
     ]
     static let batch = 8
+    static let quick = 376
     static let side = 16
     static let words = 256
 
@@ -70,7 +73,7 @@ enum X1JobBoundaryProbe {
             let cellArms = gpuWritten ? arms : arms.filter { $0.0 != "injob_none" }
             journal.starting("\(name) arms=\(cellArms.map(\.0).joined(separator: "/"))")
             let started = Date()
-            let plan = IterationPlan(cells: cellArms.count, target: 1504, batch: batch)
+            let plan = IterationPlan(cells: cellArms.count, target: LongRuns.on ? 1504 : quick, batch: batch)
             var trial = [Int](repeating: 0, count: cellArms.count)
             for step in plan.order {
                 if Date().timeIntervalSince(started) > 6 && step.cell == 0 { break }
@@ -106,6 +109,10 @@ enum X1JobBoundaryProbe {
         )
         let observable = judged.cells.contains { !(judged.tallies[$0]?["entry_none"]?.clean ?? true) }
         finding.metrics.set("observable", observable ? 1 : 0)
+        let unguarded = judged.cells.compactMap { cell in
+            judged.tallies[cell]?["entry_none"].map { "\(cell):\($0.trials):\($0.mismatchedTrials)" }
+        }
+        finding.metrics.set("entry_none_cells", unguarded.joined(separator: ","))
         if !observable {
             finding.note = "unobservable: entry_none never differed, so no entry form can be judged here"
         }
@@ -125,7 +132,7 @@ enum X1JobBoundaryProbe {
     }
 
     /// One cell's memory: a texture or a buffer per trial, what job 0 reads into, and what job 2 reads into.
-    struct Work {
+    final class Work {
         let kit: BarrierKit
         let pipelines: [String: MTLComputePipelineState]
         let writer: Writer, reader: Reader
@@ -135,6 +142,8 @@ enum X1JobBoundaryProbe {
         let staging: [MTLBuffer]
         let primeAtlas: MTLTexture, atlas: MTLTexture
         let primeOut: MTLBuffer, out: MTLBuffer
+        private var expectedCache: [Int: [UInt8]] = [:]
+        private var patternCache: [Int: [UInt8]] = [:]
 
         init(
             _ kit: BarrierKit, _ pipelines: [String: MTLComputePipelineState], _ writer: Writer, _ reader: Reader
@@ -180,20 +189,33 @@ enum X1JobBoundaryProbe {
         }
 
         func expected(_ seed: Int) -> [UInt8] {
+            if let cached = expectedCache[seed] { return cached }
+            let made: [UInt8]
             if reader == .tex {
-                return kit.expectedTap(
+                made = kit.expectedTap(
                     seed: seed, base: SIMD2(0, 0), step: SIMD2(1, 1), width: X1JobBoundaryProbe.side,
                     height: X1JobBoundaryProbe.side
                 )
+            } else {
+                var out = [UInt8](repeating: 0, count: X1JobBoundaryProbe.words * 4)
+                out.withUnsafeMutableBytes { buf in
+                    for i in 0 ..< X1JobBoundaryProbe.words {
+                        let word = probeHash(UInt32(i), 0, UInt32(seed)).littleEndian
+                        buf.storeBytes(of: word, toByteOffset: i * 4, as: UInt32.self)
+                    }
+                }
+                made = out
             }
-            return (0 ..< X1JobBoundaryProbe.words).flatMap { i -> [UInt8] in
-                withUnsafeBytes(of: probeHash(UInt32(i), 0, UInt32(seed)).littleEndian, Array.init)
-            }
+            expectedCache[seed] = made
+            return made
         }
 
         func pattern(_ seed: Int) -> [UInt8] {
+            if let cached = patternCache[seed] { return cached }
             let side = X1JobBoundaryProbe.side
-            return (0 ..< side * side).flatMap { kit.texel($0 % side, $0 / side, seed: seed) }
+            let made = kit.pattern.image(width: side, height: side, seed: seed)
+            patternCache[seed] = made
+            return made
         }
 
         /// Reads every trial's memory: into the prime outputs (job 0) or the results (job 2)
@@ -269,8 +291,8 @@ enum X1JobBoundaryProbe {
             for k in 0 ..< seeds.count {
                 switch writer {
                 case .cpu:
-                    let words = buffers[k].contents().bindMemory(to: UInt32.self, capacity: X1JobBoundaryProbe.words)
-                    for i in 0 ..< X1JobBoundaryProbe.words { words[i] = probeHash(UInt32(i), 0, UInt32(seeds[k])) }
+                    let bytes = expected(seeds[k])
+                    buffers[k].contents().copyMemory(from: bytes, byteCount: bytes.count)
                 case .chan:
                     textures[k].replace(
                         region: MTLRegionMake2D(0, 0, side, side), mipmapLevel: 0, withBytes: pattern(seeds[k]),
@@ -301,7 +323,8 @@ enum X1JobBoundaryProbe {
             if writer == .rop || writer == .ce || writer == .sto {
                 writeFromCPU(seeds)
                 return try gpu.runBackToBack(
-                    forms: forms, [{ read($0, results: false) }, { write($0, seeds) }, { read($0, results: true) }]
+                    forms: forms,
+                    [{ self.read($0, results: false) }, { self.write($0, seeds) }, { self.read($0, results: true) }]
                 )
             }
             if writer == .hdr { writeFromCPU(seeds) }

@@ -122,7 +122,6 @@ bool Device::purgeKernelArenaLocked(std::unique_lock<gm20b::Mutex> &l, uint32_t 
     if (parked) {
         a.bo = bo;
         a.boParked = true;
-        SWITCH_METAL_DIAGNOSTIC(glassMemEvent("heap purged", bytes));
         SWITCH_METAL_DIAGNOSTIC(stats.parkedHeaps++);
         SWITCH_METAL_DIAGNOSTIC(stats.parkedHeapBytes += bytes);
         SWITCH_METAL_DIAGNOSTIC(stats.heapParks++);

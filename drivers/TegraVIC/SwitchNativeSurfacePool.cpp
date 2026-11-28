@@ -47,7 +47,9 @@ void switch_native_surface_empty(SwitchNativeSurface *object)
     object->turn = {};
     object->turnOp = {};
     object->chromaSite = 0;
+    object->writeEpoch = 0;
     object->pitchValid = false;
+    object->gpuOwned = false;
 }
 
 SwitchNativeSurface *switch_native_surface_take_retired()

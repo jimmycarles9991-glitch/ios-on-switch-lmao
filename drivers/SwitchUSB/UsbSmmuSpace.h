@@ -6,7 +6,7 @@
 // the space's lock, before handing out or reusing a window address. Both run in thread context.
 #pragma once
 #include <IOKit/IOLocks.h>
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
 #include <kern/clock.h>
 #endif
 #include <stddef.h>
@@ -31,14 +31,23 @@ public:
         return attached_;
     }
 
+    void lock()
+    {
+        IOLockLock(lock_);
+    }
+
+    void unlock()
+    {
+        IOLockUnlock(lock_);
+    }
+
     // `pages` window pages, the first `alignPages`-aligned, page i at the physical page fill's mapPage(i, pa) gives it,
     // then one clean and one flush. The window index, or -1 (no room in the window, or fill refused: nothing kept).
-    template <class Fill> int64_t map(uint32_t pages, uint32_t alignPages, Fill fill)
+    template <class Fill> int64_t mapUnlocked(uint32_t pages, uint32_t alignPages, Fill fill)
     {
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
         const uint64_t entered = mach_absolute_time();
 #endif
-        IOLockLock(lock_);
         int64_t index = window_.take(pages, alignPages);
         if (index >= 0) {
             const uint64_t base = window_.iova(static_cast<uint32_t>(index));
@@ -53,17 +62,25 @@ public:
                 index = -1;
             }
         }
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
         if (index >= 0) {
             ++cost_.maps;
             cost_.mapTicks += mach_absolute_time() - entered;
         }
 #endif
-        IOLockUnlock(lock_);
         return index;
     }
 
-    // What map() returned, once the controller can no longer reach it: one clean and one flush.
+    template <class Fill> int64_t map(uint32_t pages, uint32_t alignPages, Fill fill)
+    {
+        lock();
+        const int64_t index = mapUnlocked(pages, alignPages, fill);
+        unlock();
+        return index;
+    }
+
+    // What map() / mapUnlocked() returned, once the controller can no longer reach it: one clean and one flush.
+    void unmapUnlocked(uint32_t index, uint32_t pages);
     void unmap(uint32_t index, uint32_t pages);
 
     uint64_t iova(uint32_t index) const
@@ -95,7 +112,7 @@ public:
     // The physical address a device address translates to (UINT64_MAX: unmapped).
     uint64_t translate(uint64_t address);
 
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
     // The table entry of a window address's page, as the SMMU reads it (0: none).
     uint32_t entry(uint64_t address)
     {
@@ -124,7 +141,7 @@ private:
     UsbStaticMap map_ = {};
     uint32_t asid_ = 0;
     bool attached_ = false;
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
     Cost cost_ = {};
 #endif
 };

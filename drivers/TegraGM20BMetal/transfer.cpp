@@ -47,7 +47,7 @@ void TextureTransfers::reset(Kernel &kernel)
 // kernel's wait looks the channel up again and a close wakes it). False: the copy failed, or another thread's reset()
 // closed the channel meanwhile (its copies drained, the slot no longer pending), whose fence record a new channel may hold
 // by now.
-bool TextureTransfers::retire(Kernel &kernel, std::unique_lock<gm20b::Mutex> &serial, Slot &slot)
+bool TextureTransfers::retire(Kernel &kernel, std::unique_lock<gm20b::UnfairMutex> &serial, Slot &slot)
 {
     if (!slot.pending)
         return true;
@@ -145,7 +145,7 @@ bool TextureTransfers::copy(Kernel &kernel, ResourceSet &set, gm20b::Mutex &allo
     const uint64_t commandBytes = uint64_t(region.planes) * 32 * sizeof(uint32_t);
     if (commandOffset < dataBytes || commandOffset > UINT64_MAX - commandBytes || commandBytes / 4 >= (1u << 21))
         return false;
-    std::unique_lock<gm20b::Mutex> serial(lock_);
+    std::unique_lock<gm20b::UnfairMutex> serial(lock_);
     const Claim opened = open(kernel, serial, allocationLock, commandOffset + commandBytes);
     if (!opened)
         return false;
@@ -196,7 +196,7 @@ bool TextureTransfers::copyBytes(Kernel &kernel, ResourceSet &set, gm20b::Mutex 
 {
     if (!kernel.exactJobs() || !source || !destination || !bytes || bytes > UINT32_MAX)
         return false;
-    std::unique_lock<gm20b::Mutex> serial(lock_);
+    std::unique_lock<gm20b::UnfairMutex> serial(lock_);
     constexpr uint32_t kWords = kCopyBytesWords + SWITCH_GM20B_KIND_SWITCH_WORDS;
     const Claim slot = open(kernel, serial, allocationLock, kWords * sizeof(uint32_t));
     if (!slot)
@@ -237,7 +237,7 @@ TextureTransfers::Claim TextureTransfers::claim()
 
 // lock_ held through `serial`: the next slot, claimed, its last copy retired, with `bytes` of memory, on a live channel;
 // null: none
-TextureTransfers::Claim TextureTransfers::open(Kernel &kernel, std::unique_lock<gm20b::Mutex> &serial,
+TextureTransfers::Claim TextureTransfers::open(Kernel &kernel, std::unique_lock<gm20b::UnfairMutex> &serial,
                                                gm20b::Mutex &allocationLock, uint64_t bytes)
 {
     Claim slot = claim();
@@ -305,7 +305,7 @@ bool TextureTransfers::submit(Kernel &kernel, ResourceSet &set, Slot &slot, uint
 
 void TextureTransfers::close(Kernel &kernel, gm20b::Mutex &allocationLock)
 {
-    std::lock_guard<gm20b::Mutex> serial(lock_);
+    std::lock_guard<gm20b::UnfairMutex> serial(lock_);
     reset(kernel);
     for (auto &slot : slots_) {
         std::lock_guard<gm20b::Mutex> allocate(allocationLock);

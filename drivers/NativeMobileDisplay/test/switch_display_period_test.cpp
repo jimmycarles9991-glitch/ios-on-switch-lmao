@@ -101,7 +101,7 @@ protected:
     {
         return {::gSimpleLockTakes.load(),
                 d.intMaskLock->takes,
-                gHarnessSimpleLocks - d.intMaskLock->takes,
+                gHarnessSimpleLocks,
                 gRmws,
                 d.vblankSource.signals,
                 d.gpuDoneStore.signals,
@@ -426,6 +426,54 @@ TEST_F(DisplayPeriod, RepeatedEdrFactorTakesNoLock)
     for (int i = 0; i < 8; ++i)
         colour.setEdrFactor(0.5f);
     EXPECT_EQ(colour.lockTakes(), takesBefore + 1);
+}
+
+TEST_F(DisplayPeriod, RepeatedColorSettersDeduplicateWithoutRebuildsOrHolds)
+{
+    const unsigned holdsStart = gHolds;
+    const uint32_t genStart = colour.generation();
+
+    ASSERT_EQ(colour.setBrightnessCorrection(0x8000u), kIOReturnSuccess);
+    EXPECT_EQ(colour.generation(), genStart + 1);
+    const unsigned takesAfterCorr = colour.lockTakes();
+    const unsigned holdsAfterCorr = gHolds;
+    for (int i = 0; i < 8; ++i)
+        ASSERT_EQ(colour.setBrightnessCorrection(0x8000u), kIOReturnSuccess);
+    EXPECT_EQ(colour.lockTakes(), takesAfterCorr);
+    EXPECT_EQ(gHolds, holdsAfterCorr);
+    EXPECT_EQ(colour.generation(), genStart + 1);
+
+    ASSERT_EQ(colour.setAccessibilityScale(0xc000u), kIOReturnSuccess);
+    const unsigned takesAfterScale = colour.lockTakes();
+    const unsigned holdsAfterScale = gHolds;
+    for (int i = 0; i < 8; ++i)
+        ASSERT_EQ(colour.setAccessibilityScale(0xc000u), kIOReturnSuccess);
+    EXPECT_EQ(colour.lockTakes(), takesAfterScale);
+    EXPECT_EQ(gHolds, holdsAfterScale);
+
+    switch_color::Matrix warm = switch_color::kIdentity;
+    warm.m[2][2] = switch_color::kOne / 2;
+    ASSERT_EQ(colour.setMatrix(9, &warm), kIOReturnSuccess);
+    const uint32_t genAfterMat = colour.generation();
+    const unsigned holdsAfterMat = gHolds;
+    for (int i = 0; i < 4; ++i)
+        ASSERT_EQ(colour.setMatrix(9, &warm), kIOReturnSuccess);
+    EXPECT_EQ(colour.generation(), genAfterMat);
+    EXPECT_EQ(gHolds, holdsAfterMat);
+
+    switch_color::Q32 swapMat[15] = {};
+    memcpy(&swapMat[3], &warm, sizeof(warm));
+    ASSERT_EQ(colour.swapSetColorMatrix(swapMat, 2, 0), kIOReturnSuccess);
+    const uint32_t genAfterSwapMat = colour.generation();
+    const unsigned holdsAfterSwapMat = gHolds;
+    for (int i = 0; i < 4; ++i)
+        ASSERT_EQ(colour.swapSetColorMatrix(swapMat, 2, 0), kIOReturnSuccess);
+    EXPECT_EQ(colour.generation(), genAfterSwapMat);
+    EXPECT_EQ(gHolds, holdsAfterSwapMat);
+
+    for (int i = 0; i < 8; ++i)
+        frameEnd();
+    EXPECT_EQ(gHolds, holdsStart);
 }
 
 }  // namespace

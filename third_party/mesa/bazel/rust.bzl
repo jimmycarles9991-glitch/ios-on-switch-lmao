@@ -50,6 +50,11 @@ _BUILDTYPE = [
     "-Cstrip=none",
 ]
 
+_TARGET_CPU = select({
+    "//third_party/mesa/bazel:ios": ["-Ctarget-cpu=cortex-a57"],
+    "//conditions:default": [],
+})
+
 _EMBED = select({
     "//bazel:release": ["-Cembed-bitcode=yes"],
     "//conditions:default": ["-Cembed-bitcode=no"],
@@ -129,7 +134,7 @@ def mesa_rust_library(
         name = name,
         crate_name = crate_name,
         edition = edition,
-        rustc_flags = flags + _EMBED + (_LTO if crate_type == "staticlib" else []) + _REMAP,
+        rustc_flags = flags + _TARGET_CPU + _EMBED + (_LTO if crate_type == "staticlib" else []) + _REMAP,
         target_compatible_with = _RUST_1_96_1,
         toolchains = _TOOLCHAINS,
         **kwargs
@@ -140,7 +145,7 @@ def mesa_rust_library(
             name = name + "_rlib",
             crate_name = crate_name,
             edition = edition,
-            rustc_flags = flags + _EMBED + _REMAP,
+            rustc_flags = flags + _TARGET_CPU + _EMBED + _REMAP,
             target_compatible_with = _RUST_1_96_1,
             toolchains = _TOOLCHAINS,
             **kwargs

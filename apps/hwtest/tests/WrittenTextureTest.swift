@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// gpu.gm20b.written_textures: a fragment function writes words past 8 and 16 bits to a texture at index 1 (RenderBox's

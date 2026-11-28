@@ -38,9 +38,6 @@ STUB void boot_progress_stage(const char *message)
     (void)message;
 }
 
-// The extension rows of sheng's diagnostic page, where KeyStoreProbe.cpp writes its AppleKeyStore counters.
-STUB char boot_progress_ext[8][48];
-
 int boot_progress_pulse_anchor(uintptr_t address, uint64_t bytes, unsigned width, unsigned height, unsigned row);
 
 STUB int boot_progress_pulse_anchor(uintptr_t address, uint64_t bytes, unsigned width, unsigned height, unsigned row)

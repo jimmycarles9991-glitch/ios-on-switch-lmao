@@ -44,7 +44,7 @@ static inline bool switch_quiesce_is_armed(const struct switch_quiesce *q)
 
 static inline void switch_quiesce_leave(struct switch_quiesce *q, switch_quiesce_wake_fn wake, void *arg)
 {
-    const uint32_t prev = __atomic_fetch_sub(&q->active, 1u, __ATOMIC_SEQ_CST);
+    const uint32_t prev = __atomic_fetch_sub(&q->active, 1u, __ATOMIC_RELEASE);
     const uint32_t after = prev - 1u;
     if ((after & ~SWITCH_QUIESCE_STOPPING) == 0u && (after & SWITCH_QUIESCE_STOPPING) != 0u && wake != NULL) {
         wake(arg);
@@ -72,7 +72,7 @@ static inline bool switch_quiesce_has_writers(const struct switch_quiesce *q)
 
 static inline bool switch_quiesce_mark_stopping(struct switch_quiesce *q)
 {
-    const uint32_t prev = __atomic_fetch_or(&q->active, SWITCH_QUIESCE_STOPPING, __ATOMIC_SEQ_CST);
+    const uint32_t prev = __atomic_fetch_or(&q->active, SWITCH_QUIESCE_STOPPING, __ATOMIC_ACQ_REL);
     return (prev & ~SWITCH_QUIESCE_STOPPING) != 0u;
 }
 

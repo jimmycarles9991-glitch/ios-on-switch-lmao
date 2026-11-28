@@ -1,14 +1,14 @@
-// Host stand-ins for the IOKit pieces SwitchFalconInterrupt.cpp uses: the spin lock, a filter interrupt event source the
-// test fires by hand (filter with switch_test_interrupts_off set, then the action when it returned true, as IOKit masks
-// a level line until then), the work loop and the GIC nub. The including stubs provide IOLog and IOLock; a spin lock
-// taken with interrupts disabled, a work-loop call or an allocation throws while interrupts are off.
+// Host stand-ins for the IOKit pieces SwitchFalconInterrupt.cpp uses: a GIC nub with direct interrupt registration
+// (the test fires it with switch_test_interrupts_off set, then drains any thread_call entered during the handler)
+// and thread_call primitives. The including stubs provide IOLog and IOLock; logging, blocking locks, enableInterrupt,
+// or allocations throw while interrupts are off.
 #pragma once
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
-using IOInterruptState = bool;
 #ifndef SWITCH_TEST_IORETURN
 #define SWITCH_TEST_IORETURN
 using IOReturn = int;
@@ -20,121 +20,128 @@ inline bool switch_test_interrupts_off;
 inline void switch_test_interrupts_off_forbids(const char *what)
 {
     if (switch_test_interrupts_off)
-        throw std::runtime_error(std::string(what) + " in an interrupt filter");
+        throw std::runtime_error(std::string(what) + " in a primary interrupt handler");
 }
 
-struct IOSimpleLock {
-    bool held;
+using thread_call_param_t = void *;
+using thread_call_func_t = void (*)(thread_call_param_t, thread_call_param_t);
+
+struct thread_call {
+    thread_call_func_t fire;
+    thread_call_param_t param;
+    bool armed;
+    bool pending;
 };
 
-inline IOSimpleLock *IOSimpleLockAlloc()
+using thread_call_t = thread_call *;
+constexpr int THREAD_CALL_PRIORITY_KERNEL = 0;
+
+inline std::vector<thread_call_t> &switch_test_calls()
 {
-    switch_test_interrupts_off_forbids("IOSimpleLockAlloc");
-    return new IOSimpleLock{};
+    static std::vector<thread_call_t> calls;
+    return calls;
 }
 
-inline void IOSimpleLockLock(IOSimpleLock *lock)
+inline thread_call_t thread_call_allocate_with_options(thread_call_func_t fire, thread_call_param_t param, int, int)
 {
-    if (lock->held)
-        throw std::runtime_error("spin lock taken twice: a deadlock on the device");
-    lock->held = true;
+    switch_test_interrupts_off_forbids("thread_call_allocate_with_options");
+    auto *call = new thread_call{fire, param, false, false};
+    switch_test_calls().push_back(call);
+    return call;
 }
 
-inline void IOSimpleLockUnlock(IOSimpleLock *lock)
+inline void thread_call_free(thread_call_t call)
 {
-    lock->held = false;
+    switch_test_interrupts_off_forbids("thread_call_free");
+    delete call;
 }
 
-inline IOInterruptState IOSimpleLockLockDisableInterrupt(IOSimpleLock *lock)
+inline bool thread_call_enter(thread_call_t call)
 {
-    switch_test_interrupts_off_forbids("IOSimpleLockLockDisableInterrupt");
-    IOSimpleLockLock(lock);
+    const bool was = call->pending;
+    call->pending = true;
+    return was;
+}
+
+inline bool thread_call_enter_delayed(thread_call_t call, uint64_t)
+{
+    call->armed = true;
     return true;
 }
 
-inline void IOSimpleLockUnlockEnableInterrupt(IOSimpleLock *lock, IOInterruptState)
+inline bool switch_test_drain_calls()
 {
-    IOSimpleLockUnlock(lock);
+    bool ran = false;
+    for (thread_call_t call : switch_test_calls()) {
+        if (!call->pending)
+            continue;
+        call->pending = false;
+        ran = true;
+        call->fire(call->param, nullptr);
+    }
+    return ran;
 }
 
 class OSObject {};
 
-class IOService : public OSObject {};
+class IOService;
+using IOInterruptAction = void (*)(OSObject *, void *, IOService *, int);
 
-class IOInterruptEventSource : public OSObject {
+class IOService : public OSObject {
 public:
-    using Action = void (*)(OSObject *, IOInterruptEventSource *, int);
-
-    void enable()
+    IOReturn registerInterrupt(int, OSObject *t, IOInterruptAction h, void *r)
     {
-        switch_test_interrupts_off_forbids("IOInterruptEventSource::enable");
-        enabled = true;
-    }
-
-    void disable()
-    {
-        switch_test_interrupts_off_forbids("IOInterruptEventSource::disable");
+        switch_test_interrupts_off_forbids("IOService::registerInterrupt");
+        target = t;
+        handler = h;
+        refCon = r;
         enabled = false;
+        return kIOReturnSuccess;
     }
 
-    Action action = nullptr;
-    bool enabled = false;
-};
-
-class IOFilterInterruptEventSource : public IOInterruptEventSource {
-public:
-    using Filter = bool (*)(OSObject *, IOFilterInterruptEventSource *);
-
-    static IOFilterInterruptEventSource *filterInterruptEventSource(OSObject *, Action action, Filter filter,
-                                                                    IOService *, int)
+    IOReturn unregisterInterrupt(int)
     {
-        auto *source = new IOFilterInterruptEventSource;
-        source->action = action;
-        source->filter = filter;
-        return source;
+        switch_test_interrupts_off_forbids("IOService::unregisterInterrupt");
+        target = nullptr;
+        handler = nullptr;
+        refCon = nullptr;
+        enabled = false;
+        return kIOReturnSuccess;
     }
 
-    // An asserted line reaches the filter only while the source is enabled.
+    IOReturn enableInterrupt(int)
+    {
+        switch_test_interrupts_off_forbids("IOService::enableInterrupt");
+        enabled = true;
+        return kIOReturnSuccess;
+    }
+
+    IOReturn disableInterrupt(int)
+    {
+        enabled = false;
+        return kIOReturnSuccess;
+    }
+
+    // An asserted line reaches the handler only while enabled; returns true when a deferred call was scheduled.
     bool fire()
     {
-        if (!enabled)
+        if (!enabled || !handler)
             return false;
         switch_test_interrupts_off = true;
-        bool taken = false;
         try {
-            taken = filter(nullptr, this);
+            handler(target, refCon, this, 0);
         } catch (...) {
             switch_test_interrupts_off = false;
             throw;
         }
         switch_test_interrupts_off = false;
-        if (taken)
-            action(nullptr, this, 1);
-        return taken;
+        return switch_test_drain_calls();
     }
 
-    Filter filter = nullptr;
-};
-
-class IOWorkLoop : public OSObject {
-public:
-    static IOWorkLoop *workLoop()
-    {
-        static IOWorkLoop loop;
-        return &loop;
-    }
-
-    IOReturn addEventSource(IOInterruptEventSource *source)
-    {
-        last() = static_cast<IOFilterInterruptEventSource *>(source);
-        return kIOReturnSuccess;
-    }
-
-    static IOFilterInterruptEventSource *&last()
-    {
-        static IOFilterInterruptEventSource *source;
-        return source;
-    }
+    OSObject *target = nullptr;
+    IOInterruptAction handler = nullptr;
+    void *refCon = nullptr;
+    bool enabled = false;
 };
 
 inline IOService *switch_interrupt_nub(uint32_t, bool)

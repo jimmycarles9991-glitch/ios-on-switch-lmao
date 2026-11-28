@@ -17,15 +17,9 @@ mig 3821 reply
 mig 3822 reply
 mig 4815 reply
 
-# CPU performance counters (config_cpu_counters, config_pervasive_cpi/energy): XNU's code drives Apple's PMU, not the
-# A57's PMUv3. Named by kperf, DVTInstrumentsFoundation, locationd and taskinfo.
-sysctl kpc
+# CPU performance counters: the A57's PMUv3 backs kpc, kern.monotonic and kern.cpc (e1ba598de). The kpc sysctls Apple's
+# PMU has and an ARMv8.0 PMUv3 does not stay a gap. Named by kperf, DVTInstrumentsFoundation, locationd and taskinfo.
 sysctl kpc.*
-sysctl kern.monotonic
-sysctl kern.monotonic.*
-sysctl kern.cpc
-sysctl kern.cpc.*
-sysctl kern.microstackshot.pmi_*
 sysctl ktrace.secure
 
 # Apple's page table and trust monitors (SPTM, TXM): none on the Tegra X1.

@@ -172,6 +172,24 @@ TEST(Zcull, UntrackableStatesInvalidateOnce)
     EXPECT_FALSE(invalidates(zfail, false, false, false));  // no stencil aspect: never tested
 }
 
+// gpu.perf.nvn's zcull rule probes: each bit keeps the region past its own rule alone
+TEST(Zcull, AProbeKeepsTheRegionPastTheRuleItNamesAlone)
+{
+    const auto invalidates = [](const gm20b::DepthStencilDesc &d, bool fragmentDepth, uint32_t keep) {
+        gm20b::ZcullPass z;
+        z.candidate = true;
+        gm20b::zcullInvalidates(z, depth(kLess, true), true, false, false, false, false);
+        return gm20b::zcullInvalidates(z, d, true, false, fragmentDepth, false, false, false, keep);
+    };
+    EXPECT_FALSE(invalidates(depth(kAlways, true), false, gm20b::kZcullKeepAlways));
+    EXPECT_TRUE(invalidates(depth(kNotEqual, true), false, gm20b::kZcullKeepAlways));
+    EXPECT_FALSE(invalidates(depth(kNotEqual, true), false, gm20b::kZcullKeepNotEqual));
+    EXPECT_TRUE(invalidates(depth(kAlways, true), false, gm20b::kZcullKeepNotEqual));
+    EXPECT_FALSE(invalidates(depth(kLess, true), true, gm20b::kZcullKeepFragmentDepth));
+    EXPECT_TRUE(invalidates(depth(kLess, true), true, gm20b::kZcullKeepAlways | gm20b::kZcullKeepNotEqual));
+    EXPECT_TRUE(invalidates(depth(kGreater, false), false, ~0u)) << "no probe keeps a flipped direction";
+}
+
 gm20b::ZcullAsk clearedDepth()
 {
     gm20b::ZcullAsk a;
@@ -224,15 +242,16 @@ TEST(Zcull, ALayeredPassTakesARegionAsDeepAsItsLayers)
         << "no layer's share of the RAM holds a subregion";
 }
 
-// gpu.gm20b.zcull loaded_passes=2: a pass that clears and stores a depth a recorded pass loads stores its region; the
-// next pass that loads the depth over the same region loads it, unless something wrote the depth in between
+// gpu.gm20b.zcull loaded_passes=2: a pass that clears and stores a depth keeps its region; the next pass that loads the
+// depth over the same region loads it, unless something wrote the depth in between
 TEST(Zcull, ALoadedDepthLoadsTheRegionAnEarlierPassStored)
 {
     const TegraGM20BAbiZcullInfo x1 = {32, 32, 1024, 2048, 32, 32, 192, 16, 32, 64, 0x1500, 0x1000};
     constexpr uint64_t kZeta = 0x100000, kZetaBytes = 0x400000, kStorage = 0x2000000;
     uint64_t asked = 0;
-    const auto storage = [&](uint64_t bytes) {
+    const auto storage = [&](uint64_t bytes, int &slot) {
         asked = bytes;
+        slot = 2;
         return kStorage;
     };
     gm20b::ZcullPlanes planes;
@@ -242,6 +261,7 @@ TEST(Zcull, ALoadedDepthLoadsTheRegionAnEarlierPassStored)
     EXPECT_FALSE(first.load);
     ASSERT_TRUE(first.store);
     EXPECT_EQ(first.storage, kStorage);
+    EXPECT_EQ(first.slot, 2);
     EXPECT_EQ(asked, uint64_t(first.region.aliquotCount) * 32 + 32 + 192);
     planes.wrote(kZeta, kZetaBytes);  // the first pass's own write, at its begin
     planes.stored(gm20b::zcullStoredBy(first, kZeta, kZeta, kZetaBytes));
@@ -255,6 +275,7 @@ TEST(Zcull, ALoadedDepthLoadsTheRegionAnEarlierPassStored)
     EXPECT_TRUE(second.load);
     EXPECT_TRUE(second.store) << "into the storage it loaded";
     EXPECT_EQ(second.storage, kStorage);
+    EXPECT_EQ(second.slot, 2);
     EXPECT_EQ(second.dir, gm20b::kZcullLess);
 
     gm20b::ZcullPass smaller;
@@ -274,10 +295,10 @@ TEST(Zcull, ALoadedDepthLoadsTheRegionAnEarlierPassStored)
     gm20b::ZcullPass unkept;
     gm20b::zcullBegin(unkept, clearedDepth(), x1, 0, 0, 1280, 720, 1, gm20b::ZcullStored(), false, storage);
     EXPECT_TRUE(unkept.candidate);
-    EXPECT_FALSE(unkept.store) << "no recorded pass loads the depth";
+    EXPECT_FALSE(unkept.store) << "a pass that does not store its depth";
     EXPECT_EQ(unkept.storage, 0u);
     gm20b::ZcullPass full;
-    gm20b::zcullBegin(full, clearedDepth(), x1, 0, 0, 1280, 720, 1, gm20b::ZcullStored(), true, [](uint64_t) {
+    gm20b::zcullBegin(full, clearedDepth(), x1, 0, 0, 1280, 720, 1, gm20b::ZcullStored(), true, [](uint64_t, int &) {
         return uint64_t(0);
     });
     EXPECT_TRUE(full.candidate);

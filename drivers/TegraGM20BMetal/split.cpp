@@ -71,13 +71,15 @@ bool bindsAsWhole(const Pipeline &twin, const Pipeline &whole)
 }  // namespace
 
 // A state with argument tables is never split: its twin is built without their words (makeSplit), and the pack keys a
-// split by its fragment program, which a state of other vertex tables may share
+// split by its fragment program, which a state of other vertex tables may share. A state is offered one split at most:
+// draws read its source without the device's lock, and makeSplit may have taken it back for good.
 void Device::offerSplit(Pipeline &pl, SplitSource &&source)
 {
-    if (!usableSplitMetadata(source.rec) || spillEntryOf(*source.pp, 0) || spillEntryOf(*source.pp, 1))
+    if (pl.ownedSplitSource || !usableSplitMetadata(source.rec) || spillEntryOf(*source.pp, 0) ||
+        spillEntryOf(*source.pp, 1))
         return;
-    splitSources_.push_back(std::move(source));
-    __atomic_store_n(&pl.splitSource, &splitSources_.back(), __ATOMIC_RELEASE);
+    pl.ownedSplitSource = std::make_unique<SplitSource>(std::move(source));
+    __atomic_store_n(&pl.splitSource, pl.ownedSplitSource.get(), __ATOMIC_RELEASE);
 }
 
 bool Device::placeSplitPrograms(const SplitSource &source, PlacedProgram &fs, uint32_t &prologue,
@@ -136,7 +138,7 @@ SplitState *Device::makeSplit(Pipeline &pl)
         stats.heapFull++;
         SWITCH_METAL_DIAGNOSTIC(stats.splitRoomRefusals++);
         os_log_error(
-            os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "gm20b"),
+            gm20b::log(),
             "SwitchMetal: a split twin found no room in the shader heap or local memory: this draw draws whole");
         return nullptr;
     }

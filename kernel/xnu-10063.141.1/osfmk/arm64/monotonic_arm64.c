@@ -45,6 +45,9 @@
 #include <string.h>
 #include <sys/errno.h>
 #include <sys/monotonic.h>
+#if defined(SWITCH_ARMV8_PMUV3)
+#include <switch/pmuv3.h>
+#endif /* defined(SWITCH_ARMV8_PMUV3) */
 
 /*
  * Ensure that control registers read back what was written under MACH_ASSERT
@@ -72,6 +75,89 @@
 const bool mt_core_supported = true;
 
 static const ml_topology_info_t *topology_info;
+
+#if defined(SWITCH_ARMV8_PMUV3)
+
+static uint64_t
+core_reset_value_for(unsigned int ctr)
+{
+	if (mt_core_reset_values[ctr] != 0) {
+		return switch_pmuv3_mask_value(ctr, mt_core_reset_values[ctr]);
+	}
+	return switch_pmuv3_idle_reload(ctr);
+}
+
+static inline void
+core_init_execution_modes(void)
+{
+	switch_pmuv3_configure_fixed_filters();
+}
+
+static int
+core_init(__unused mt_device_t dev)
+{
+	/* the dev node interface to the core counters is still unsupported */
+	return ENOTSUP;
+}
+
+struct mt_cpu *
+mt_cur_cpu(void)
+{
+	return &getCpuDatap()->cpu_monotonic;
+}
+
+uint64_t
+mt_core_snap(unsigned int ctr)
+{
+	if (ctr >= CORE_NCTRS) {
+		panic("monotonic: invalid core counter read: %u", ctr);
+	}
+	return switch_pmuv3_read_slot(ctr);
+}
+
+void
+mt_core_set_snap(unsigned int ctr, uint64_t count)
+{
+	if (ctr >= MT_CORE_NFIXED) {
+		panic("monotonic: invalid core counter %u write %llu", ctr, count);
+	}
+	switch_pmuv3_write_slot(ctr, switch_pmuv3_mask_value(ctr, count));
+}
+
+static void
+core_set_enabled(void)
+{
+	uint32_t hw_mask = SWITCH_PMUV3_FIXED_HW_MASK;
+	uint32_t kpc_mask = kpc_get_running() &
+	    (KPC_CLASS_CONFIGURABLE_MASK | KPC_CLASS_POWER_MASK);
+
+	if (kpc_mask != 0) {
+		uint32_t kpc_slots = (uint32_t)(kpc_get_configurable_pmc_mask(kpc_mask) <<
+		    MT_CORE_NFIXED);
+		hw_mask |= switch_pmuv3_slot_mask_to_hw(kpc_slots);
+	}
+
+	switch_pmuv3_write_pmcntenclr(SWITCH_PMUV3_ALL_HW_MASK & ~hw_mask);
+	switch_pmuv3_write_pmintenclr(SWITCH_PMUV3_ALL_HW_MASK & ~hw_mask);
+	switch_pmuv3_write_pmintenset(hw_mask);
+	switch_pmuv3_write_pmcntenset(hw_mask);
+	switch_pmuv3_start();
+}
+
+static void
+core_idle(__unused cpu_data_t *cpu)
+{
+	assert(cpu != NULL);
+	assert(ml_get_interrupts_enabled() == FALSE);
+
+	switch_pmuv3_stop();
+	switch_pmuv3_write_pmintenclr(SWITCH_PMUV3_ALL_HW_MASK);
+	mt_update_fixed_counts();
+	switch_pmuv3_clear_pmovs(SWITCH_PMUV3_ALL_HW_MASK);
+	__builtin_arm_isb(ISB_SY);
+}
+
+#else /* defined(SWITCH_ARMV8_PMUV3) */
 
 /*
  * PMC[0-1] are the 48/64-bit fixed counters -- PMC0 is cycles and PMC1 is
@@ -296,6 +382,8 @@ core_idle(__unused cpu_data_t *cpu)
 
 	mt_update_fixed_counts();
 }
+
+#endif /* !defined(SWITCH_ARMV8_PMUV3) */
 
 #pragma mark uncore performance monitor
 
@@ -1251,6 +1339,24 @@ mt_cpu_run(cpu_data_t *cpu)
 
 	mtc = &cpu->cpu_monotonic;
 
+#if defined(SWITCH_ARMV8_PMUV3)
+	switch_pmuv3_stop();
+	switch_pmuv3_write_pmcntenclr(SWITCH_PMUV3_ALL_HW_MASK);
+	switch_pmuv3_write_pmintenclr(SWITCH_PMUV3_ALL_HW_MASK);
+	switch_pmuv3_clear_pmovs(SWITCH_PMUV3_ALL_HW_MASK);
+
+	for (unsigned int i = 0; i < MT_CORE_NFIXED; i++) {
+		if (!switch_pmuv3_is_64bit(i) && mtc->mtc_snaps[i] < SWITCH_PMUV3_IDLE_RELOAD_32) {
+			mtc->mtc_snaps[i] = core_reset_value_for(i);
+		}
+		mt_core_set_snap(i, mtc->mtc_snaps[i]);
+	}
+
+	core_init_execution_modes();
+	switch_pmuv3_clear_pmovs(SWITCH_PMUV3_ALL_HW_MASK);
+	__builtin_arm_isb(ISB_SY);
+	core_set_enabled();
+#else /* defined(SWITCH_ARMV8_PMUV3) */
 	for (int i = 0; i < MT_CORE_NFIXED; i++) {
 		mt_core_set_snap(i, mtc->mtc_snaps[i]);
 	}
@@ -1259,6 +1365,7 @@ mt_cpu_run(cpu_data_t *cpu)
 	core_init_execution_modes();
 
 	core_set_enabled();
+#endif /* !defined(SWITCH_ARMV8_PMUV3) */
 }
 
 void
@@ -1308,6 +1415,56 @@ mt_cpu_pmi(cpu_data_t *cpu, uint64_t pmcr0)
 	assert(cpu != NULL);
 	assert(ml_get_interrupts_enabled() == FALSE);
 
+#if defined(SWITCH_ARMV8_PMUV3)
+#pragma unused(pmcr0)
+	switch_pmuv3_stop();
+
+	uint32_t ovs_hw = switch_pmuv3_read_pmovs() & SWITCH_PMUV3_ALL_HW_MASK;
+	switch_pmuv3_clear_pmovs(ovs_hw);
+	__builtin_arm_isb(ISB_SY);
+
+	cpu->cpu_monotonic.mtc_npmis += 1;
+	cpu->cpu_stat.pmi_cnt_wake += 1;
+
+	uint32_t ovs_slots = switch_pmuv3_hw_mask_to_slots(ovs_hw);
+
+	for (unsigned int i = 0; i < MT_CORE_NFIXED; i++) {
+		if ((ovs_slots & (1U << i)) == 0) {
+			continue;
+		}
+
+		uint64_t count = mt_cpu_update_count(cpu, i);
+		cpu->cpu_monotonic.mtc_counts[i] += count;
+		uint64_t reload = core_reset_value_for(i);
+		mt_core_set_snap(i, reload);
+		cpu->cpu_monotonic.mtc_snaps[i] = reload;
+
+		if (mt_microstackshots && mt_microstackshot_ctr == i) {
+			bool user_mode = false;
+			arm_saved_state_t *state = cpu->cpu_int_state != NULL ?
+			    (arm_saved_state_t *)cpu->cpu_int_state :
+			    get_user_regs(current_thread());
+			if (state) {
+				user_mode = PSR64_IS_USER(get_saved_state_cpsr(state));
+			}
+			KDBG_RELEASE(KDBG_EVENTID(DBG_MONOTONIC, DBG_MT_DEBUG, 1),
+			    mt_microstackshot_ctr, user_mode);
+			mt_microstackshot_pmi_handler(user_mode, mt_microstackshot_ctx);
+		} else if (mt_debug) {
+			KDBG_RELEASE(KDBG_EVENTID(DBG_MONOTONIC, DBG_MT_DEBUG, 2),
+			    i, count);
+		}
+	}
+
+	for (unsigned int i = MT_CORE_NFIXED; i < CORE_NCTRS; i++) {
+		if ((ovs_slots & (1U << i)) != 0) {
+			extern void kpc_pmi_handler(unsigned int ctr);
+			kpc_pmi_handler(i);
+		}
+	}
+
+	core_set_enabled();
+#else /* defined(SWITCH_ARMV8_PMUV3) */
 	__builtin_arm_wsr64("PMCR0_EL1", PMCR0_INIT);
 	/*
 	 * Ensure the CPMU has flushed any increments at this point, so PMSR is up
@@ -1402,6 +1559,7 @@ mt_cpu_pmi(cpu_data_t *cpu, uint64_t pmcr0)
 #endif /* MACH_ASSERT */
 
 	core_set_enabled();
+#endif /* !defined(SWITCH_ARMV8_PMUV3) */
 }
 
 #if CPMU_AIC_PMI
@@ -1413,7 +1571,11 @@ mt_cpmu_aic_pmi(cpu_id_t source)
 		panic("monotonic: PMI from IOCPU %p delivered to %p", source,
 		    curcpu->interrupt_nub);
 	}
+#if defined(SWITCH_ARMV8_PMUV3)
+	mt_cpu_pmi(curcpu, 0);
+#else /* defined(SWITCH_ARMV8_PMUV3) */
 	mt_cpu_pmi(curcpu, __builtin_arm_rsr64("PMCR0_EL1"));
+#endif /* !defined(SWITCH_ARMV8_PMUV3) */
 }
 #endif /* CPMU_AIC_PMI */
 
@@ -1458,6 +1620,21 @@ mt_microstackshot_start_remote(__unused void *arg)
 {
 	cpu_data_t *cpu = getCpuDatap();
 
+#if defined(SWITCH_ARMV8_PMUV3)
+	switch_pmuv3_stop();
+
+	for (unsigned int i = 0; i < MT_CORE_NFIXED; i++) {
+		uint64_t count = mt_cpu_update_count(cpu, i);
+		cpu->cpu_monotonic.mtc_counts[i] += count;
+		uint64_t reload = core_reset_value_for(i);
+		mt_core_set_snap(i, reload);
+		cpu->cpu_monotonic.mtc_snaps[i] = reload;
+	}
+
+	switch_pmuv3_clear_pmovs(SWITCH_PMUV3_FIXED_HW_MASK);
+	__builtin_arm_isb(ISB_SY);
+	core_set_enabled();
+#else /* defined(SWITCH_ARMV8_PMUV3) */
 	__builtin_arm_wsr64("PMCR0_EL1", PMCR0_INIT);
 
 	for (int i = 0; i < MT_CORE_NFIXED; i++) {
@@ -1468,6 +1645,7 @@ mt_microstackshot_start_remote(__unused void *arg)
 	}
 
 	core_set_enabled();
+#endif /* !defined(SWITCH_ARMV8_PMUV3) */
 
 	if (os_atomic_dec(&mt_xc_sync, relaxed) == 0) {
 		thread_wakeup((event_t)&mt_xc_sync);
@@ -1477,11 +1655,19 @@ mt_microstackshot_start_remote(__unused void *arg)
 int
 mt_microstackshot_start_arch(uint64_t period)
 {
+#if defined(SWITCH_ARMV8_PMUV3)
+	if (period == 0 ||
+	    (!switch_pmuv3_is_64bit(mt_microstackshot_ctr) && period > SWITCH_PMUV3_MAX_PERIOD_32)) {
+		return ERANGE;
+	}
+	uint64_t reset_value = switch_pmuv3_reload_value(mt_microstackshot_ctr, period);
+#else /* defined(SWITCH_ARMV8_PMUV3) */
 	uint64_t reset_value = 0;
 	int ovf = os_sub_overflow(CTR_MAX, period, &reset_value);
 	if (ovf) {
 		return ERANGE;
 	}
+#endif /* !defined(SWITCH_ARMV8_PMUV3) */
 
 	mt_core_reset_values[mt_microstackshot_ctr] = reset_value;
 	cpu_broadcast_xcall(&mt_xc_sync, TRUE, mt_microstackshot_start_remote,

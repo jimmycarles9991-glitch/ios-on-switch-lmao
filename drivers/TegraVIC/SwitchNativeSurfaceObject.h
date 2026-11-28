@@ -30,7 +30,9 @@ OSDeclareDefaultStructors(SwitchNativeSurface) public : bool initialize()
     // generation, so a view kept from an earlier publication of it stays stale.
     alignas(8) volatile uint64_t generation = 1;
     uint64_t live = 1;
+    alignas(8) volatile uint64_t writeEpoch = 0;
     bool pitchValid = false;
+    bool gpuOwned = false;
     bool preparing = false;
     void free() override;
 };

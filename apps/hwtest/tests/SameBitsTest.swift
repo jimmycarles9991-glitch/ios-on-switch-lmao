@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Textures bound as an attachment of the other class of format with the same bits (SameBitsCases): a one-sample

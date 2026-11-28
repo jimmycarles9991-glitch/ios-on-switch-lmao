@@ -159,7 +159,9 @@ int main(int argc, char **argv)
         unsigned failed = 0;
         for (const Case &c : kCases)
             for (NSUInteger n : {2u, 4u}) {
-                id<MTLTexture> ms = texture(dev, c.format, n, MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead);
+                id<MTLTexture> ms =
+                    texture(dev, c.format, n,
+                            MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView);
                 id<MTLTexture> metal = texture(dev, c.format, 1, MTLTextureUsageRenderTarget);
                 id<MTLTexture> ours = texture(dev, c.written, 1, MTLTextureUsageRenderTarget);
                 id<MTLRenderPipelineState> fill = state(dev, samples, "cover", c.samples, c.format, n);
@@ -183,7 +185,9 @@ int main(int argc, char **argv)
                 enc = [cb renderCommandEncoderWithDescriptor:r];
                 const uint32_t count = uint32_t(n);
                 [enc setRenderPipelineState:resolve];
-                [enc setFragmentTexture:ms atIndex:0];
+                // an sRGB format's samples are read as their codes, through the UNORM twin it is written as
+                [enc setFragmentTexture:c.written == c.format ? ms : [ms newTextureViewWithPixelFormat:c.written]
+                                atIndex:0];
                 [enc setFragmentBytes:&count length:sizeof count atIndex:0];
                 [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
                 [enc endEncoding];

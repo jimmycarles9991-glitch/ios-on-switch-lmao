@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Stage the TegraGM20B Metal plugin onto the SD card's iPadOS Data volume, mounted on the Mac.
+r"""Stage the TegraGM20B Metal plugin onto the SD card's iPadOS Data volume, mounted on the Mac.
 
 usage: stage-tegra-gm20b-metal.py <Data mount point> (--build <manifest or dir> | --remove) [--progress]
 
---build is //gpu:bundle's manifest (bazel-bin/gpu/bundle.stage, in //deploy:sd's runfiles: tools/gpu/stage_manifest.py),
-or a directory laid out as //gpu:base (bazel-bin/gpu/base, an lkg snapshot's gpu/). Exit status 0 on success, else one
-error line.
+--build is a GPU stage manifest (tools/gpu/stage_format.py): //gpu:bundle's (bazel-bin/gpu/bundle.stage, in
+//deploy:sd's runfiles), or a stage tree's gpu.stage. A directory stands for the gpu.stage at its top: a stage tree
+(//gpu:stage_tree), //gpu:base or an lkg snapshot's gpu/. Exit status 0 on success, else one error line.
 
 Mount the Data volume read-write first, e.g.
 `diskutil mount -mountOptions nobrowse D1B1D053-D0A6-496C-8625-A947A3DA863E` (SwitchRawMount.h SWITCH_RAW_DATA_UUID),
@@ -18,13 +18,24 @@ What it stages, on the live volume (as vendor/unixnu/scripts/add-gpu-plugin-data
     shader compiler reads);
   * <Data>/ngpu/addons/TegraGM20BMetal.pack beside it (the driver's pipeline pack: a process that cannot read
     it gets no Metal device);
-  * CAEnableDeepFramebuffer, CAEnableFramebufferCompression and CAEnableIOSurfaceCompression = false merged into the
-    preferences backboardd reads when it starts, before any plugin code runs (its own domain and the global one, for
-    mobile and root): the GPU and the display driver take plain 8-bit rows.
-Only files whose sha256 differs from what the card holds are copied, and files the build no longer has are removed:
-<Data>/ngpu/stage.tsv.gz lists what is staged (its first line the whole list's digest, so an unchanged build reads
-nothing else), and <Data>/ngpu/stage.pending the files a stage was writing, which the next one copies again if it was
-cut short. A card without the list has the three directories replaced whole.
+  * the manifest's preference records merged into the plists they name (backboardd's Core Animation preferences,
+    which it reads when it starts, before any plugin code runs).
+Only files whose sha256 differs from what the card holds are copied, and files the build no longer has are removed. A
+card without the list below has the three directories replaced whole.
+
+What the card holds, which an incremental stage reads back first:
+  <Data>/ngpu/stage.tsv.gz  gzip text. Line 1 is '# <digest>': the sha256 of the lines that follow, which are one
+                            '<path>\t<sha256>\t<size>\t<mode, octal>' per staged file, in path order, each followed
+                            by a newline. A matching digest with no stage.pending means nothing changed, and nothing
+                            else is read.
+  <Data>/ngpu/stage.pending one path a line: what a stage was copying or removing when it began. The next stage takes
+                            those as not staged, so a cut-short stage copies them again; removed when a stage ends.
+Preferences are not in the list: they are merged on every stage.
+<Data>/Switch/icon-cache-gpu names the staged build (the list's digest with the manifest's `# kext` identity of the
+kernel's GPU kext folded in, empty once removed), on every path that stages. The kext identity covers the three
+TegraGM20B libraries only: a change to IOSurface, the SMMU, host1x or display flip code keeps the name.
+iconservicesagent keeps the icons it drew while __cache_info__ names the system's ProductBuildVersion, which a GPU build
+does not change, so the next boot's kernel lets them go once per build it names (kernel/switch/boot/icon_cache.c).
 --remove deletes the three directories and the list (the preferences stay; without a Metal device they change nothing).
 --progress prints 'progress DONE/TOTAL bytes' as the files land and 'progress WHAT' before a long wait, for the deploy
 and the image builder to show.
@@ -34,6 +45,7 @@ TegraGM20BMetal.trustcache), so stage and package from the same build.
 
 import gzip
 import hashlib
+import json
 import os
 import plistlib
 import shutil
@@ -53,16 +65,15 @@ OWNED = (BUNDLE, SEED, RAW)
 RENAMED_FROM = (ADDONS + '/TegraGM20BMetal.m2v-seed', ADDONS + '/TegraGM20BMetal.raw')
 STATE = 'ngpu/stage.tsv.gz'
 PENDING = 'ngpu/stage.pending'
-MANIFEST_HEADER = '# gpu stage 1 '
-EXECUTABLES = ('TegraGM20BMetal',)
-PREFS = {
-    'CAEnableDeepFramebuffer': False,
-    'CAEnableFramebufferCompression': False,
-    'CAEnableIOSurfaceCompression': False,
-}
+ICON_CACHE_RECORD = 'Switch/icon-cache-gpu'
+MANIFEST_HEADER = '# gpu stage 2 '
+MANIFEST_KEXT = '# kext '
+TREE_MANIFEST = 'gpu.stage'
 
 # path below the volume -> (source file, sha256, size, mode)
 Wanted = dict[str, tuple[Path, str, int, int]]
+# plist below the volume -> (owner uid, key -> value)
+Prefs = dict[str, tuple[int, dict]]
 
 
 def _arguments(argv: list[str]) -> tuple[Path, Path | None, bool, bool]:
@@ -89,33 +100,52 @@ def _check_volume(data: Path) -> None:
         sys.exit(f'{data} has no mobile/; wrong volume?')
 
 
-def from_manifest(manifest: Path) -> Wanted:
-    """Read //gpu:bundle's manifest; its sources are below the runfiles root its own rlocation path names."""
+def _below(path: str) -> str:
+    parts = Path(path).parts
+    if not parts or path.startswith('/') or '..' in parts:
+        sys.exit(f'stage-tegra-gm20b-metal: {path!r} is not a path below the Data volume')
+    return path
+
+
+def from_manifest(manifest: Path) -> tuple[Wanted, Prefs]:
+    """Read a GPU stage manifest (tools/gpu/stage_format.py): its files and its preferences."""
     lines = manifest.read_text().splitlines()
     if not lines or not lines[0].startswith(MANIFEST_HEADER):
-        sys.exit(f'stage-tegra-gm20b-metal: {manifest} is not a GPU stage manifest (bazel build //gpu:bundle)')
-    own = lines[0][len(MANIFEST_HEADER) :]
-    if not str(manifest).endswith('/' + own):
+        sys.exit(
+            f'stage-tegra-gm20b-metal: {manifest} is not a GPU stage manifest, format 2 (bazel build //gpu:bundle)'
+        )
+    form, _, own = lines[0][len(MANIFEST_HEADER) :].partition(' ')
+    if form == 'tree' and not own:
+        root = manifest.parent
+    elif form == 'runfiles' and own and str(manifest).endswith('/' + own):
+        root = Path(str(manifest)[: -len(own)])
+    else:
         sys.exit(f'stage-tegra-gm20b-metal: {manifest} is not in a runfiles tree (run it as bazel run //deploy:sd)')
-    root = Path(str(manifest)[: -len(own)])
-    wanted = {}
+    wanted, prefs = {}, {}
     for line in lines[1:]:
-        path, digest, size, mode, source = line.split('\t')
-        wanted[path] = (root / source, digest, int(size), int(mode, 8))
-    return wanted
+        if line.startswith(MANIFEST_KEXT):
+            continue
+        kind, *fields = line.split('\t')
+        if kind == 'file':
+            path, sha, size, mode, source = fields
+            wanted[_below(path)] = (root / _below(source), sha, int(size), int(mode, 8))
+        elif kind == 'pref':
+            plist, uid, key, value = fields
+            plist_path, owner = _below(plist), int(uid)
+            existing_owner, values = prefs.setdefault(plist_path, (owner, {}))
+            if existing_owner != owner:
+                sys.exit(f'stage-tegra-gm20b-metal: {manifest}: conflicting owners for {plist_path}')
+            values[key] = json.loads(value)
+        else:
+            sys.exit(f'stage-tegra-gm20b-metal: {manifest}: no record kind {kind!r}')
+    return wanted, prefs
 
 
-def from_directory(build: Path) -> Wanted:
-    """Hash a directory laid out as //gpu:base (an lkg snapshot's gpu/, or the image builder's)."""
-    if not (build / 'TegraGM20BMetal.trustcache').is_file():
-        sys.exit(f'stage-tegra-gm20b-metal: no plugin build in {build} (bazel build //gpu:bundle)')
-    wanted = {}
-    for top in OWNED:
-        for path in sorted(p for p in (build / top).rglob('*') if p.is_file()):
-            data = path.read_bytes()
-            mode = 0o755 if path.name in EXECUTABLES else 0o644
-            wanted[path.relative_to(build).as_posix()] = (path, hashlib.sha256(data).hexdigest(), len(data), mode)
-    return wanted
+def from_directory(build: Path) -> tuple[Wanted, Prefs]:
+    """Read the manifest at the top of a stage tree, //gpu:base or an lkg snapshot's gpu/."""
+    if not (build / TREE_MANIFEST).is_file():
+        sys.exit(f'stage-tegra-gm20b-metal: {build} has no {TREE_MANIFEST} (built before gpu stage 2: build it again)')
+    return from_manifest(build / TREE_MANIFEST)
 
 
 def digest(wanted: dict) -> str:
@@ -190,7 +220,46 @@ def _copy_all(data: Path, wanted: Wanted, changed: list[str], report: Callable[[
                 pending.cancel()
 
 
-def sync(data: Path, wanted: Wanted, report: Callable[[str], None]) -> str:
+def _data_folder(data: Path) -> Path:
+    """Return the Data volume's own folder: Switch, or the former one while only it exists (tools/install/renamed.py)."""
+    folder = data / ICON_CACHE_RECORD.split('/', 1)[0]
+    if folder.exists():
+        return folder
+
+    def ours(folder: Path) -> bool:
+        try:
+            return folder.is_dir() and not folder.is_symlink() and (folder / 'overlay').is_dir()
+        except PermissionError:  # root's 0700 folders, closed to the Mac's user: not one of ours
+            return False
+
+    older = [p for p in data.iterdir() if ours(p)]
+    return older[0] if len(older) == 1 else folder
+
+
+def manifest_kext(manifest: Path) -> str:
+    """Return the GPU kext's build identity a GPU stage manifest names, '' where it names none."""
+    path = manifest / TREE_MANIFEST if manifest.is_dir() else manifest
+    for line in path.read_text().splitlines()[1:3]:
+        if line.startswith(MANIFEST_KEXT):
+            return line[len(MANIFEST_KEXT) :]
+    return ''
+
+
+def icon_build(whole: str, kext: str) -> str:
+    """Name what draws icons: the staged list and, where known, the kernel's GPU kext, which draws through them too."""
+    return hashlib.sha256(f'{whole}\n{kext}'.encode()).hexdigest() if kext else whole
+
+
+def name_for_icon_cache(data: Path, build: str) -> None:
+    """Name the staged build in ICON_CACHE_RECORD, writing nothing when it already does."""
+    record = _data_folder(data) / ICON_CACHE_RECORD.split('/', 1)[1]
+    if record.is_file() and record.read_text() == build + '\n':
+        return
+    record.parent.mkdir(parents=True, exist_ok=True)
+    _write_atomically(record, lambda f: f.write_text(build + '\n'))
+
+
+def sync(data: Path, wanted: Wanted, report: Callable[[str], None], kext: str = '') -> str:
     """Make the card hold `wanted` under the three staged directories; return what was done."""
     for directory in (data / 'ngpu', data / ADDONS):
         directory.mkdir(exist_ok=True)
@@ -199,6 +268,7 @@ def sync(data: Path, wanted: Wanted, report: Callable[[str], None]) -> str:
     known = read_state(data, whole)
     renamed = ''.join(f'; removed {old}, which the rename replaced' for old in _remove_renamed(data))
     if known is True:
+        name_for_icon_cache(data, icon_build(whole, kext))
         return f'unchanged ({len(wanted)} files){renamed}'
     if known is None:
         for top in OWNED:
@@ -221,6 +291,7 @@ def sync(data: Path, wanted: Wanted, report: Callable[[str], None]) -> str:
 
     _write_atomically(data / STATE, write_state)
     (data / PENDING).unlink()
+    name_for_icon_cache(data, icon_build(whole, kext))
     copied = sum(wanted[p][2] for p in changed)
     return (
         f'{len(changed)} copied ({copied >> 20} MiB), {len(stale)} removed, {len(wanted) - len(changed)} unchanged'
@@ -228,22 +299,18 @@ def sync(data: Path, wanted: Wanted, report: Callable[[str], None]) -> str:
     )
 
 
-def _merge_preferences(data: Path) -> None:
-    for home, owner in (('mobile', 501), ('root', 0)):
-        directory = data / home / 'Library/Preferences'
-        directory.mkdir(parents=True, exist_ok=True)
-        # backboardd's defaults domain is its bundle ID, com.apple.backboardd; the global domain is what took effect
-        # so far
-        for name in ('com.apple.backboardd.plist', 'backboardd.plist', '.GlobalPreferences.plist'):
-            file = directory / name
-            values = plistlib.loads(file.read_bytes()) if file.exists() else {}
-            if all(values.get(k) == v for k, v in PREFS.items()):
-                continue
-            values.update(PREFS)
-            file.write_bytes(plistlib.dumps(values, fmt=plistlib.FMT_BINARY))
-            file.chmod(0o644)
-            if os.geteuid() == 0:
-                os.chown(file, owner, owner)
+def _merge_preferences(data: Path, prefs: Prefs) -> None:
+    for plist, (owner, values) in sorted(prefs.items()):
+        file = data / plist
+        file.parent.mkdir(parents=True, exist_ok=True)
+        merged = plistlib.loads(file.read_bytes()) if file.exists() else {}
+        if all(k in merged and type(merged[k]) is type(v) and merged[k] == v for k, v in values.items()):
+            continue
+        merged.update(values)
+        file.write_bytes(plistlib.dumps(merged, fmt=plistlib.FMT_BINARY))
+        file.chmod(0o644)
+        if os.geteuid() == 0:
+            os.chown(file, owner, owner)
 
 
 def _silent(_: str) -> None:
@@ -265,15 +332,14 @@ def main() -> None:
             print('removed', data / old)
         for name in (STATE, PENDING):
             (data / name).unlink(missing_ok=True)
+        name_for_icon_cache(data, '')
         print('removed', data / BUNDLE)
         return
-    if not build.is_file():
-        report('hashing the build')
-    wanted = from_manifest(build) if build.is_file() else from_directory(build)
+    wanted, prefs = from_manifest(build) if build.is_file() else from_directory(build)
     if BUNDLE + '/TegraGM20BMetal' not in wanted:
         sys.exit(f'stage-tegra-gm20b-metal: no plugin build in {build} (bazel build //gpu:bundle)')
-    done = sync(data, wanted, report)
-    _merge_preferences(data)
+    done = sync(data, wanted, report, manifest_kext(build))
+    _merge_preferences(data, prefs)
     report('flushing to the card')
     subprocess.run(['/bin/sync'], check=True)
     staged = sorted({p.split('/')[2] for p in wanted})

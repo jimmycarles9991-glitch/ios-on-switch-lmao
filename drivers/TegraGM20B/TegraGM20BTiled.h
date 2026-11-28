@@ -14,11 +14,13 @@ extern "C" {
 struct tgm_record;
 
 /* One task's mapping of a surface, as IOSurface made it for that task's IOSurfaceRootUserClient (IOSurfaceClient's
- * IOMemoryMap): the user client (retained while a lock through it is held), its task, address, length and options */
+ * IOMemoryMap): the user client (retained while a lock through it is held), its task, address, length and options.
+ * An unlocked fault view carries client == null and holds a reference to task and the surface's memory descriptor. */
 struct tgm_cpu_view {
 	void *client, *task;
 	uint64_t address, length, offset; /* offset: into the map's descriptor */
 	uint32_t options;
+	void *memory;
 };
 
 #define TGM_VIEWS 8
@@ -34,7 +36,8 @@ struct tgm_tiled {
 	 * scratch is never reused), and the mappings pointed at the scratch with each one's locks */
 	struct tgm_scratch *scratch;
 	uint32_t locks;
-	int wrote, stranded;
+	uint32_t unlockedViews;
+	int wrote, unlockedWrote, scratchMarked, stranded;
 	/* the texels as rows, read back before the first GPU submission that writes the surface under a write lock
 	 * (tgm_views_gpu_writes): the last unlock merges; whether that was logged for the surface */
 	struct tgm_scratch *base;
@@ -46,6 +49,7 @@ struct tgm_tiled {
 	struct {
 		struct tgm_cpu_view view;
 		uint32_t locks;
+		int unlocked;
 	} views[TGM_VIEWS];
 
 	uint32_t nviews;
@@ -53,6 +57,7 @@ struct tgm_tiled {
 		window_ns; /* debug: locks this second, and whether the surface was named for them */
 	uint32_t window_locks;
 	int named;
+	int slow_fill_named; /* debug: whether a first lock's slow fill was named for the surface */
 };
 
 /* TegraGM20BCoherency.cpp: the entry's lock (held across a decision and a move), its layout slot (entry lock), whether
@@ -81,6 +86,16 @@ uint64_t tgm_coh_written(const struct tgm_coh *c);
 struct tgm_coh *tgm_coh_find_tiled(uint32_t id);
 /* The same by a physical address inside the surface (any page of it): *offset its byte offset in the surface */
 struct tgm_coh *tgm_coh_find_tiled_pa(uint64_t pa, uint64_t *offset);
+struct tgm_coh *tgm_coh_find_tiled_scratch_pa(uint64_t pa);
+void tgm_coh_for_each_unlocked_write(void (*fn)(struct tgm_coh *));
+void *tgm_coh_surface(const struct tgm_coh *c);
+int tgm_coh_is_deferred(struct tgm_coh *c);
+void tgm_coh_clear_gpu_dirty(struct tgm_coh *c);
+void tgm_tiled_mark_pages(const uint64_t *pas, uint32_t npages);
+void tgm_tiled_unmark_pages(const uint64_t *pas, uint32_t npages);
+void tgm_cpu_disconnect_pages(const uint64_t *pas, uint32_t npages);
+int tgm_views_untile_prepare(struct tgm_coh *c, struct tgm_tiled *t);
+void tgm_views_untile_finish(struct tgm_coh *c, struct tgm_tiled *t);
 /* The entry of the surface whose first page is at `pa` (tiled or not), with a reference for tgm_coherency_put, or null */
 struct tgm_coh *tgm_coh_find_pa(uint64_t pa);
 /* One more reference to an entry the caller holds one to */

@@ -68,6 +68,7 @@ kernel_driver(
         "kits/SwitchCAR",
         "kits/SwitchDMA",
         "kits/SwitchDT",
+        "kits/SwitchEntitlement",
         "kits/SwitchMMIO",
         "kits/SwitchRefusal",
         "kits/SwitchSysctl",

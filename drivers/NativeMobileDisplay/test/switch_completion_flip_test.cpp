@@ -316,7 +316,7 @@ TEST(CompletionFlipSource, TheDisplayCallsItWhereTheOrderingNeedsIt)
     const CodeText check = Block(display, "void checkFlip(bool atFrameEnd)");
     EXPECT_TRUE(check.has("const auto [control, start] = latchState();"));
     EXPECT_FALSE(check.has("windowActive("));
-    EXPECT_TRUE(Block(display, "bool frameEndNeeded()").has("completionFlipOut()"));
+    EXPECT_TRUE(Block(display, "switch_frame_end::Holder frameEndHolder()").has("completionFlipOut()"));
     EXPECT_TRUE(Block(display, "bool offerDirect(").has("offerWithCompletionFlip(copy, entry)"));
     EXPECT_TRUE(Block(display, "bool offerGpuCopy(").has("offerWithCompletionFlip(copy, target)"));
     const CodeText vic = Block(SourceText("../SwitchVICScanoutDisplay.h"), "bool offerVicCopy(");

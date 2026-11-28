@@ -2,6 +2,7 @@ import CoreVideo
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// RGB10A8_2P_XR10 (550) over a 'b3a8' surface, as Core Animation's backdrop blur makes it, rendered through its
@@ -69,10 +70,13 @@ struct XRTwoPlaneTest: HWTest {
         let cellShadows = moved("xr_plane_shadows") - directShadows
         let narrow = try await cells.narrowWrong()
         let narrowShadows = moved("xr_plane_shadows") - directShadows - cellShadows
-        let nearest = try await cells.pairSamples(texture, "nearest_fragment")
-        let linear = try await cells.pairSamples(texture, "linear_fragment")
-        let gatherAlpha = try await cells.gatherWrong(texture, want, alpha: true)
-        let gatherRed = try await cells.gatherWrong(texture, want, alpha: false)
+        let warmed = try await cells.warmPairPipelines(texture)
+        let nearest = try await cells.pairSamples(texture, "nearest_fragment", warmed: warmed["nearest_fragment"])
+        let linear = try await cells.pairSamples(texture, "linear_fragment", warmed: warmed["linear_fragment"])
+        let gatherAlpha = try await cells.gatherWrong(
+            texture, want, alpha: true, warmed: warmed["gather_alpha_fragment"]
+        )
+        let gatherRed = try await cells.gatherWrong(texture, want, alpha: false, warmed: warmed["gather_red_fragment"])
         let texels = Self.planes(buffer)
         let nearestApart = XRTwoPlaneModel.nearestApart(nearest.halves, texels)
         let linearApart = XRTwoPlaneModel.linearApart(
@@ -101,6 +105,7 @@ struct XRTwoPlaneTest: HWTest {
         metrics.set("pair_linear", linear.paired ? 1 : 0)
         metrics.set("pair_linear_apart", linearApart.apart)
         metrics.set("pair_linear_steps", linearApart.steps)
+        metrics.set("pair_linear_first", linearApart.first)
         metrics.set("pair_gather", gatherAlpha.paired && gatherRed.paired ? 1 : 0)
         metrics.set("pair_gather_alpha_wrong", gatherAlpha.wrong)
         metrics.set("pair_gather_red_wrong", gatherRed.wrong)
@@ -230,12 +235,20 @@ struct XRTwoPlaneTest: HWTest {
             alpha = CVPixelBufferGetBaseAddressOfPlane(buffer, 1)!
         let wordRow = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0),
             alphaRow = CVPixelBufferGetBytesPerRowOfPlane(buffer, 1)
-        return (0 ..< (width * height)).map { i in
-            let (x, y) = (i % width, i / width)
-            let w = word.loadUnaligned(fromByteOffset: y * wordRow + x * 4, as: UInt32.self)
-            let a = alpha.load(fromByteOffset: y * alphaRow + x, as: UInt8.self)
-            return UInt64(a) << 32 | UInt64(w)
+        var out = [UInt64](repeating: 0, count: width * height)
+        out.withUnsafeMutableBufferPointer { dst in
+            let p = dst.baseAddress!
+            for y in 0 ..< height {
+                let wRow = word + y * wordRow
+                let aRow = alpha.advanced(by: y * alphaRow).assumingMemoryBound(to: UInt8.self)
+                let base = y * width
+                for x in 0 ..< width {
+                    let w = wRow.loadUnaligned(fromByteOffset: x * 4, as: UInt32.self)
+                    p[base + x] = UInt64(aRow[x]) << 32 | UInt64(w)
+                }
+            }
         }
+        return out
     }
 
     /// A CPU write of both planes under the surface's lock, which moves its seed
@@ -283,15 +296,22 @@ struct XRTwoPlaneTest: HWTest {
             encoder.endEncoding()
         }
         let bytes = try await gpu.read(target, bytesPerPixel: 8)
-        let value = { (n: Int, d: Double) in Float16(Double(n) / d).bitPattern }
-        return (0 ..< (width * height)).filter { i in
-            let t = want[i]
-            let expected: [UInt16] = [
-                value(Int(t >> 20 & 0x3ff) - 384, 510), value(Int(t >> 10 & 0x3ff) - 384, 510),
-                value(Int(t & 0x3ff) - 384, 510), value(Int(t >> 32 & 0xff), 255),
-            ]
-            let got = (0 ..< 4).map { c in bytes.loaded(as: UInt16.self, at: i * 4 + c) }
-            return got != expected
-        }.count
+        return bytes.withUnsafeBytes { raw in
+            var wrong = 0
+            for i in 0 ..< (width * height) {
+                let t = want[i]
+                let e0 = Float16(Double(Int(t >> 20 & 0x3ff) - 384) / 510).bitPattern
+                let e1 = Float16(Double(Int(t >> 10 & 0x3ff) - 384) / 510).bitPattern
+                let e2 = Float16(Double(Int(t & 0x3ff) - 384) / 510).bitPattern
+                let e3 = Float16(Double(t >> 32 & 0xff) / 255).bitPattern
+                let off = i * 8
+                let g0 = raw.loadUnaligned(fromByteOffset: off, as: UInt16.self)
+                let g1 = raw.loadUnaligned(fromByteOffset: off + 2, as: UInt16.self)
+                let g2 = raw.loadUnaligned(fromByteOffset: off + 4, as: UInt16.self)
+                let g3 = raw.loadUnaligned(fromByteOffset: off + 6, as: UInt16.self)
+                if g0 != e0 || g1 != e1 || g2 != e2 || g3 != e3 { wrong += 1 }
+            }
+            return wrong
+        }
     }
 }

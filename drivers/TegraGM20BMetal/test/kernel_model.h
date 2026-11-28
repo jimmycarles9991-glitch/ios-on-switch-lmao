@@ -26,6 +26,7 @@
 #include "TegraGM20BCompilerABI.h"
 #include "TegraGM20BFencePageABI.h"
 #include "TegraGM20BJobABI.h"
+#include "TegraGM20BSchedABI.h"
 #include "TegraGM20BVolatileABI.h"
 #include <IOKit/IOKitLib.h>
 #include <mach/mach.h>
@@ -109,6 +110,10 @@ struct Slot {
     uint32_t submitted = 0, error = 0;
     uint64_t uid = 0;      // the channel the slot holds, 0: free
     bool foreign = false;  // another driver's channel of the connection (NVK's) holds it
+    std::vector<TegraGM20BAbiSurfaceUse> cachedUses;
+    uint64_t cachedBindGen = 0, cachedBoGen = 0;
+    uint32_t cachedSet = 0;
+    bool cachedAdmitted = false, cachedValid = false;
 };
 
 // The kernel's page is zero where no region of TegraGM20BFencePageABI.h is; the model's holds kStray there, so a word
@@ -157,6 +162,9 @@ struct Model {
     // [va, va + bytes) in the host memory of the one bind that holds all of it; null where it does not
     uint8_t *host(uint64_t va, uint64_t bytes)
     {
+        if (packMappedBytes && packImage.hostData && va >= packMappedVa && va - packMappedVa < packMappedBytes &&
+            bytes <= packMappedBytes - (va - packMappedVa))
+            return const_cast<uint8_t *>(packImage.hostData + (va - packMappedVa));
         auto bound = binds.upper_bound(va);
         if (bound == binds.begin())
             return nullptr;
@@ -276,6 +284,8 @@ struct Model {
             bo.vm->entry = MACH_PORT_NULL;
         }
         bo.parkState = ParkState::Reclaimed;
+        ++bindGen;
+        ++boGen;
         reclaims++;
         return true;
     }
@@ -307,6 +317,7 @@ struct Model {
         uint64_t stack = 0;
         uint64_t waitedNs = 0;
         uint64_t vmPageBytes = 0;
+        const uint8_t *hostData = nullptr;
         std::function<void()> onMap;
     };
 
@@ -330,6 +341,11 @@ struct Model {
     unsigned notResponding = 0;  // WaitFences answered kIOReturnNotResponding while GetStatus calls the channel healthy
     bool foreignTakesFreedSlot = false;
     bool volatileWrites = true;
+    bool priorityCritical = false;
+    bool channelProgress = true;
+    bool sameUses = true;
+    uint64_t bindGen = 1, boGen = 1;
+    unsigned sameUseHits = 0, sameUseMisses = 0;
     unsigned creates = 0, destroys = 0, staleReads = 0, cpuAcquireCalls = 0;
     // the channel epoch's count (channelEpochMoves)
     uint32_t epoch = 0;
@@ -464,6 +480,8 @@ struct Model {
         creates++;
         slots[slot].uid = nextUid++;
         slots[slot].error = 0;
+        slots[slot].cachedUses.clear();
+        slots[slot].cachedValid = false;
         TegraGM20BAbiFence &f = fence(slot);
         f.killed_first = f.killed_last = f.error = 0;
         auto *identity = reinterpret_cast<TegraGM20BAbiFenceIdentity *>(
@@ -544,14 +562,13 @@ struct Model {
         }
         const auto *shared = reinterpret_cast<const TegraGM20BAbiSurfaceUse *>(
             reinterpret_cast<const uint8_t *>(head + 1) + head->push_count * sizeof(TegraGM20BAbiPush));
-        for (uint32_t i = 0; i < head->shared_count; ++i)
-            if (const uint64_t bo = resolve(shared[i]); (!bo && unknownUsesRefused) || (bo && bos.at(bo).set))
-                return kIOReturnBadArgument;
         const uint32_t admission = head->flags & TegraGM20BJobAdmission;
         const uint64_t cookie =
             admission ? reinterpret_cast<const TegraGM20BAbiSubmitAdmission *>(shared + head->shared_count)->cookie : 0;
         auto held = admitted.find(head->channel);
         if (admission & TegraGM20BJobAdmissionCancel) {
+            if (head->flags & TegraGM20BJobSameUses)
+                return kIOReturnBadArgument;
             if (held != admitted.end() && held->second.first == cookie)
                 admitted.erase(held);
             reply = {};
@@ -560,9 +577,30 @@ struct Model {
         if (bool(admission & TegraGM20BJobAdmissionContinue) != (held != admitted.end()) ||
             (held != admitted.end() && held->second.first != cookie))
             return kIOReturnBadArgument;
+        const bool useCached = (head->flags & TegraGM20BJobSameUses) != 0;
+        const bool isAdmitted = (admission & (TegraGM20BJobAdmissionBegin | TegraGM20BJobAdmissionContinue)) != 0;
+        std::vector<TegraGM20BAbiSurfaceUse> effective;
+        if (useCached) {
+            if (head->shared_count != 0)
+                return kIOReturnBadArgument;
+            if (!s->cachedValid || s->cachedBindGen != bindGen || s->cachedBoGen != boGen ||
+                s->cachedSet != head->set || s->cachedAdmitted != isAdmitted) {
+                s->cachedValid = false;
+                sameUseMisses++;
+                return kIOReturnNotReady;
+            }
+            sameUseHits++;
+            effective = s->cachedUses;
+        } else {
+            s->cachedValid = false;
+            effective.assign(shared, shared + head->shared_count);
+            for (const auto &u : effective)
+                if (const uint64_t bo = resolve(u); (!bo && unknownUsesRefused) || (bo && bos.at(bo).set))
+                    return kIOReturnBadArgument;
+        }
         std::vector<uint64_t> named;
-        for (uint32_t i = 0; i < head->shared_count; ++i)
-            if (const uint64_t bo = resolve(shared[i]))
+        for (const auto &u : effective)
+            if (const uint64_t bo = resolve(u))
                 named.push_back(bo);
         for (const uint64_t bo : named) {
             if (bos.count(bo) && bos.at(bo).parkState != ParkState::Live)
@@ -578,6 +616,14 @@ struct Model {
                 if (bos.count(m.handle) && bos.at(m.handle).parkState != ParkState::Live)
                     return kIOReturnNotReady;
         }
+        if (!useCached) {
+            s->cachedUses = effective;
+            s->cachedBindGen = bindGen;
+            s->cachedBoGen = boGen;
+            s->cachedSet = head->set;
+            s->cachedAdmitted = isAdmitted;
+            s->cachedValid = true;
+        }
         if (admission & TegraGM20BJobAdmissionBegin)
             admitted[head->channel] = {cookie, named};
         if (admission & TegraGM20BJobAdmissionEnd)
@@ -586,16 +632,16 @@ struct Model {
             staleViews--;
             return kIOReturnNotReady;
         }
-        std::vector<TegraGM20BAbiSurfaceUse> uses(shared, shared + head->shared_count);
+        std::vector<TegraGM20BAbiSurfaceUse> uses = effective;
         if (set) {
             uses.insert(uses.end(), set->members.begin(), set->members.end());
             set->used |= 1u << (head->channel - 1);
             setJobs++;
         }
         bool hostWritten = (head->flags & TegraGM20BJobHostWritten) != 0;
-        for (uint32_t i = 0; i < head->shared_count; ++i) {
-            hostWritten |= (shared[i].access & TegraGM20BSurfaceHostWritten) != 0;
-            if (const auto bo = bos.find(resolve(shared[i])); bo != bos.end())
+        for (const auto &u : effective) {
+            hostWritten |= (u.access & TegraGM20BSurfaceHostWritten) != 0;
+            if (const auto bo = bos.find(resolve(u)); bo != bos.end())
                 hostWritten |= std::exchange(bo->second.hostWritten, false);
         }
         const auto *kept = reinterpret_cast<const TegraGM20BAbiJobPromises *>(
@@ -677,6 +723,7 @@ struct Model {
         for (const auto &member : sets[index].members)
             bos[member.handle].set = index + 1;
         sets[index].live = true;
+        ++boGen;
         endGeneration(index);
         out = {index + 1, sets[index].generation, kFenceToken, (TegraGM20BSetGenerationWord + index) * 4};
         return KERN_SUCCESS;
@@ -691,6 +738,7 @@ struct Model {
                 it->second.set = 0;
         sets[in.set - 1].members.clear();
         sets[in.set - 1].live = false;
+        ++boGen;
         return KERN_SUCCESS;
     }
 
@@ -716,6 +764,8 @@ struct Model {
         imports.erase(handle);
         for (auto bound = binds.begin(); bound != binds.end();)
             bound = bound->second.first == handle ? binds.erase(bound) : std::next(bound);
+        ++bindGen;
+        ++boGen;
     }
 
     void cpuLease(uint64_t handle)
@@ -851,7 +901,9 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
         info = {};
         info.abi_version = TegraGM20BAbiVersion;
         info.flags = TegraGM20BInfoKernelMap | TegraGM20BInfoSubmitAddress | TegraGM20BInfoKillRecord |
-                     TegraGM20BInfoCpuAccess | TegraGM20BInfoChannelEpoch |
+                     TegraGM20BInfoCpuAccess | TegraGM20BInfoChannelEpoch | TegraGM20BInfoPriority |
+                     TegraGM20BInfoPriorityReply | (model.channelProgress ? TegraGM20BInfoChannelProgress : 0u) |
+                     (model.sameUses ? TegraGM20BInfoSameUses : 0u) |
                      (model.volatileWrites ? TegraGM20BInfoVolatileWrites : 0u) |
                      (model.packImage.enabled ? TegraGM20BInfoPackImage : 0u) | model.infoFlags;
         info.fence_token = kernel_model::kFenceToken;
@@ -905,6 +957,7 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
             model.memory[token].assign(in.bytes, 0);
         }
         model.bos[model.nextHandle] = std::move(state);
+        ++model.boGen;
         *static_cast<TegraGM20BAbiBoAllocReply *>(output) = {model.nextHandle++, token, 0};
         return KERN_SUCCESS;
     }
@@ -921,6 +974,7 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
         imported.bytes = in.bytes;
         model.bos[model.nextHandle] = std::move(imported);
         model.imports[model.nextHandle] = {in.address, in.bytes};
+        ++model.boGen;
         *static_cast<TegraGM20BAbiBoAllocReply *>(output) = {model.nextHandle++, 0, 0};
         return KERN_SUCCESS;
     }
@@ -961,6 +1015,7 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
         bo.parkedGuard = guard;
         bo.mapped = false;
         bo.mappedVa = 0;
+        ++model.boGen;
         model.parkCalls++;
         model.parkedOrder.push_back(in.handle);
         model.parkedBytes += bo.bytes;
@@ -1002,6 +1057,7 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
         bo.vm->ownsVa = true;
         bo.parkedVa = 0;
         bo.parkedGuard = false;
+        ++model.boGen;
         model.parkedOrder.erase(std::remove(model.parkedOrder.begin(), model.parkedOrder.end(), in.handle),
                                 model.parkedOrder.end());
         model.parkedBytes -= bo.bytes;
@@ -1043,6 +1099,8 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
             if (model.bound)
                 model.bound(op);
         }
+        if (b.count)
+            ++model.bindGen;
         return KERN_SUCCESS;
     }
     case TegraGM20BMethodCpuAcquire: {
@@ -1147,6 +1205,18 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
     case TegraGM20BMethodGetStatus:
         return model.status(*static_cast<const TegraGM20BAbiChannel *>(input),
                             *static_cast<TegraGM20BAbiStatus *>(output));
+    case TegraGM20BMethodChannelProgress: {
+        if (!model.channelProgress)
+            return kIOReturnUnsupported;
+        const auto &in = *static_cast<const TegraGM20BAbiChannel *>(input);
+        if (!model.live(in.channel))
+            return kIOReturnBadArgument;
+        const uint32_t slot = in.channel - 1;
+        *static_cast<TegraGM20BAbiChannelProgressReply *>(output) = {uint64_t(kernel_model::kFenceToken) +
+                                                                     slot * kernel_model::kRecordBytes +
+                                                                     TegraGM20BFencePageChannelProgressOffset};
+        return KERN_SUCCESS;
+    }
     case TegraGM20BMethodCpuComplete: {
         const auto &in = *static_cast<const TegraGM20BAbiCpuComplete *>(input);
         *static_cast<TegraGM20BAbiCpuCompleteReply *>(output) = {in.range_count, 0, 0, 0, 0, 0};
@@ -1225,6 +1295,17 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
         if (!wait || !input)
             return kIOReturnNotFound;
         return wait(*static_cast<const uint64_t *>(input));
+    }
+    case TegraGM20BMethodPriority: {
+        const auto &in = *static_cast<const TegraGM20BAbiPriority *>(input);
+        if (in.priority == 3 || in.priority > TegraGM20BMaxPriority || in.background_priority > TegraGM20BMaxPriority)
+            return kIOReturnBadArgument;
+        if (output) {
+            const bool top = in.priority == 0 || in.priority == 5;
+            *static_cast<TegraGM20BAbiPriorityReply *>(output) = {
+                top && model.priorityCritical ? uint32_t(TegraGM20BPriorityCritical) : 0u, 0};
+        }
+        return KERN_SUCCESS;
     }
     case TegraGM20BMethodSurfaceLayout:
         *static_cast<TegraGM20BAbiSurfaceLayoutReply *>(output) = {model.surfaceLayout, 0};

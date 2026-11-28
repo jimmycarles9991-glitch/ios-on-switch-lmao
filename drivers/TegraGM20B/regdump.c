@@ -8,7 +8,7 @@
 #include <engine/fifo/runl.h>
 #include "TegraGM20BGpu.h"
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 #include "TegraGM20BRegDump.h"
 #include "TegraGM20BRegDumpABI.h"
 

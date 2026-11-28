@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Depth and stencil attached apart: each aspect lands in its own texture, level or slice and nothing else changes.

@@ -262,10 +262,15 @@ public:
 class IOWorkLoop : public OSObject {
 public:
     typedef IOReturn (*Action)(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3);
+    static inline IOWorkLoop *last = nullptr;
+    static inline unsigned created = 0;
 
     static IOWorkLoop *workLoop()
     {
-        return new IOWorkLoop;
+        auto *wl = new IOWorkLoop;
+        last = wl;
+        ++created;
+        return wl;
     }
 
     IOReturn addEventSource(IOEventSource *)
@@ -376,8 +381,16 @@ public:
 // --- Locks ------------------------------------------------------------------------------------------------------
 // A non-recursive lock (a second holder fails the test). Sleep releases it while the queue runs; a wakeup reaches the
 // sleeper gWakeNs later (the scheduler's thread wake).
+typedef void *event_t;
+typedef void *thread_t;
+typedef int wait_result_t;
+typedef uint32_t wait_interrupt_t;
+typedef void (*thread_continue_t)(void *, wait_result_t);
+#define THREAD_CONTINUE_NULL static_cast<thread_continue_t>(nullptr)
+
 enum {
     THREAD_UNINT = 0,
+    THREAD_WAITING = -1,
     THREAD_AWAKENED = 0,
     THREAD_TIMED_OUT = 1
 };
@@ -389,6 +402,46 @@ struct IOLock {
 };
 
 inline std::map<void *, uint64_t> gWakeups;  // event -> when its sleeper runs again
+inline event_t gWaitEvent = nullptr;
+inline uint64_t gWaitDeadline = 0;
+
+inline thread_t current_thread()
+{
+    return nullptr;
+}
+
+inline wait_result_t assert_wait_deadline(event_t event, wait_interrupt_t, uint64_t deadline)
+{
+    gWaitEvent = event;
+    gWaitDeadline = deadline;
+    gWakeups.erase(event);
+    return THREAD_WAITING;
+}
+
+inline void clear_wait(thread_t, wait_result_t)
+{
+    gWaitEvent = nullptr;
+}
+
+inline void thread_wakeup(event_t event)
+{
+    gWakeups[event] = gNow + gWakeNs;
+    gSchedule(gNow + gWakeNs, [] {});
+}
+
+inline wait_result_t thread_block(thread_continue_t)
+{
+    event_t event = gWaitEvent;
+    const uint64_t deadline = gWaitDeadline;
+    gWaitEvent = nullptr;
+    const bool woken = gRunUntil(deadline, [event] {
+        const auto it = gWakeups.find(event);
+        return it != gWakeups.end() && it->second <= gNow;
+    });
+    if (woken)
+        gWakeups.erase(event);
+    return woken ? THREAD_AWAKENED : THREAD_TIMED_OUT;
+}
 
 inline IOLock *IOLockAlloc()
 {
@@ -433,7 +486,7 @@ inline int IOLockSleepDeadline(IOLock *lock, void *event, uint64_t deadline, uin
     IOLockUnlock(lock);
     gWakeups.erase(event);
     const bool woken = gRunUntil(deadline, [event] {
-        auto it = gWakeups.find(event);
+        const auto it = gWakeups.find(event);
         return it != gWakeups.end() && it->second <= gNow;
     });
     if (woken)

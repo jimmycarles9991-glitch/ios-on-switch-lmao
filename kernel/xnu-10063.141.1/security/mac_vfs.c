@@ -1312,7 +1312,7 @@ mac_vnode_check_exec(vfs_context_t ctx, struct vnode *vp,
 			    (switch_package_exec && !strcmp(mpc->mpc_name, "Sandbox") &&
 			     (switch_package_exec == SWITCH_BOOTSTRAP_EXEC_LAUNCHER ||
 			      (mpc->mpc_field_off && !mac_label_get(mac_cred_label(cred), *mpc->mpc_field_off)))) ||
-			    ((switch_app_code_image(vp) || switch_bootstrap_image(vp)) && switch_app_code_amfi(mpc->mpc_name))) {
+			    (switch_app_code_amfi(mpc->mpc_name) && (switch_app_code_image(vp) || switch_bootstrap_image(vp)))) {
 				continue;
 			}
 
@@ -1337,7 +1337,7 @@ mac_vnode_check_exec(vfs_context_t ctx, struct vnode *vp,
 				    (switch_package_exec && !strcmp(mpc->mpc_name, "Sandbox") &&
 				     (switch_package_exec == SWITCH_BOOTSTRAP_EXEC_LAUNCHER ||
 				      (mpc->mpc_field_off && !mac_label_get(mac_cred_label(cred), *mpc->mpc_field_off)))) ||
-				    ((switch_app_code_image(vp) || switch_bootstrap_image(vp)) && switch_app_code_amfi(mpc->mpc_name))) {
+				    (switch_app_code_amfi(mpc->mpc_name) && (switch_app_code_image(vp) || switch_bootstrap_image(vp)))) {
 					continue;
 				}
 

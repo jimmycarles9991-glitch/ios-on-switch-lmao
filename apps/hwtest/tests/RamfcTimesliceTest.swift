@@ -1,5 +1,8 @@
 import Darwin
+import HWTestCommon
 import HWTestCore
+import HWTestKit
+import HWTestShared
 
 /// RAMFC timeslices as the host keeps them (debug.switch_gpu_ramfc, debug kernels). A level change's timeslice is
 /// written only after a preempt of the channel has completed, so the host's save of a channel it still holds cannot land

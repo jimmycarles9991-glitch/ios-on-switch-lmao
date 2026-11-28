@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// New private textures read before anything writes them, as Apple's GPUs answer: a texture Metal keeps losslessly

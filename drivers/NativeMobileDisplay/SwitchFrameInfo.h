@@ -178,14 +178,13 @@ private:
 // swap it shows: that swap's frame comes out, and older ones go unsent (replaced before a frame showed them; Core
 // Animation drops its frame info for every swap id up to the one it gets). timedShown and timedUnsent count the swaps
 // the timed-present gate held for their presentation time (presentDrawable:atTime:'s) by which way they went;
-// timedOrdinary (debug kernels) those it let go as the render server's ordinary frame though the next frame end came
-// too early for them, timedUnphased those it let go so with the frame ends masked, and shownEarly those shown more
-// than `early` before their requested presentation. heldEarly and heldPhase (debug kernels) count the swaps the gate
+// timedUnphased (debug kernels) those it let go as the render server's ordinary frame with the frame ends masked, and
+// shownEarly those shown more than `early` before their requested presentation. heldEarly and heldPhase (debug kernels) count the swaps the gate
 // held, for a frame end too early and for a frame end to learn the phase from.
 class Pending {
 public:
     static constexpr unsigned kMax = 16;
-    uint32_t timedShown = 0, timedUnsent = 0, timedOrdinary = 0, shownEarly = 0;
+    uint32_t timedShown = 0, timedUnsent = 0, shownEarly = 0;
     uint32_t timedUnphased = 0, heldEarly = 0, heldPhase = 0;
 
     void take(uint64_t seq, uint32_t swapId, uint64_t requested, bool timed = false)

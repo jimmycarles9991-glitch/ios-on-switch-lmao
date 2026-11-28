@@ -20,3 +20,8 @@ BOOTSTRAP_PACKAGES = {
     package: "build/switch-bootstrap/packages/" + package + ".deb"
     for package in ["sileo", "ellekit", "uikittools", "launchctl"]
 }
+
+BOOTSTRAP_DEVELOPMENT_PACKAGES = {
+    "//bootstrap:development_" + package.replace("-", "_"): "build/switch-bootstrap/packages/" + package + ".deb"
+    for package in ["openssh-client", "openssh-sftp-server", "openssh-server", "switch-ssh", "top"]
+}

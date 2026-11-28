@@ -25,8 +25,9 @@ void SwitchEMC::hint()
         HintSlot &slot = hints[cpu];
         const uint64_t now = mach_absolute_time();
         __atomic_store_n(&slot.until, now + holdTicks, __ATOMIC_RELAXED);
-        if (!__atomic_load_n(&gTopHeld, __ATOMIC_ACQUIRE)) {
-#if DEVELOPMENT || DEBUG
+        if (!__atomic_load_n(&gTopHeld, __ATOMIC_ACQUIRE) && !__atomic_load_n(&gRaisePending, __ATOMIC_ACQUIRE)) {
+            __atomic_store_n(&gRaisePending, true, __ATOMIC_RELEASE);
+#if SWITCH_STATS_POWER
             if (!__atomic_load_n(&slot.asked, __ATOMIC_RELAXED))
                 __atomic_store_n(&slot.asked, now, __ATOMIC_RELAXED);
 #endif
@@ -36,7 +37,7 @@ void SwitchEMC::hint()
     ml_set_interrupts_enabled(enabled);
 }
 
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_POWER
 // The loop: the first of the hints that asked for this raise, their slots cleared. A slot's CPU stores a time only while
 // the slot reads 0, and the loop clears only a slot it read as a time, so a CPU's store always follows the clear it saw.
 uint64_t SwitchEMC::takeAsked()
@@ -60,7 +61,7 @@ uint64_t SwitchEMC::takeAsked()
 void SwitchEMC::tick(uint64_t now, uint64_t busy)
 {
     const bool topHeld = __atomic_load_n(&gTopHeld, __ATOMIC_ACQUIRE);
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_POWER
     noteWindow(busy, topHeld);
 #endif
     if (!switch_emc_hold_tick(&holdState, now, busy, hintUntil(), switch_idle_last_frame(), topHeld))

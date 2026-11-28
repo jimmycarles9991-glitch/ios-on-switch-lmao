@@ -54,23 +54,58 @@ static inline enum switch_pt_error switch_pt_originals_parse(const uint8_t *raw,
     return SWITCH_PT_OK;
 }
 
+static inline const uint8_t *switch_pt_file_cdhash_at(const struct switch_pt_index *index, uint32_t i)
+{
+    return index->records + (size_t)SWITCH_PT_RECORD * i + 24u;
+}
+
+static inline size_t switch_pt_originals_link_bytes(const struct switch_pt_index *index)
+{
+    return (size_t)switch_pt_capacity(index->count) * sizeof(uint32_t);
+}
+
 /* files[i]: the index record carrying pair i's translation, so a lookup costs no scan of the index. Every translation
- * must have one. */
+ * must have one. scratch holds switch_pt_originals_link_bytes(index) bytes. */
 static inline enum switch_pt_error switch_pt_originals_link(const struct switch_pt_index *index,
                                                             const struct switch_pt_originals *originals,
-                                                            uint32_t *files)
+                                                            uint32_t *files, void *scratch, size_t scratch_bytes)
 {
+    if (originals->count == 0) {
+        return SWITCH_PT_OK;
+    }
+    const uint32_t capacity = switch_pt_capacity(index->count);
+    const size_t need = (size_t)capacity * sizeof(uint32_t);
+    if (!scratch || scratch_bytes < need) {
+        return SWITCH_PT_STORAGE_SHORT;
+    }
+    uint32_t *slots = (uint32_t *)scratch;
+    __builtin_memset(slots, 0, need);
+    const uint32_t mask = capacity - 1u;
+    for (uint32_t file = 0; file < index->count; ++file) {
+        const uint8_t *cdhash = switch_pt_file_cdhash_at(index, file);
+        for (uint32_t at = switch_pt_slot(switch_pt_u64(cdhash), mask);; at = (at + 1u) & mask) {
+            if (slots[at] == 0) {
+                slots[at] = file + 1u;
+                break;
+            }
+            if (__builtin_memcmp(switch_pt_file_cdhash_at(index, slots[at] - 1u), cdhash, SWITCH_PT_CDHASH) == 0) {
+                break;
+            }
+        }
+    }
     for (uint32_t i = 0; i < originals->count; ++i) {
         const uint8_t *translated = switch_pt_original_at(originals, i) + SWITCH_PT_CDHASH;
-        uint32_t file = 0;
-        while (file < index->count &&
-               __builtin_memcmp(switch_pt_file_at(index, file).cdhash, translated, SWITCH_PT_CDHASH) != 0) {
-            ++file;
+        uint32_t found = 0;
+        for (uint32_t at = switch_pt_slot(switch_pt_u64(translated), mask); slots[at] != 0; at = (at + 1u) & mask) {
+            if (__builtin_memcmp(switch_pt_file_cdhash_at(index, slots[at] - 1u), translated, SWITCH_PT_CDHASH) == 0) {
+                found = slots[at];
+                break;
+            }
         }
-        if (file == index->count) {
+        if (found == 0) {
             return SWITCH_PT_RECORD_BAD;
         }
-        files[i] = file;
+        files[i] = found - 1u;
     }
     return SWITCH_PT_OK;
 }

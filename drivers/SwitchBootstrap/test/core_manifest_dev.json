@@ -1,0 +1,62 @@
+{
+  "archive_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "managed_generation": "12c2e88c80a49381a0bcb7d532536b7410a10f4f27753567c2ea1cfbecce0c19",
+  "managed_packages": {
+    "ellekit": {
+      "file": "ellekit.deb",
+      "sha256": "9e220dbe1062e6a4635b36d8727945846897e01522ea4a5c830b9e0f2d3c33b9",
+      "size": 15,
+      "version": "1"
+    },
+    "launchctl": {
+      "file": "launchctl.deb",
+      "sha256": "58ffd7c39502009aa613bfe3c3aa230cb1542389cc8a5a405e41922ec90bbc97",
+      "size": 17,
+      "version": "1:1.2.0+switch1"
+    },
+    "openssh-client": {
+      "file": "openssh-client.deb",
+      "sha256": "aa168976dd9efcb436b59c5a470dd1c7e7e44b96f5940e83d17992b4ee5c8f4a",
+      "size": 22,
+      "version": "1"
+    },
+    "openssh-server": {
+      "file": "openssh-server.deb",
+      "sha256": "05a4f6f4a0abbbd10abf6c40f826d559da06d19021a2cd37cf2c0094e5c51b81",
+      "size": 22,
+      "version": "1"
+    },
+    "openssh-sftp-server": {
+      "file": "openssh-sftp-server.deb",
+      "sha256": "eb0ce02d5a74b5e1e3eade2bdd302daf8cc71682039e08c546d7c2bc908a0548",
+      "size": 27,
+      "version": "1"
+    },
+    "org.coolstar.sileo": {
+      "file": "sileo.deb",
+      "sha256": "994b8b410a83f38bfc0f26489b0bd464491785eb2a0ebb6fe4783bb1eccca805",
+      "size": 13,
+      "version": "1"
+    },
+    "switch-ssh": {
+      "file": "switch-ssh.deb",
+      "sha256": "5431e3293fb219978662527c7797ed7a17a231e29867aa095b97626457ec53d0",
+      "size": 18,
+      "version": "1"
+    },
+    "top": {
+      "file": "top.deb",
+      "sha256": "bfb587de25abdaaa7e68322da369829d6b3d3be5e7a5074317555c8c1a21ca93",
+      "size": 11,
+      "version": "1"
+    },
+    "uikittools": {
+      "file": "uikittools.deb",
+      "sha256": "7d76bf0180a7d0521f11e70f2c27df2ef3fa0b2000777709e6927ff270544b72",
+      "size": 18,
+      "version": "1"
+    }
+  },
+  "schema_version": 1,
+  "sileo_executable_sha256": "14719265a8166baae973aef4852db92435525b04bb8161db86b64f84ac0f708b"
+}

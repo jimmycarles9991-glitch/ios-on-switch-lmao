@@ -434,44 +434,45 @@ static int decodePicture(HEVCDecoder *d, const Span *seg, int count, const HEVCS
     hevc_tile_table((uint16_t *)(input->va + kTilesOff), sps, pps, col, row);
     hevc_scaling_table((nvdec_hevc_scaling_list_s *)(input->va + kScalingOff), hevc_scaling_list(sps, pps));
 
-    TegraNVDECSubmit submit;
-    memset(&submit, 0, sizeof(submit));
-    submit.codec = TEGRA_NVDEC_CODEC_HEVC;
-    submit.setup_bytes = sizeof(nvdec_hevc_pic_s);
-    hevc_fill_setup(d, (nvdec_hevc_pic_s *)submit.setup, sps, pps, sh, cur, poc, &r, scratch, (uint32_t)length);
-    entry(&submit, NVC5B0_SET_APPLICATION_ID, TEGRA_NVDEC_ENTRY_VALUE, NVC5B0_SET_APPLICATION_ID_ID_HEVC, 0);
-    entry(&submit, NVC5B0_SET_CONTROL_PARAMS, TEGRA_NVDEC_ENTRY_VALUE,
+    TegraNVDECSubmit stackSubmit;
+    TegraNVDECSubmit *submit = d->b.submit_buffer ? d->b.submit_buffer : &stackSubmit;
+    memset(submit, 0, sizeof(*submit));
+    submit->codec = TEGRA_NVDEC_CODEC_HEVC;
+    submit->setup_bytes = sizeof(nvdec_hevc_pic_s);
+    hevc_fill_setup(d, (nvdec_hevc_pic_s *)submit->setup, sps, pps, sh, cur, poc, &r, scratch, (uint32_t)length);
+    entry(submit, NVC5B0_SET_APPLICATION_ID, TEGRA_NVDEC_ENTRY_VALUE, NVC5B0_SET_APPLICATION_ID_ID_HEVC, 0);
+    entry(submit, NVC5B0_SET_CONTROL_PARAMS, TEGRA_NVDEC_ENTRY_VALUE,
           NVC5B0_SET_CONTROL_PARAMS_CODEC_TYPE_HEVC | (1u << 4) /* GPTIMER_ON */ | (1u << 6) /* ERR_CONCEAL_ON */, 0);
-    entry(&submit, NVC5B0_SET_PICTURE_INDEX, TEGRA_NVDEC_ENTRY_VALUE, d->picture_index++, 0);
-    entry(&submit, NVC5B0_SET_IN_BUF_BASE_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input->handle, kBitsOff);
-    entry(&submit, NVC5B0_SET_NVDEC_STATUS_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input->handle, kStatusOff);
-    entry(&submit, NVC5B0_HEVC_SET_SCALING_LIST_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input->handle, kScalingOff);
-    entry(&submit, NVC5B0_HEVC_SET_TILE_SIZES_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input->handle, kTilesOff);
-    entry(&submit, NVC5B0_HEVC_SET_FILTER_BUFFER_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->filter_off);
-    entry(&submit, NVC5B0_SET_COLOC_DATA_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, 0);
+    entry(submit, NVC5B0_SET_PICTURE_INDEX, TEGRA_NVDEC_ENTRY_VALUE, d->picture_index++, 0);
+    entry(submit, NVC5B0_SET_IN_BUF_BASE_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input->handle, kBitsOff);
+    entry(submit, NVC5B0_SET_NVDEC_STATUS_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input->handle, kStatusOff);
+    entry(submit, NVC5B0_HEVC_SET_SCALING_LIST_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input->handle, kScalingOff);
+    entry(submit, NVC5B0_HEVC_SET_TILE_SIZES_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input->handle, kTilesOff);
+    entry(submit, NVC5B0_HEVC_SET_FILTER_BUFFER_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->filter_off);
+    entry(submit, NVC5B0_SET_COLOC_DATA_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, 0);
     for (uint16_t i = 0; i < SLOTS; i++) {
         const Entry *pic = i == cur || (d->dpb[i].used && d->dpb[i].ref) ? &d->dpb[i] : &d->dpb[scratch];
-        entry(&submit, (uint16_t)(NVC5B0_SET_PICTURE_LUMA_OFFSET0 + 4 * i), TEGRA_NVDEC_ENTRY_RELOC, pic->handle, 0);
-        entry(&submit, (uint16_t)(NVC5B0_SET_PICTURE_CHROMA_OFFSET0 + 4 * i), TEGRA_NVDEC_ENTRY_RELOC, pic->handle,
+        entry(submit, (uint16_t)(NVC5B0_SET_PICTURE_LUMA_OFFSET0 + 4 * i), TEGRA_NVDEC_ENTRY_RELOC, pic->handle, 0);
+        entry(submit, (uint16_t)(NVC5B0_SET_PICTURE_CHROMA_OFFSET0 + 4 * i), TEGRA_NVDEC_ENTRY_RELOC, pic->handle,
               d->luma_bytes);
     }
     if (hevc_display_buffer(d)) {
-        entry(&submit, NVC5B0_SET_DISPLAY_BUF_LUMA_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, e->display, 0);
-        entry(&submit, NVC5B0_SET_DISPLAY_BUF_CHROMA_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, e->display, d->luma_bytes / 2);
+        entry(submit, NVC5B0_SET_DISPLAY_BUF_LUMA_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, e->display, 0);
+        entry(submit, NVC5B0_SET_DISPLAY_BUF_CHROMA_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, e->display, d->luma_bytes / 2);
     }
-    entry(&submit, NVC5B0_EXECUTE, TEGRA_NVDEC_ENTRY_VALUE, 1u << 8 /* AWAKEN */, 0);
-    submit.clean[0] = (TegraNVDECRange){input->handle, kTilesOff, (uint32_t)(kBitsOff - kTilesOff + length + 64), 0};
-    submit.clean_count = 1;
+    entry(submit, NVC5B0_EXECUTE, TEGRA_NVDEC_ENTRY_VALUE, 1u << 8 /* AWAKEN */, 0);
+    submit->clean[0] = (TegraNVDECRange){input->handle, kTilesOff, (uint32_t)(kBitsOff - kTilesOff + length + 64), 0};
+    submit->clean_count = 1;
     uint32_t fence = 0;
-    if (d->b.submit(d->b.ctx, &submit, &fence))
+    if (d->b.submit(d->b.ctx, submit, &fence))
         return -2;
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     if (d->probe_wanted && !d->probe_ran && idr && d->sample_bytes == 2 && decodedCleanly(d, input, fence)) {
         TegraNVDECWait probeWait = {.invalidate_count = 1};
         probeWait.invalidate[0] = (TegraNVDECRange){e->handle, 0, d->luma_bytes + d->luma_bytes / 2, 0};
         for (uint32_t mode = 2; mode <= 3; mode++)
-            hevc_display_probe_run(&d->b, &submit, &probeWait, d->surface_bytes, d->luma_bytes, e->va, d->pitch,
-                                   d->rows, sps->width, sps->height, mode, &d->probe[mode - 2]);
+            hevc_display_probe_run(&d->b, submit, &probeWait, d->surface_bytes, d->luma_bytes, e->va, d->pitch, d->rows,
+                                   sps->width, sps->height, mode, &d->probe[mode - 2]);
         d->probe_ran = true;
     }
 #endif

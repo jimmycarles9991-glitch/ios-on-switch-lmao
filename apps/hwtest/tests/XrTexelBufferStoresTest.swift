@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A kernel's store of (0.5, 0.25, -0.25, 0.75) into a 64-texel texture buffer of each extended-range format over a

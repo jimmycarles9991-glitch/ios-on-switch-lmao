@@ -9,6 +9,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import kernels
+import packfile
 
 KEY = 'k | tg=8,8,1 | tgmem= | tex=0:70:2:1:1:02030405,1:115:2:1:1:02030405 | smp='
 
@@ -40,6 +41,34 @@ class ViewsOtherTexelSize(unittest.TestCase):
     def test_a_plane_at_a_texture_of_one_image_is_named(self) -> None:
         plane = {'off': 16, 'kind': kernels.TEXTURE_PLANE, 'slot': 1, 'window': 0x1D}
         self.assertEqual(kernels.views_other_texel_size(KEY, [tex(1, 0x03), plane]), [1])
+
+    def test_facts_only_records_populate_compute_facts_without_emitting_kernels(self) -> None:
+        state_key = 'aa' * 32 + ' | #0:33:01 | max=256 tgm=1'
+        facts_rec = {
+            'outcome': 0,
+            'key': state_key + ' | tg=0,0,0 | tgmem= | tex= | smp=',
+            'why': '',
+            'facts': (256, 32, 1024),
+        }
+        failed_rec = {
+            'outcome': 1,
+            'key': 'bb' * 32 + ' |  | max=0 tgm=0 | tg=0,0,0 | tgmem= | tex= | smp=',
+            'why': 'unsupported',
+        }
+        made, skipped = kernels.from_records([facts_rec, failed_rec], [])
+        self.assertEqual(made, [])
+        self.assertEqual(skipped, [(failed_rec['key'], 'unsupported')])
+        self.assertEqual(
+            kernels.state_facts([facts_rec, failed_rec]),
+            [
+                {
+                    'hash': packfile.fnv(state_key.encode()),
+                    'max_threads': 256,
+                    'execution_width': 32,
+                    'static_memory': 1024,
+                }
+            ],
+        )
 
 
 if __name__ == '__main__':

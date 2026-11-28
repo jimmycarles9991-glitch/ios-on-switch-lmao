@@ -70,6 +70,25 @@ protected:
                std::string(reinterpret_cast<const char *>(found.data), found.size) == bytesOf(n);
     }
 
+    // The entry under `name` is the one bytesOf wrote under it: its number read back from its bytes names it
+    static bool whole(const pack::StoreReader &reader, const uint8_t *name)
+    {
+        pack::Bytes found;
+        if (!reader.find(name, found))
+            return false;
+        const std::string text(reinterpret_cast<const char *>(found.data), found.size);
+        const uint32_t n = uint32_t(strtoul(text.c_str() + 6, nullptr, 10));
+        return text == bytesOf(n) && !memcmp(nameOf(n).data(), name, pack::kStoreNameBytes);
+    }
+
+    void openIn(pack::StoreWriter &writer, const char *boot, uint64_t data = kData)
+    {
+        char named[pack::kStoreBootBytes] = {};
+        strncpy(named, boot, sizeof named - 1);
+        std::string error;
+        ASSERT_TRUE(writer.open(path, identity, kSlots, data, error, named)) << error;
+    }
+
     // The file mapped read only, as a client's mapping of the kernel's view of it
     struct ReadOnly {
         pack::Bytes mapped;
@@ -97,7 +116,6 @@ TEST_F(SeedStore, AnEntryPutIsFoundAndAnotherOfItsNameIsNotAdded)
     EXPECT_EQ(put(writer, 1), pack::StoreWriter::Put::Present);
     EXPECT_TRUE(holds(writer.reader(), 1));
     EXPECT_FALSE(holds(writer.reader(), 2));
-    EXPECT_TRUE(writer.intact(nameOf(1).data()));
     EXPECT_EQ(writer.used(), 1u);
 }
 
@@ -137,7 +155,7 @@ TEST_F(SeedStore, ASlotNamedButNotPublishedIsEmptyAndTakenAgain)
     EXPECT_EQ(again.used(), 1u);
     EXPECT_EQ(put(again, 2), pack::StoreWriter::Put::Added);
     EXPECT_TRUE(holds(client.reader, 2));
-    EXPECT_TRUE(again.intact(nameOf(2).data()));
+    EXPECT_TRUE(holds(again.reader(), 2));
 }
 
 TEST_F(SeedStore, AWriterKilledMidAppendLeavesEveryPublishedEntryWhole)
@@ -171,7 +189,7 @@ TEST_F(SeedStore, AWriterKilledMidAppendLeavesEveryPublishedEntryWhole)
             const uint8_t *entry = writer.base() + pack::kStoreHeaderBytes + uint64_t(slot) * pack::kStoreSlotBytes;
             const uint64_t offset = pack::loadAcquire(entry);
             if (offset && offset != pack::kRetired)
-                EXPECT_TRUE(writer.intact(entry + 16)) << "round " << round << " slot " << slot;
+                EXPECT_TRUE(whole(writer.reader(), entry + 16)) << "round " << round << " slot " << slot;
         }
         if (writer.used() + writer.retired() + 1 < kSlots * 3 / 4)
             EXPECT_EQ(put(writer, 900000 + round), pack::StoreWriter::Put::Added);
@@ -229,7 +247,7 @@ TEST_F(SeedStore, ARetiredEntryIsSteppedOverAndMayBePublishedAgain)
     EXPECT_TRUE(holds(writer.reader(), 4));
 }
 
-TEST_F(SeedStore, AFullStoreRefusesAndCompactionKeepsOnlyWholeEntries)
+TEST_F(SeedStore, AFullStoreRefusesAndCompactionKeepsItsLiveEntries)
 {
     {
         pack::StoreWriter writer;
@@ -240,19 +258,174 @@ TEST_F(SeedStore, AFullStoreRefusesAndCompactionKeepsOnlyWholeEntries)
         EXPECT_EQ(put(writer, n), pack::StoreWriter::Put::Full);
         EXPECT_EQ(writer.used(), kSlots * 3 / 4);
         writer.retire(nameOf(0).data());
-        pack::Bytes bytes;
-        ASSERT_TRUE(writer.reader().find(nameOf(1).data(), bytes));
-        const_cast<uint8_t *>(bytes.data)[0] ^= 0xff;  // its slot written back, its bytes not
     }
     std::string error;
     ASSERT_TRUE(pack::compactStore(path, identity, kSlots, kData, error)) << error;
     pack::StoreWriter writer;
     open(writer);
-    EXPECT_EQ(writer.used(), kSlots * 3 / 4 - 2);
+    EXPECT_EQ(writer.used(), kSlots * 3 / 4 - 1);
     EXPECT_EQ(writer.retired(), 0u);
     EXPECT_FALSE(holds(writer.reader(), 0));
-    EXPECT_FALSE(holds(writer.reader(), 1));
+    EXPECT_TRUE(holds(writer.reader(), 1));
     EXPECT_TRUE(holds(writer.reader(), 2));
+}
+
+// A panic after entry 3 was published and before it was persisted: its slot may be on the card without its bytes
+TEST_F(SeedStore, AnEntryPastTheDurableEndIsRetiredByAWriterOfALaterBoot)
+{
+    uint64_t durable = 0;
+    {
+        pack::StoreWriter writer;
+        openIn(writer, "boot A");
+        ASSERT_EQ(put(writer, 1), pack::StoreWriter::Put::Added);
+        ASSERT_EQ(put(writer, 2), pack::StoreWriter::Put::Added);
+        const uint64_t written = writer.layout().dataOffset + writer.dataUsed();
+        ASSERT_TRUE(writer.persist());
+        durable = writer.durableEnd();
+        EXPECT_EQ(durable, written);
+        ASSERT_EQ(put(writer, 3), pack::StoreWriter::Put::Added);
+    }
+    pack::StoreWriter writer;
+    openIn(writer, "boot B");
+    EXPECT_TRUE(holds(writer.reader(), 1));
+    EXPECT_TRUE(holds(writer.reader(), 2));
+    EXPECT_FALSE(holds(writer.reader(), 3));
+    EXPECT_EQ(writer.used(), 2u);
+    EXPECT_EQ(writer.retired(), 1u);
+    EXPECT_EQ(writer.durableEnd(), durable);
+    ASSERT_EQ(put(writer, 3), pack::StoreWriter::Put::Added);
+    pack::Bytes found;
+    ASSERT_TRUE(writer.reader().find(nameOf(3).data(), found));
+    EXPECT_GE(uint64_t(found.data - writer.base()), durable) << "a new entry lands past what a later boot trusts";
+    EXPECT_EQ(uint64_t(found.data - writer.base()) % pack::kStorePageBytes, 0u) << "and off the mark's page";
+}
+
+uint64_t offsetOf(const pack::StoreWriter &writer, uint32_t n)
+{
+    pack::Bytes found;
+    return writer.reader().find(nameOf(n).data(), found) ? uint64_t(found.data - writer.base()) : 0;
+}
+
+// A torn write of the page an entry shares with trusted bytes would corrupt them with nothing to see it
+TEST_F(SeedStore, AnEntryPutAfterAPersistStartsOnAPageOfItsOwn)
+{
+    pack::StoreWriter writer;
+    openIn(writer, "boot A");
+    ASSERT_EQ(put(writer, 1), pack::StoreWriter::Put::Added);
+    ASSERT_TRUE(writer.persist());
+    const uint64_t durable = writer.durableEnd();
+    ASSERT_EQ(put(writer, 2), pack::StoreWriter::Put::Added);
+    EXPECT_EQ(offsetOf(writer, 2) % pack::kStorePageBytes, 0u);
+    EXPECT_GE(offsetOf(writer, 2), durable);
+    ASSERT_EQ(put(writer, 3), pack::StoreWriter::Put::Added);
+    EXPECT_EQ(offsetOf(writer, 3), offsetOf(writer, 2) + bytesOf(2).size() + (8 - bytesOf(2).size() % 8) % 8)
+        << "entries between persists are packed";
+}
+
+// The compiler restarted in the boot that wrote the store, its newest entries retired (a refusal made again): the
+// bytes below the mark are a later boot's to trust, so nothing is written there again
+TEST_F(SeedStore, ASameBootWriterWhoseNewestEntriesWereRetiredAppendsPastTheMark)
+{
+    uint64_t durable = 0;
+    {
+        pack::StoreWriter writer;
+        openIn(writer, "boot A");
+        ASSERT_EQ(put(writer, 1), pack::StoreWriter::Put::Added);
+        ASSERT_EQ(put(writer, 2), pack::StoreWriter::Put::Added);
+        ASSERT_TRUE(writer.persist());
+        durable = writer.durableEnd();
+        ASSERT_TRUE(writer.retire(nameOf(2).data()));
+    }
+    pack::StoreWriter writer;
+    openIn(writer, "boot A");
+    ASSERT_EQ(put(writer, 3), pack::StoreWriter::Put::Added);
+    EXPECT_GE(offsetOf(writer, 3), durable);
+    EXPECT_EQ(offsetOf(writer, 3) % pack::kStorePageBytes, 0u);
+    EXPECT_TRUE(holds(writer.reader(), 1));
+}
+
+// The newer mark's write torn so its generation is the old one's: the older mark is read, which trusts less
+TEST_F(SeedStore, ATornNewerMarkFallsBackToTheOlderMark)
+{
+    uint64_t older = 0;
+    {
+        pack::StoreWriter writer;
+        openIn(writer, "boot A");
+        ASSERT_EQ(put(writer, 1), pack::StoreWriter::Put::Added);
+        ASSERT_TRUE(writer.persist());
+        older = writer.durableEnd();
+        ASSERT_EQ(put(writer, 2), pack::StoreWriter::Put::Added);
+        ASSERT_TRUE(writer.persist());
+        ASSERT_GT(writer.durableEnd(), older);
+        uint8_t *newer = writer.base() + pack::kStoreMarksAt;  // generation 2's slot
+        memset(newer + 8, 0, 8);
+    }
+    pack::StoreWriter writer;
+    openIn(writer, "boot B");
+    EXPECT_EQ(writer.durableEnd(), older);
+    EXPECT_TRUE(holds(writer.reader(), 1));
+    EXPECT_FALSE(holds(writer.reader(), 2));
+}
+
+// The compiler started again in the boot that wrote the store: the page cache holds every published entry whole
+TEST_F(SeedStore, AWriterOfTheSameBootKeepsEntriesPastTheDurableEnd)
+{
+    {
+        pack::StoreWriter writer;
+        openIn(writer, "boot A");
+        ASSERT_EQ(put(writer, 1), pack::StoreWriter::Put::Added);
+        ASSERT_TRUE(writer.persist());
+        ASSERT_EQ(put(writer, 2), pack::StoreWriter::Put::Added);
+    }
+    pack::StoreWriter writer;
+    openIn(writer, "boot A");
+    EXPECT_TRUE(holds(writer.reader(), 1));
+    EXPECT_TRUE(holds(writer.reader(), 2));
+    EXPECT_EQ(writer.retired(), 0u);
+}
+
+TEST_F(SeedStore, AStoreThatSaysNothingOfItsBootTrustsOnlyItsDurableEnd)
+{
+    {
+        pack::StoreWriter writer;
+        openIn(writer, "");
+        ASSERT_EQ(put(writer, 1), pack::StoreWriter::Put::Added);
+        ASSERT_TRUE(writer.persist());
+        ASSERT_EQ(put(writer, 2), pack::StoreWriter::Put::Added);
+    }
+    pack::StoreWriter writer;
+    openIn(writer, "");
+    EXPECT_TRUE(holds(writer.reader(), 1));
+    EXPECT_FALSE(holds(writer.reader(), 2));
+}
+
+TEST_F(SeedStore, APersistWithNothingNewKeepsTheMark)
+{
+    pack::StoreWriter writer;
+    openIn(writer, "boot A");
+    ASSERT_EQ(put(writer, 1), pack::StoreWriter::Put::Added);
+    ASSERT_TRUE(writer.persist());
+    const uint64_t durable = writer.durableEnd();
+    EXPECT_TRUE(writer.persist());
+    EXPECT_EQ(writer.durableEnd(), durable);
+}
+
+TEST_F(SeedStore, AStoreWrittenAgainIsDurableWhole)
+{
+    {
+        pack::StoreWriter writer;
+        openIn(writer, "boot A");
+        for (uint32_t n = 0; n < 6; ++n)
+            ASSERT_EQ(put(writer, n), pack::StoreWriter::Put::Added);
+        ASSERT_TRUE(writer.persist());
+    }
+    std::string error;
+    ASSERT_TRUE(pack::compactStore(path, identity, kSlots, kData, error)) << error;
+    pack::StoreWriter writer;
+    openIn(writer, "boot B");
+    for (uint32_t n = 0; n < 6; ++n)
+        EXPECT_TRUE(holds(writer.reader(), n)) << n;
+    EXPECT_EQ(writer.retired(), 0u);
 }
 
 // A program slot kept for a GPU client to run in place: a whole-page entry on pages no other entry shares, before and

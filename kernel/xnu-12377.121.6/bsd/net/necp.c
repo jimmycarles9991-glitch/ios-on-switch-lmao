@@ -10188,8 +10188,8 @@ necp_socket_find_policy_match_with_info_locked(struct necp_kernel_socket_policy 
 		int session_start_index = -1;
 		bool check_signing_id = false;
 		bool skipped_signing_id = false;
-		u_int32_t saved_netagent_ids[NECP_MAX_NETAGENTS] = {};
-		u_int32_t saved_netagent_use_flags[NECP_MAX_NETAGENTS] = {};
+		u_int32_t saved_netagent_ids[NECP_MAX_NETAGENTS];
+		u_int32_t saved_netagent_use_flags[NECP_MAX_NETAGENTS];
 		size_t saved_netagent_cursor = 0;
 		size_t saved_route_rule_id_count = 0;
 		necp_kernel_policy_filter saved_return_filter = 0;
@@ -10197,7 +10197,7 @@ necp_socket_find_policy_match_with_info_locked(struct necp_kernel_socket_policy 
 		necp_kernel_policy_id saved_skip_policy_id = NECP_KERNEL_POLICY_ID_NONE;
 		bool saved_skipped_ip_result = false;
 		u_int32_t saved_drop_order = 0;
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_DIAG_NECP) && SWITCH_DIAG_NECP
 		const struct necp_kernel_socket_policy *saved_last_skip = NULL;
 #endif
 		for (i = 0; policy_search_array[i] != NULL; i++) {
@@ -10241,8 +10241,10 @@ necp_socket_find_policy_match_with_info_locked(struct necp_kernel_socket_policy 
 				session_start_index = i;
 				check_signing_id = false;
 				skipped_signing_id = false;
-				memcpy(&saved_netagent_ids, &netagent_ids, sizeof(saved_netagent_ids));
-				memcpy(&saved_netagent_use_flags, &netagent_use_flags, sizeof(saved_netagent_use_flags));
+				if (netagent_cursor > 0) {
+					memcpy(&saved_netagent_ids, &netagent_ids, netagent_cursor * sizeof(u_int32_t));
+					memcpy(&saved_netagent_use_flags, &netagent_use_flags, netagent_cursor * sizeof(u_int32_t));
+				}
 				saved_netagent_cursor = netagent_cursor;
 				saved_route_rule_id_count = route_rule_id_count;
 				if (return_filter != NULL) {
@@ -10256,7 +10258,7 @@ necp_socket_find_policy_match_with_info_locked(struct necp_kernel_socket_policy 
 				}
 				saved_skipped_ip_result = skipped_ip_result;
 				saved_drop_order = info->drop_order;
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_DIAG_NECP) && SWITCH_DIAG_NECP
 				saved_last_skip = info->switch_last_skip;
 #endif
 			}
@@ -10475,8 +10477,15 @@ necp_socket_find_policy_match_with_info_locked(struct necp_kernel_socket_policy 
 				    (policy_search_array[i]->result_parameter.drop_flags & NECP_KERNEL_POLICY_DROP_FLAG_RETRY_SIGNING_IDENTIFIER)) {
 					skipped_signing_id = false;
 					check_signing_id = true;
-					memcpy(&netagent_ids, &saved_netagent_ids, sizeof(netagent_ids));
-					memcpy(&netagent_use_flags, &saved_netagent_use_flags, sizeof(netagent_use_flags));
+					if (saved_netagent_cursor > 0) {
+						memcpy(&netagent_ids, &saved_netagent_ids, saved_netagent_cursor * sizeof(u_int32_t));
+						memcpy(&netagent_use_flags, &saved_netagent_use_flags, saved_netagent_cursor * sizeof(u_int32_t));
+					}
+					if (netagent_cursor > saved_netagent_cursor) {
+						size_t clear_bytes = (netagent_cursor - saved_netagent_cursor) * sizeof(u_int32_t);
+						memset(&netagent_ids[saved_netagent_cursor], 0, clear_bytes);
+						memset(&netagent_use_flags[saved_netagent_cursor], 0, clear_bytes);
+					}
 					netagent_cursor = saved_netagent_cursor;
 					route_rule_id_count = saved_route_rule_id_count;
 					if (return_filter != NULL) {
@@ -10490,7 +10499,7 @@ necp_socket_find_policy_match_with_info_locked(struct necp_kernel_socket_policy 
 					}
 					skipped_ip_result = saved_skipped_ip_result;
 					info->drop_order = saved_drop_order;
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_DIAG_NECP) && SWITCH_DIAG_NECP
 					info->switch_last_skip = saved_last_skip;
 #endif
 					skip_order = 0;

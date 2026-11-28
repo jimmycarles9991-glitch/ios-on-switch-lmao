@@ -7,6 +7,8 @@ struct tgm_mem;
 
 int peer_allocated_memory_smmu(struct switch_gpu_backing *backing, uint32_t count,
 			       struct tgm_mem **out);
+int peer_allocated_memory_big(struct switch_gpu_backing *backing, uint32_t count,
+			      struct tgm_mem **out);
 int peer_allocated_memory_existing(struct switch_gpu_backing *backing, uint32_t count,
 				   struct tgm_mem **out);
 int peer_allocated_memory_existing_or_direct(struct switch_gpu_backing *backing, uint32_t count,

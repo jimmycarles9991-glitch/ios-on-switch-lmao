@@ -51,13 +51,16 @@ static native_planes::Surface planeSurfaceOf(OSObject *surface)
     const auto narrow = [](uint64_t v) {
         return v > 0xffffffffULL ? 0xffffffffu : static_cast<uint32_t>(v);
     };
-    TegraVICSurfaceDesc color = {};
-    switch_vic_surface_color(surface, &color);
-    f.colorMatrix = color.colorMatrix;
-    f.transfer = color.transfer;
-    f.primaries = color.primaries;
-    f.chromaTop = color.chromaTop;
-    f.chromaBottom = color.chromaBottom;
+    const native_planes::Kind kind = native_planes::kindOf(f.format, f.planes);
+    if (native_planes::isYuv(kind)) {
+        TegraVICSurfaceDesc color = {};
+        switch_vic_surface_color(surface, &color);
+        f.colorMatrix = color.colorMatrix;
+        f.transfer = color.transfer;
+        f.primaries = color.primaries;
+        f.chromaTop = color.chromaTop;
+        f.chromaBottom = color.chromaBottom;
+    }
     if (f.planes >= 2) {
         for (uint32_t p = 0; p < 2; ++p) {
             f.offset[p] = native_planes_surface_plane_offset(surface, p);
@@ -95,8 +98,13 @@ struct PlaneDecision {
 #include "SwitchPlaneSelection.h"
 
 // The GPU driver's layout of a surface it renders block-linear (by its first page): `block` filled, or null for rows.
-static const tgm_layout *surfaceLayout(OSObject *surface, tgm_layout &block)
+static const tgm_layout *surfaceLayout(OSObject *surface, tgm_layout &block,
+                                       const SwitchNativeScanout *scanout = nullptr)
 {
+    if (scanout && scanout->allocation.pages && scanout->pitchOffset / 4096 < scanout->allocation.page_count) {
+        const addr64_t pa = scanout->allocation.pages[scanout->pitchOffset / 4096];
+        return pa && tegra_gm20b_surface_layout(pa & ~0xfffULL, &block) == 1 ? &block : nullptr;
+    }
     IOMemoryDescriptor *memory = native_legacy_surface_descriptor(surface);
     if (!memory || !memory->metaCast("IOMemoryDescriptor") || memory->prepare(kIODirectionOut) != kIOReturnSuccess)
         return nullptr;

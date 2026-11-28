@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// KernelConvertedWrites.swift on the driver: per view <view>_bytes_changed= surface bytes the dropped store moved,

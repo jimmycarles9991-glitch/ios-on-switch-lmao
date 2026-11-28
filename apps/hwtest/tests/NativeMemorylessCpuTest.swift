@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A CPU copy of a memoryless texture (drivers/TegraGM20BMetal/TegraGM20BMetalTexture.mm cpuReachesNothing): getBytes

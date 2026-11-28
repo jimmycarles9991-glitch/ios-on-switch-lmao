@@ -990,8 +990,9 @@ pub struct FramebufferFetchInputs {
     pub depth_or_stencil: bool,
     /// The descriptor enables alpha to coverage.
     pub alpha_to_coverage: bool,
-    /// The descriptor's `maxVertexAmplificationCount` is above 1: the pipeline may draw
-    /// multiview.
+    /// The descriptor's `maxVertexAmplificationCount` is above 1: its draws are drawn one
+    /// amplification each into a layered pass, where a multisampled function has no storage form
+    /// (`lower::fragment::fetch::plan_layer`).
     pub amplified: bool,
     /// The attachments of [`attachments`](Self::attachments) the pipeline names only for Metal's
     /// 16-bit float blend of a `half4` output (`DevicePolicy::half_blend`): the function takes

@@ -16,6 +16,7 @@
 // A full-target clear of a compressed target to a value the GPU's ZBC table holds writes comptags and no texels. The table
 // is the boot one (nvkm gf100_gr_zbc_init and the kernel's opaque black) and what processes added (zbc.h).
 #pragma once
+#include <atomic>
 #include <IOKit/IOReturn.h>
 #include <algorithm>
 #include <chrono>
@@ -75,6 +76,18 @@ constexpr bool copyEngineReadsCompressed(uint32_t kind)
     default:
         return false;
     }
+}
+
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+// 4x private colour textures made while set take NVN's C32_MS4_2CBR and C64_MS4_2CBR (deko3d image_formats.cpp) in
+// place of 2CRA: gpu.perf.nvn's A/B (TegraGM20BMetalProbe.mm, private_comp.h privateCompressedKind)
+inline std::atomic<bool> probeMs4Cbr{false};
+#endif
+
+// The 2CBR kinds only that probe binds
+constexpr bool probeOnlyKind(uint32_t kind)
+{
+    return kind == 0xe0 || kind == 0xee;
 }
 
 // The compressible kind of a block-linear colour target of `bpp`-byte texels at `samples` samples, or of the depth/stencil
@@ -273,7 +286,6 @@ struct CompQueue {
     // refused for a shortage since this process last gave compressed memory back, which alone may change the answer
     std::vector<CompWant> refused;
     std::vector<std::unique_ptr<CompMem>> mems;
-    bool loggedOn = false;
 
     // Not to be asked for: asked already or made at least as large, or refused for a shortage nothing has eased since
     bool asked(const CompWant &w) const

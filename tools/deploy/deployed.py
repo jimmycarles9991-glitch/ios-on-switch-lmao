@@ -10,6 +10,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
+from tools.deploy import compiler_inputs
 from tools.install import renamed
 
 NAME = 'deployed.json'
@@ -39,9 +40,12 @@ def record(data_root: Path, checkout: Path, build: str, log: Callable[..., None]
     source = provenance(package) if package else None
     if source is None:
         source = describe(checkout)
+    fixtures = compiler_inputs.staged_states(data_root)
     info = {
         **source,
         'build': source.get('build') or build,
+        'compiler_inputs_staged': bool(fixtures),
+        'compiler_input_states': fixtures,
         'deployed_at': datetime.now(UTC).isoformat(timespec='seconds'),
     }
     folder = renamed.data_folder(data_root)

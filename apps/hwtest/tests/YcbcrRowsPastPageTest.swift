@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 import SwitchBench
 

@@ -3,6 +3,8 @@
 #include "compiler_store.h"
 #include "../compute_slot.h"
 #include "../program_pages.h"
+#include "../cache_io.h"
+#include "../store_key.h"
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -64,10 +66,11 @@ bool Store::open(const std::string &root, uint64_t stack, const gm20b::Digest &r
         return error = "cannot make " + dir + ": " + strerror(errno), false;
     removeOthers(root, ours);
     identityOf(stack, rules, identity_);
+    switch_seed_pack::currentBoot(boot_);
     const uint8_t *identity = identity_;
     path_ = dir + "/store";
     std::lock_guard<std::mutex> l(lock_);
-    if (!writer_.open(path_, identity, kSlots, kDataBytes, error))
+    if (!writer_.open(path_, identity, kSlots, kDataBytes, error, boot_))
         return false;
     // Retired entries are reclaimed here, before this compiler registers the file
     const bool crowded = writer_.retired() * 4 > kSlots || writer_.dataUsed() > kDataBytes / 4 * 3 ||
@@ -76,9 +79,9 @@ bool Store::open(const std::string &root, uint64_t stack, const gm20b::Digest &r
         return true;
     writer_.close();
     std::string compacted;
-    if (!switch_seed_pack::compactStore(path_, identity, kSlots, kDataBytes, compacted))
+    if (!switch_seed_pack::compactStore(path_, identity, kSlots, kDataBytes, compacted, UINT64_MAX, UINT32_MAX, boot_))
         unlink(path_.c_str());
-    return writer_.open(path_, identity, kSlots, kDataBytes, error);
+    return writer_.open(path_, identity, kSlots, kDataBytes, error, boot_);
 }
 
 bool Store::find(const gm20b::Digest &name, std::string &bytes) const
@@ -97,12 +100,91 @@ void Store::retire(const gm20b::Digest &name)
     writer_.retire(name.data());
 }
 
+bool Store::holdsLocked(const gm20b::Digest &name, const gm20b::CacheKey &key) const
+{
+    switch_seed_pack::Bytes found;
+    if (!writer_.reader().find(name.data(), found))
+        return false;
+    const std::string_view view(reinterpret_cast<const char *>(found.data), found.size);
+    gm20b::Reader r(view);
+    uint32_t kind = 0;
+    return gm20b::readEntryHead(view, r, key, kind);
+}
+
+// Every candidate is read before a free one is chosen: makeRoom keeps the newest entries and retire steps one over, so
+// a content's entry can sit past a free candidate, where clients still find it (Completion::storedEntry)
+bool Store::findViewLocked(const gm20b::Digest &name, const gm20b::CacheKey &key, std::string_view &bytes,
+                           gm20b::Digest &at) const
+{
+    bool free = false;
+    for (uint32_t k = 0; k < gm20b::kStoreCandidates; ++k) {
+        const gm20b::Digest candidate = gm20b::candidateName(name, k);
+        switch_seed_pack::Bytes found;
+        if (!writer_.reader().find(candidate.data(), found)) {
+            if (!free)
+                at = candidate;
+            free = true;
+            continue;
+        }
+        const std::string_view view(reinterpret_cast<const char *>(found.data), found.size);
+        gm20b::Reader r(view);
+        uint32_t kind = 0;
+        if (gm20b::readEntryHead(view, r, key, kind)) {
+            bytes = view;
+            at = candidate;
+            return true;
+        }
+        if (!free)
+            at = candidate;
+    }
+    bytes = {};
+    return false;
+}
+
+bool Store::find(const gm20b::Digest &name, const gm20b::CacheKey &key, std::string &bytes, gm20b::Digest &at) const
+{
+    std::lock_guard<std::mutex> l(lock_);
+    std::string_view view;
+    if (!findViewLocked(name, key, view, at)) {
+        bytes.clear();
+        return false;
+    }
+    bytes.assign(view.data(), view.size());
+    return true;
+}
+
+void Store::retire(const gm20b::Digest &name, const gm20b::CacheKey &key)
+{
+    std::lock_guard<std::mutex> l(lock_);
+    if (holdsLocked(name, key))
+        writer_.retire(name.data());
+}
+
 Store::Put Store::put(const gm20b::Digest &name, const std::string &entry)
 {
     std::lock_guard<std::mutex> l(lock_);
     if (entry.size() > UINT32_MAX)
         return Put::Failed;
     switch (writer_.put(name.data(), reinterpret_cast<const uint8_t *>(entry.data()), uint32_t(entry.size()), true)) {
+    case switch_seed_pack::StoreWriter::Put::Added:
+        return Put::Added;
+    case switch_seed_pack::StoreWriter::Put::Full:
+        return Put::Full;
+    default:
+        return Put::Failed;
+    }
+}
+
+Store::Put Store::put(const gm20b::Digest &name, const gm20b::CacheKey &key, const std::string &entry,
+                      gm20b::Digest &at, const std::function<bool(const std::string &held)> &keep)
+{
+    std::lock_guard<std::mutex> l(lock_);
+    if (entry.size() > UINT32_MAX)
+        return Put::Failed;
+    std::string_view held;
+    if (findViewLocked(name, key, held, at) && keep && keep(std::string(held)))
+        return Put::Kept;
+    switch (writer_.put(at.data(), reinterpret_cast<const uint8_t *>(entry.data()), uint32_t(entry.size()), true)) {
     case switch_seed_pack::StoreWriter::Put::Added:
         return Put::Added;
     case switch_seed_pack::StoreWriter::Put::Full:
@@ -148,13 +230,33 @@ Store::Put Store::putProgramSlots(const gm20b::CacheKey &key, const std::string 
 
 bool Store::makeRoom(std::string &error)
 {
+    std::lock_guard<std::mutex> p(persistLock_);
     std::lock_guard<std::mutex> l(lock_);
     writer_.close();
-    if (!switch_seed_pack::compactStore(path_, identity_, kSlots, kDataBytes, error, kDataBytes / 2, kSlots / 4)) {
+    if (!switch_seed_pack::compactStore(path_, identity_, kSlots, kDataBytes, error, kDataBytes / 2, kSlots / 4,
+                                        boot_)) {
         unlink(path_.c_str());
         error = "the full store could not be written again (" + error + "): made anew";
     }
-    return writer_.open(path_, identity_, kSlots, kDataBytes, error);
+    return writer_.open(path_, identity_, kSlots, kDataBytes, error, boot_);
+}
+
+bool Store::persist()
+{
+    std::lock_guard<std::mutex> p(persistLock_);
+    switch_seed_pack::StoreWriter::Pending pending;
+    {
+        std::lock_guard<std::mutex> l(lock_);
+        if (!writer_.pending(pending))
+            return true;
+    }
+    if (!writer_.sync(pending))
+        return false;
+    {
+        std::lock_guard<std::mutex> l(lock_);
+        writer_.markDurable(pending);
+    }
+    return writer_.syncMark();
 }
 
 }  // namespace switch_compiler

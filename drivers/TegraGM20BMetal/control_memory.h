@@ -34,6 +34,7 @@ enum class ControlUse : uint8_t {
     HandleTables,
     // m2v's root table, its identity resident set, sink and ExecutionStatus words: one CPU fill, then the GPU's writes
     ArgumentRoots,
+    ZcullStorage,  // zcull regions (zcull_slots.h): STORE_ZCULL writes them, LOAD_ZCULL reads them, the CPU never
 };
 
 constexpr ControlMapping controlMapping(ControlUse use)
@@ -45,6 +46,7 @@ constexpr ControlMapping controlMapping(ControlUse use)
     case ControlUse::ColorTable:
     case ControlUse::ArgumentRoots:
     case ControlUse::HandleTables:
+    case ControlUse::ZcullStorage:
         return ControlMapping::Cached;
     case ControlUse::TextureHeaders:
     case ControlUse::SamplerHeaders:

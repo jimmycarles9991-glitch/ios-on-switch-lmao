@@ -6,9 +6,12 @@
  */
 #include <sys/decmpfs.h>
 #include <sys/ioccom.h>
+#include <sys/param.h>
 #include <sys/proc.h>
 #include <sys/uio_internal.h>
 #include <sys/vnode_internal.h>
+#include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <sys/systm.h>
 #include <sys/xattr.h>
 
@@ -22,6 +25,55 @@
 #define FSCTL_DIAG_PATH 96
 
 static uint32_t fsctl_diag_marks, fsctl_diag_others;
+static uint32_t fsctl_mark_counts[SWITCH_FSCTL_MARK_KINDS];
+/* The first process each outcome came from: claimed by one writer, readable once published */
+static uint32_t fsctl_mark_by_claimed[SWITCH_FSCTL_MARK_KINDS], fsctl_mark_by_published[SWITCH_FSCTL_MARK_KINDS];
+static char fsctl_mark_by[SWITCH_FSCTL_MARK_KINDS][MAXCOMLEN + 1];
+
+static const char *fsctl_mark_by_name(enum switch_fsctl_mark kind)
+{
+    return os_atomic_load(&fsctl_mark_by_published[kind], acquire) ? fsctl_mark_by[kind] : "-";
+}
+
+static int fsctl_marks_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2,
+                              struct sysctl_req *req)
+{
+    char line[192];
+
+    snprintf(line, sizeof(line),
+             "ok=%u unsupported=%u compressed=%u other=%u unsupported_by=%s compressed_by=%s "
+             "other_by=%s",
+             os_atomic_load(&fsctl_mark_counts[SWITCH_FSCTL_MARK_OK], relaxed),
+             os_atomic_load(&fsctl_mark_counts[SWITCH_FSCTL_MARK_UNSUPPORTED], relaxed),
+             os_atomic_load(&fsctl_mark_counts[SWITCH_FSCTL_MARK_COMPRESSED], relaxed),
+             os_atomic_load(&fsctl_mark_counts[SWITCH_FSCTL_MARK_OTHER], relaxed),
+             fsctl_mark_by_name(SWITCH_FSCTL_MARK_UNSUPPORTED), fsctl_mark_by_name(SWITCH_FSCTL_MARK_COMPRESSED),
+             fsctl_mark_by_name(SWITCH_FSCTL_MARK_OTHER));
+    return SYSCTL_OUT(req, line, strlen(line) + 1);
+}
+
+/* Every purgeable mark any process asked APFS for since boot: what HW Test's sandbox never lets it ask itself. */
+SYSCTL_PROC(_kern, OID_AUTO, switch_fsctl_marks, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, NULL, 0,
+            fsctl_marks_sysctl, "A", "APFS purgeable marks since boot by outcome");
+
+static void fsctl_mark_count(vnode_t vp, int error, vfs_context_t ctx)
+{
+    struct vnode_attr va;
+    int compressed = 0;
+    enum switch_fsctl_mark kind;
+
+    if (error != 0) {
+        VATTR_INIT(&va);
+        VATTR_WANTED(&va, va_flags);
+        compressed = vnode_getattr(vp, &va, ctx) == 0 && (va.va_flags & UF_COMPRESSED) != 0;
+    }
+    kind = switch_fsctl_mark_for(error, compressed);
+    os_atomic_inc(&fsctl_mark_counts[kind], relaxed);
+    if (os_atomic_cmpxchg(&fsctl_mark_by_claimed[kind], 0, 1, relaxed)) {
+        proc_selfname(fsctl_mark_by[kind], sizeof(fsctl_mark_by[kind]));
+        os_atomic_store(&fsctl_mark_by_published[kind], 1, release);
+    }
+}
 
 static int fsctl_diag_xattr(vnode_t vp, const char *name, void *buf, size_t len, size_t *size, vfs_context_t ctx)
 {
@@ -49,7 +101,13 @@ void switch_fsctl_failed(vnode_t vp, unsigned long cmd, const void *data, int er
     void *xattr = NULL;
     enum switch_fsctl_line line;
 
-    if (error == 0 || IOCGROUP(cmd) != 'J') {
+    if (IOCGROUP(cmd) != 'J') {
+        return;
+    }
+    if (switch_fsctl_is_mark(cmd, vnode_isreg(vp))) {
+        fsctl_mark_count(vp, error, ctx);
+    }
+    if (error == 0) {
         return;
     }
     line = switch_fsctl_line_for(

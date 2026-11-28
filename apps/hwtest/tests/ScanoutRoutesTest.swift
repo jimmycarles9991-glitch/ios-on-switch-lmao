@@ -1,4 +1,6 @@
 import HWTestCore
+import HWTestKit
+import HWTestShared
 
 /// The display copies a scanout frame on the CPU only while VIC is not up: the GPU's copy engine takes a frame window
 /// A cannot scan in place, VIC one the copy engine declines. kern.switch_scanout_* (debug kernels) count since boot the
@@ -22,7 +24,9 @@ struct ScanoutRoutesTest: HWTest {
         var metrics = Metrics()
         guard unread == 0 else {
             metrics.set("sysctl", KernelSysctl.code(unread))
-            return .skip(KernelSysctl.unreadable("kern.switch_scanout_*", unread), metrics)
+            return .skip(
+                KernelSysctl.unreadable("kern.switch_scanout_*", unread, flag: "--//bazel:stats_frame"), metrics
+            )
         }
         for name in Self.counters { metrics.set(name, values[name] ?? -1) }
         guard values["vic_up"] == 1 else {

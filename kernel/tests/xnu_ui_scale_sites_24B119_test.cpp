@@ -142,19 +142,43 @@ TEST(XnuUiScaleSites24B119, ScaleOverrideReplacesTheExternalDisplayScale)
 
 TEST(XnuUiScaleSites24B119, MainScreenScaleIsTheScalesFloat)
 {
-    const switch_us_site *site = Named("MobileGestalt main-screen-scale");
+    const switch_us_site *site = Named("MobileGestalt main-screen-scale and screen class");
     ASSERT_NE(site, nullptr);
     ASSERT_EQ(site->edits, 2u);
     const switch_us_edit &read = site->edit[0], &convert = site->edit[1];
     EXPECT_EQ(Word(read.stock), switch_a64_movz_w(4, 1));
     EXPECT_EQ(Word(read.stock + 4) >> 26, 0x25u);
-    EXPECT_EQ(Word(read.stock + 8), 0xaa0003f3u);     // mov x19, x0
-    EXPECT_EQ(Word(convert.stock + 4), 0x1e220260u);  // scvtf s0, w19
-    EXPECT_EQ(Word(convert.patched), 0x1e270260u);    // fmov s0, w19
+    EXPECT_EQ(Word(read.stock + 8), 0xaa0003f3u);        // mov x19, x0
+    EXPECT_EQ(Word(convert.stock + 12), 0x1e220260u);    // scvtf s0, w19
+    EXPECT_EQ(Word(convert.patched + 12), 0x1e270260u);  // fmov s0, w19
     uint8_t out[8] = {};
     ASSERT_TRUE(switch_ui_scale_edit_bytes(read.kind, switch_ui_scale_named("1.6"), out, read.size));
     EXPECT_EQ(Word(out), switch_a64_movz_w(19, 0xcccd));
     EXPECT_EQ(Word(out + 4), switch_a64_movk_w_lsl16(19, 0x3fcc));
+    // scale 1: the display probe's /chosen/display-scale is 1, so the float is the stock answer
+    ASSERT_TRUE(switch_ui_scale_edit_bytes(read.kind, switch_ui_scale_named("1"), out, read.size));
+    EXPECT_EQ(Word(out), switch_a64_movz_w(19, 0x0000));
+    EXPECT_EQ(Word(out + 4), switch_a64_movk_w_lsl16(19, 0x3f80));
+}
+
+// Every main-screen-class miss (an unknown dot pitch, scale or panel, and the scale's float bits, which are never an
+// integer scale) reaches the one mov w8, #-1 before the CFData is made; it answers J181's 10.2-inch class instead.
+TEST(XnuUiScaleSites24B119, MainScreenClassMissIsJ181s)
+{
+    EXPECT_EQ(kCache.main_screen_class, 21);
+    const switch_us_site *site = Named("MobileGestalt main-screen-scale and screen class");
+    ASSERT_NE(site, nullptr);
+    EXPECT_TRUE(site->every_scale);
+    const switch_us_edit &convert = site->edit[1];
+    ASSERT_EQ(convert.at, 0u);
+    ASSERT_EQ(convert.size, 16u);
+    EXPECT_EQ(AddressOf(*site, convert, 0), 0x1b07bfbe4u);
+    EXPECT_EQ(Word(convert.stock), 0x12800008u);  // mov w8, #-1
+    EXPECT_EQ(Word(convert.patched), switch_a64_movz_w(8, static_cast<uint16_t>(kCache.main_screen_class)));
+    for (unsigned offset : {4u, 8u}) {  // the stores of the panel size, the dot pitch: unchanged
+        EXPECT_EQ(Word(convert.patched + offset), Word(convert.stock + offset)) << offset;
+    }
+    EXPECT_EQ(Word(convert.stock + 16), 0x2d0da3e0u);  // stp s0, s8, [sp, #0x6c]: kept
 }
 
 TEST(XnuUiScaleSites24B119, CoreUiRowBytesAndProgressBar)
@@ -541,6 +565,7 @@ TEST(XnuUiScaleSites24B119, OnlyHardwareAndCompatibilitySitesApplyAtScaleOne)
     for (size_t i = 0; i < kCache.count; i++) {
         const std::string name = switch_ui_scale_sites::NameOf(kCache.sites[i]);
         const bool every_scale = name == "SpringBoardHome home screen grid 3x5" ||
+                                 name == "MobileGestalt main-screen-scale and screen class" ||
                                  name == "WidgetKit placeholder batch deadline (n + 10) x 5 s" ||
                                  name == "WidgetKit archived image limit of a 2x screen" ||
                                  name == "SampleAnalysis mach timebase of a 19.2 MHz counter" ||

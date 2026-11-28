@@ -9,9 +9,53 @@
 #
 #   bazel test //drivers/SwitchBrightness/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
-load("//bazel/testing:defs.bzl", "host_test")
+load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
 
 lint_files()
+
+host_shims(
+    name = "als_kernel",
+    headers = [
+        "IOKit/IOInterruptEventSource.h",
+        "IOKit/IOLib.h",
+        "IOKit/IOReturn.h",
+        "IOKit/IOService.h",
+        "IOKit/IOTimerEventSource.h",
+        "IOKit/IOWorkLoop.h",
+        "kern/clock.h",
+        "pexpert/pexpert.h",
+    ],
+    stubs = "switch_als_stubs.h",
+)
+
+host_library(
+    name = "als_headers",
+    hdrs = [
+        "//drivers/NativeMobileDisplay:SwitchPortrait.h",
+        "//drivers/SwitchBrightness:SwitchALSMath.h",
+        "//drivers/SwitchBrightness:SwitchBrightness.h",
+        "//drivers/SwitchTouch:SwitchHID.h",
+        "//drivers/TegraGPIO:TegraGPIO.h",
+        "//drivers/TegraI2C:TegraI2C.h",
+        "//kits/SwitchCAR:SwitchPMC.h",
+        "//kits/SwitchRefusal:SwitchRefusal.h",
+    ],
+)
+
+host_test(
+    name = "switch_als_test",
+    srcs = ["switch_als_test.cpp"],
+    additional_compiler_inputs = ["//drivers/SwitchBrightness:SwitchALS.cpp"],
+    copts = [
+        "-DDEVELOPMENT=1",
+        "-DSWITCH_IPSW_KIND_21H461=1",
+        "-Wno-unused-parameter",
+    ],
+    deps = [
+        ":als_headers",
+        ":als_kernel",
+    ],
+)
 
 host_test(
     name = "als_math_test",

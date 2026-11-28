@@ -5,6 +5,8 @@
 #include "gpu_inline.h"
 #include "SwitchGpuJobRing.h"
 
+#if TGM_STATS
+#if TGM_PROF
 /* push profile (stats):
  * What each push of a submission costs the GPU, sampled: one submission in 64 of each connection (the user client's
  * scanSubmission, with each push's class from the method stream it read, struct tgm_prof) stamps the GPU's time after its
@@ -30,8 +32,6 @@ static inline void prof_collect(struct tgm_chan *chan, u32 seqno, u64 start, u64
 	u32 sdraws = 0;
 	u32 ilk = 0;
 	u32 twin = 0;
-	u32 syncs = 0;
-	u64 sync_ns = 0;
 	struct switch_gpu_prof_seq *run = &chan->prof_run;
 	struct switch_gpu_prof_push *at = NULL;
 
@@ -54,10 +54,6 @@ static inline void prof_collect(struct tgm_chan *chan, u32 seqno, u64 start, u64
 		t = slot[i].ns;
 		if (t < prev)
 			return;
-		if (c == TGM_PC_SYNC) {
-			syncs++;
-			sync_ns += t - prev;
-		}
 		__atomic_fetch_add(&chan->prof_ns[c], t - prev, __ATOMIC_RELAXED);
 		__atomic_fetch_add(&chan->prof_n[c], 1, __ATOMIC_RELAXED);
 		__atomic_fetch_add(&chan->prof_dn[c], draws, __ATOMIC_RELAXED);
@@ -80,14 +76,13 @@ static inline void prof_collect(struct tgm_chan *chan, u32 seqno, u64 start, u64
 		__atomic_fetch_add(&chan->prof_n[TGM_PC_FENCE], 1, __ATOMIC_RELAXED);
 		run->ns = tgm_deadline_pt_ns(end - start);
 		run->behind = READ_ONCE(chan->stat_kick[seqno % CHAN_NSTAMPS]) != TGM_KICK_CLEAR;
-		if (chan->high)
-			switch_gpu_compositor_sync(syncs, tgm_deadline_pt_ns(sync_ns), run->behind);
 		switch_gpu_prof_seq_offer(&chan->prof_slow, run);
 		__atomic_fetch_add(&chan->prof_span, end - start, __ATOMIC_RELAXED);
 		__atomic_fetch_add(&chan->prof_spans, 1, __ATOMIC_RELAXED);
 	}
 	__atomic_fetch_add(&chan->prof_subs, 1, __ATOMIC_RELAXED);
 }
+#endif
 
 /* A user channel's completed seqno for the job timing: a job's first begins it, each of its seqnos ends a batch, its last
  * ends it and counts its whole time (first start to last end) as the window's exec time. */
@@ -150,6 +145,7 @@ static inline void stats_fences(struct tgm_chan *chan)
 			stats_job_seqno(chan, s + 1);
 		}
 		st = chan_stamps(chan, s + 1);
+#if TGM_PROF
 		if (!chan->kernel && s + 1 == READ_ONCE(chan->prof_seqno)) {
 			u32 first = READ_ONCE(chan->prof_first);
 			volatile struct tgm_stamps *fs = chan_stamps(chan, first);
@@ -158,6 +154,7 @@ static inline void stats_fences(struct tgm_chan *chan)
 				prof_collect(chan, first, fs->start.ns, st->end.ns);
 			WRITE_ONCE(chan->prof_seqno, 0);
 		}
+#endif
 #if SWITCH_RECORDER
 		started = st->start.payload == s + 1;
 		ended = st->end.payload == s + 1;
@@ -190,7 +187,6 @@ static inline void stats_fences(struct tgm_chan *chan)
 				__atomic_fetch_add(&tgm_stats.behind, 1, __ATOMIC_RELAXED);
 				stats_add(&tgm_stats.behind_sum, &tgm_stats.behind_max, queue);
 			}
-#if TGM_STATS
 			{
 				const u8 foreign = READ_ONCE(chan->stat_foreign[i]);
 
@@ -203,12 +199,16 @@ static inline void stats_fences(struct tgm_chan *chan)
 						  &tgm_stats.foreign_queue_max, queue);
 				}
 			}
-#endif
 		}
 	}
 	chan->stat_done = done;
-	tgm_stats_gr_context();
 }
+#else
+static inline void stats_fences(struct tgm_chan *chan)
+{
+	(void)chan;
+}
+#endif
 
 /* A high channel's fence moved from `from` to `done` (interrupt pass): the GPU time of what completed, for the
  * compositor's time per frame (deadline.c): from its start stamp to its end stamp (debug kernels) or now, or for the

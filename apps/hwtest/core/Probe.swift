@@ -6,6 +6,8 @@ public enum ClaimVerdict: String, Sendable {
     case pass = "PASS"
     case fail = "FAIL"
     case inconclusive = "INCONCLUSIVE"
+    /// Clean at Run All's short trial counts, which bound a missed race only loosely: no rule ledger counts it as proof
+    case passQuick = "PASS_QUICK"
 }
 
 public struct ProbeFinding: Sendable {
@@ -32,6 +34,12 @@ public struct ProbeFinding: Sendable {
         let failed = wrong.filter { $0.value != 0 }.keys.sorted()
         let note = failed.isEmpty ? "" : "wrong: \(failed.joined(separator: ","))"
         return ProbeFinding(failed.isEmpty ? .pass : .fail, metrics, note: note)
+    }
+
+    /// A race probe's clean claim at Run All's trial counts (95% bound on a missed race up to about 31% at 8 trials a
+    /// cell) is PASS_QUICK; only the Long runs targets (LongRuns) prove it. FAIL and INCONCLUSIVE stand.
+    public mutating func quick(unless long: Bool) {
+        if !long && verdict == .pass { verdict = .passQuick }
     }
 
     /// The probe's fields in front of its own: probe=<id> claim_verdict=<verdict>; the longest of its own go to the

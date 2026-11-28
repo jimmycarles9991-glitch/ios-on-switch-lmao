@@ -13,7 +13,7 @@ static bool failSubmission(SwitchMetalCommandBuffer *cb, NSString *reason)
     failCommandBuffer(cb, reason);
     NSError *error = nil;
     {
-        std::lock_guard<gm20b::Mutex> l(cb->_lock);
+        std::lock_guard<gm20b::UnfairMutex> l(cb->_lock);
         error = cb->_segError;
     }
     finish(cb, error);
@@ -211,7 +211,7 @@ bool submitRange(SwitchMetalCommandBuffer *cb, bool followed)
     [[maybe_unused]] GM20BState &r = *gRM;
     NSError *priorError = nil;
     if (cb->_segError.set()) {
-        std::lock_guard<gm20b::Mutex> l(cb->_lock);
+        std::lock_guard<gm20b::UnfairMutex> l(cb->_lock);
         priorError = cb->_segError;
     }
     // a present is added before its command buffer is committed, a completed handler's flag before it is added
@@ -235,7 +235,7 @@ bool submitRange(SwitchMetalCommandBuffer *cb, bool followed)
     if (range.held) {
         decltype(cb->_loopContinue) loop;
         {
-            std::lock_guard<gm20b::Mutex> l(cb->_lock);
+            std::lock_guard<gm20b::UnfairMutex> l(cb->_lock);
             loop = std::exchange(cb->_loopContinue, {});
         }
         if (loop.pending) {
@@ -289,8 +289,12 @@ bool submitRange(SwitchMetalCommandBuffer *cb, bool followed)
     } else {
         const char *why = nullptr;
 #if SWITCH_FRAME_TIMELINE
-        const uint64_t began = nowUs();
         cb->_frame.mark(switch_frame::EncodeStart);
+#endif
+#if SWITCH_METAL_STATS
+        const uint64_t began = nowUs();
+#endif
+#if SWITCH_METAL_PROF
         gm20b::EncodeProfile profile;
         std::optional<gm20b::EncodeMallocs> mallocs(std::in_place, profile);
         const uint64_t profileTicks = gm20b::encodeTicks();
@@ -301,14 +305,23 @@ bool submitRange(SwitchMetalCommandBuffer *cb, bool followed)
         cb->_rangeHeld = gm20b::frameHeld(end);
         SwitchMetalEncoded encoded = SwitchMetalEncoded::stopped;
         @autoreleasepool {
-            gm20bMoveWanting();
+            const bool deferMoves = !range.from && gm20bPipelineHasOpenAhead(cb);
+            if (!deferMoves)
+                gm20bMoveWanting();
             encoded = encodeRaw(cb, range.from, range.to, &why);
+            if (deferMoves)
+                gm20bMoveWanting();
         }
 #if SWITCH_FRAME_TIMELINE
-        const uint64_t wallTicks = gm20b::encodeTicks() - profileTicks;
         cb->_frame.mark(switch_frame::EncodeEnd);
-        SWITCH_METAL_DIAGNOSTIC(r.stats.encodeUs += nowUs() - began);
-        SWITCH_METAL_DIAGNOSTIC(cb->_scheduleNotes.encodeUs.fetch_add(nowUs() - began, std::memory_order_relaxed));
+#endif
+#if SWITCH_METAL_STATS
+        const uint64_t encodeElapsed = nowUs() - began;
+        r.stats.encodeUs += encodeElapsed;
+        cb->_scheduleNotes.encodeUs.fetch_add(encodeElapsed, std::memory_order_relaxed);
+#endif
+#if SWITCH_METAL_PROF
+        const uint64_t wallTicks = gm20b::encodeTicks() - profileTicks;
         const auto folded = [&, wallTicks] {
             gm20b::tEncodeProfile = nullptr;
             mallocs.reset();
@@ -316,11 +329,11 @@ bool submitRange(SwitchMetalCommandBuffer *cb, bool followed)
         };
 #endif
         if (encoded != SwitchMetalEncoded::submitted) {
-#if SWITCH_FRAME_TIMELINE
+#if SWITCH_METAL_PROF
             folded();
 #endif
             {
-                std::lock_guard<gm20b::Mutex> l(cb->_lock);
+                std::lock_guard<gm20b::UnfairMutex> l(cb->_lock);
                 priorError = cb->_segError;
             }
             if (priorError) {
@@ -334,7 +347,7 @@ bool submitRange(SwitchMetalCommandBuffer *cb, bool followed)
             return failSubmission(cb, stoppedWithoutError(why));
         }
         SWITCH_METAL_DIAGNOSTIC(r.stats.raw++);
-#if SWITCH_METAL_DIAGNOSTICS
+#if SWITCH_METAL_STATS
         if (!cb->_kickedTicks)
             cb->_kickedTicks = mach_absolute_time();
 #endif
@@ -348,7 +361,7 @@ bool submitRange(SwitchMetalCommandBuffer *cb, bool followed)
             }
             retireRawRange(cb, range.from, range.to);
         }
-#if SWITCH_FRAME_TIMELINE
+#if SWITCH_METAL_PROF
         folded();
 #endif
     }

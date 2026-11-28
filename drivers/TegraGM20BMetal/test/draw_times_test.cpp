@@ -165,8 +165,9 @@ TEST(GM20BDrawTimes, AMarkFlushesTheTiledCacheWaitsForIdleThenReleasesItsTimeAnd
     EXPECT_EQ(words[3], 0x12u);
     EXPECT_EQ(words[4], 0x34567880u);
     EXPECT_EQ(words[5], kSerial);
-    // OPERATION 1:0 RELEASE, RELEASE 4:4 after every write, PIPELINE_LOCATION 15:12 ALL, STRUCTURE_SIZE 28:28 four words
-    EXPECT_EQ(words[6], 1u << 4 | 0xfu << 12);
+    // OPERATION 1:0 RELEASE, FLUSH_DISABLE 2:2 TRUE, RELEASE 4:4 after every write, PIPELINE_LOCATION 15:12 ALL,
+    // STRUCTURE_SIZE 28:28 four words
+    EXPECT_EQ(words[6], 1u << 2 | 1u << 4 | 0xfu << 12);
     EXPECT_EQ(words[7], Push::hdr(1, SUBC_3D, NVB197_SET_REPORT_SEMAPHORE_A, 4));
     EXPECT_EQ(words[9], 0x34567890u);
     // OPERATION REPORT_ONLY (2), FLUSH_DISABLE 2:2, PIPELINE_LOCATION PIXEL_SHADER (0xa), REPORT 27:23 PS_INVOCATIONS

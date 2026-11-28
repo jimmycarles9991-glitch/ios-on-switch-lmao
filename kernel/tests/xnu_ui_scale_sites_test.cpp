@@ -293,13 +293,75 @@ TEST(XnuUiScaleSites, CoreUiRowBytes)
     }
 }
 
+TEST(XnuUiScaleSites, MainScreenClassMissIsJ120s)
+{
+    EXPECT_EQ(kCache.main_screen_class, 11);
+    const switch_us_site *site = Named("MobileGestalt main-screen-scale and screen class");
+    ASSERT_NE(site, nullptr);
+    EXPECT_TRUE(site->every_scale);
+    const switch_us_edit &convert = site->edit[1];
+    ASSERT_EQ(convert.at, 0u);
+    ASSERT_EQ(convert.size, 16u);
+    EXPECT_EQ(Word(convert.stock), 0x12800008u);  // mov w8, #-1
+    EXPECT_EQ(Word(convert.patched), switch_a64_movz_w(8, static_cast<uint16_t>(kCache.main_screen_class)));
+    EXPECT_EQ(Word(convert.patched + 4), Word(convert.stock + 4));
+    EXPECT_EQ(Word(convert.patched + 8), Word(convert.stock + 8));
+    EXPECT_EQ(Word(convert.stock + 12), 0x1e220260u);    // scvtf s0, w19
+    EXPECT_EQ(Word(convert.patched + 12), 0x1e270260u);  // fmov s0, w19
+}
+
+// Each build answers its pinned identity's class (ipsw/pins.bzl device_class, the same panel's key in MobileGestalt's
+// table): an identity change must bring its class.
+TEST(XnuUiScaleSites, TheScreenClassIsThePinnedIdentitys)
+{
+    const std::string pins = switch_ios::test::SourceText("../../ipsw/pins.bzl");
+
+    const struct {
+        const switch_us_cache &cache;
+        const char *identity;
+        int screen_class;
+    } builds[] = {{switch_us_cache_21H461, "j120ap", 11}, {switch_us_cache_24B119, "j181ap", 21}};
+
+    for (const auto &build : builds) {
+        SCOPED_TRACE(build.cache.build);
+        const std::string kind =
+            switch_ios::test::Between(pins, std::string("\"") + build.cache.build + "\": {", "\n    },");
+        EXPECT_EQ(switch_ios::test::Between(kind, "\"device_class\": \"", "\""), build.identity);
+        EXPECT_EQ(build.cache.main_screen_class, build.screen_class);
+    }
+}
+
+// MobileGestalt keeps main-screen-class in its build-keyed cache: the identity marker's digest takes the class, so a
+// cache made before the class changed is dropped once.
+TEST(XnuUiScaleSitesSource, TheIdentityDigestTakesTheScreenClass)
+{
+    for (const char *tree : {"../xnu-10063.141.1", "../xnu-12377.121.6"}) {
+        SCOPED_TRACE(tree);
+        const std::string exec = switch_ios::test::SourceText(std::string(tree) + "/bsd/kern/kern_exec.c");
+        const std::string identity = switch_ios::test::Body(exec, "native_switch_identity_cache(proc_t p");
+        const size_t screen_class = identity.find("switch_ui_scale_main_screen_class()");
+        ASSERT_NE(screen_class, std::string::npos);
+        const std::string guard =
+            "#if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT && CONFIG_CODE_DECRYPTION";
+        const size_t guarded = identity.rfind(guard, screen_class);  // the accessor's own guard (vm_unix.c)
+        ASSERT_NE(guarded, std::string::npos);
+        EXPECT_GT(identity.find("#endif", guarded), screen_class);
+        EXPECT_LT(screen_class, identity.find("native_switch_file_unchanged(marker"));
+        const std::string vm_unix = switch_ios::test::SourceText(std::string(tree) + "/bsd/vm/vm_unix.c");
+        EXPECT_NE(switch_ios::test::Body(vm_unix, "\nswitch_ui_scale_main_screen_class(void)")
+                      .find("return SWITCH_US_CACHE->main_screen_class;"),
+                  std::string::npos);
+    }
+}
+
 TEST(XnuUiScaleSitesSource, BothTreesAndOnlyNativeCanvasAtScaleOne)
 {
     for (size_t i = 0; i < kCache.count; i++) {
         const std::string name = switch_ui_scale_sites::NameOf(kCache.sites[i]);
-        const bool native_canvas =
-            name == "SpringBoard iPad native canvas selection" || name == "SpringBoard iPad native canvas eligibility";
-        EXPECT_EQ(kCache.sites[i].every_scale, native_canvas) << name;
+        const bool every_scale = name == "SpringBoard iPad native canvas selection" ||
+                                 name == "SpringBoard iPad native canvas eligibility" ||
+                                 name == "MobileGestalt main-screen-scale and screen class";
+        EXPECT_EQ(kCache.sites[i].every_scale, every_scale) << name;
     }
     for (const char *header :
          {"switch_ui_scale_sites.h", "switch_ui_scale_sites_21H461.h", "switch_ui_scale_sites_24B119.h"}) {

@@ -171,14 +171,12 @@ def labels(
 
 
 def _demand_tier(tables: caspec.Tables) -> list[str]:
-    if not tables.v27:
-        return []
-    return [n for n in closure.demand(tables.t['build']) if closure.strict(tables.v27, n)]
+    return [n for n in closure.demand(tables.t['build']) if closure.strict(tables, n)]
 
 
 def _closure_tier(tables: caspec.Tables, seeds: list[str], demanded: list[str]) -> list[str]:
-    table = closure.context(tables.t['build']) if tables.v27 else None
-    return closure.closure(tables.v27, table, seeds, demanded) if table else []
+    table = closure.context(tables.t['build'])
+    return closure.closure(tables, table, seeds, demanded) if table else []
 
 
 def _variant_tier(tables: caspec.Tables, seeds: list[str]) -> list[str]:

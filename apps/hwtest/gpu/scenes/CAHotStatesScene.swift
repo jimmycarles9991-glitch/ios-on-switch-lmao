@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// The time of Core Animation's costliest states (CAHotCorpus) at the console's resolution: each state draws `draws`

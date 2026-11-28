@@ -2,6 +2,7 @@ import Foundation
 import HWTestCore
 import HWTestGPU
 import HWTestKit
+import HWTestShared
 import SwiftUI
 import UIKit
 

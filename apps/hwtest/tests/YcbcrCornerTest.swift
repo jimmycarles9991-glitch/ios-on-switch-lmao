@@ -2,6 +2,7 @@ import CoreVideo
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import IOSurface
 import Metal
 
@@ -13,23 +14,34 @@ import Metal
 /// the same bytes in a surface of the texture's own size (read_off_), every command buffer raw. Then one pass into a
 /// YCBCR8_420_2P and an RGB8_420_2P corner at once, as cameracaptured's two-target states draw (an M4 Max stores each
 /// as it stores it alone): two_wrong, two_outside.
-struct YcbcrCornerTest: HWTest {
-    let id = "gpu.ycbcr_corner"
-    let name = "YCbCr textures smaller than their surface: made, rendered and sampled at the corner, on the driver"
-    let subsystem = Subsystem.metal
-    var timeout: TimeInterval { 60 }
+public struct YcbcrCornerTest: HWTest {
+    public let id = "gpu.ycbcr_corner"
+    public let name = "YCbCr textures smaller than their surface: made, rendered and sampled at the corner, on the driver"
+    public let subsystem = Subsystem.metal
+    public var timeout: TimeInterval { 60 }
 
-    struct Corner {
-        let format: UInt
-        let fourcc: OSType
-        let width: Int, height: Int, surfaceWidth: Int, surfaceHeight: Int
+    public init() {}
 
-        var key: String { "\(format)_\(width)x\(height)of\(surfaceWidth)" }
-        var converted: Bool { format == 500 }
-        var full: Bool { fourcc == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange }
+    public struct Corner {
+        public let format: UInt
+        public let fourcc: OSType
+        public let width: Int, height: Int, surfaceWidth: Int, surfaceHeight: Int
+
+        public init(format: UInt, fourcc: OSType, width: Int, height: Int, surfaceWidth: Int, surfaceHeight: Int) {
+            self.format = format
+            self.fourcc = fourcc
+            self.width = width
+            self.height = height
+            self.surfaceWidth = surfaceWidth
+            self.surfaceHeight = surfaceHeight
+        }
+
+        public var key: String { "\(format)_\(width)x\(height)of\(surfaceWidth)" }
+        public var converted: Bool { format == 500 }
+        public var full: Bool { fourcc == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange }
     }
 
-    static let corners = [
+    public static let corners = [
         Corner(
             format: 540, fourcc: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, width: 2, height: 2, surfaceWidth: 8,
             surfaceHeight: 8
@@ -47,9 +59,9 @@ struct YcbcrCornerTest: HWTest {
             surfaceWidth: 16, surfaceHeight: 16
         ),
     ]
-    static let usage: MTLTextureUsage = [.shaderRead, .shaderWrite, .renderTarget]
+    public static let usage: MTLTextureUsage = [.shaderRead, .shaderWrite, .renderTarget]
 
-    func run(_ context: TestContext) async throws -> Outcome {
+    public func run(_ context: TestContext) async throws -> Outcome {
         let probe = try GPU.make()
         guard GM20BFacade.kind(of: probe.device) == "gm20b" else {
             return .skip("the default device is not the facade (\(GM20BFacade.kind(of: probe.device)))")
@@ -267,7 +279,7 @@ struct YcbcrCornerTest: HWTest {
     }
 
     /// Plane 0's codes of the corner, then plane 1's Cb, Cr pairs.
-    static func codes(_ corner: Corner, _ texels: [SIMD4<Float>], _ source: YcbcrStore.Source) -> [[UInt16]] {
+    public static func codes(_ corner: Corner, _ texels: [SIMD4<Float>], _ source: YcbcrStore.Source) -> [[UInt16]] {
         let (luma, chroma) =
             corner.converted
                 ? YcbcrStore.converted(
@@ -280,7 +292,7 @@ struct YcbcrCornerTest: HWTest {
         return [luma, chroma]
     }
 
-    static func pixelBuffer(_ width: Int, _ height: Int, _ fourcc: OSType) -> CVPixelBuffer? {
+    public static func pixelBuffer(_ width: Int, _ height: Int, _ fourcc: OSType) -> CVPixelBuffer? {
         var made: CVPixelBuffer?
         let attributes =
             [kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true] as CFDictionary
@@ -288,7 +300,7 @@ struct YcbcrCornerTest: HWTest {
     }
 
     /// Each plane's rows, the plane's own bytes of each (a luma code, or a Cb, Cr pair, a byte each).
-    static func planes(_ buffer: CVPixelBuffer) -> [[[UInt8]]] {
+    public static func planes(_ buffer: CVPixelBuffer) -> [[[UInt8]]] {
         CVPixelBufferLockBaseAddress(buffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
         return (0 ..< 2).map { plane in
@@ -302,7 +314,7 @@ struct YcbcrCornerTest: HWTest {
         }
     }
 
-    static func copyCorner(from: CVPixelBuffer, to: CVPixelBuffer, width: Int, height: Int) {
+    public static func copyCorner(from: CVPixelBuffer, to: CVPixelBuffer, width: Int, height: Int) {
         CVPixelBufferLockBaseAddress(from, .readOnly)
         CVPixelBufferLockBaseAddress(to, [])
         defer {

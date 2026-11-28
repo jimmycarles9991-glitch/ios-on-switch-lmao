@@ -2,9 +2,10 @@
 #   nvjpg_host_test     TegraNVJPGJpeg.h's parser against libjpeg-turbo's own parse (BCR @libjpeg_turbo, pinned in
 #                       MODULE.bazel) over a matrix of files libjpeg-turbo writes, every refusal, the output targets and
 #                       the JFIF matrix (nvjpg_host.c)
-#   request_host_test   the AppleJPEGDriver decode request's translation and refusals (request_host.c)
+#   request_host_test   the AppleJPEGDriver decode request's translation, refusals and route onto the destination's
+#                       layout (request_host.c)
 #   tegra_nvjpg_vendored_test  the vendored firmware and NVIDIA headers are the files their SOURCE files name
-#   tegra_nvjpg_layout_source_test  a decode's order around GM20B's layout of its destination (TegraNVJPGUserClient.cpp)
+#   tegra_nvjpg_layout_source_test  a decode's order around GM20B's layout of its destination (TegraNVJPGJobs.cpp)
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
 
@@ -39,6 +40,7 @@ host_library(
         "//drivers/TegraGM20B:TegraGM20BLayoutFit.h",
         "//drivers/TegraNVJPG:TegraNVJPGJpeg.h",
         "//drivers/TegraNVJPG:TegraNVJPGRequest.h",
+        "//drivers/TegraNVJPG:TegraNVJPGRoute.h",
         "//drivers/TegraNVJPG:nvidia/nvjpg_drv.h",
     ],
     copts = ["-O1"],
@@ -56,8 +58,9 @@ host_test(
     srcs = ["tegra_nvjpg_layout_source_test.cpp"],
     data = [
         "//drivers/TegraNVJPG:TegraNVJPG.cpp",
+        "//drivers/TegraNVJPG:TegraNVJPGFlight.cpp",
+        "//drivers/TegraNVJPG:TegraNVJPGJobs.cpp",
         "//drivers/TegraNVJPG:TegraNVJPGRepack.cpp",
-        "//drivers/TegraNVJPG:TegraNVJPGUserClient.cpp",
     ],
 )
 
@@ -81,8 +84,7 @@ host_shims(
         "IOKit/IOLib.h",
         "IOKit/IOLocks.h",
         "IOKit/IOBufferMemoryDescriptor.h",
-        "IOKit/IOFilterInterruptEventSource.h",
-        "IOKit/IOWorkLoop.h",
+        "IOKit/IOService.h",
         "kern/clock.h",
         "kern/thread.h",
         "kern/thread_call.h",
@@ -95,8 +97,10 @@ host_shims(
 # TegraNVJPG.cpp's model of the engine (switch_nvjpg_engine_model.h) and every header it reaches
 ENGINE_MODEL = [
     "switch_nvjpg_engine_model.h",
+    "//drivers/TegraHost1x:SwitchHost1xFence.h",
     "//drivers/TegraHost1x:TegraHost1x.h",
     "//drivers/TegraNVJPG:TegraNVJPG.h",
+    "//drivers/TegraNVJPG:TegraNVJPGEngine.h",
     "//drivers/TegraNVJPG:TegraNVJPGJpeg.h",
     "//drivers/TegraNVJPG:TegraNVJPGRequest.h",
     "//drivers/TegraNVJPG:TegraNVJPGStats.h",
@@ -128,6 +132,7 @@ ENGINE_MODEL = [
 
 ENGINE_SOURCES = [
     "//drivers/TegraNVJPG:TegraNVJPG.cpp",
+    "//drivers/TegraNVJPG:TegraNVJPGFlight.cpp",
     "//kits/SwitchFalcon:SwitchFalconInterrupt.cpp",
 ]
 
@@ -149,7 +154,10 @@ host_test(
     name = "switch_nvjpg_lock_counts_test",
     srcs = ["switch_nvjpg_lock_counts_test.cpp"] + ENGINE_MODEL,
     additional_compiler_inputs = ENGINE_SOURCES,
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_IO=1",
+    ],
     deps = [":gate_kernel"],
 )
 
@@ -158,7 +166,10 @@ host_test(
     srcs = ["switch_nvjpg_lock_counts_test.cpp"] + ENGINE_MODEL,
     additional_compiler_inputs = ENGINE_SOURCES,
     copts = ["-fsanitize=thread"],
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_IO=1",
+    ],
     linkopts = ["-fsanitize=thread"],
     sanitize = False,
     deps = [":gate_kernel"],
@@ -180,14 +191,12 @@ host_shims(
     name = "user_client_kernel",
     headers = [
         "IOKit/IOBufferMemoryDescriptor.h",
-        "IOKit/IOFilterInterruptEventSource.h",
         "IOKit/IOLib.h",
         "IOKit/IOLocks.h",
         "IOKit/IOMemoryDescriptor.h",
         "IOKit/IOService.h",
         "IOKit/IOTypes.h",
         "IOKit/IOUserClient.h",
-        "IOKit/IOWorkLoop.h",
         "kern/clock.h",
         "kern/task.h",
         "kern/thread.h",
@@ -204,11 +213,18 @@ host_test(
     srcs = [
         "switch_nvjpg_user_client_test.cpp",
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuSharedEvent.h",
+        "//drivers/TegraGM20B:TegraGM20BCopy.h",
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraNVJPG:TegraNVJPGJobs.h",
         "//drivers/TegraNVJPG:TegraNVJPGMapping.h",
         "//drivers/TegraNVJPG:TegraNVJPGRepack.h",
+        "//drivers/TegraNVJPG:TegraNVJPGRoute.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
         "//drivers/TegraVIC:SwitchVICDecodeOutput.h",
+        "//drivers/TegraVIC:SwitchVICJobs.h",
+        "//drivers/TegraVIC:SwitchVICQueue.h",
+        "//drivers/TegraVIC:SwitchVICSurfaceAccess.h",
         "//drivers/TegraVIC:TegraVIC.h",
         "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
@@ -220,8 +236,10 @@ host_test(
     ] + ENGINE_MODEL,
     additional_compiler_inputs = ENGINE_SOURCES + [
         "//drivers/TegraNVJPG:TegraNVJPGMapping.cpp",
+        "//drivers/TegraNVJPG:TegraNVJPGJobs.cpp",
         "//drivers/TegraNVJPG:TegraNVJPGRepack.cpp",
         "//drivers/TegraNVJPG:TegraNVJPGUserClient.cpp",
     ],
+    defines = ["SWITCH_STATS_IO=1"],
     deps = [":user_client_kernel"],
 )

@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A Depth16Unorm a fetching draw tests in its shader, in a layered pass and in a pass into a turned plane

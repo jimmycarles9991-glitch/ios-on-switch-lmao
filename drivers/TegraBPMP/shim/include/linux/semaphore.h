@@ -10,6 +10,7 @@
 struct semaphore {
 	spinlock_t lock;
 	int count;
+	unsigned int waiters;
 };
 void sema_init(struct semaphore *s, int count);
 int down_timeout(struct semaphore *s, long timeout);

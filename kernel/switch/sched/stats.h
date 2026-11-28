@@ -20,6 +20,7 @@ struct switch_sched_window {
     uint32_t limit_blocks;  /* sleeps imposed by a CPU limit (proc_setthread_cpupercent's ledger block) */
     uint64_t limit_us;      /* their length, to the ledger's refill */
     uint64_t max_us;
+    uint64_t max_before_ms; /* how long before the window the longest wait began, 0 inside it */
 };
 
 /* The class of a thread as of its last run (sched.h's TH_MODE_*, thread QoS, clutch bucket). */
@@ -36,6 +37,41 @@ static inline unsigned int switch_sched_bucket(uint64_t us)
     unsigned int b = us == 0 ? 0 : 64 - (unsigned int)__builtin_clzll(us);
 
     return b < SWITCH_SCHED_BUCKETS ? b : SWITCH_SCHED_BUCKETS - 1;
+}
+
+/*
+ * A window's longest wait as one word, its length in microseconds above and the uptime in milliseconds it began at
+ * below, each saturating at 32 bits. One word, so the report's exchange never pairs one wait's length with another's
+ * start, and its largest value is the longest wait. A wait is counted in the window it ends in, which can be windows
+ * after it began: on 25 Nov backboardd's main thread had no run for 20 s, then a 32.6 s wait.
+ */
+static inline uint64_t switch_sched_longest(uint64_t us, uint64_t began_ms)
+{
+    const uint64_t high = us < UINT32_MAX ? us : UINT32_MAX;
+    const uint64_t low = began_ms < UINT32_MAX ? began_ms : UINT32_MAX;
+
+    return high << 32 | low;
+}
+
+/* A dispatch's word: its wait, `us`, and the uptime it was made runnable at, `made_us`. */
+static inline uint64_t switch_sched_longest_since(uint64_t us, uint64_t made_us)
+{
+    return switch_sched_longest(us, made_us / 1000);
+}
+
+/*
+ * A window's take: its longest wait, and how long before the window's start (uptime ms, the last take's) that wait
+ * began. Returns the next window's start, from `now_us`: every take advances it, a window with no run too.
+ */
+static inline uint64_t switch_sched_take_longest(struct switch_sched_window *w, uint64_t longest, uint64_t start_ms,
+                                                 uint64_t now_us)
+{
+    const uint64_t began_ms = longest & UINT32_MAX;
+
+    w->max_us = longest >> 32;
+    /* A start past 2^32 ms (49.7 days of uptime) saturated: it says nothing about when the wait began. */
+    w->max_before_ms = w->max_us != 0 && began_ms < start_ms && began_ms != UINT32_MAX ? start_ms - began_ms : 0;
+    return now_us / 1000;
 }
 
 static inline void switch_sched_note(struct switch_sched_window *w, uint64_t us)
@@ -94,8 +130,9 @@ static inline size_t switch_sched_appended(size_t at, int n, size_t size)
 }
 
 /*
- * One thread's entry: "label[pid] base/sched mode qos bucket: runs p50/p99/max us", then the fail-safe and CPU-limit
- * counts when there are any. Returns the length written (snprintf's, clamped to the buffer).
+ * One thread's entry: "label[pid] base/sched mode qos bucket: runs p50/p99/max us", then how long before the window the
+ * longest wait began, and the fail-safe and CPU-limit counts, when there are any. Returns the length written
+ * (snprintf's, clamped to the buffer).
  */
 static inline size_t switch_sched_format(char *out, size_t size, const char *label, int pid,
                                          const struct switch_sched_class *c, const struct switch_sched_window *w)
@@ -111,6 +148,11 @@ static inline size_t switch_sched_format(char *out, size_t size, const char *lab
                  w->runs, (unsigned long long)switch_sched_percentile(w, 50),
                  (unsigned long long)switch_sched_percentile(w, 99), (unsigned long long)w->max_us);
     at = switch_sched_appended(0, n, size);
+    if (w->max_before_ms != 0 && at < size) {
+        n = snprintf(out + at, size - at, ", longest began %llu ms before the window",
+                     (unsigned long long)w->max_before_ms);
+        at = switch_sched_appended(at, n, size);
+    }
     if (w->failsafe_runs != 0 && at < size) {
         n = snprintf(out + at, size - at, ", %u fail-safe", w->failsafe_runs);
         at = switch_sched_appended(at, n, size);

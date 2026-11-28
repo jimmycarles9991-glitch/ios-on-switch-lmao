@@ -31,17 +31,17 @@ void expect(bool ok, const char *what)
 }
 
 // The values a state's push words give `mthd` (subchannel 3D): op 1 incrementing, 3 non-incrementing, 4 immediate, 5 once
-bool methodValue(const std::vector<uint32_t> &w, uint32_t mthd, uint32_t &value)
+bool methodValue(const uint32_t *w, size_t n, uint32_t mthd, uint32_t &value)
 {
     bool found = false;
-    for (size_t i = 0; i < w.size();) {
+    for (size_t i = 0; i < n;) {
         const uint32_t h = w[i++], op = h >> 29, count = (h >> 16) & 0x1fff, m = (h & 0x1fff) << 2;
         if (op == 4) {
             if (m == mthd)
                 value = count, found = true;
             continue;
         }
-        for (uint32_t k = 0; k < count && i < w.size(); k++, i++) {
+        for (uint32_t k = 0; k < count && i < n; k++, i++) {
             const uint32_t at = op == 1 ? m + 4 * k : op == 5 && k ? m + 4 : m;
             if (at == mthd)
                 value = w[i], found = true;
@@ -117,9 +117,10 @@ int main(int argc, char **argv)
         named.insert({pl->rec->vs, pl->rec->fs});
         uint32_t vs = 0, fs = 0;
         const bool pixel = gm20b::pixelStage(*pl->rec);
-        programsRight +=
-            methodValue(pl->methods, kVertexProgram, vs) && programAt(pack, region, pl->rec->vs, vs) &&
-            (!pixel || (methodValue(pl->methods, kPixelProgram, fs) && programAt(pack, region, pl->rec->fs, fs)));
+        programsRight += methodValue(pl->methodWords(), pl->methodCount(), kVertexProgram, vs) &&
+                         programAt(pack, region, pl->rec->vs, vs) &&
+                         (!pixel || (methodValue(pl->methodWords(), pl->methodCount(), kPixelProgram, fs) &&
+                                     programAt(pack, region, pl->rec->fs, fs)));
     }
     std::printf(
         "%u of %u states made, %u with both programs the pack's at their GPU VA (%u with the prefetch past a heap "

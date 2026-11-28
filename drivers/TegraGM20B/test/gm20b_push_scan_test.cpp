@@ -488,3 +488,22 @@ TEST(GM20BPushScan, MemOpDL2InvalidateUsesOperationBits31To27)
 	const Result other = scan({&flushDirty, &tlbInval});
 	EXPECT_EQ(other.c.l2Inval, 0u);
 }
+
+// gpu.poster_targets: every submission of a process that submits a few times is read, and the reads of a busy one stand
+// for every submission it made.
+TEST(GM20BPushScan, AConnectionsFirstSubmissionsAreEachReadAndLaterOnesSampled)
+{
+	for (uint32_t n = 0; n < 16; n++)
+		EXPECT_EQ(scanWeight(n, 16, 4), 1u) << n;
+	uint32_t read = 0;
+	uint32_t stoodFor = 0;
+	for (uint32_t n = 0; n < 1000; n++) {
+		const uint32_t submits = scanWeight(n, 16, 4);
+		read += submits != 0;
+		stoodFor += submits;
+	}
+	EXPECT_EQ(read, 16u + (1000u - 16u) / 4);
+	EXPECT_EQ(stoodFor, 1000u);
+	static_assert(scanWeight(16, 16, 4) == 4 && scanWeight(17, 16, 4) == 0 &&
+		      scanWeight(20, 16, 4) == 4);
+}

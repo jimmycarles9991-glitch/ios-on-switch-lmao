@@ -444,7 +444,7 @@ static void writeFenceOrder()
         fence.submitted = 2;
         SwitchSdWriteFence::Barrier barrier;
         if (waiting)
-            fence.begin(barrier);
+            fence.begin(barrier, 1);
         ++fence.submitted;
         Picked p{};
         const uint32_t count = switchGatherWrites(q.head, q.at(0), 2048, 256, 128, &p.start, &p.sectors, nullptr, 0,
@@ -685,6 +685,23 @@ static void writeRandomQueues()
             for (int older = 0; older < id && !blocked; ++older)
                 blocked = !taken[size_t(older)] && switchOverlaps(&q.storage[size_t(older)], &r);
             REQUIRE(blocked);
+        }
+        // With a synchronize waiting (inOrder) the chain's writes are the oldest queued writes: none is left behind.
+        {
+            Queue ordered(items);
+            Picked o{};
+            const uint32_t n2 = switchGatherWrites(ordered.head, ordered.at(first), limit, 256, 128, &o.start,
+                                                   &o.sectors, inFlight.empty() ? nullptr : inFlight.data(),
+                                                   static_cast<unsigned>(inFlight.size()), true);
+            REQUIRE(switchWriteChainTiles(ordered.head, o.start, o.sectors, n2));
+            int newest = first;
+            for (const Request *r = ordered.head; r; r = r->next)
+                if (r->chained && r->id > newest)
+                    newest = r->id;
+            for (const Request *r = ordered.head; r; r = r->next)
+                if (r->write && !r->chained && r->id < newest && r->id > first)
+                    REQUIRE(false);
+            switchClearChain(ordered.head);
         }
         // When `first` is head (as in pickLocked), executing the gathered chain then `rest` must match strict FIFO.
         if (first == 0) {

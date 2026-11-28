@@ -38,7 +38,7 @@ uint64_t tgm_chan_fault_va(struct tgm_chan *chan)
 {
 	return READ_ONCE(chan->fault_va);
 }
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 uint64_t tgm_chan_killed_ns(struct tgm_chan *chan)
 {
 	return READ_ONCE(chan->killed_ns);
@@ -82,10 +82,6 @@ static unsigned int live_count(void)
 	return n;
 }
 
-#if TGM_STATS
-static u32 syncs_inside;
-#endif
-
 /* Each caller's own snapshot: no lock is held while it sleeps, and a sync never waits for work submitted after it
  * started. Channels are appended to tgm_live_chans, so every channel counted and still live is among the first `n`. */
 int tegra_gm20b_sync_for_cpu(const void *va, uint64_t bytes, uint64_t timeout_ns)
@@ -110,10 +106,6 @@ int tegra_gm20b_sync_for_cpu(const void *va, uint64_t bytes, uint64_t timeout_ns
 			  capacity);
 		return -ENOMEM;
 	}
-#if TGM_STATS
-	if (__atomic_fetch_add(&syncs_inside, 1, __ATOMIC_RELAXED))
-		tgm_stats_unlocked(TGM_UNLOCKED_SYNC_BESIDE, 0);
-#endif
 	mutex_lock(&tgm_live_lock);
 	list_for_each_entry(chan, &tgm_live_chans, live)
 	{
@@ -145,9 +137,6 @@ int tegra_gm20b_sync_for_cpu(const void *va, uint64_t bytes, uint64_t timeout_ns
 		}
 	}
 	kfree(want);
-#if TGM_STATS
-	__atomic_fetch_sub(&syncs_inside, 1, __ATOMIC_RELAXED);
-#endif
 	nvxnu_dcache_clean_inval(va, bytes);
 	return ret;
 }
@@ -167,7 +156,8 @@ int tgm_writer_done(uint32_t uid, uint32_t seqno)
 
 	mutex_lock(&tgm_live_lock);
 	chan = live_by_uid(uid);
-	done = !chan || chan->error || (s32)(tgm_chan_completed(chan) - seqno) >= 0;
+	done = !chan || __atomic_load_n(&chan->error, __ATOMIC_ACQUIRE) ||
+	       (s32)(tgm_chan_completed(chan) - seqno) >= 0;
 	mutex_unlock(&tgm_live_lock);
 	return done;
 }

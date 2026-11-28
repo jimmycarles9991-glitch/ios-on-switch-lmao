@@ -44,7 +44,7 @@ void ComputeEncoder::setStageInRegionIndirect(const Buffer *region, uint64_t off
 // wrote that a continuation fetches are there (NVK's pre-Turing indirect-read barrier)
 static void fetchAfterWrites(Push &p)
 {
-    p.m(NVB1C0_WAIT_FOR_IDLE, 0, SUBC_COMPUTE);
+    // INVALIDATE_SHADER_CACHES (0x021c) is implicitly a WFI on Maxwell.
     p.m(NVB1C0_INVALIDATE_SHADER_CACHES, NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES, FLUSH_DATA, TRUE), SUBC_COMPUTE);
     p.m(kSetReference, 0, SUBC_COMPUTE);
 }
@@ -93,28 +93,38 @@ bool ComputeEncoder::dispatchIndirect(const Buffer *arguments, uint64_t offset, 
     if (!prepareDescriptors(why))
         return false;
     cb_.bufferWrites_.anything();
-    if (serial_ && dispatched_)
+    AccessRange extras[2];
+    uint32_t extraCount = 0;
+    extras[extraCount++] = {arguments->va + offset, arguments->va + offset + kArgumentBytes};
+    if (stageInRegion_)
+        extras[extraCount++] = {stageInRegion_->va + stageInRegionOffset_,
+                                stageInRegion_->va + stageInRegionOffset_ + 24};
+    const bool looping = cb_.loops_.open();
+    if (serial_ && dispatched_ && (looping || dispatchHasHazard(extras, extraCount)))
         barrier();
     dispatched_ = true;
+    recordDispatchAccesses(extras, extraCount);
     slotTableVa_ = 0;
     const uint32_t none[3] = {};
-    uint32_t root[kRootBytes / 4] = {};
+    const uint32_t rootBytes = activeRootBytes(*state_, r, residualMask_, stageInRegion_ != nullptr);
+    uint32_t root[kRootBytes / 4];
+    memset(root, 0, rootBytes);
     rootWords(r, none, none, setVa_, residualMask_, residuals_, region, root);
     argumentRoot(r, root);
-    stageInWords(r, stageIn_, root + kRootPush / 4);
+    if (rootBytes > kRootPush)
+        stageInWords(r, stageIn_, root + kRootPush / 4);
     uint64_t rootVa = 0, qmdVa = 0;
-    memcpy(dev_.alloc(dev_.upload_, kRootBytes, 256, rootVa), root, sizeof root);
+    memcpy(dev_.alloc(dev_.upload_, rootBytes, 256, rootVa), root, rootBytes);
     rootVa_ = 0;
     uint32_t qmd[kQmdWords];
-    if (!qmdWords(*state_, none, rootVa, setVa_, qmd, why))
+    if (!qmdWords(*state_, none, rootVa, setVa_, qmd, why, rootBytes))
         return false;
     memcpy(dev_.alloc(dev_.upload_, sizeof qmd, 256, qmdVa), qmd, sizeof qmd);
-    SWITCH_METAL_DIAGNOSTIC(dev_.stats.uploadBytes += kRootBytes + sizeof qmd);
+    SWITCH_METAL_DIAGNOSTIC(dev_.stats.uploadBytes += rootBytes + sizeof qmd);
     cb_.use(*arguments, false);
     emitKindSwitch();
     if (arguments->hostVisible && !arguments->wc && arguments->cpu)
         cb_.clean(arguments->cpu + offset, kArgumentBytes);
-    const bool looping = cb_.loops_.open();
     room(8 + (looping ? SWITCH_GM20B_INLINE_WORDS_WORDS(kQmdWords) : 0));
     if (looping)
         kit(p_, switch_gm20b_compute_inline_words, qmdVa, qmd, kQmdWords);

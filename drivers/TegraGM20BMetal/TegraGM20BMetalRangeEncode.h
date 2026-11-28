@@ -119,7 +119,6 @@ private:
     bool refused();
     bool stop(uint32_t veto);
     uint32_t ineligible(size_t from, size_t until, size_t &stopAt);
-    bool loadsAStoredDepth(size_t x);
     bool enter(size_t begin);
     bool resources(size_t from, size_t to);
     bool borderHeaders(size_t from, size_t to);
@@ -151,7 +150,7 @@ private:
     void planesBack();
     void separateZeta(const SwitchMetalPass &pass, SwitchMetalTexture *depth, SwitchMetalTexture *stencil,
                       gm20b::PassDesc &p);
-    bool depth16Zeta(const SwitchMetalPass &pass, gm20b::PassDesc &p);
+    bool depth16Zeta(const SwitchMetalPass &pass, gm20b::PassDesc &p, bool convertDepth32 = false);
     bool depth16Tested(const SwitchMetalPass &pass, gm20b::PassDesc &p);
     bool depth16Back();
     bool imagePlanes(size_t pass, gm20b::PassDesc &p);
@@ -170,6 +169,7 @@ private:
     bool endEncoder(size_t at);
     bool endEncoders();
     bool closeEncoders();
+    void carryZcull(size_t to);
     bool producersOrdered();
 
     __unsafe_unretained SwitchMetalCommandBuffer *cb_ = nil;
@@ -198,6 +198,7 @@ private:
     bool encoderShadows_ = false;
     bool encoderTracked_ = false;  // its dispatches' uses are tracked: shadowed images, or stand-ins writes reach
     gm20b::StateCursor stateCursor_;
+    uint32_t namedBytesChunk_ = UINT32_MAX;
     gm20b::FusionPass fused_;
     size_t fusedAt_ = SIZE_MAX;
     gm20b::PassUses planned_;

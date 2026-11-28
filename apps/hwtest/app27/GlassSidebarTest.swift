@@ -1,24 +1,21 @@
 import Foundation
 import HWTestCore
 import HWTestKit
+import HWTestShared
 import UIKit
 
 /// Settings' Liquid Glass sidebar blinking black for single frames while its list or the detail beside it scrolls,
 /// judged on what the display was handed: the sidebar split view of SidebarScene, dark, with every presented frame of
 /// each moving phase read back (ScanoutSession) and the sidebar's band judged as ui.glass_live judges its glass.
-/// Phases: idle1 (12 s with no commit, past the driver's 10 s idle reclaim), sidebar (the list scrolls every display
-/// frame), idle2, detail (the detail scrolls, so the blur behind the sidebar is rebuilt every frame), both.
+/// Phases: idle1 (1.5 s with no commit: the driver's 10 s idle reclaim is forced after its first second, once the last
+/// frame's uses have completed, by DriverSwitch.reclaimIdle), sidebar (the list scrolls every display frame), idle2,
+/// detail (the detail scrolls, so the blur behind the sidebar is rebuilt every frame), both.
 ///
-/// The render server's glass memory probe (GlassMemWords, DEVELOPMENT builds) is read at each phase boundary and its
-/// record armed before each moving phase. The result line: frames=, black=, partial=, probe= (- without the probe),
-/// reclaim= (yes: the pool showed the idle reclaim after both idle phases; reported, not judged: the black does not
-/// need it), under= (the detail is behind the judged
+/// The result line: frames=, black=, partial=, under= (the detail is behind the judged
 /// band), region= (the band in points, x,y,w,h), means= (both candidate bands' mean level, a/b: the sidebar's should be
 /// the lower, the other near the stripes' 0.7), then per moving phase frames/black/partial and its first black frame's
-/// sequence, per phase its glass-mem counts' rise (cbs/changed/nonfinite/moved/zero), per idle phase the pool before
-/// it and the first one published after it (MB,chunks,backings,backingMB,compressed,made). Each black frame logs one
-/// line with its sequence and mach ticks; every frame is in Documents/ui/ui.glass_sidebar/frames.json, with PNGs of each
-/// phase's first black frame and its neighbours.
+/// sequence. Each black frame logs one line with its sequence and mach ticks; every frame is in
+/// Documents/ui/ui.glass_sidebar/frames.json, with PNGs of each phase's first black frame and its neighbours.
 struct UIGlassSidebarTest: HWTest {
     let id = "ui.glass_sidebar"
     let name = "Settings' Liquid Glass sidebar over scrolling content after idle, read back per presented frame"
@@ -33,7 +30,7 @@ struct UIGlassSidebarTest: HWTest {
     }
 
     static let settle: TimeInterval = 1
-    static let idle: TimeInterval = 12
+    static let idle: TimeInterval = 1
     static let steps = [
         Step(name: "idle1", seconds: idle, sidebar: false, detail: false),
         Step(name: "sidebar", seconds: 4, sidebar: true, detail: false),
@@ -48,7 +45,6 @@ struct UIGlassSidebarTest: HWTest {
         defer { session.close() }
         let directory = context.documents.appendingPathComponent("ui").appendingPathComponent(id)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        GlassProbe.arm(lines: false)
         guard let scene = await MainActor.run(body: { SidebarScene.present() }) else {
             return .skip("no key window to present the split view over")
         }
@@ -71,13 +67,11 @@ struct UIGlassSidebarTest: HWTest {
         metrics.set("region", layout.regionText)
         metrics.set("means", run.means)
         return GlassSidebarVerdict.outcome(
-            run.phases, reads: run.reads, scene: metrics, pngs: run.pngs, stopped: run.stopped
+            run.phases, scene: metrics, pngs: run.pngs, stopped: run.stopped
         )
     }
 }
 
-/// The phases ui.glass_sidebar (or ui.glass_settings) ran, the probe words read at their boundaries and each moving
-/// phase's frames.
 struct SidebarRun {
     let session: ScanoutSession
     let test: String
@@ -85,7 +79,6 @@ struct SidebarRun {
     let band: SidebarBand
     let directory: URL
     private(set) var phases: [GlassSidebarVerdict.Phase] = []
-    private(set) var reads: [GlassMemWords] = [.read()]
     private(set) var frames: [(String, [SidebarFrame])] = []
     private(set) var pngs: [String] = []
     private(set) var stopped: String?
@@ -104,11 +97,11 @@ struct SidebarRun {
     {
         guard !scrolls.isEmpty || appearing != nil else {
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1e9))
+            DriverSwitch.reclaimIdle()
+            try? await Task.sleep(nanoseconds: 500_000_000)
             phases.append(.init(name: name, moving: false))
-            reads.append(.read())
             return
         }
-        GlassProbe.arm(lines: false)
         let (session, test, band, directory) = (self.session, self.test, self.band, self.directory)
         let reader = await MainActor.run {
             SidebarReader(session: session, test: test, phase: name, band: band, directory: directory)
@@ -123,11 +116,9 @@ struct SidebarRun {
         try? await Task.sleep(nanoseconds: 100_000_000)
         phases.append(
             .init(
-                name: name, moving: true, frames: reader.frames.count, black: reader.black, partial: reader.partial,
-                pools: reader.pools
+                name: name, moving: true, frames: reader.frames.count, black: reader.black, partial: reader.partial
             )
         )
-        reads.append(.read())
         frames.append((name, reader.frames))
         pngs += reader.saved
         stopped = reader.failure.map { "\(name):\($0)" }
@@ -145,7 +136,6 @@ struct SidebarRun {
             let bandX: [Double]
             let mirroredX: [Double]
             let bandY: [Double]
-            let reads: [[UInt64]]
             let phases: [Phase]
         }
         let rect = { (r: CGRect) in [r.minX, r.minY, r.width, r.height].map(Double.init) }
@@ -153,19 +143,11 @@ struct SidebarRun {
             sidebar: rect(layout.sidebar), detail: rect(layout.detail), region: rect(layout.region),
             bandX: [band.x.lowerBound, band.x.upperBound],
             mirroredX: [band.mirroredX.lowerBound, band.mirroredX.upperBound],
-            bandY: [band.y.lowerBound, band.y.upperBound], reads: reads.map { [$0.mem, $0.pool] },
+            bandY: [band.y.lowerBound, band.y.upperBound],
             phases: frames.map { Phase(name: $0.0, frames: $0.1) }
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try? encoder.encode(record).place(at: directory.appendingPathComponent("frames.json"))
     }
-}
-
-extension GlassMemWords {
-    static func read() -> GlassMemWords {
-        GlassMemWords(mem: GlassProbe.state(GlassProbe.prefix + "glass-mem") ?? 0, pool: pool())
-    }
-
-    static func pool() -> UInt64 { GlassProbe.state(GlassProbe.prefix + "glass-mem.pool") ?? 0 }
 }

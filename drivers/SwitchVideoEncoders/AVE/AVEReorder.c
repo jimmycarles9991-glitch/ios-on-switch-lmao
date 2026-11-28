@@ -64,8 +64,12 @@ static void drop(Encoder *e, const AVEHeld *h, OSStatus status, bool coded)
         r->spareDts = false;
     else if (!coded)
         (void)nextDts(r);
-    if (e->session)
-        VTEncoderSessionEmitEncodedFrame(e->session, h->frame, status, kVTEncodeInfo_FrameDropped, NULL);
+    VTVideoEncoderSession session = e->session;
+    if (session) {
+        pthread_mutex_unlock(&e->lock);
+        VTEncoderSessionEmitEncodedFrame(session, h->frame, status, kVTEncodeInfo_FrameDropped, NULL);
+        pthread_mutex_lock(&e->lock);
+    }
 }
 
 // The frame no reference slot holds.

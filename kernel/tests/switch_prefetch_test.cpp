@@ -78,8 +78,6 @@ std::vector<uint8_t> serializeList(struct switch_prefetch_header header,
                                    const std::vector<struct switch_prefetch_run> &runs)
 {
     header.runs = static_cast<uint32_t>(runs.size());
-    header.checksum =
-        switch_prefetch_fnv(reinterpret_cast<const uint8_t *>(runs.data()), runs.size() * sizeof(runs[0]));
     std::vector<uint8_t> bytes(sizeof(header) + runs.size() * sizeof(runs[0]));
     memcpy(bytes.data(), &header, sizeof(header));
     if (!runs.empty()) {
@@ -191,13 +189,9 @@ TEST(SwitchPrefetchList, ValidatesV3AndRefusesV2AndMismatches)
     EXPECT_STREQ(switch_prefetch_validate_file(badData.data(), badData.size(), &expected, 1u << 18, nullptr),
                  "saved for another Data volume");
 
-    // Torn short list and checksum mismatch.
+    // Torn short list.
     EXPECT_STREQ(switch_prefetch_validate_file(valid.data(), valid.size() - 4u, &expected, 1u << 18, nullptr),
                  "torn (short list)");
-    auto badCsum = valid;
-    badCsum.back() ^= 0xffu;
-    EXPECT_STREQ(switch_prefetch_validate_file(badCsum.data(), badCsum.size(), &expected, 1u << 18, nullptr),
-                 "torn (its runs do not match its checksum)");
 
     // Invalid run fields: bad volume, zero pages, over max run limit.
     auto badRuns = runs;
@@ -366,7 +360,6 @@ TEST(SwitchPrefetchList, SavesAtomicallyByTempThenRename)
     auto hdr = expected;
     hdr.runs = 1u;
     hdr.files = 1u;
-    hdr.checksum = switch_prefetch_fnv(reinterpret_cast<const uint8_t *>(runs.data()), sizeof(runs[0]));
     const struct switch_prefetch_file_ops ops = {fakeWrite, fakeRename, fakeUnlink};
     const char *path = "/private/preboot/Switch-Staging/sys.img.boot-prefetch";
     const char *uuid = "11223344-5566-7788-99AA-BBCCDDEEFF00";
@@ -471,6 +464,66 @@ TEST(SwitchPrefetchPace, EnforcesInflightAndLeadBoundsAndFirstReclaimClamp)
     drain.waiting = 1u;
     EXPECT_TRUE(switch_pace_inflight_done(&drain, 512u * 1024u));
     EXPECT_EQ(switch_pace_inflight_bytes(&drain), 0u);
+}
+
+// A run waits until this boot is within SWITCH_PREFETCH_LOOKAHEAD_S of its recorded first use; unknown and early runs go
+// at once.
+TEST(SwitchPrefetchPace, RunsWaitUntilTheirRecordedUseIsNear)
+{
+    EXPECT_EQ(switch_pace_run_due_s(0, 15), 0u);
+    EXPECT_EQ(switch_pace_run_due_s(1, 15), 0u);
+    EXPECT_EQ(switch_pace_run_due_s(16, 15), 0u);
+    EXPECT_EQ(switch_pace_run_due_s(17, 15), 1u);
+    EXPECT_EQ(switch_pace_run_due_s(60, 15), 44u);
+    EXPECT_EQ(switch_pace_run_due_s(255, 15), 239u);
+}
+
+// The replay waits for each run's due time before it reads it, releasing its vnode first, and a stop ends the wait. Its
+// I/O is passive, so it opens no throttle window for lower tiers.
+TEST(SwitchPrefetchSource, ReplayWaitsForEachRunsDueTime)
+{
+    const std::string prefetch = SourceText("../switch/vm/prefetch.c");
+    const size_t due = prefetch.find("switch_pace_run_due_s(runs[i].when, SWITCH_PREFETCH_LOOKAHEAD_S)");
+    const size_t wait = prefetch.find("switch_vm_prefetch_wait_until(due_abs)");
+    const size_t put = prefetch.find("vnode_put(vp);", due);
+    const size_t pagein = prefetch.find("vnode_pagein(vp, NULL, 0, in.offset");
+    ASSERT_NE(due, std::string::npos);
+    ASSERT_NE(wait, std::string::npos);
+    EXPECT_LT(due, put);
+    EXPECT_LT(put, wait);
+    EXPECT_LT(wait, pagein);
+    const size_t thread = prefetch.find("static void switch_prefetch_thread(");
+    const size_t passive = prefetch.find("throttle_set_thread_io_policy(IOPOL_PASSIVE);");
+    EXPECT_LT(thread, passive);
+    EXPECT_LT(passive, prefetch.find("switch_prefetch_replay_runs(runs, run_count, files)"));
+    const std::string vm = SourceText("../switch/vm/prefetch_vm.c");
+    const size_t until = vm.find("bool switch_vm_prefetch_wait_until(uint64_t deadline_abs)");
+    ASSERT_NE(until, std::string::npos);
+    const std::string body = vm.substr(until, vm.find("\n}\n", until) - until);
+    EXPECT_NE(body.find("switch_pace_replay_stop_reason(&g_pace) != SWITCH_PREFETCH_STOP_NONE"), std::string::npos);
+    EXPECT_NE(body.find("assert_wait_deadline((event_t)&g_pace_event, THREAD_UNINT, deadline_abs)"), std::string::npos);
+    // Review F3: the deadline wait does not publish g_pace.waiting, so page use and reclaim do not wake it.
+    EXPECT_EQ(body.find("__atomic_store_n(&g_pace.waiting"), std::string::npos);
+    for (const char *stop : {"void switch_vm_pressure_changed(", "uint32_t switch_vm_prefetch_stop(uint32_t reason)"}) {
+        const size_t at = vm.find(stop);
+        ASSERT_NE(at, std::string::npos) << stop;
+        EXPECT_NE(vm.substr(at, vm.find("\n}\n", at) - at).find("thread_wakeup((event_t)&g_pace_event);"),
+                  std::string::npos)
+            << stop << " wakes the replay unconditionally";
+    }
+}
+
+// While the replay waits for a run's due time, nothing of its own is in flight: a page's first use or reclaim must not
+// wake it (g_pace.waiting is 0 in that wait).
+TEST(SwitchPrefetchPace, ADeadlineWaitIsNotWokenByPageUse)
+{
+    struct switch_prefetch_pace p = {};
+    switch_pace_init(&p, 500u, 100u, 3u * 512u * 1024u);
+    ASSERT_TRUE(switch_pace_can_issue(&p));
+    EXPECT_FALSE(switch_pace_on_used(&p));
+    EXPECT_FALSE(switch_pace_on_reclaimed(&p));
+    p.waiting = 1u;  // the wait for room to issue (switch_vm_prefetch_wait_can_issue) is the one page use wakes
+    EXPECT_TRUE(switch_pace_on_used(&p));
 }
 
 TEST(SwitchPrefetchPace, StopEventsReleaseWaitingReplayAndFirstWins)
@@ -755,6 +808,56 @@ TEST(SwitchPrefetchSource, ReplayReleasesVnodeDrainsInflightAndUsesLowPriority)
     EXPECT_GE(count, 2u);
 }
 
+// A replay read that never completes must not hang shutdown silently: debug kernels arm the trail, the SoC watchdog and
+// the deadline before they wait on the replay, and the wait itself panics at its own deadline in every build.
+TEST(SwitchPrefetchSource, ShutdownCannotHangSilentlyOnTheReplay)
+{
+    const std::string shutdown = SourceText("../switch/shutdown/shutdown.c");
+    const std::string begin = bodyOf(shutdown, "void switch_shutdown_begin(int howto)\n");
+    ASSERT_FALSE(begin.empty());
+    const size_t wait = begin.find("switch_prefetch_shutdown();");
+    ASSERT_NE(wait, std::string::npos);
+    EXPECT_LT(begin.find("switch_power_trail_watch(WATCHDOG_S"), wait);
+    EXPECT_LT(begin.find("switch_shutdown_arm_deadline();"), wait);
+    EXPECT_LT(begin.find("switch_gpu_pack_shutdown_request();"), wait);
+    const std::string release = bodyOf(shutdown, "void switch_shutdown_begin(int howto __unused)");
+    EXPECT_LT(release.find("switch_gpu_pack_shutdown_request();"), release.find("switch_prefetch_shutdown();"));
+
+    const std::string stop = bodyOf(SourceText("../switch/vm/prefetch.c"), "void switch_prefetch_shutdown(void)");
+    EXPECT_THAT(stop, HasSubstr("assert_wait_deadline((event_t)&g_prefetch.done_event, THREAD_UNINT, deadline)"));
+    EXPECT_THAT(stop, Not(HasSubstr("assert_wait((event_t)")));
+    EXPECT_THAT(stop, HasSubstr("THREAD_TIMED_OUT"));
+    EXPECT_THAT(stop, HasSubstr("panic("));
+}
+
+// Shutdown's wait on the replay thread includes a Boot Complete save already under way (27 s on one device boot). That
+// save ends at its next vnode or file once reboot_kernel has marked the system in shutdown, which it does before
+// switch_shutdown_begin, and writes nothing from the incomplete naming.
+TEST(SwitchPrefetchSource, ARebootDuringTheListSaveEndsItAndWritesNoList)
+{
+    const std::string save = SourceText("../switch/vm/prefetch_save.c");
+    EXPECT_THAT(bodyOf(save, "static int name_logged_vnode("),
+                HasSubstr("if (get_system_inshutdown()) {\n        return VNODE_RETURNED_DONE;"));
+    EXPECT_THAT(bodyOf(save, "static uint32_t switch_prefetch_name_groups("),
+                HasSubstr("v < SWITCH_PREFETCH_VOLUME_COUNT && !get_system_inshutdown();"));
+    const std::string next = bodyOf(save, "void switch_prefetch_save_next(");
+    const size_t refused = next.find("int error = get_system_inshutdown() ? ECANCELED : count == 0u ? ENOENT : 0;");
+    const size_t write = next.find("switch_prefetch_save_atomic(");
+    ASSERT_NE(refused, std::string::npos);
+    ASSERT_NE(write, std::string::npos);
+    EXPECT_LT(refused, write);
+
+    for (const char *tree : {"xnu-10063.141.1", "xnu-12377.121.6"}) {
+        const std::string reboot = bodyOf(SourceText(std::string("../") + tree + "/bsd/kern/kern_shutdown.c"),
+                                          "reboot_kernel(int howto, char *message)");
+        const size_t marked = reboot.find("OSCompareAndSwap(0, 1, &system_inshutdown)");
+        const size_t begin = reboot.find("switch_shutdown_begin(howto);");
+        ASSERT_NE(marked, std::string::npos) << tree;
+        ASSERT_NE(begin, std::string::npos) << tree;
+        EXPECT_LT(marked, begin) << tree;
+    }
+}
+
 TEST(SwitchPrefetchList, RefusesZeroVolumeUuidsAndInvalidRunIdentity)
 {
     const auto expected = makeExpectedKey();
@@ -851,19 +954,6 @@ TEST(SwitchPrefetchList, VnodeEligibilityRefusesDeletedAndSpecialVnodes)
     EXPECT_FALSE(switch_prefetch_vnode_eligible(true, false, false, false, false, true, 42u, 42u, 4096u, true, 0u));
 }
 
-TEST(SwitchPrefetchList, ReplayedBitmaskTracksPerRunSuccess)
-{
-    uint8_t bits[64] = {};
-    const uint32_t setIndices[] = {0u, 7u, 8u, 15u, 16u, 127u, 255u, 511u};
-    for (uint32_t idx : setIndices) {
-        switch_prefetch_bit_set(bits, idx);
-    }
-    for (uint32_t i = 0; i < 512u; ++i) {
-        const bool expected = std::find(std::begin(setIndices), std::end(setIndices), i) != std::end(setIndices);
-        EXPECT_EQ(switch_prefetch_bit_test(bits, i), expected) << i;
-    }
-}
-
 TEST(SwitchPrefetchSource, RootAndDataVolumesWiredAcrossBothXnuTrees)
 {
     for (const char *tree : {"xnu-10063.141.1", "xnu-12377.121.6"}) {
@@ -904,6 +994,7 @@ TEST(SwitchPrefetchSource, RootAndDataVolumesWiredAcrossBothXnuTrees)
 
     const std::string prefetch = SourceText("../switch/vm/prefetch.c");
     const std::string prefetchSave = SourceText("../switch/vm/prefetch_save.c");
+    const std::string prefetchVnode = SourceText("../switch/vm/prefetch_vnode.c");
 
     const std::string volsMounted = bodyOf(prefetch, "switch_prefetch_volumes_mounted(");
     EXPECT_THAT(volsMounted, HasSubstr("SWITCH_PREFETCH_VOL_ROOT"));
@@ -923,7 +1014,7 @@ TEST(SwitchPrefetchSource, RootAndDataVolumesWiredAcrossBothXnuTrees)
     EXPECT_THAT(replay, Not(HasSubstr("SWITCH_PREFETCH_CRYPTEX_COUNT")));
     EXPECT_THAT(replay, HasSubstr("switch_prefetch_vget_regular("));
     EXPECT_THAT(replay, HasSubstr("switch_prefetch_vnode_meta("));
-    EXPECT_THAT(replay, HasSubstr("rc == PAGER_SUCCESS"));
+    EXPECT_THAT(replay, HasSubstr("(void)vnode_pagein(vp, NULL, 0, in.offset, (upl_size_t)in.length, 0, &err);"));
     EXPECT_THAT(replay, Not(HasSubstr("vfs_flags(mp)")));
 
     const std::string threadBody = bodyOf(prefetch, "switch_prefetch_thread(");
@@ -931,7 +1022,7 @@ TEST(SwitchPrefetchSource, RootAndDataVolumesWiredAcrossBothXnuTrees)
     EXPECT_THAT(threadBody, Not(HasSubstr("SWITCH_PREFETCH_CRYPTEX_COUNT")));
 
     // SB-1: all mount busy calls validate mount liveness through mount_list_lookupby_fsid + mount_iterdrop.
-    const std::string busyMount = bodyOf(prefetchSave, "switch_prefetch_busy_mount(");
+    const std::string busyMount = bodyOf(prefetchVnode, "switch_prefetch_busy_mount(");
     const size_t lookupPos = busyMount.find("mount_list_lookupby_fsid(&fsid, 0, 1)");
     const size_t busyCallPos = busyMount.find("vfs_busy(mp, LK_NOWAIT)");
     const size_t dropPos = busyMount.find("mount_iterdrop(mp);");
@@ -941,7 +1032,7 @@ TEST(SwitchPrefetchSource, RootAndDataVolumesWiredAcrossBothXnuTrees)
     EXPECT_LT(lookupPos, busyCallPos);
     EXPECT_LT(busyCallPos, dropPos);
 
-    const std::string vgetReg = bodyOf(prefetchSave, "switch_prefetch_vget_regular(");
+    const std::string vgetReg = bodyOf(prefetchVnode, "switch_prefetch_vget_regular(");
     const size_t busyPos = vgetReg.find("switch_prefetch_busy_mount(mp, fsid)");
     const size_t vgetPos = vgetReg.find("VFS_VGET(");
     const size_t unbusyPos = vgetReg.find("vfs_unbusy(busy_mp);");
@@ -957,9 +1048,58 @@ TEST(SwitchPrefetchSource, RootAndDataVolumesWiredAcrossBothXnuTrees)
         EXPECT_LT(unbusyPos, metaPos);
     }
 
-    const std::string saveNext = bodyOf(prefetchSave, "switch_prefetch_save_next(");
-    EXPECT_THAT(saveNext, HasSubstr("switch_prefetch_busy_mount(mounts[v], fsids[v])"));
-    EXPECT_THAT(saveNext, HasSubstr("vfs_unbusy(busy_mp);"));
-    EXPECT_THAT(bodyOf(prefetchSave, "collect_kept_replayed("), HasSubstr("switch_prefetch_bit_test("));
-    EXPECT_THAT(bodyOf(prefetchSave, "collect_kept_replayed("), HasSubstr("switch_prefetch_vget_regular("));
+    const std::string naming = bodyOf(prefetchSave, "switch_prefetch_name_groups(");
+    EXPECT_THAT(naming, HasSubstr("switch_prefetch_busy_mount(mounts[v], fsids[v])"));
+    EXPECT_THAT(naming, HasSubstr("vfs_unbusy(busy_mp);"));
+}
+
+// The SD card queues the replay's reads below tier-0 demand (SwitchSdPick.h), so XNU's busy-page raise must treat a UPL
+// the replay thread made as below a tier-0 waiter, without lowering the UPL's own priority (spec_strategy issues a
+// cluster I/O at it, and tier 1 would throttle the replay).
+TEST(SwitchPrefetchSource, ATierZeroWaiterRaisesTheReplaysBusyPages)
+{
+    for (const char *tree : {"xnu-10063.141.1", "xnu-12377.121.6"}) {
+        SCOPED_TRACE(tree);
+        const std::string object = SourceText(std::string("../") + tree + "/osfmk/vm/vm_object.c");
+        const std::string below = bodyOf(object, "switch_upl_below_waiter(upl_t upl, int cur_tier)");
+        EXPECT_THAT(below, HasSubstr("cur_tier == THROTTLE_LEVEL_TIER0"));
+        EXPECT_THAT(below, HasSubstr("upl->upl_creator != current_thread()"));
+        EXPECT_THAT(below, HasSubstr("switch_vm_prefetch_is_replay_thread(upl->upl_creator)"));
+        EXPECT_THAT(below, Not(HasSubstr("UPL_DECMP_REQ")));
+        const std::string inversion = bodyOf(object, "vm_page_handle_prio_inversion(vm_object_t o, vm_page_t m)");
+        EXPECT_THAT(inversion, HasSubstr("(upl->upl_priority <= cur_tier && !switch_upl_below_waiter(upl, cur_tier))"));
+        EXPECT_THAT(object, Not(HasSubstr("upl->upl_priority = THROTTLE_LEVEL")));
+        // A UPL the hook admitted (priority not above the waiter's tier) takes decmpfs's raise without waiting.
+        EXPECT_THAT(inversion, HasSubstr("vm_decmp_upl_reprioritize(upl, cur_tier, upl->upl_priority > cur_tier ? "
+                                         "Z_WAITOK : Z_NOWAIT)"));
+    }
+}
+
+// vm_object.c and vnode_pager.c define the raise counters under CONFIG_IOSCHED, so the line that prints them is too.
+TEST(SwitchPrefetchSource, TheRaiseCountersAreReadOnlyWhereTheyAreDefined)
+{
+    const std::string prefetch = SourceText("../switch/vm/prefetch.c");
+    const size_t declared = prefetch.find("extern uint64_t switch_reprio_requested");
+    const size_t printed = prefetch.find("busy-page raises requested");
+    ASSERT_NE(declared, std::string::npos);
+    ASSERT_NE(printed, std::string::npos);
+    for (const size_t line : {declared, printed}) {
+        const size_t guard = prefetch.rfind("#if CONFIG_IOSCHED", line);
+        ASSERT_NE(guard, std::string::npos);
+        EXPECT_EQ(guard, prefetch.rfind("#if", line));
+        EXPECT_GT(prefetch.find("#endif", guard), line);
+    }
+}
+
+// The replay's last reads are still at the card after its loop ends; their UPLs stay the replay's until they complete.
+TEST(SwitchPrefetchSource, TheReplayThreadIsForgottenOnlyAfterItsReadsDrain)
+{
+    const std::string replay = bodyOf(SourceText("../switch/vm/prefetch.c"), "switch_prefetch_replay_runs(");
+    const size_t drain = replay.rfind("switch_vm_prefetch_wait_inflight_drain();");
+    const size_t forget = replay.rfind("switch_vm_prefetch_forget_replay_thread();");
+    ASSERT_NE(drain, std::string::npos);
+    ASSERT_NE(forget, std::string::npos);
+    EXPECT_LT(drain, forget);
+    const std::string end = bodyOf(SourceText("../switch/vm/prefetch_vm.c"), "switch_vm_prefetch_end_replay(void)");
+    EXPECT_THAT(end, Not(HasSubstr("g_replay_thread")));
 }

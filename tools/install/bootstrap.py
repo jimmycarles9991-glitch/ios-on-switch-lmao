@@ -19,9 +19,17 @@ HELPER = 'switch-bootstrap'
 ROOT = 'root'
 METADATA = 'metadata.json'
 HELD = ('org.coolstar.sileo', 'ellekit', 'uikittools', 'launchctl')
+DEVELOPMENT_HELD = ('openssh-client', 'openssh-sftp-server', 'openssh-server', 'switch-ssh', 'top')
 BUILD = re.compile(r'[A-Za-z0-9]+')
 SHA256 = re.compile(r'[0-9a-f]{64}')
 MANAGED_ROOT = re.compile(re.escape(f'/private/var/{DIRECTORY}/') + r'[A-Za-z0-9]+/root')
+
+
+def _valid_holds(holds: object) -> bool:
+    if not isinstance(holds, list) or not all(isinstance(name, str) for name in holds):
+        return False
+    names = set(holds)
+    return len(names) == len(holds) and names in (set(HELD), set(HELD) | set(DEVELOPMENT_HELD))
 
 
 @dataclass(frozen=True)
@@ -48,7 +56,7 @@ def payload(package: str | Path, pins: dict | None = None) -> Payload | None:
             manifest['schema_version'] == 1
             and SHA256.fullmatch(manifest['archive_sha256'])
             and SHA256.fullmatch(manifest['helper_sha256'])
-            and set(manifest['holds']) == set(HELD)
+            and _valid_holds(manifest.get('holds'))
             and (directory / ARCHIVE).is_file()
             and (Path(package) / 'overlay/usr/libexec' / HELPER).is_file()
         )
@@ -182,7 +190,7 @@ def _control(text: str) -> list[dict[str, str]]:
     return records
 
 
-def _firmware(root: Path, version: str) -> None:
+def _firmware(root: Path, version: str, holds: tuple[str, ...] | list[str] = HELD) -> None:
     status = root / 'Library/dpkg/status'
     if not status.is_file() or status.is_symlink():
         raise host.HostError('bootstrap: missing regular dpkg status database')
@@ -192,10 +200,10 @@ def _firmware(root: Path, version: str) -> None:
         None in packages
         or '' in packages
         or len(packages) != len(records)
-        or any(name not in packages for name in HELD)
+        or any(name not in packages for name in holds)
     ):
         raise host.HostError('bootstrap: dpkg database lacks protected core packages or lists duplicates')
-    for name in HELD:
+    for name in holds:
         if packages[name].get('Status', '').split()[-2:] != ['ok', 'installed']:
             raise host.HostError(f'bootstrap: {name} is not configured')
         packages[name]['Status'] = 'hold ok installed'
@@ -302,7 +310,7 @@ def _new(source: Payload, partial: Path, build: str, version: str) -> list[dict]
         for marker in ('.procursus_strapped', '.switch-bootstrap-ready'):
             if not (root / marker).is_file() or (root / marker).is_symlink():
                 raise host.HostError(f'bootstrap: payload lacks regular {marker}')
-        _firmware(root, version)
+        _firmware(root, version, source.manifest['holds'])
         installed = dict(source.manifest, build=build, firmware=version)
         (partial / MANIFEST).write_text(json.dumps(installed, sort_keys=True) + '\n')
         (partial / METADATA).write_text(json.dumps(metadata, sort_keys=True) + '\n')

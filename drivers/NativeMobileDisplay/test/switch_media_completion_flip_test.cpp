@@ -255,6 +255,54 @@ TEST_F(MediaFlip, AGateWriteOfWindowsBAndCWithdrawsAnArmedSet)
     EXPECT_EQ(d.notShown, 1u);
 }
 
+// A GPU-rendered set (SwitchGpuPlaneStream.h): armed at its offer, its bridge submitted on the copy thread, then the
+// stream over it under the gate. The stream's completion writes the set, as a video set's does.
+TEST_F(MediaFlip, AGpuSetFlipsByTheStreamOverItsBridge)
+{
+    gBridge = {};
+    d.stats = true;
+    shownByGate(video(1));
+    ASSERT_TRUE(d.offerGpu(video(2), ++seq));
+    EXPECT_EQ(d.mediaFlip.state(), SwitchCompletionFlip::kArmed);
+    d.copyThread();
+    EXPECT_EQ(gBridge.submits, 1u);
+    ASSERT_EQ(gHost.owner, &d.mediaHostStream);
+    EXPECT_EQ(d.stPlaneGpuStreamed, 1u);
+    EXPECT_EQ(gBridge.notifies, 0u);
+    d.complete(0);
+    d.donePass();
+    frame();
+    EXPECT_EQ(d.shown.back(), seq);
+    EXPECT_EQ(d.model.active[kStartB], address(2));
+}
+
+// A gate writer of windows B and C runs while the copy thread submits the bridge: the arm is gone, the set completes
+// through the bridge, and finishPlaneFence writes it from the gate, newer than the gate writer's set.
+TEST_F(MediaFlip, AGateWriteBeforeTheGpuSetsStreamLeavesItToTheBridge)
+{
+    gBridge = {};
+    d.stats = true;
+    shownByGate(video(1));
+    ASSERT_TRUE(d.offerGpu(video(2), ++seq));
+    const uint64_t gpuSeq = seq;
+    Display::PlaneSet other = video(3);
+    other.seq = gpuSeq - 1;
+    d.planeFlipOnly(other);
+    EXPECT_TRUE(d.mediaFlipIdle());
+    d.copyThread();
+    EXPECT_EQ(gHost.owner, nullptr) << "no stream for a withdrawn arm";
+    EXPECT_EQ(gBridge.notifies, 1u);
+    EXPECT_EQ(gBridge.releases, 1u);
+    EXPECT_EQ(d.stPlaneGpuStreamRefused, 1u);
+    ASSERT_NE(gBridge.completed, nullptr);
+    gBridge.completed(gBridge.context, 0);
+    d.donePass();
+    for (int i = 0; i < 3; ++i)
+        ASSERT_NO_THROW(frame());
+    EXPECT_EQ(d.shown.back(), gpuSeq);
+    EXPECT_EQ(d.model.active[kStartB], address(2));
+}
+
 TEST_F(MediaFlip, TheRecoveryTakesAWrittenSetIntoTheLatchFirst)
 {
     shownByGate(video(1));

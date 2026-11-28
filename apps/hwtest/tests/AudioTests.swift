@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import HWTestCore
+import HWTestKit
 
 /// Counts the frames an engine's render thread asks for, so the measured rate is what the hardware consumed.
 final class FrameCounter: @unchecked Sendable {
@@ -168,8 +169,20 @@ struct AudioIdleWakeTest: HWTest {
         }
         try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         sessionActive = false
-        try await Task.sleep(nanoseconds: 6_500_000_000)
-        let idleSnap = AudioSysctl.optional()
+        let idleStart = CFAbsoluteTimeGetCurrent()
+        var idleSnap: AudioKernelSnapshot?
+        if beforeSnap?.backend == "tegra" {
+            let deadline = idleStart + 12.0
+            while CFAbsoluteTimeGetCurrent() < deadline {
+                try await Task.sleep(nanoseconds: 500_000_000)
+                idleSnap = AudioSysctl.optional()
+                if idleSnap?.powered == 0 { break }
+            }
+        } else {
+            try await Task.sleep(nanoseconds: 6_500_000_000)
+            idleSnap = AudioSysctl.optional()
+        }
+        let idleWaitMs = (CFAbsoluteTimeGetCurrent() - idleStart) * 1000.0
 
         try Audio.activate(category: .playback, rate: 48_000)
         sessionActive = true
@@ -201,6 +214,7 @@ struct AudioIdleWakeTest: HWTest {
             ),
         ]
         if let b = beforeSnap, let idle = idleSnap, let w1 = wakeSnap1, let w2 = wakeSnap2, b.backend == "tegra" {
+            metrics.set("idle_wait_ms", idleWaitMs, digits: 0)
             metrics.set("idle_powered", idle.powered)
             metrics.set("gates_delta", Int(idle.gates &- b.gates))
             metrics.set("ungates_delta", Int(w2.ungates &- b.ungates))

@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// SubmitJob (drivers/TegraGM20B/TegraGM20BJobABI.h): every raw command buffer reaches the kernel as jobs that name the

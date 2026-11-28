@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Requests Metal's validation layer stops complete on the driver: each blit fails nothing and is counted as one

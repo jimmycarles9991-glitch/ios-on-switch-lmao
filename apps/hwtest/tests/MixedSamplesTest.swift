@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A one-sample colour beside a 4x depth (MixedSamplesCases), which decides two inferred fields of the driver's mixed
@@ -14,6 +15,9 @@ import Metal
 /// triangle and hashed masks, mixed_edge_r<n>_match pixels follow the state's rule (1024/1024 on the Mac),
 /// _swapped the other rule's, _depth the pixels whose written samples are the covered and passing ones (reported; the
 /// Mac 1023 under analyse.py's coverage model) and _rows each row's edge pixels (MixedSamplesCases.edge's codes).
+/// Under the state of 4 raster samples the driver draws samples 1-3 with the pixel stage off (mixed_samples.h
+/// MixedDraw::Split): mixed_r<n>_stage_off_draws counts those draws, and raster 4 must have some, so its depth checks
+/// judge the pixel stage off under RASTER_N_TARGET_M, which GM20B had not been given before.
 struct MixedSamplesTest: HWTest {
     let id = "gpu.gm20b.mixed_samples"
     let name = "A one-sample colour beside a 4x depth tests, writes and resolves its samples as Metal's, on raw"
@@ -41,8 +45,15 @@ struct MixedSamplesTest: HWTest {
             for raster in [1, 4] {
                 let key = "mixed_r\(raster)"
                 do {
+                    let stageOffBefore = GM20BFacade.counters(of: gpu.device)["mixed_stage_off_draws"] ?? 0
                     var runs: [MixedSamplesCases.Run] = []
                     for mask in 0 ..< 16 { runs.append(try await scene.run(mask: UInt32(mask), raster: raster)) }
+                    let stageOff = (GM20BFacade.counters(of: gpu.device)["mixed_stage_off_draws"] ?? 0) - stageOffBefore
+                    metrics.set(key + "_stage_off_draws", stageOff)
+                    kept.insert(key + "_stage_off_draws")
+                    if raster == 4 {
+                        checks.append(("raster 4: samples 1-3 drawn with the pixel stage off", stageOff > 0))
+                    }
                     let u = MixedSamplesCases.uniform(runs, raster: raster)
                     grey += u.grey
                     metrics.set(key + "_white", u.white)

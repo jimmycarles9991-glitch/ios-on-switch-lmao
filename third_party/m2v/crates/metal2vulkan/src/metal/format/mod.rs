@@ -159,6 +159,15 @@ pub enum FormatEmulation {
     /// reads the nearest texel) and blends none (its validation asserts), so a filter and a blend
     /// are not admitted.
     Bfloat,
+    /// `ARGB8Unorm_sRGB`'s bytes (alpha, then red, green and blue: sRGB codes and a linear alpha)
+    /// in `R8G8B8A8_SRGB` under `ARGB8Unorm`'s rotation. A device decodes that format's first
+    /// three channels before the view's swizzle, which are Metal's alpha, red and green, so no
+    /// usage takes the image directly: a function reads its codes through its raw twin's view
+    /// (`srgb_raw_twin`: `ARGB8Unorm`'s rotated `R8G8B8A8_UNORM`) and decodes them through Metal's
+    /// table, exact for every code against Apple's GPU, linear samples included
+    /// (`Argb8SrgbFormTests` on an M4: 85 reads, samples and writes as `RGBA8Unorm_sRGB` rotated).
+    /// A read the raw codes do not serve needs the device's decode, and is refused.
+    RotatedRawSrgb,
 }
 
 impl FormatEmulation {
@@ -179,6 +188,7 @@ impl FormatEmulation {
                     | U::ColorAttachment
                     | U::ColorAttachmentBlend
             ),
+            FormatEmulation::RotatedRawSrgb => false,
             FormatEmulation::ExtendedRange => {
                 matches!(
                     usage,
@@ -186,7 +196,10 @@ impl FormatEmulation {
                 )
             }
             FormatEmulation::YCbCr => {
-                matches!(usage, U::SampledImage | U::SampledImageFilterLinear)
+                matches!(
+                    usage,
+                    U::SampledImage | U::SampledImageFilterLinear | U::UniformTexelBuffer
+                )
             }
             FormatEmulation::YCbCrRendered | FormatEmulation::YCbCrPassRefused => {
                 usage == U::ColorAttachment
@@ -955,7 +968,6 @@ macro_rules! formats_named_not_held {
             | PixelFormat::RGB8Snorm
             | PixelFormat::RGB8Uint
             | PixelFormat::RGB8Sint
-            | PixelFormat::ARGB8UnormSRGB
             | PixelFormat::RGB16Unorm
             | PixelFormat::RGB16Snorm
             | PixelFormat::RGB16Uint
@@ -1192,6 +1204,16 @@ fn make_repr(pf: PixelFormat) -> Repr {
             direct(F::B8G8R8A8_SRGB),
             red_blue_twin(F::R8G8B8A8_SRGB),
         ]),
+        P::ARGB8UnormSRGB => color(vec![Candidate {
+            format: F::R8G8B8A8_SRGB,
+            components: vk::ComponentMapping {
+                r: S::G,
+                g: S::B,
+                b: S::A,
+                a: S::R,
+            },
+            emulation: FormatEmulation::RotatedRawSrgb,
+        }]),
         // Alpha in byte 0, then red, green, and blue (measured): no Vulkan format has that order,
         // so its bytes are `R8G8B8A8_UNORM` read through a rotating view.
         P::ARGB8Unorm => color(vec![Candidate {
@@ -1518,6 +1540,7 @@ pub fn srgb_raw_twin(pf: PixelFormat) -> Option<PixelFormat> {
         P::RG8UnormSRGB => P::RG8Unorm,
         P::RGBA8UnormSRGB => P::RGBA8Unorm,
         P::BGRA8UnormSRGB => P::BGRA8Unorm,
+        P::ARGB8UnormSRGB => P::ARGB8Unorm,
         P::RGBX8UnormSRGB => P::RGBX8Unorm,
         P::BC1RGBASRGB => P::BC1RGBA,
         P::BC2RGBASRGB => P::BC2RGBA,
@@ -1852,6 +1875,7 @@ pub(crate) fn color_output_components(pf: PixelFormat) -> Option<u8> {
         | P::RGBA8Uint
         | P::RGBA8Sint
         | P::ARGB8Unorm
+        | P::ARGB8UnormSRGB
         | P::BGRA8Unorm
         | P::BGRA8UnormSRGB
         | P::RGB10A2Unorm
@@ -1946,6 +1970,9 @@ pub(crate) fn write_conversion(pf: PixelFormat) -> Option<WriteConversion> {
         P::R8UnormSRGB => [srgb, None, None, None],
         P::RG8UnormSRGB => [srgb, srgb, None, None],
         P::RGBA8UnormSRGB | P::BGRA8UnormSRGB => [srgb, srgb, srgb, u(8)],
+        // Stored as `RGBA8Unorm_sRGB`, its channels rotated after the conversion (Argb8SrgbFormTests on an M4:
+        // every code of a pass's and a kernel's writes from floats)
+        P::ARGB8UnormSRGB => [srgb, srgb, srgb, u(8)],
         P::R16Unorm => [u(16), None, None, None],
         P::RG16Unorm => [u(16), u(16), None, None],
         P::RGBA16Unorm => [u(16); 4],
@@ -2097,6 +2124,7 @@ pub(crate) fn out_of_bounds_alpha_one(pf: PixelFormat) -> Option<bool> {
         | P::BGRA10XR
         | P::BGRA10XRSRGB
         | P::ARGB8Unorm
+        | P::ARGB8UnormSRGB
         | P::RGB10A82PXR10
         | P::RGB10A82PXR10SRGB
         | P::RGBA32Uint

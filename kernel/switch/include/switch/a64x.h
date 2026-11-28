@@ -99,6 +99,18 @@ void *a64x_shared_cache_pager(void *file_object, uint64_t file_offset, uint64_t 
 /* Undefined-instruction fallback (EL0): emulate what the static rewriter left; true if handled. */
 int a64x_emulate_user(struct arm_saved_state *state, uint32_t instr);
 
+/* a64x_traps.c: a trap a64x_emulate_user handled (an instruction of class `cls` emulated, or a JIT word patched), and
+ * the report's window of them (<switch/a64x_traps.h>). Debug kernels only. */
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
+void switch_a64x_trap_noted(unsigned int cls, bool patched);
+#else
+static inline void switch_a64x_trap_noted(__unused unsigned int cls, __unused bool patched)
+{}
+#endif
+#if DEVELOPMENT || DEBUG
+size_t switch_a64x_trap_window(char *out, size_t size);
+#endif
+
 /* kern_mman: an arm64e mapping that cannot be translated fails (it would fault on its first RETAB). */
 bool switch_a64x_mmap_refused(vm_map_t map, struct vnode *vp, off_t file_pos, vm_map_offset_t addr, vm_map_size_t size);
 

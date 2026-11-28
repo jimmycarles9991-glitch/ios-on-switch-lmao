@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // See render_encoder.h (RenderEncoder::prepare: a draw's state, set 0 and barriers).
+#include "nvn_probes.h"
 #include "lock.h"
-#include "nonfinite.h"
 #include "clear_box.h"
 #include "icb.h"
 #include "dynamic_push.h"
@@ -101,30 +101,6 @@ uint32_t RenderEncoder::colorTargets() const
     return count;
 }
 
-#if SWITCH_METAL_DIAGNOSTICS
-static void probeUniforms(Pipeline &pl, uint32_t stage, uint32_t slot, const uint8_t *bytes, uint64_t length)
-{
-    const NonFiniteUniforms found = nonFiniteUniforms(bytes, length);
-    if (!found.words && (!found.halves || pl.uniformHalvesReported))
-        return;
-    char hex[3 * 32 + 1] = "";
-    const uint64_t from = found.first & ~uint64_t(15);
-    for (uint64_t at = from, n = 0; at < length && n < 32; ++at, ++n)
-        snprintf(hex + 3 * n, 4, "%02x ", bytes[at]);
-    os_log(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "gm20b"),
-           "SwitchMetal: uniform probe %{public}s stage %u slot %u: %u non-finite floats and %u halves in %llu bytes, "
-           "first at "
-           "+%llu; "
-           "+%llu: %{public}s(mach %llu)",
-           pl.uniformProbe, stage, slot, found.words, found.halves, (unsigned long long)length,
-           (unsigned long long)found.first, (unsigned long long)from, hex, (unsigned long long)mach_absolute_time());
-    if (found.words)
-        pl.uniformProbe = nullptr;
-    else
-        pl.uniformHalvesReported = true;
-}
-#endif
-
 // Set-0 entry `e` of `pl` into `set`, its buffer's bind residual into `prepared`; false: the draw is refused (`why`)
 __attribute__((always_inline)) inline bool RenderEncoder::writeSetEntry(Pipeline *pl, const PackEntry &e, uint32_t *set,
                                                                         SetResiduals &prepared, const char **why)
@@ -175,10 +151,6 @@ __attribute__((always_inline)) inline bool RenderEncoder::writeSetEntry(Pipeline
         }
         if (b.buffer && b.buffer->hostVisible && !b.buffer->wc)
             cb_->clean(b.buffer->cpu + b.offset, std::min<uint64_t>(desc.range - desc.residual, b.size));
-#if SWITCH_METAL_DIAGNOSTICS
-        if (pl->uniformProbe && b.cpu)
-            probeUniforms(*pl, e.stage, e.slot, b.cpu, std::min<uint64_t>(desc.range - desc.residual, b.size));
-#endif
         // a slot bound to nothing reads the zero page: no buffer load is bounds-checked (nak_target.h)
         const uint64_t base = b.va ? desc.base : d.zero_.va;
         at[0] = uint32_t(base);
@@ -261,7 +233,17 @@ __attribute__((always_inline)) inline bool RenderEncoder::writeSetEntry(Pipeline
         } else if (t) {
             cb_->use(t->standIn ? *t->standIn : t->sampled ? *t->sampled : *t, false);
         }
-        tic = !t ? 0 : image ? image->tic : pair ? t->tic : t->standIn && !written ? t->standIn->tic : t->tic;
+        const Texture *bound = !t ? nullptr : image ? image : pair ? t : t->standIn && !written ? t->standIn : t;
+        tic = bound ? bound->tic : 0;
+        if (bound && !image && !pair && entryArrayView(e) &&
+            (bound->type == fx::kTexCube || bound->type == fx::kTexCubeArray)) {
+            tic = dev_->arrayViewTic(*bound);
+            if (!tic) {
+                *why = "no texture header left for a cube's 2D array view";
+                cb_->refusal = {RefViewHeader, e.slot, bound->format, bound->width};
+                return false;
+            }
+        }
     } else if (e.kind == EntryFetch) {
         const ColorAttachment &a = pass_.color[e.slot];
         const Texture *t = a.texture;
@@ -302,8 +284,8 @@ __attribute__((always_inline)) inline bool RenderEncoder::writeSetEntry(Pipeline
             return false;
         }
         if (t)
-            cb_->use(*t, written);
-        tic = t ? t->tic : 0;
+            cb_->use(t->standIn && !written ? *t->standIn : *t, written);
+        tic = t ? (t->standIn && !written ? t->standIn->tic : t->tic) : 0;
     }
     const Texture *mapped = e.kind == EntryTexture ? boundTexture(e) : nullptr;
     const uint8_t map = !mapped ? 0 : mapped->levelZero ? kLevelZeroMap : mapped->addressMap;
@@ -390,18 +372,43 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
         x[0] = std::min(x[0], xj[0]), x[1] = std::max(x[1], xj[1]);
         y[0] = std::min(y[0], yj[0]), y[1] = std::max(y[1], yj[1]);
     }
-    const uint32_t facts = bindingFacts(*pl);
-    Pipeline *prepared = dev_->variant(*pl, facts | (rot_.turned() ? AssumeTurned : 0u));
+    const VariantTable *variants = nullptr;
+    if (pl == lastVariantInput_) {
+        variants = lastVariantTable_;
+    } else {
+        variants = __atomic_load_n(&pl->variantTable, __ATOMIC_ACQUIRE);
+        if (variants) {
+            lastVariantInput_ = pl;
+            lastVariantTable_ = variants;
+        }
+    }
+    Pipeline *prepared = pl;
+    if (variants) {
+        const uint32_t facts = bindingFacts(*pl, variants);
+        SWITCH_METAL_ENCODE_BEGIN(lookupSpan, VariantLookup);
+        prepared = dev_->variant(*pl, variants, facts | (rot_.turned() ? AssumeTurned : 0u));
+        SWITCH_METAL_ENCODE_END(lookupSpan);
+    }
     SWITCH_METAL_ENCODE_BEGIN(geometrySpan, Geometry);
-    DrawGeometry g;
-    if (firstDraw || pl->writeBits || (pl->fetchBits & ~pl->storageBits))
-        g = geometry(*pl, primitive, first, indexed ? drawIndexCount_ : count, {x[0], y[0], x[1], y[1]});
-    else
-        g.limit = {x[0], y[0], x[1], y[1]};
-    auto geometryAnalysis = geometryCache_.analysis(g, bindingRevision_, cb_->geometryBudget_, &cb_->geometryPool_);
+    const PixelBox limit = {x[0], y[0], x[1], y[1]};
+    // splitTwin() re-loads splitSource with acquire before dereferencing; a relaxed null check avoids a per-draw barrier.
+    const bool hasSplit = !indirectGeometry_ && !(rot_.turned() && pl->turnedVariant) &&
+                          __atomic_load_n(&pl->splitSource, __ATOMIC_RELAXED) != nullptr;
+    const bool needGeometry = firstDraw || mayFetch_ || hasSplit || pl->fetchBits != 0;
+    std::optional<WrittenRegion::Analysis> geometryAnalysis;
+    Pipeline *twin = pl;
+    if (needGeometry) {
+        DrawGeometry g;
+        if (firstDraw || pl->writeBits || (pl->fetchBits & ~pl->storageBits))
+            g = geometry(*pl, primitive, first, indexed ? drawIndexCount_ : count, limit);
+        else
+            g.limit = limit;
+        geometryAnalysis.emplace(geometryCache_.analysis(g, bindingRevision_, cb_->geometryBudget_, &cb_->geometryPool_));
+    }
     SWITCH_METAL_ENCODE_BEGIN(variantSpan, Variant);
     // a turned draw of a turned variant's state takes the variant over the generic program's split twin
-    Pipeline *twin = indirectGeometry_ || (rot_.turned() && pl->turnedVariant) ? pl : splitTwin(pl, geometryAnalysis);
+    if (hasSplit)
+        twin = splitTwin(pl, *geometryAnalysis);
     const Pipeline *launchOnly = nullptr;
     bool generic = false;
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
@@ -423,15 +430,15 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
     } else if (!pl->splitOf && !generic)
         pl = prepared;
     SWITCH_METAL_ENCODE_END(variantSpan);
-    if (!whole_) {
-        if (x[1] > x[0] && y[1] > y[0]) {
+    if (!whole_ && x[1] > x[0] && y[1] > y[0]) {
+        growReached(reached_, limit);
+        if (trackRects_) {
             const std::array<uint32_t, 4> r = {x[0], y[0], x[1], y[1]};
-            if (std::find(rects_.begin(), rects_.end(), r) == rects_.end()) {
+            if (std::find(rects_.begin(), rects_.end(), r) == rects_.end())
                 rects_.push_back(r);
-                growReached(reached_, {r[0], r[1], r[2], r[3]});
-            }
             if (rects_.size() > 1024) {
                 whole_ = true;
+                trackRects_ = false;
                 rects_.clear();
             }
         }
@@ -486,9 +493,12 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
         }
         compatible_ = pl;
     }
+    const MixedDraw mixed = mixedForm(*pl);
+    SWITCH_METAL_DIAGNOSTIC(if (mixed == MixedDraw::Covering) dev_->stats.mixedCovering++;
+                            if (mixed == MixedDraw::Split) dev_->stats.mixedStageOff++);
     if (!prepareShaderTests(*pl, why))
         return false;
-    if (p_.room() < 1024 + pl->methods.size() + (cb_->extrasLive_ ? cb_->extrasLive_->restore.size() : 0) +
+    if (p_.room() < 1024 + pl->methodCount() + (cb_->extrasLive_ ? cb_->extrasLive_->restore.size() : 0) +
                         (views_.dirtyViewports | views_.dirtyScissors ? 24 * kMaxViewports : 0))
         reserve();
     Device &d = *dev_;
@@ -506,7 +516,8 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
     const bool dsChanged = dsDirty_;
     if (dsDirty_) {
         SWITCH_METAL_ENCODE_SPAN(Bind);
-        const bool depth = zeta && zetaHasDepth(zeta->format), stencil = zeta && zetaHasStencil(zeta->format);
+        const bool depth = zeta && zetaHasDepth(zeta->format) && pass_.depthStencil.depthEnabled,
+                   stencil = zeta && zetaHasStencil(zeta->format) && pass_.depthStencil.stencilEnabled;
         const bool fixedStencil = stencil && !shadowStencil_, shaderTests = shaderTestsActive_ && !shadowStencil_;
         SWITCH_METAL_DIAGNOSTIC(cb_->counts_.segmentCopies += !shaderTests && !measuringInline() && !bindsBySegment() &&
                                                               dsState_->segment(depth, fixedStencil));
@@ -522,11 +533,30 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
     }
     if (zcull_.candidate && !zcull_.invalidated && (dsChanged || pl != zcullProgram_)) {
         zcullProgram_ = pl;
-        const bool earlyTests = pl->writesMemory[1] && zcullEarlyFragmentTests(pl->methods.data(), pl->methods.size());
-        if (zcullInvalidates(zcull_, ds_, zeta && zetaHasDepth(zeta->format), zeta && zetaHasStencil(zeta->format),
-                             pl->fragmentDepth, shaderTestsActive_ != 0, pl->writesMemory[1], earlyTests)) {
+        const bool earlyTests = pl->writesMemory[1] && zcullEarlyFragmentTests(pl->methodWords(), pl->methodCount());
+        bool openBounds = false;
+        uint32_t keep = 0;
+        const bool depthOn = zeta && zetaHasDepth(zeta->format) && pass_.depthStencil.depthEnabled,
+                   stencilOn = zeta && zetaHasStencil(zeta->format) && pass_.depthStencil.stencilEnabled;
+#if SWITCH_METAL_DIAGNOSTICS
+        openBounds = pl->fragmentDepth && (probeNvn_ & kNvnZcullBounds);
+        if ((keep = probeZcullKeep_)) {
+            ZcullPass without = zcull_, with = zcull_;
+            const bool fragmentDepth = pl->fragmentDepth && !openBounds, shaderTests = shaderTestsActive_ != 0;
+            d.stats.zcullRulesKept += zcullInvalidates(without, ds_, depthOn, stencilOn, fragmentDepth, shaderTests,
+                                                       pl->writesMemory[1], earlyTests) &&
+                                      !zcullInvalidates(with, ds_, depthOn, stencilOn, fragmentDepth, shaderTests,
+                                                        pl->writesMemory[1], earlyTests, keep);
+        }
+#endif
+        if (zcullInvalidates(zcull_, ds_, depthOn, stencilOn, pl->fragmentDepth && !openBounds, shaderTestsActive_ != 0,
+                             pl->writesMemory[1], earlyTests, keep)) {
             p.m(kInvalidateZcull, 0);
             SWITCH_METAL_DIAGNOSTIC(d.stats.zcullInvalidations++);
+        } else if (openBounds != zcull_.boundsOpen) {
+            p.m(NVB197_SET_ZCULL_BOUNDS, openBounds ? kZcullBoundsUnbounded : 0u);
+            zcull_.boundsOpen = openBounds;
+            SWITCH_METAL_DIAGNOSTIC(d.stats.nvnBoundsOpened += openBounds);
         }
     }
     uint32_t *root = cb_->rootPush_;
@@ -537,7 +567,9 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
         cb_->refusal = {RefUnnamedUniform};
         return false;
     }
-    if (__atomic_load_n(&pl->heapMissing, __ATOMIC_ACQUIRE) && !dev_->rebindArguments(*pl)) {
+    if (pl != emitted_ &&
+        (r.rootTableWord[0] || r.rootTableWord[1] || r.statusWord[0] || r.statusWord[1] || r.heapArrays) &&
+        __atomic_load_n(&pl->heapMissing, __ATOMIC_ACQUIRE) && !dev_->rebindArguments(*pl)) {
         *why = "no memory for the tables a state reads argument buffers through";
         cb_->refusal = {RefHeapMemory};
         return false;
@@ -573,7 +605,8 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
                 for (uint32_t i = 0; i < entries.size(); i++)
                     if ((moved >> i & 1) && !writeSetEntry(pl, entries[i], set, prepared, why))
                         return false;
-                fillSpills(*pl, moved, false, prepared, set);
+                if (r.spillWords[0] || r.spillWords[1])
+                    fillSpills(*pl, moved, false, prepared, set);
                 return true;
             },
             [&](const DescriptorWords &words) {
@@ -604,6 +637,7 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
     SWITCH_METAL_ENCODE_END(descriptorSpan);
     if (!set)
         return false;
+    const bool holesMoved = pl->guestBases[0].word && guestSlotMoved(*pl);
     moved_ = MovedBindings{{}, {}, {}, false};
     spillDirty_ = false;
     const auto &residuals = built->residuals;
@@ -611,10 +645,24 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
     prepared_ = pl;
     preparedSet_ = setVa;
     SWITCH_METAL_ENCODE_BEGIN(bindSpan, Bind);
-    const Raster raster = rasterFor(primitive);
-    writeRaster(p, raster);
+    const bool plainRaster = !depthBias_.constant && !depthBias_.slope && raster_.cull == rasterHeld_.cull &&
+                             raster_.winding == rasterHeld_.winding && raster_.fill == rasterHeld_.fill &&
+                             icb::triangles(primitive) == rasterHeld_.bias && !rasterHeld_.biasConstant &&
+                             !rasterHeld_.biasSlope && !rasterHeld_.biasClamp;
+    Raster raster;
+    if (plainRaster) {
+        raster = rasterHeld_;
+    } else {
+        raster = rasterFor(primitive);
+        writeRaster(p, raster);
+    }
     const bool dynamicBlend = r.halfBlendColorWord;
-    const bool slotRoots = r.rootSlots[0] || r.rootSlots[1];
+    const auto rootTableDirty = [&](uint32_t k) {
+        return r.rootSlots[k] && r.rootTableWord[k] && r.rootTableWord[k] <= 31 &&
+               (!rootTableVa_[k] || rootTableSlots_[k] != r.rootSlots[k] ||
+                rootTableWrites_[k] != pl->writesMemory[k] || (rootBufDirty_[k] & r.rootSlots[k]));
+    };
+    const bool slotRootsDirty = rootTableDirty(0) || rootTableDirty(1);
     const bool patches = tessellates(r);
     const bool drawnWordsDirty = ((r.amplificationIdWord || r.amplificationCountWord || r.amplificationLayerWord ||
                                    r.amplificationViewportWord) &&
@@ -622,8 +670,8 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
                                  r.pulledStride[0][1] || r.arrayLengthWord || r.viewportCountWord;
     const bool rebinds = pl != emitted_;
     if (pl != emitted_ || residualMask || residualsPushed_ || (dynamicBlend && blendColorDirty_) ||
-        r.shaderTests.flags || shadowStencil(r.shaderTests) || slotRoots || (patches && tessWordsDirty_) ||
-        drawnWordsDirty) {
+        r.shaderTests.flags || shadowStencil(r.shaderTests) || slotRootsDirty || (patches && tessWordsDirty_) ||
+        drawnWordsDirty || holesMoved) {
         if (pl != emitted_) {
             blendColorDirty_ |= pl->constantBlend || dynamicBlend;
             if (cb_->extrasLive_ && cb_->extrasLive_ != pl) {
@@ -639,8 +687,9 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
                 narrowed_ = narrow;
             }
             bindState(p, *pl);
+            streamFormatKnown_ = 0;
             clipHeld_ = pl->viewportClip;
-            clampRangeHeld_ = clampRangeHeld_ && !pl->namesViewportClipRange;
+            cb_->clampRangeHeld_ = cb_->clampRangeHeld_ && !pl->namesViewportClipRange;
             // a vertex program's Layer selects the slice where it writes one (NVK: the last pre-rasterization stage's)
             if (const uint32_t rtLayer = pl->writesLayer ? kRtLayerFromShader : 0; rtLayer != cb_->rtLayer_) {
                 p.m(NVB197_SET_RT_LAYER, rtLayer);
@@ -666,17 +715,24 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
         patchShaderTestPush(r.shaderTests, ds_, stencilRef_, depthRange_, false, want);
         for (uint32_t k = 0; k < 2; k++)
             if (const uint8_t word = r.rootTableWord[k]; r.rootSlots[k] && word && word <= 31) {
-                const uint64_t table = rootTable(r, k, pl->writesMemory[k]);
+                if (rootTableDirty(k)) {
+                    rootTableVa_[k] = rootTable(r, k, pl->writesMemory[k]);
+                    rootTableSlots_[k] = r.rootSlots[k];
+                    rootTableWrites_[k] = pl->writesMemory[k];
+                    rootBufDirty_[k] &= ~r.rootSlots[k];
+                }
+                const uint64_t table = rootTableVa_[k];
                 want[word - 1] = uint32_t(table);
                 want[word] = uint32_t(table >> 32);
             }
+        const uint32_t pushMask = pl->pushMask | (pl->guestBases[0].word ? guestBaseWords(*pl, want) : 0u);
         for (int i = 0; i < 32;) {
-            if (!(pl->pushMask >> i & 1) || root[i] == want[i]) {
+            if (!(pushMask >> i & 1) || root[i] == want[i]) {
                 i++;
                 continue;
             }
             int j = i;
-            while (j < 32 && (pl->pushMask >> j & 1) && root[j] != want[j])
+            while (j < 32 && (pushMask >> j & 1) && root[j] != want[j])
                 j++;
             p.m(LOAD_CB_OFFSET, 0x700 + 4 * i);
             p.nonInc(LOAD_CB, want + i, j - i);
@@ -691,18 +747,21 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
                       pl->blendKill);
     if (rebinds && cb_->sampleMaskHeld_ != kSampleMaskAll)
         cb_->sampleMaskHeld_ = kSampleMaskUnknown;
-    if (compatibleRasterMask_ != cb_->sampleMaskHeld_) {
-        const uint32_t m = compatibleRasterMask_;
-        p.inc(NVB197_SET_SAMPLE_MASK_X0_Y0, {m, m, m, m});
-        cb_->sampleMaskHeld_ = m;
+    const uint32_t wantMask = mixed == MixedDraw::Whole || mixed == MixedDraw::Covering
+                                  ? compatibleRasterMask_
+                                  : compatibleRasterMask_ & kFirstSampleMask;
+    if (wantMask != cb_->sampleMaskHeld_) {
+        p.inc(NVB197_SET_SAMPLE_MASK_X0_Y0, {wantMask, wantMask, wantMask, wantMask});
+        cb_->sampleMaskHeld_ = wantMask;
     }
     if (rasterSamples_ > samples_ && tirControl(pl->samples) != tirControlHeld_) {
         tirControlHeld_ = tirControl(pl->samples);
         p.m(NVB197_SET_TIR_CONTROL, tirControlHeld_);
     }
     SWITCH_METAL_ENCODE_END(bindSpan);
-    if (!writeClipControl(p, *pl, raster, why))
-        return false;
+    if (clipDirty_ || viewportDirty_ || rebinds || !plainRaster || pass_.metalDraws != cb_->clampRangeHeld_)
+        if (!writeClipControl(p, *pl, raster, why))
+            return false;
     if (samplePasses_ != pl->samplePasses) {
         p.m(LOAD_CB_OFFSET, kRootSampleInfo + 8);
         p.nonInc(LOAD_CB, compatibleSampleMasks_, 4);
@@ -740,12 +799,16 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
     if (descriptorBinding_.changed(pl, setVa)) {
         const HeapSet *heap = pl->heapSet;
         const uint64_t heapVa = heap ? heap->memory.va : 0;
-        // NVK's root table sets[0] and sets[1]: set 0, and set 1 for a heap array a program reads past its constant buffer
-        const uint32_t s[8] = {uint32_t(setVa),        uint32_t(setVa >> 32),  setBytes, 0, uint32_t(heapVa),
-                               uint32_t(heapVa >> 32), heap ? r.heapBytes : 0, 0};
+        const uint32_t s[4] = {uint32_t(setVa), uint32_t(setVa >> 32), setBytes, 0};
         p.m(LOAD_CB_OFFSET, 0x38);
-        p.nonInc(LOAD_CB, s, heap ? 8 : 4);
-        if (pl->heapSlot[0] || pl->heapSlot[1] || pl->heapSlot[2] || pl->heapSlot[3]) {
+        p.nonInc(LOAD_CB, s, 4);
+        if (heap && descriptorBinding_.heapRootChanged(heapVa, r.heapBytes)) {
+            const uint32_t h[4] = {uint32_t(heapVa), uint32_t(heapVa >> 32), r.heapBytes, 0};
+            p.m(LOAD_CB_OFFSET, 0x48);
+            p.nonInc(LOAD_CB, h, 4);
+        }
+        if ((pl->heapSlot[0] || pl->heapSlot[1] || pl->heapSlot[2] || pl->heapSlot[3]) &&
+            descriptorBinding_.heapBindChanged(pl, heapVa, r.heapBytes)) {
             p.inc(CB_SELECTOR_A, {cbufBindBytes(r.heapBytes), uint32_t(heapVa >> 32), uint32_t(heapVa)});
             for (uint32_t k = 0; k < 4; k++)
                 if (pl->heapSlot[k])
@@ -783,7 +846,7 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
         launchSplit(p, *launchOnly, set);
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     if (cb_->splitCapturing_ && twin->splitOf && !indexed)
-        captureSplit(*pl, geometryAnalysis, primitive, vFirst, count);
+        captureSplit(*pl, *geometryAnalysis, primitive, vFirst, count);
 #endif
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     countRules(*pl);
@@ -811,12 +874,13 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
     }
     if (firstDraw && !indirectGeometry_ && !pl->dropsPixels && !(alphaWanted_ & kAlphaToCoverage)) {
         const uint8_t opaque = pl->writeBits & ~(pl->readBits | pl->fetchBits | pl->storageBits);
-        if (opaque && geometryAnalysis.covers(primitive == 3, areaW_, areaH_))
+        if (opaque && geometryAnalysis->covers(primitive == 3, areaW_, areaH_))
             covered_ = opaque;
     }
     const AttachmentBarrier needed = access.after(attachmentWrites_.rop, attachmentWrites_.storage);
     if (needed != AttachmentBarrier::None) {
-        if (needed == AttachmentBarrier::Pixel && !fetchedCompressed && !written_.meets(geometryAnalysis)) {
+        if (needed == AttachmentBarrier::Pixel &&
+            !(fetchedCompressed ? written_.meetsTiles(*geometryAnalysis) : written_.meets(*geometryAnalysis))) {
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
             SWITCH_METAL_DIAGNOSTIC(dev_->stats.fetchBarriersElided++);
 #endif
@@ -846,18 +910,14 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
         !fetchedCompressed && fetchesOwnColor(pl->fetchBits, pl->writeBits, pl->storageBits) && !indirectGeometry_ &&
         !amplifies() && raster_.fill == 0 && (!pl->viewportIndex || views_.viewports <= 1) &&
         (primitive == 3 || primitive == 4) && drawCount == (primitive == 3 ? 6u : 4u) &&
-        WrittenRegion::nonOverlappingQuad(geometryAnalysis, primitive == 3));
+        WrittenRegion::nonOverlappingQuad(*geometryAnalysis, primitive == 3));
     SWITCH_METAL_ENCODE_END(barrierSpan);
-#if SWITCH_METAL_DIAGNOSTICS
-    if (pipeline_ && pipeline_->caName)
-        probeDraw(*pipeline_, *pl, primitive, first, count, indexed, {x[0], y[0], x[1], y[1]});
-#endif
     SWITCH_METAL_DIAGNOSTIC(cb_->counts_.interlockDraws += pl->storageBits != 0);
     SWITCH_METAL_DIAGNOSTIC(cb_->counts_.rasterOrderedDraws += pl->rec && (pl->rec->flags & PipelineRasterOrdered));
 #if SWITCH_METAL_DIAGNOSTICS
     if (pl->rec && pl->storageBits)
         dev_->stats.fetch.interlockKeys.note(pl->rec->keyHash);
-    if (pl->rec && pl->genericState)
+    if (pl->rec && __atomic_load_n(&pl->genericState, __ATOMIC_RELAXED))
         dev_->stats.fetch.genericKeys.note(pl->rec->keyHash);
 #endif
     SWITCH_METAL_DIAGNOSTIC(cb_->counts_.interlocked += (pl->fetchBits & pl->storageBits) != 0);
@@ -866,11 +926,11 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
     attachmentWrites_.storage |= pl->storageWriteBits;
     passShaderWrites_ |= pl->writtenSlots != 0 || pl->writesMemory[0] || pl->writesMemory[1];
     passWritesMemory_ |= pl->writesMemory[0] || pl->writesMemory[1];
-    if (pl->writeBits)
-        written_.add(geometryAnalysis);
+    if (pl->writeBits && mayFetch_)
+        written_.add(*geometryAnalysis);
     // Reuse a bound already established for split/coverage/fetch decisions. Admission never triggers new CPU geometry
     // reads; unknown geometry uses the clipped viewport/scissor extent rather than the whole render target.
-    drawBox_ = geometryAnalysis.cachedBox();
+    drawBox_ = geometryAnalysis ? geometryAnalysis->cachedBox() : limit;
     drawPixels_ = drawBox_.empty() ? 0 : uint64_t(drawBox_.x1 - drawBox_.x0) * (drawBox_.y1 - drawBox_.y0);
     return pl->freeForm.matrixSlot == kNoUniform || matrixConstants(*pl, why);
 }
@@ -887,6 +947,8 @@ const char *Device::fetchBarrierName(FetchBarrier b)
         return "psonly";
     case FetchBarrier::None:
         return "none";
+    case FetchBarrier::Tiles:
+        return "tiles";
     }
     return "?";
 }
@@ -895,7 +957,7 @@ const char *Device::fetchBarrierName(FetchBarrier b)
 void RenderEncoder::fetchBarrier(Push &p)
 {
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-    switch (dev_->fetchBarrier.load(std::memory_order_relaxed)) {
+    switch (Device::FetchBarrier(fetchBarrierMode_)) {
     case Device::FetchBarrier::None:
         return;
     case Device::FetchBarrier::WaitForIdle:
@@ -905,16 +967,20 @@ void RenderEncoder::fetchBarrier(Push &p)
     case Device::FetchBarrier::PixelShaderOnly:
         p.m(PIXEL_SHADER_BARRIER, 0);
         return;
+    case Device::FetchBarrier::Tiles:
+        // the tile barrier orders nothing while the tiled cache is off: the shipped barrier there, as ddaf1338f had it
+        if (!tiledCache(dev_->k_.info()))
+            break;
+        p.m(SWITCH_NVB197_TILED_CACHE_BARRIER, 0);
+        p.m(INVALIDATE_TEXTURE_DATA_CACHE_PIXEL_ORDERED, 0);
+        return;
     case Device::FetchBarrier::PixelShader:
         break;
     }
 #endif
-    for (uint32_t j = 0; j < pass_.count && j < 8; j++) {
-        const Texture *t = pass_.color[j].texture;
-        if (t && !shadowOf_[j] && t->storageRange().gpuVolatile) {
-            kit(p, switch_gm20b_pixel_shader_barrier_sysmem);
-            return;
-        }
+    if (passHasVolatileColor_) {
+        kit(p, switch_gm20b_pixel_shader_barrier_sysmem);
+        return;
     }
     kit(p, switch_gm20b_pixel_shader_barrier);
 }

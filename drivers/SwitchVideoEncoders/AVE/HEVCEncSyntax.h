@@ -26,6 +26,7 @@ typedef struct {
     uint8_t log2_ctb, log2_min_cb, log2_min_tb, log2_max_tb;
     uint8_t max_tr_depth_inter, max_tr_depth_intra;
     bool amp, sao, temporal_mvp, strong_intra_smoothing;
+    bool fast;
     bool full_range, colour_description;
     uint8_t colour_primaries, transfer, matrix;  // H.273 code points
     uint32_t fps_num, fps_den;                   // 0/0: no timing information in the VUI

@@ -2,14 +2,14 @@
 #import "TegraGM20BMetalInternal.h"
 #include "object_pool.h"
 
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+#if SWITCH_METAL_PROF
 namespace {
 
-constexpr const char *kPartNames[] = {"resources",     "loop",  "state",    "pass",     "split_plan",  "fusion",
-                                      "pass_end",      "draw",  "prepare",  "geometry", "descriptors", "barriers",
-                                      "split_launch",  "blit",  "compute",  "tail",     "commit",      "prologues",
-                                      "kernel",        "exec",  "use",      "uniforms", "bind",        "variant",
-                                      "pass_prologue", "apply", "textures", "retire",   "pass_begin"};
+constexpr const char *kPartNames[] = {
+    "resources",     "loop",      "state",       "pass",     "split_plan",   "fusion",        "pass_end", "draw",
+    "prepare",       "geometry",  "descriptors", "barriers", "split_launch", "blit",          "compute",  "tail",
+    "commit",        "prologues", "kernel",      "exec",     "use",          "uniforms",      "bind",     "variant",
+    "pass_prologue", "apply",     "textures",    "retire",   "pass_begin",   "variant_lookup"};
 static_assert(sizeof kPartNames / sizeof *kPartNames == gm20b::kEncodeParts);
 
 constexpr const char *kCountNames[] = {"mallocs",

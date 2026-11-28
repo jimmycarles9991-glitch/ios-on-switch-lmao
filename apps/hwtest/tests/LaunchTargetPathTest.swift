@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// 22 Nov, boot B: Photos' launch made a 1792x1472 RGBA16F attachment in backboardd, a block-linear chunk of its own

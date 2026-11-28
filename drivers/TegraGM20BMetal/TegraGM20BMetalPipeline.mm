@@ -55,7 +55,7 @@ void giveBack(uint32_t veto)
         return;
     if (a.open) {
         gm20bRangeEncode().reset();
-        gRM->committed.fetch_sub(1);
+        gRM->committed.fetch_sub(1, std::memory_order_release);
         cb->_pipelineAbandons++;
         cb->_pipelineGivenBack |= veto;
         SWITCH_METAL_DIAGNOSTIC(gRM->stats.pipelineAbandons[__builtin_ctz(veto ? veto : uint32_t(VetoFailed))]++);
@@ -78,21 +78,21 @@ size_t stopOf(const Ahead &a)
 
 }  // namespace
 
-bool gm20bAheadReads(SwitchMetalCommandBuffer *cb)
+bool gm20bAheadReads(__unsafe_unretained SwitchMetalCommandBuffer *cb)
 {
     const size_t stop = cb->_aheadStop.load(std::memory_order_relaxed);
     return cb->_handedOnce && !cb->_pipelineVeto.load(std::memory_order_relaxed) &&
            !cb->_pipelineDeclined.load(std::memory_order_relaxed) && (!stop || cb->_encAt < stop);
 }
 
-void gm20bPrepareEncoder(SwitchMetalCommandBuffer *cb, size_t from, size_t to)
+void gm20bPrepareEncoder(__unsafe_unretained SwitchMetalCommandBuffer *cb, size_t from, size_t to)
 {
     cb->_plan.prepareRange(from, to);
-    SWITCH_METAL_DIAGNOSTIC(gm20b::frameCpuCounts().recordPrepares.fetch_add(1, std::memory_order_relaxed));
+    SWITCH_METAL_STAT(gm20b::frameCpuCounts().recordPrepares.fetch_add(1, std::memory_order_relaxed));
 }
 
 // Before the first hand-off: the encoders recorded so far, which the worker encodes from the tape's start
-static void prepareEnded(SwitchMetalCommandBuffer *cb, size_t length)
+static void prepareEnded(__unsafe_unretained SwitchMetalCommandBuffer *cb, size_t length)
 {
     if (const size_t stop = cb->_aheadStop.load(std::memory_order_relaxed))
         length = std::min(length, stop);
@@ -109,24 +109,28 @@ static void prepareEnded(SwitchMetalCommandBuffer *cb, size_t length)
     }
 }
 
-void gm20bPublishEncoder(SwitchMetalCommandBuffer *cb)
+void gm20bPublishEncoder(__unsafe_unretained SwitchMetalCommandBuffer *cb)
 {
     const size_t length = cb->_plan.size();
-    cb->_published.store(uint64_t(cb->_endedAt) << 32 | length, std::memory_order_seq_cst);
+    const uint64_t published = uint64_t(cb->_endedAt) << 32 | length;
     cb->_endedAt = cb->_encAt;
     cb->_handedCommands += uint32_t(length - cb->_encAt);
-    if (cb->_handedCommands < kHandOff || cb->_pipelineVeto.load(std::memory_order_relaxed))
+    if (cb->_handedCommands < kHandOff || cb->_pipelineVeto.load(std::memory_order_relaxed)) {
+        cb->_published.store(published, std::memory_order_release);
         return;
+    }
     cb->_handedCommands = 0;
     SWITCH_METAL_DIAGNOSTIC(gRM->stats.handoffs++);
     if (!cb->_handedOnce) {
         prepareEnded(cb, length);
         cb->_handedOnce = true;
+        cb->_published.store(published, std::memory_order_release);
         SWITCH_METAL_DIAGNOSTIC(gRM->stats.handoffWakes += gRM->submitAsleep.load(std::memory_order_relaxed));
         gRM->schedule.push({SwitchMetalScheduleChange::Encoded, cb});
         return;
     }
-    // the worker holds it already and reads _published before it sleeps: a wake only for a worker asleep
+    // Dekker pair with submitLoop's submitAsleep.store(seq_cst) -> _published.load(seq_cst)
+    cb->_published.store(published, std::memory_order_seq_cst);
     if (!cb->_pipelineDeclined.load(std::memory_order_relaxed) && gRM->submitAsleep.load(std::memory_order_seq_cst)) {
         SWITCH_METAL_DIAGNOSTIC(gRM->stats.handoffWakes++);
         gRM->schedule.wake();
@@ -139,7 +143,7 @@ void gm20bPipelineHanded(SwitchMetalCommandBuffer *cb)
     if (cb->_pipelineDeclined.load(std::memory_order_relaxed) || cb->_committed.load(std::memory_order_acquire))
         return;
     if (a.cb) {
-        SWITCH_METAL_DIAGNOSTIC(
+        SWITCH_METAL_STAT(
             cb->_scheduleNotes.aheadLost.store(uint8_t(gm20b::AheadLost::Busy), std::memory_order_relaxed));
         cb->_pipelineDeclined.store(true, std::memory_order_release);
         aheadChanged(cb);
@@ -179,11 +183,12 @@ bool gm20bPipelineStep()
         return false;
     return gm20bSubmission([&] {
         if (!a.open) {
+            gm20bMoveWanting();
             // counted as committed, no purge takes an arena it encodes (gpu.h purgeArenas)
             gRM->committed.fetch_add(1);
             if (gRM->raw->purgedArenas()) {
                 encode.reset();
-                gRM->committed.fetch_sub(1);
+                gRM->committed.fetch_sub(1, std::memory_order_release);
                 giveBack(VetoDevice);
                 return true;
             }
@@ -216,6 +221,17 @@ void gm20bPipelineYield(SwitchMetalCommandBuffer *cb, size_t from, bool nativeRa
         giveBack(VetoOtherWork);
 }
 
+bool gm20bPipelineOpen()
+{
+    return ahead().open;
+}
+
+bool gm20bPipelineHasOpenAhead(SwitchMetalCommandBuffer *cb)
+{
+    const Ahead &a = ahead();
+    return a.cb == cb && a.open;
+}
+
 void gm20bPipelineFailed(SwitchMetalCommandBuffer *cb)
 {
     if (ahead().cb == cb)
@@ -228,7 +244,7 @@ bool gm20bPipelineTake(SwitchMetalCommandBuffer *cb, size_t from)
     if (a.cb != cb || from)
         return false;
     if (!a.open) {
-        SWITCH_METAL_DIAGNOSTIC(
+        SWITCH_METAL_STAT(
             cb->_scheduleNotes.aheadLost.store(uint8_t(gm20b::AheadLost::Late), std::memory_order_relaxed));
         giveBack(0);
         return false;
@@ -245,7 +261,7 @@ bool gm20bPipelineTake(SwitchMetalCommandBuffer *cb, size_t from)
 #if SWITCH_METAL_DIAGNOSTICS
     cb->_pipelinedEncoders = encodersBefore(cb, encode.position());
 #endif
-    gRM->committed.fetch_sub(1);
+    gRM->committed.fetch_sub(1, std::memory_order_release);
     a.cb = nil;
     a.open = false;
     return true;
@@ -333,8 +349,8 @@ static void splitCommittedRange(SwitchMetalCommandBuffer *cb)
     rest.from = range.to = uint32_t(at);
     rest.gpuWait = false;
     cb->_segs.insert(cb->_segs.begin() + ptrdiff_t(cb->_segNext) + 1, rest);
-    SWITCH_METAL_DIAGNOSTIC(gm20b::frameCpuCounts().splits.fetch_add(1, std::memory_order_relaxed));
-    SWITCH_METAL_DIAGNOSTIC(gm20b::frameCpuCounts().rangeSplits.fetch_add(1, std::memory_order_relaxed));
+    SWITCH_METAL_STAT(gm20b::frameCpuCounts().splits.fetch_add(1, std::memory_order_relaxed));
+    SWITCH_METAL_STAT(gm20b::frameCpuCounts().rangeSplits.fetch_add(1, std::memory_order_relaxed));
 }
 
 static size_t aheadSplitPoint(SwitchMetalCommandBuffer *cb, const SwitchMetalSegment &range)
@@ -366,7 +382,7 @@ void gm20bPipelineSplit(SwitchMetalCommandBuffer *cb)
                 rest.from = range.to = uint32_t(at);
                 rest.gpuWait = false;
                 cb->_segs.insert(cb->_segs.begin() + ptrdiff_t(cb->_segNext) + 1, rest);
-                SWITCH_METAL_DIAGNOSTIC(gm20b::frameCpuCounts().splits.fetch_add(1, std::memory_order_relaxed));
+                SWITCH_METAL_STAT(gm20b::frameCpuCounts().splits.fetch_add(1, std::memory_order_relaxed));
             }
             return;
         }

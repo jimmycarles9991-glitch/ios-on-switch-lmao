@@ -362,11 +362,15 @@ TEST(SwitchNecpDiagSource, ReleaseKernelsCompileItToNothing)
     const std::string cryptex = switch_ios::test::SourceText("../switch/include/switch/cryptex_map.h");
     EXPECT_THAT(cryptex, HasSubstr("#else\n#define SWITCH_CRYPTEX_MAP_REFUSED(p, cache, preboot, preboot_error) \\\n"
                                    "    do {"));
-    for (const char *file : {"../switch/diag/necp.c", "../switch/diag/necp_table.c", "../switch/diag/cryptex_map.c"}) {
+    for (const char *file : {"../switch/diag/necp.c", "../switch/diag/necp_table.c"}) {
         const std::string source = switch_ios::test::SourceText(file);
-        EXPECT_THAT(source, HasSubstr("\n#if DEVELOPMENT || DEBUG\n")) << file;
-        EXPECT_THAT(source, HasSubstr("\n#endif /* DEVELOPMENT || DEBUG */\n")) << file;
+        EXPECT_THAT(source, HasSubstr("\n#if (DEVELOPMENT || DEBUG) && defined(SWITCH_DIAG_NECP) && SWITCH_DIAG_NECP\n"))
+            << file;
+        EXPECT_THAT(source, HasSubstr("\n#endif /* (DEVELOPMENT || DEBUG) && SWITCH_DIAG_NECP */\n")) << file;
     }
+    const std::string cryptex_src = switch_ios::test::SourceText("../switch/diag/cryptex_map.c");
+    EXPECT_THAT(cryptex_src, HasSubstr("\n#if DEVELOPMENT || DEBUG\n"));
+    EXPECT_THAT(cryptex_src, HasSubstr("\n#endif /* DEVELOPMENT || DEBUG */\n"));
 }
 
 }  // namespace

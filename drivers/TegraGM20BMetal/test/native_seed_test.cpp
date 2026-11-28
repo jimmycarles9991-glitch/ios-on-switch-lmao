@@ -120,7 +120,7 @@ TEST_F(NativeSeed, ReadOnlyConsumerLoadsWithoutPrivateCacheAndCannotStore)
     EXPECT_EQ(cache.load(cachechecks::keyOf(key.stack, "unseeded", 7), loaded, why), gm20b::RecordCache::Found::None);
 }
 
-TEST_F(NativeSeed, SeedWinsOverPrivateRecordAndDamagedSeedRecordFallsBack)
+TEST_F(NativeSeed, SeedWinsOverPrivateRecordAndASeedRecordOfAnotherHeadFallsBack)
 {
     gm20b::RecordCache cache;
     ASSERT_TRUE(cache.open(local.string(), key.stack, 0));
@@ -133,10 +133,11 @@ TEST_F(NativeSeed, SeedWinsOverPrivateRecordAndDamagedSeedRecordFallsBack)
     EXPECT_TRUE(cachechecks::same(loaded, installed));
     const std::string entry = gm20b::encodeEntry(key, &installed, "");
     for (uint32_t number = 0; number < 64 && fs::exists(pack(number)); ++number) {
-        // Damaged in place at the same length: a mapped pack cut short would fault its reader
+        // Its head changed in place at the same length (a mapped pack cut short would fault its reader). Nothing
+        // checks an entry's body again: the seed is built on the host and installed read only
         std::string bytes = readFile(pack(number));
         for (size_t at = bytes.find(entry); at != std::string::npos; at = bytes.find(entry, at + 1))
-            bytes[at + entry.size() / 2] ^= 1;
+            bytes[at] ^= 1;
         std::fstream(pack(number), std::ios::binary | std::ios::in | std::ios::out).write(bytes.data(), bytes.size());
     }
     EXPECT_EQ(cache.load(key, loaded, why), gm20b::RecordCache::Found::Record);

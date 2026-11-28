@@ -24,6 +24,7 @@
 #include <switch/shutdown.h>
 #include "SwitchPowerTrail.h"
 
+extern void switch_gpu_pack_shutdown_request(void) __attribute__((weak));
 extern void switch_gpu_pack_shutdown(void) __attribute__((weak));
 
 #if DEVELOPMENT || DEBUG
@@ -76,16 +77,8 @@ static unsigned switch_shutdown_mark(const char *what)
     return SWITCH_MARK_HALT_OTHER;
 }
 
-void switch_shutdown_begin(int howto)
+static void switch_shutdown_arm_deadline(void)
 {
-    if (switch_prefetch_shutdown != NULL)
-        switch_prefetch_shutdown();
-    if (switch_gpu_pack_shutdown != NULL)
-        switch_gpu_pack_shutdown();
-    shutdown_howto = howto;
-    switch_power_trail("reboot(%#x) began", howto);
-    switch_shutdown_mark_sync(SWITCH_MARK_HALT_BEGAN);
-    switch_power_trail_watch(WATCHDOG_S, "shutdown");
     thread_call_t call = thread_call_allocate_with_options(switch_shutdown_stalled, NULL,
                                                            THREAD_CALL_PRIORITY_KERNEL_HIGH, THREAD_CALL_OPTIONS_ONCE);
     if (!call) {
@@ -95,6 +88,25 @@ void switch_shutdown_begin(int howto)
     uint64_t deadline = 0;
     clock_interval_to_deadline(DEADLINE_S, NSEC_PER_SEC, &deadline);
     thread_call_enter_delayed(call, deadline);
+}
+
+/* The trail, the SoC watchdog and the deadline come first: the replay and pack stops below wait on other threads.
+ * The pack is told to stop before the replay wait, so both threads wind down side by side. */
+void switch_shutdown_begin(int howto)
+{
+    shutdown_howto = howto;
+    switch_power_trail("reboot(%#x) began", howto);
+    switch_shutdown_mark_sync(SWITCH_MARK_HALT_BEGAN);
+    switch_power_trail_watch(WATCHDOG_S, "shutdown");
+    switch_shutdown_arm_deadline();
+    last_step = "reboot(2) began; stopping the boot replay and the GPU pack";
+    if (switch_gpu_pack_shutdown_request != NULL)
+        switch_gpu_pack_shutdown_request();
+    if (switch_prefetch_shutdown != NULL)
+        switch_prefetch_shutdown();
+    if (switch_gpu_pack_shutdown != NULL)
+        switch_gpu_pack_shutdown();
+    last_step = "boot replay and GPU pack stopped";
 }
 
 void switch_shutdown_step(const char *what, const void *pc, uint64_t elapsed)
@@ -133,6 +145,8 @@ SYSCTL_PROC(_debug, OID_AUTO, switch_watchdog_bench, CTLTYPE_INT | CTLFLAG_WR | 
 #else
 void switch_shutdown_begin(int howto __unused)
 {
+    if (switch_gpu_pack_shutdown_request != NULL)
+        switch_gpu_pack_shutdown_request();
     if (switch_prefetch_shutdown != NULL)
         switch_prefetch_shutdown();
     if (switch_gpu_pack_shutdown != NULL)

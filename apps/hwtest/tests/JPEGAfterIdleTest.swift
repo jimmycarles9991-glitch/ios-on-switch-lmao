@@ -1,6 +1,8 @@
 import CoreGraphics
 import Foundation
 import HWTestCore
+import HWTestKit
+import HWTestShared
 import ImageIO
 
 /// NVJPG powers off 500 ms after its last decode (SwitchEngineGate) and on again at the next. A 4:2:0 photo decoded

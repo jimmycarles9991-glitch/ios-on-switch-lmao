@@ -47,7 +47,21 @@ typedef enum {
     CONTEXT_SWITCH = 1,
     IDLE = 11,
 } perfcontrol_event;
-struct perfcontrol_thread_data;
+
+typedef enum {
+    PERFCONTROL_CLASS_IDLE = 1,
+    PERFCONTROL_CLASS_KERNEL = 2,
+    PERFCONTROL_CLASS_REALTIME = 3,
+    PERFCONTROL_CLASS_BACKGROUND = 4,
+    PERFCONTROL_CLASS_UTILITY = 5,
+    PERFCONTROL_CLASS_NONUI = 6,
+    PERFCONTROL_CLASS_UI = 7,
+} perfcontrol_class_t;
+
+struct perfcontrol_thread_data {
+    uint32_t energy_estimate_nj;
+    perfcontrol_class_t perfctl_class;
+};
 struct perfcontrol_cpu_counters;
 typedef void (*sched_perfcontrol_deadline_passed_t)(uint64_t deadline);
 typedef void (*sched_perfcontrol_csw_t)(perfcontrol_event event, uint32_t cpu_id, uint64_t timestamp, uint32_t flags,

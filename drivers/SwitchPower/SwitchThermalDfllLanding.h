@@ -112,7 +112,9 @@ void SwitchThermal::dfllLandingStep()
     run.on = perfRaised && dfllMode && perfRaises == run.raise;
     switch (run.step) {
     case DfllLandingStepKind::Begin:
-        dfllLandingRuns = run.on;
+        __atomic_store_n(&dfllLandingRuns, run.on, __ATOMIC_RELEASE);
+        if (run.on)
+            syncGovLoop();
         break;
     case DfllLandingStepKind::Ask:
         run.err = run.on ? tegra_dfll_cpu_set_rate(run.hz) : 0;
@@ -129,11 +131,9 @@ void SwitchThermal::dfllLandingStep()
         } else {
             run.err = run.restore ? tegra_dfll_cpu_set_rate(run.restore) : -EINVAL;
         }
-        dfllLandingRuns = false;
-        const bool pending = governorPending;
-        governorPending = false;
-        if (pending && switchperf::running())
-            applyGovernor();
+        __atomic_store_n(&dfllLandingRuns, false, __ATOMIC_RELEASE);
+        if (__atomic_exchange_n(&governorPending, false, __ATOMIC_ACQ_REL) && switchperf::running() && governor[0])
+            governor[0]->interruptOccurred(nullptr, nullptr, 0);
         break;
     }
     }

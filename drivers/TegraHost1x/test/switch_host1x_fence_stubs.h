@@ -7,13 +7,19 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <new>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 using IOReturn = int;
 using IOOptionBits = uint32_t;
+using event_t = void *;
+using wait_result_t = int;
+using thread_continue_t = void (*)(void *, wait_result_t);
 constexpr IOReturn kIOReturnSuccess = 0;
-constexpr int THREAD_UNINT = 0, THREAD_AWAKENED = 0, THREAD_TIMED_OUT = 1;
+constexpr int THREAD_UNINT = 0, THREAD_WAITING = -1, THREAD_AWAKENED = 0, THREAD_TIMED_OUT = 1;
+constexpr thread_continue_t THREAD_CONTINUE_NULL = nullptr;
 constexpr uint32_t kMicrosecondScale = 1000, kMillisecondScale = 1000000;
 constexpr uint64_t NSEC_PER_USEC = 1000, NSEC_PER_MSEC = 1000000;
 constexpr size_t PAGE_SIZE = 16384;
@@ -96,14 +102,36 @@ inline void IOSimpleLockUnlockEnableInterrupt(IOSimpleLock *lock, IOInterruptSta
 }
 
 inline uint32_t switch_test_wakeups;
+inline uint64_t switch_test_wait_deadline;
+inline event_t switch_test_wait_event;
 
 inline void IOLockWakeup(IOLock *, void *, bool)
 {
     ++switch_test_wakeups;
 }
 
-// Called with the lock held and the deadline: returns THREAD_AWAKENED or THREAD_TIMED_OUT.
+inline void thread_wakeup(event_t)
+{
+    ++switch_test_wakeups;
+}
+
+// Called with the lock released and the deadline: returns THREAD_AWAKENED or THREAD_TIMED_OUT.
 inline std::function<int(uint64_t deadline)> switch_test_sleep;
+
+inline wait_result_t assert_wait_deadline(event_t event, int, uint64_t deadline)
+{
+    switch_test_wait_event = event;
+    switch_test_wait_deadline = deadline;
+    return THREAD_WAITING;
+}
+
+inline wait_result_t thread_block(thread_continue_t)
+{
+    switch_test_may_block("thread_block");
+    if (!switch_test_sleep)
+        throw std::runtime_error("unexpected sleep");
+    return switch_test_sleep(switch_test_wait_deadline);
+}
 
 inline int IOLockSleepDeadline(IOLock *lock, void *, uint64_t deadline, int)
 {
@@ -121,13 +149,26 @@ inline int IOLockSleep(IOLock *lock, void *event, int interruptible)
     return IOLockSleepDeadline(lock, event, 0, interruptible);
 }
 
-inline void IOLog(const char *, ...)
+// Every IOLog line, for the tests that read them.
+inline std::vector<std::string> switch_test_iolog;
+
+inline void IOLog(const char *format, ...)
 {
     switch_test_may_block("IOLog");
+    char text[512];
+    va_list arguments;
+    va_start(arguments, format);
+    vsnprintf(text, sizeof(text), format, arguments);
+    va_end(arguments);
+    switch_test_iolog.emplace_back(text);
 }
 
 inline void IODelay(unsigned)
 {}
+
+#define IONew(type, count)             new (std::nothrow) type[count]
+#define IONewZero(type, count)         new (std::nothrow) type[count]()
+#define IODelete(pointer, type, count) delete[] (pointer)
 
 [[noreturn]] inline void panic(const char *format, ...)
 {
@@ -174,22 +215,46 @@ public:
     }
 
     void enable()
-    {}
+    {
+        enabled = true;
+    }
+
+    void disable()
+    {
+        enabled = false;
+    }
 
     void interruptOccurred(void *, IOService *, int)
     {
         ++switch_test_kicks;
     }
+
+    Action action = nullptr;
+    bool enabled = false;
 };
 
 class IOFilterInterruptEventSource : public IOInterruptEventSource {
 public:
     using Filter = bool (*)(OSObject *, IOFilterInterruptEventSource *);
 
-    static IOFilterInterruptEventSource *filterInterruptEventSource(OSObject *, Action, Filter, IOService *, int)
+    static IOFilterInterruptEventSource *filterInterruptEventSource(OSObject *, Action action, Filter filter,
+                                                                    IOService *, int)
     {
-        return new IOFilterInterruptEventSource;
+        auto *source = new IOFilterInterruptEventSource;
+        source->action = action;
+        source->filter = filter;
+        made().push_back(source);
+        return source;
     }
+
+    // Every source made, in order: the syncpoint line's first, then the general interrupt's.
+    static std::vector<IOFilterInterruptEventSource *> &made()
+    {
+        static std::vector<IOFilterInterruptEventSource *> sources;
+        return sources;
+    }
+
+    Filter filter = nullptr;
 };
 
 class IOWorkLoop : public OSObject {
@@ -208,27 +273,52 @@ public:
 
 using thread_call_param_t = void *;
 using thread_call_func_t = void (*)(thread_call_param_t, thread_call_param_t);
-using thread_call_t = thread_call_func_t *;
 constexpr int THREAD_CALL_PRIORITY_KERNEL = 0, THREAD_CALL_OPTIONS_ONCE = 1;
+
+// Each call made: host1x's bound timer, which is the one entered delayed, and an engine's cancellation, which the test
+// runs once it was entered.
+struct thread_call {
+    thread_call_func_t fire;
+    thread_call_param_t param;
+    uint32_t entered;
+};
+
+using thread_call_t = thread_call *;
 inline thread_call_func_t switch_test_bounds;
 inline uint64_t switch_test_bounds_at;
 
-inline thread_call_t thread_call_allocate_with_options(thread_call_func_t function, thread_call_param_t, int, int)
+inline thread_call_t thread_call_allocate_with_options(thread_call_func_t function, thread_call_param_t param, int, int)
 {
-    switch_test_bounds = function;
-    return &switch_test_bounds;
+    return new thread_call{function, param, 0};
 }
 
-inline bool thread_call_enter_delayed(thread_call_t, uint64_t deadline)
+inline uint32_t switch_test_bounds_cancels;
+
+inline bool thread_call_enter_delayed(thread_call_t call, uint64_t deadline)
 {
+    switch_test_bounds = call->fire;
     switch_test_bounds_at = deadline;
+    return false;
+}
+
+inline bool thread_call_cancel(thread_call_t)
+{
+    ++switch_test_bounds_cancels;
+    switch_test_bounds_at = 0;
+    return true;
+}
+
+inline bool thread_call_enter(thread_call_t call)
+{
+    ++call->entered;
     return false;
 }
 
 // DEBUG builds of SwitchHost1xChannels.cpp write their stats line here.
 inline std::string switch_test_log;
-#define OS_LOG_DEFAULT   nullptr
-#define os_log(log, ...) switch_test_os_log(__VA_ARGS__)
+#define OS_LOG_DEFAULT         nullptr
+#define os_log(log, ...)       switch_test_os_log(__VA_ARGS__)
+#define os_log_error(log, ...) switch_test_os_log(__VA_ARGS__)
 
 inline void switch_test_os_log(const char *format, ...)
 {

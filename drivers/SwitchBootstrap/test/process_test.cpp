@@ -244,9 +244,11 @@ int main()
     switch_failed_stage.clear();
     assert(switch_bootstrap_run(success, successful) == 0);
     switch_expected_stderr = true;
+    switch_expected_timeout = 240;
     assert(switch_bootstrap_run_prep(shell, preparing) == 0);
     int daemon_status;
     const char *plist = "/var/jb/Library/LaunchDaemons/test.plist";
+    switch_expected_timeout = 60;
     for (int code :
          {SWITCH_LAUNCHCTL_CHANGED, SWITCH_LAUNCHCTL_PRESENT, SWITCH_LAUNCHCTL_DISABLED, SWITCH_LAUNCHCTL_ABSENT}) {
         switch_fake_exit = code;
@@ -255,7 +257,9 @@ int main()
     switch_fake_exit = SWITCH_LAUNCHCTL_FAILED;
     assert(switch_bootstrap_run_daemon("bootstrap", plist, &daemon_status) == EIO);
     switch_fake_exit = SWITCH_LAUNCHCTL_DISABLED;
+    switch_expected_timeout = 240;
     assert(switch_bootstrap_run_update(shell, preparing) == EIO);
+    switch_expected_timeout = 60;
     switch_failed_stage = "timeout";
     assert(switch_bootstrap_run_daemon("bootstrap", plist, &daemon_status) == ETIMEDOUT);
     assert(switch_bootstrap_run_daemon("exec", plist, &daemon_status) == EINVAL);
@@ -287,4 +291,7 @@ int main()
     switch_expected_timeout = 1;
     switch_spawn_count = switch_delay_seconds = 0;
     assert(switch_bootstrap_run(registrar, migration) == ETIMEDOUT && switch_spawn_count == 1 && !switch_delay_seconds);
+    switch_fake_exit = 0;
+    switch_bootstrap_set_budget(1500);
+    assert(switch_bootstrap_run_update(shell, preparing) == 0);
 }

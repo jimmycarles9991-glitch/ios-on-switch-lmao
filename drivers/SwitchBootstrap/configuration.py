@@ -11,13 +11,29 @@ MANAGED = {
     'uikittools': 'uikittools.deb',
     'launchctl': 'launchctl.deb',
 }
+DEVELOPMENT = {
+    'openssh-client': 'openssh-client.deb',
+    'openssh-sftp-server': 'openssh-sftp-server.deb',
+    'openssh-server': 'openssh-server.deb',
+    'switch-ssh': 'switch-ssh.deb',
+    'top': 'top.deb',
+}
+
+
+def managed_names(records: dict) -> dict:
+    """Return every image's four managed packages, followed by a development image's SSH and tool set."""
+    if not isinstance(records, dict):
+        raise ValueError('invalid managed package manifest')
+    if set(records) == set(MANAGED):
+        return MANAGED
+    if set(records) == set(MANAGED) | set(DEVELOPMENT):
+        return MANAGED | DEVELOPMENT
+    raise ValueError('invalid managed package manifest')
 
 
 def managed_packages(manifest: dict) -> dict:
     records = manifest.get('managed_packages')
-    if not isinstance(records, dict) or set(records) != set(MANAGED):
-        raise ValueError('invalid managed package manifest')
-    for name, filename in MANAGED.items():
+    for name, filename in managed_names(records).items():
         record = records[name]
         if (
             not isinstance(record, dict)
@@ -41,7 +57,7 @@ def managed_packages(manifest: dict) -> dict:
 
 def package_header(records: dict) -> str:
     entries = []
-    for name in MANAGED:
+    for name in managed_names(records):
         fields = ', '.join(
             '@' + json.dumps(key) + ': @' + (str(value) if isinstance(value, int) else json.dumps(value))
             for key, value in records[name].items()

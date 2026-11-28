@@ -103,4 +103,26 @@ TEST(SwitchFsctlDiagSource, ReleaseKernelsCompileItToNothing)
     EXPECT_THAT(source, HasSubstr("\n#endif /* DEVELOPMENT || DEBUG */\n"));
 }
 
+// 25 Nov 19:18: APFS refused SpringBoard's marks with 45 on a card imaged before the Data volume had the purgeable
+// feature bits, and refused SplashBoard's compressed snapshots.
+TEST(SwitchFsctlMark, ARefusalIsCountedByItsCause)
+{
+    EXPECT_EQ(switch_fsctl_mark_for(0, 0), SWITCH_FSCTL_MARK_OK);
+    EXPECT_EQ(switch_fsctl_mark_for(0, 1), SWITCH_FSCTL_MARK_OK);
+    EXPECT_EQ(switch_fsctl_mark_for(45, 1), SWITCH_FSCTL_MARK_UNSUPPORTED);
+    EXPECT_EQ(switch_fsctl_mark_for(22, 1), SWITCH_FSCTL_MARK_COMPRESSED);
+    EXPECT_EQ(switch_fsctl_mark_for(22, 0), SWITCH_FSCTL_MARK_OTHER);
+}
+
+// SpringBoard's marks came as 'J' 111 and SplashBoard's snapshot marks as 'J' 68 on its files; OTACrashCopier's
+// 'J' 68 on a directory (refused EPERM 8 times in the boot2 excerpts) is not a snapshot mark
+TEST(SwitchFsctlMark, BothMarkCommandsCountAndADirectorysJ68DoesNot)
+{
+    EXPECT_TRUE(switch_fsctl_is_mark(0xc0304a6f, 1));
+    EXPECT_TRUE(switch_fsctl_is_mark(0xc0304a6f, 0));
+    EXPECT_TRUE(switch_fsctl_is_mark(0xc0084a44, 1));
+    EXPECT_FALSE(switch_fsctl_is_mark(0xc0084a44, 0));
+    EXPECT_FALSE(switch_fsctl_is_mark(0x40084a47, 1));
+}
+
 }  // namespace

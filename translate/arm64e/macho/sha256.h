@@ -5,15 +5,23 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __APPLE__
+#include <CommonCrypto/CommonDigest.h>
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 struct a64x_sha256 {
+#ifdef __APPLE__
+    CC_SHA256_CTX cc;
+#else
     uint32_t h[8];
     uint64_t length;
     uint8_t block[64];
     size_t used;
+#endif
 };
 
 void a64x_sha256_init(struct a64x_sha256 *s);

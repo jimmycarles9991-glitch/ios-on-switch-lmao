@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Depth bias on a Depth32Float target, read back exactly: no bias leaves z alone, a constant bias moves a flat quad

@@ -509,6 +509,8 @@ TEST(GM20BFacadeXrImages, NoImageTagIsAnotherScratchsOrAnotherImages)
         EXPECT_TRUE(tags.insert(tag).second) << "image " << k << " shares tag " << tag;
         EXPECT_FALSE(tag >= gm20b::kPlaneImageTag && tag < gm20b::kPlaneImageTag + 8) << k;
         EXPECT_FALSE(tag >= 48 && tag < kXrPlanesImageTag) << k << ": a turn copy's, reach's, conversion's or load's";
+        EXPECT_FALSE(tag >= gm20b::kDriverPassColorTag && tag < gm20b::kDriverPassColorTag + 8)
+            << k << ": a driver pass's";
         EXPECT_FALSE(tag >= gm20b::kFormatStandInTag && tag < gm20b::kFormatStandInTag + 16)
             << k << ": a format stand-in's";
     }

@@ -577,4 +577,116 @@ TEST_F(FacadeZetaPass, ANanClearDepthIsTheRawPaths)
     EXPECT_EQ(path, "gm20b");
 }
 
+// Each depth target the jobs from `first` bind, in order, and whether the stencil was cleared while it was bound
+std::vector<std::pair<uint64_t, bool>> zetaTargets(size_t first)
+{
+    std::vector<std::pair<uint64_t, bool>> out;
+    uint32_t upper = 0;
+    const auto write = [&](uint32_t subchannel, uint32_t method, uint32_t value) {
+        if (subchannel != gm20b::SUBC_3D)
+            return;
+        if (method == NVB197_SET_ZT_A)
+            upper = value;
+        else if (method == NVB197_SET_ZT_A + 4)
+            out.emplace_back(uint64_t(upper) << 32 | value, false);
+        else if (method == NVB197_CLEAR_SURFACE && (value & 2) && !out.empty())
+            out.back().second = true;
+    };
+    const auto &jobs = kernel_model::model.jobs;
+    for (size_t j = first; j < jobs.size(); ++j) {
+        const auto &words = jobs[j].words;
+        for (size_t i = 0; i < words.size();) {
+            const uint32_t header = words[i++], op = header >> 29, count = header >> 16 & 0x1fff,
+                           subchannel = header >> 13 & 7, method = (header & 0xfff) << 2;
+            if (op == 4) {
+                write(subchannel, method, count);
+                continue;
+            }
+            for (uint32_t k = 0; k < count && i < words.size(); ++k, ++i)
+                write(subchannel, method + 4 * (op == 1 ? k : op == 5 && k ? 1 : 0), words[i]);
+        }
+    }
+    return out;
+}
+
+// A Depth32Float_Stencil8 attached as depth alone in a pass whose state tests stencil: an M4 Max tests a stencil that
+// starts at 0 and is never stored (zeta.h testedZeta), so the pass renders a Depth32Float_Stencil8 scratch whose stencil
+// it clears, the texture's depth converted in and back, the texture's own stencil left as it was. A Clear over a render
+// area smaller than the texture converts it in too, so the texels past the area go back as they were.
+TEST_F(FacadeZetaPass, ADepthStencilTextureAttachedAsDepthAloneTestsAStencilOfItsOwn)
+{
+    id<MTLTexture> combined = zeta(MTLPixelFormatDepth32Float_Stencil8);
+    ASSERT_TRUE(combined != nil);
+    const uint64_t texture = ((SwitchMetalTexture *)combined)->_raw.va;
+    MTLDepthStencilDescriptor *tests = [MTLDepthStencilDescriptor new];
+    tests.frontFaceStencil.stencilCompareFunction = MTLCompareFunctionNotEqual;
+    tests.backFaceStencil.stencilCompareFunction = MTLCompareFunctionNotEqual;
+    id<MTLDepthStencilState> state = [gDevice newDepthStencilStateWithDescriptor:tests];
+    ASSERT_TRUE(state != nil);
+    const auto setState = ^(id<MTLRenderCommandEncoder> e) {
+        [e setDepthStencilState:state];
+    };
+
+    struct Case {
+        const char *name;
+        MTLLoadAction load;
+        NSUInteger width;
+        size_t conversionsIn;
+    };
+
+    for (const Case &c : {Case{"loaded", MTLLoadActionLoad, 0, 1}, Case{"cleared whole", MTLLoadActionClear, 0, 0},
+                          Case{"cleared over part", MTLLoadActionClear, 16, 1}}) {
+        SCOPED_TRACE(c.name);
+        MTLRenderPassDescriptor *p = pass(combined, nil, c.load, MTLStoreActionStore);
+        p.renderTargetWidth = c.width;
+        p.renderTargetHeight = c.width;
+        const size_t first = kernel_model::model.jobs.size();
+        const auto [taken, path] = run(p, setState);
+        EXPECT_TRUE(taken);
+        EXPECT_EQ(path, "gm20b");
+        // the scratch's binds (the conversions in, then the pass's, whose first clears the stencil), then the texture's
+        const auto targets = zetaTargets(first);
+        ASSERT_GE(targets.size(), c.conversionsIn + 2);
+        const uint64_t scratch = targets.front().first;
+        EXPECT_NE(scratch, texture);
+        for (size_t k = 0; k + 1 < targets.size(); k++)
+            EXPECT_EQ(targets[k].first, scratch) << k;
+        for (size_t k = 0; k < c.conversionsIn; k++)
+            EXPECT_FALSE(targets[k].second) << "a conversion in clears nothing";
+        EXPECT_TRUE(targets[c.conversionsIn].second) << "the pass clears its scratch's stencil";
+        EXPECT_EQ(targets.back().first, texture);
+        EXPECT_FALSE(targets.back().second) << "the texture's own stencil left alone";
+    }
+}
+
+// Two such passes back to back, each loading and storing the depth: fused, the second would test the stencil the first
+// left in the shared scratch, where Metal starts each pass's at 0. Each clears a stencil of its own.
+TEST_F(FacadeZetaPass, TwoDepthAlonePassesOfADepthStencilTextureTestingStencilDoNotFuse)
+{
+    id<MTLTexture> combined = zeta(MTLPixelFormatDepth32Float_Stencil8);
+    ASSERT_TRUE(combined != nil);
+    MTLDepthStencilDescriptor *tests = [MTLDepthStencilDescriptor new];
+    tests.frontFaceStencil.stencilCompareFunction = MTLCompareFunctionNotEqual;
+    tests.backFaceStencil.stencilCompareFunction = MTLCompareFunctionNotEqual;
+    id<MTLDepthStencilState> state = [gDevice newDepthStencilStateWithDescriptor:tests];
+    ASSERT_TRUE(state != nil);
+    const size_t first = kernel_model::model.jobs.size();
+    id<MTLCommandBuffer> cb = [[gDevice newCommandQueue] commandBuffer];
+    for (int k = 0; k < 2; k++) {
+        id<MTLRenderCommandEncoder> e =
+            [cb renderCommandEncoderWithDescriptor:pass(combined, nil, MTLLoadActionLoad, MTLStoreActionStore)];
+        [e setDepthStencilState:state];
+        [e endEncoding];
+    }
+    [cb commit];
+    [cb waitUntilCompleted];
+    EXPECT_EQ(cb.status, MTLCommandBufferStatusCompleted) << cb.error.description.UTF8String;
+    const auto targets = zetaTargets(first);
+    EXPECT_EQ(std::count_if(targets.begin(), targets.end(),
+                            [](const auto &t) {
+                                return t.second;
+                            }),
+              2);
+}
+
 }  // namespace

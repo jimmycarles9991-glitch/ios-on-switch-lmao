@@ -9,10 +9,14 @@
 #include <gtest/gtest.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -675,6 +679,133 @@ TEST_F(ArenaTrim, AVolatileHeapIsPurgedNotTrimmed)
     std::atomic<uint32_t> committed{0};
     dev.trimArenas(committed);
     EXPECT_EQ(importsIn(a.cpu, 4 * kQuarter), (std::vector<gm20b::ArenaRange>{{0, 4 * kQuarter}}));
+}
+
+class ArenaIoctlGate {
+public:
+    explicit ArenaIoctlGate(uint32_t method) : method_(method)
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        active_ = this;
+        kernel_model::arriving.store(&arrive, std::memory_order_release);
+    }
+
+    ~ArenaIoctlGate()
+    {
+        release();
+        kernel_model::arriving.store(nullptr, std::memory_order_release);
+        std::lock_guard<std::mutex> l(mu_);
+        if (active_ == this)
+            active_ = nullptr;
+    }
+
+    bool waitHeld()
+    {
+        std::unique_lock<std::mutex> l(mu_);
+        return cv_.wait_for(l, std::chrono::seconds(5), [&] {
+            return held_;
+        });
+    }
+
+    void release()
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        released_ = true;
+        cv_.notify_all();
+    }
+
+private:
+    static int arrive(uint32_t method, const void *)
+    {
+        std::unique_lock<std::mutex> l(mu_);
+        ArenaIoctlGate *g = active_;
+        if (!g || method != g->method_ || g->matched_)
+            return KERN_SUCCESS;
+        g->matched_ = true;
+        g->held_ = true;
+        g->cv_.notify_all();
+        g->cv_.wait(l, [&] {
+            return g->released_;
+        });
+        return KERN_SUCCESS;
+    }
+
+    uint32_t method_ = 0;
+    bool matched_ = false, held_ = false, released_ = false;
+    std::condition_variable cv_;
+    static inline std::mutex mu_;
+    static inline ArenaIoctlGate *active_ = nullptr;
+};
+
+TEST_F(ArenaTrim, ArenaViewAndBackPlacementDropDeviceLockDuringKernelIoctls)
+{
+    gm20b::Buffer warm;
+    ASSERT_TRUE(dev.createBuffer(4096, warm));
+    dev.destroyBuffer(warm);
+
+    {
+        uint32_t blArena = 0;
+        ASSERT_TRUE(dev.createArena(4 * kQuarter, true, blArena));
+        ArenaIoctlGate bindGate(TegraGM20BMethodVmBind);
+        gm20b::TextureAsk ask;
+        ask.kind = gm20b::TextureAsk::Zeta;
+        ask.width = 64;
+        ask.height = 64;
+        ask.format = 252;
+        ask.samples = 1;
+        gm20b::Texture depth;
+        bool made = false;
+        std::thread worker([&] {
+            made = dev.arenaTexture({blArena, std::nullopt}, ask, depth);
+        });
+        const bool held = bindGate.waitHeld();
+        EXPECT_TRUE(held);
+        if (held) {
+            EXPECT_TRUE(dev.lockFree());
+            gm20b::Buffer probe;
+            ASSERT_TRUE(dev.createBuffer(4096, probe));
+            dev.destroyBuffer(probe);
+        }
+        bindGate.release();
+        worker.join();
+        ASSERT_TRUE(made);
+        dev.destroyTexture(depth);
+        dev.destroyArena(blArena);
+    }
+
+    {
+        uint32_t sharedArena = 0;
+        ASSERT_TRUE(dev.createArena(4 * kQuarter, false, sharedArena));
+        gm20b::Buffer a, b, c;
+        ASSERT_TRUE(dev.arenaBuffer(sharedArena, kQuarter, a));
+        ASSERT_TRUE(dev.arenaBuffer(sharedArena, kQuarter, b));
+        ASSERT_TRUE(dev.arenaBuffer(sharedArena, kQuarter, c));
+        dev.arenaRelease(b);
+        std::atomic<uint32_t> committed{0};
+        dev.trimArenas(committed);
+
+        ArenaIoctlGate importGate(TegraGM20BMethodBoImport);
+        gm20b::Buffer d;
+        bool made = false;
+        std::thread worker([&] {
+            made = dev.arenaBuffer(sharedArena, kQuarter, d);
+        });
+        const bool held = importGate.waitHeld();
+        EXPECT_TRUE(held);
+        if (held) {
+            EXPECT_TRUE(dev.lockFree());
+            gm20b::Buffer probe;
+            ASSERT_TRUE(dev.createBuffer(4096, probe));
+            dev.destroyBuffer(probe);
+        }
+        importGate.release();
+        worker.join();
+        ASSERT_TRUE(made);
+        dev.arenaRelease(d);
+        dev.arenaRelease(c);
+        dev.arenaRelease(a);
+        dev.destroyArena(sharedArena);
+    }
 }
 
 }  // namespace

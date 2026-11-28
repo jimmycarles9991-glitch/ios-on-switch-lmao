@@ -14,6 +14,7 @@
 #include <mach/vm_param.h>
 #include <stdint.h>
 #include <switch/memory_attachment.h>
+#include <switch/tiled_fault.h>
 #include "OriginalIOSurface.h"
 #include "OriginalIOSurfaceClient.h"
 #include "OriginalIOSurfaceRootUserClient.h"
@@ -88,10 +89,31 @@ extern "C" int tgm_cpu_view_of(void *client, uint32_t id, struct tgm_cpu_view *o
 		mapped = -1;
 	} else if (map) {
 		*out = {client, map->getAddressTask(), map->getAddress(), map->getLength(),
-			0,      map->getMapOptions()};
+			0,      map->getMapOptions(),  nullptr};
 	}
 	c->release();
 	return mapped;
+}
+
+extern "C" void tgm_tiled_mark_pages(const uint64_t *pas, uint32_t npages)
+{
+	switch_vm_tiled_mark_pages(pas, npages, 1);
+}
+
+extern "C" void tgm_tiled_unmark_pages(const uint64_t *pas, uint32_t npages)
+{
+	switch_vm_tiled_mark_pages(pas, npages, 0);
+}
+
+extern "C" void tgm_cpu_disconnect_pages(const uint64_t *pas, uint32_t npages)
+{
+	switch_vm_disconnect_pages(pas, npages);
+}
+
+extern "C" void tgm_cpu_view_protect_ro(const struct tgm_cpu_view *view)
+{
+	if (view && view->task && view->length)
+		switch_vm_protect_ro(view->task, view->address, view->length);
 }
 
 // A prefaulted mapping enters every page's entries in the call (the scratch is prepared): a task's first touch of each of
@@ -391,18 +413,77 @@ extern "C" void tgm_memory_release(void *memory)
 		static_cast<OSObject *>(memory)->release();
 }
 
+extern "C" int tgm_cpu_view_at(void *task, struct tgm_coh *c, uint64_t fault_va,
+			       uint64_t page_offset, struct tgm_cpu_view *out)
+{
+	if (!task || !c || !out)
+		return 0;
+	const tgm_relayout_pages pages = tgm_coh_pages(c);
+	const uint64_t surfaceBytes = static_cast<uint64_t>(pages.npages) << 12;
+	if (!surfaceBytes)
+		return 0;
+	uint64_t start = 0, end = 0;
+	uint32_t cacheIdx = 0;
+	int writable = 0;
+	if (!switch_vm_mapping_bounds(task, fault_va, &start, &end, &cacheIdx, &writable))
+		return 0;
+	const uint64_t faultPage = fault_va & ~static_cast<uint64_t>(PAGE_MASK);
+	const uint64_t offPage = page_offset & ~static_cast<uint64_t>(PAGE_MASK);
+	if (faultPage < offPage)
+		return 0;
+	const uint64_t base = faultPage - offPage;
+	if (base < start || surfaceBytes > end - base)
+		return 0;
+	OSObject *surface = static_cast<OSObject *>(tgm_coh_surface(c));
+	OSObject *lookedUp = nullptr;
+	if (!surface) {
+		const uint32_t id = tgm_coh_surface_id(c);
+		lookedUp = id ? tgm_surface_lookup(id, task) : nullptr;
+		if (!lookedUp ||
+		    surfacePages(lookedUp, pages.pas, pages.npages) != SwitchGpuSurfaceMatch::Match) {
+			if (lookedUp)
+				lookedUp->release();
+			return 0;
+		}
+		surface = lookedUp;
+	}
+	IOMemoryDescriptor *md = tegra_vic_ios_memory(surface);
+	const uint64_t baseOffset = at<uint64_t>(surface, OriginalIOSurface::baseOffset);
+	if (!md || md->getLength() < baseOffset + surfaceBytes) {
+		if (lookedUp)
+			lookedUp->release();
+		return 0;
+	}
+	md->retain();
+	if (lookedUp)
+		lookedUp->release();
+	const uint32_t options = (cacheIdx << kIOMapCacheShift) |
+				 (writable ? 0u : static_cast<uint32_t>(kIOMapReadOnly));
+	*out = {nullptr, task, base, surfaceBytes, baseOffset, options, md};
+	return 1;
+}
+
 extern "C" int tgm_cpu_view_live(const struct tgm_cpu_view *view)
 {
-	return static_cast<int>(!static_cast<IOService *>(view->client)->isInactive());
+	if (view->client)
+		return static_cast<int>(!static_cast<IOService *>(view->client)->isInactive());
+	return view->task ? switch_vm_task_active(view->task) : 0;
 }
 
 // NOLINTNEXTLINE(misc-const-correctness): the host tests' stubs and the C callers share this signature
 extern "C" void tgm_cpu_view_hold(struct tgm_cpu_view *view, int hold)
 {
-	if (hold) {
-		static_cast<OSObject *>(view->client)->retain();
-	} else {
-		static_cast<OSObject *>(view->client)->release();
+	if (view->client) {
+		if (hold)
+			static_cast<OSObject *>(view->client)->retain();
+		else
+			static_cast<OSObject *>(view->client)->release();
+	} else if (view->task) {
+		switch_vm_task_hold(view->task, hold);
+	}
+	if (!hold && view->memory) {
+		static_cast<OSObject *>(view->memory)->release();
+		view->memory = nullptr;
 	}
 }
 

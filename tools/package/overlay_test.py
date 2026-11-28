@@ -158,7 +158,59 @@ class SupplementalTest(unittest.TestCase):
         manifest = json.loads(Path('overlay/manifest.json').read_text())
         for kind in ('21H461', '24B119'):
             for release in (False, True):
-                overlay.plan(manifest, portrait=False, kind=kind, release=release)
+                for hwtest in (None, False, True):
+                    options = overlay.BuildOptions(release=release, hwtest=hwtest)
+                    overlay.plan(manifest, portrait=False, kind=kind, options=options)
+
+    def test_plan_cli_respects_hwtest_override(self):
+        tmp = Path(tempfile.mkdtemp())
+        header = tmp / 'portrait.h'
+        header.write_text('#define SWITCH_PORTRAIT_NATIVE 0\n')
+        manifest = tmp / 'manifest.json'
+        manifest.write_text(
+            json.dumps(
+                {
+                    'files': [
+                        {'path': '/usr/sbin/BlueTool', 'source': 'bt', 'trust': True},
+                        {'path': '/usr/bin/switch-fetchform', 'source': 'ff', 'trust': True, 'debug': True},
+                        {
+                            'path': APP,
+                            'source': 'hw',
+                            'trust': True,
+                            'bundle': True,
+                            'union': '/Applications',
+                            'hwtest': True,
+                        },
+                    ]
+                }
+            )
+        )
+        cases = [
+            ([], ['bt', 'ff', 'hw']),
+            (['--no-hwtest'], ['bt', 'ff']),
+            (['--release'], ['bt']),
+            (['--release', '--hwtest'], ['bt', 'hw']),
+        ]
+        for idx, (flags, expected) in enumerate(cases):
+            out = tmp / f'plan-{idx}.json'
+            given = [arg for source in expected for arg in ('--given', source)]
+            argv = [
+                'overlay.py',
+                'plan',
+                '--manifest',
+                str(manifest),
+                '--portrait-header',
+                str(header),
+                '--kind',
+                '24B119',
+                *given,
+                *flags,
+                '--out',
+                str(out),
+            ]
+            with mock.patch.object(sys, 'argv', argv):
+                overlay.main()
+            self.assertEqual([f['source'] for f in json.loads(out.read_text())['files']], expected, flags)
 
 
 if __name__ == '__main__':

@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Blits Metal takes past its validation (gpu.gm20b.ms_buffer_copy, gpu.gm20b.integer_mipmaps): a 4-sample texture

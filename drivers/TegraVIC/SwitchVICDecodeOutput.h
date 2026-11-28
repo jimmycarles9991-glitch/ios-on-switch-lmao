@@ -18,6 +18,7 @@ struct SwitchVICDecodeOutput {
     uint32_t width, height;        // the picture
     uint32_t x, y;                 // where it goes in the destination
     const TegraVICAcquire *after;  // the decoder's job that writes the buffer
+    uint32_t *fence;               // set to the queued job's VIC fence (switch_vic_job_background), when not null
 };
 
 bool switch_vic_decode_output_ready(void);

@@ -99,7 +99,8 @@ bool Device::createTexture(uint32_t width, uint32_t height, uint32_t format, Tex
     tgm_layout bl;
     const bool laid = plainTiled(t, tiled, bl);
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-    if (probeCompressNext.exchange(false) && laid && !wc && !blocks && compressedKind(t.bpp, 0))
+    if (probeCompressNext.exchange(false, std::memory_order_relaxed) && laid && !wc && !blocks &&
+        compressedKind(t.bpp, 0))
         return probeCompressible(bl, t, deferred);
 #endif
     if (laid && blAlloc(l, bl.bytes, bl.align, t.span)) {
@@ -343,6 +344,7 @@ bool Device::createLaidOut(const TextureAsk &ask, Texture &t, const ArenaAt *at)
         fx::mipChainTic(chain->layout, chain->va, f->tic0, f->srgb, 0, ask.levels, w);
         // the texture's header: the chain's (visible at the next header invalidate)
         memcpy(tic_.cpu + 32 * t.tic, w, 32);
+        noteTicWrite();
         t.chain = chain;
         SWITCH_METAL_DIAGNOSTIC(stats.chains++);
         SWITCH_METAL_DIAGNOSTIC(stats.chainBytes += chain->layout.bytes);
@@ -357,6 +359,7 @@ bool Device::createLaidOut(const TextureAsk &ask, Texture &t, const ArenaAt *at)
         uint32_t w[8];
         fx::mipChainTic(imageLayout, t.va, kZetaFormatInfo[z].tic0, false, 0, ask.levels, w, t.type);
         memcpy(tic_.cpu + 32 * t.tic, w, 32);
+        noteTicWrite();
     } else {
         writeTic(t);
     }
@@ -365,10 +368,6 @@ bool Device::createLaidOut(const TextureAsk &ask, Texture &t, const ArenaAt *at)
 
 void Device::destroyTexture(Texture &t)
 {
-#if SWITCH_METAL_DIAGNOSTICS
-    if (glassMemOn.load(std::memory_order_relaxed))
-        glassMem->forget(t.storageRange().va ? t.storageRange().va : t.va, t.view ? t.tic : 0);
-#endif
     if (t.view) {
         // its stand-in's and pool image's views are its own (viewCompanions); every other pointer is its texture's
         if (t.sampled)
@@ -489,10 +488,12 @@ bool Device::probeRetarget(const Texture &a, const Texture *to)
     std::lock_guard<gm20b::Mutex> l(lock_);
     if (!a.tic || (to && !to->tic))
         return false;
-    if (to)
+    if (to) {
         memcpy(tic_.cpu + 32 * a.tic, tic_.cpu + 32 * to->tic, 32);
-    else
+        noteTicWrite();
+    } else {
         writeTic(a);
+    }
     return true;
 }
 

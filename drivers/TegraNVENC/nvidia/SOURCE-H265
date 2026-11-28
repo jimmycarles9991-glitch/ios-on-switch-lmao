@@ -19,6 +19,12 @@ method values to DMEM 0x3b8 (words 0 and 1 at 0x3b8 and 0x3bc, word k = method 0
     (0x700:0xc0, 0x7c0:0x40 and 0x800:0x80 for the controls). The reads land on nvenc_drv.h's H.265 field boundaries
     throughout (through act_stat_offset at +0x2e4): the C9B7 layout is NVENC 5.0's. gpTimer_timeout_val (+0x30c) and
     wp_control_offset (+0x2b0) are never read.
+  - SPS and PPS: sps_data goes only into I[0x1ad0] (0x13ba1-0x13c2b: CU and TU size ranges, both transform depths,
+    AMP, PCM) and pps_data's flags, transform skip among them, only into I[0x1ad4] (0x13d64-0x13dbf), the stream's
+    syntax. The engine's own choices come from the MD control: the tusize_4x4..32x32 enables into I[0xaf8]
+    (0x11258-0x11282) and bias_transform_skip into I[0xb14] (0x1062e-0x10640). So an SPS depth or PPS flag below what
+    the MD control enables describes a stream the engine does not write (HW Test encode.hevc_realtime, 25 Nov: depth 1
+    with every TU size on, 56 of 60 pictures decoded with errors).
   - CONTROL_PARAMS: the codec type is unread. GPTIMER_ON (bit 12, copied to DMEM 0x378 at 0xf4ef) arms the GP timer
     with width x height x 24 cycles, at most 0x1600000 (0x1f2a-0x1fb6); its interrupt stores error 0xe2640010 (ISR 0x26f5). RCSTAT_READ/WRITE (bits
     20/19) gate the RC data transfers (0x11b5c, 0x108dc); with both off SET_IN_RCDATA is never used.

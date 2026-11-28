@@ -70,6 +70,7 @@ def clang_command(iphoneos_sdk: str, include: Path, framework: Path, source: Pat
         'clang',
         '-target',
         'arm64-apple-ios17.0',
+        '-mcpu=cortex-a57',
         '-isysroot',
         iphoneos_sdk,
         '-mkernel',

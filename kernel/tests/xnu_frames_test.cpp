@@ -134,7 +134,7 @@ TEST(Frames, LinesAreCutAndTerminated)
         EXPECT_LT(line(c, &d, size).size(), size);
 }
 
-TEST(FramesSource, BothTreesFeedItUnderThePortLock)
+TEST(FramesSource, BothTreesCaptureUnderThePortLockAndRecordAfterUnlock)
 {
     for (const char *path : {IPC_KMSG_10063, IPC_KMSG_12377}) {
         const std::string s = source(path);
@@ -145,9 +145,13 @@ TEST(FramesSource, BothTreesFeedItUnderThePortLock)
         const size_t send = s.find("\nipc_kmsg_send(\n");
         ASSERT_NE(send, std::string::npos);
         const std::string body = s.substr(send, s.find("\n}\n", send) - send);
-        const size_t sent = body.find("switch_frames_render_server_sent(port);");
+        const size_t send_locked = body.find("ipc_mqueue_send_locked(&port->ip_messages, kmsg,");
+        const size_t pending = body.find("switch_frames_touch_pending()");
+        const size_t sent = body.find("switch_frames_render_server_sent_to(switch_recv_pid, switch_recv_name);");
+        ASSERT_NE(pending, std::string::npos);
         ASSERT_NE(sent, std::string::npos);
-        EXPECT_LT(body.find("ip_mq_lock(port);"), sent);
-        EXPECT_LT(sent, body.find("ipc_mqueue_send_locked(&port->ip_messages, kmsg,"));
+        EXPECT_LT(body.find("ip_mq_lock(port);"), pending);
+        EXPECT_LT(pending, send_locked);
+        EXPECT_LT(send_locked, sent);
     }
 }

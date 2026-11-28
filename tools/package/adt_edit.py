@@ -6,7 +6,8 @@ The iPad's identity (model, board, SoC, /product) is read from Apple's device tr
 --smp, all four A57s.
 
     adt_edit.py --adt BASE --apple-adt APPLE --overlay-plan PLAN --bt-patch HCD --portrait-header H
-                --root-volume-uuid UUID [--smp] [--a64x-cache-pretranslated LIST] [--cdhashes ROLE=MODULE]... --out ADT
+                --root-volume-uuid UUID [--smp] [--a64x-cache-pretranslated LIST] [--cdhashes ROLE=MODULE]...
+                [--pretranslated-updates JSON] --out ADT
 """
 
 import argparse
@@ -27,7 +28,8 @@ from loader_abi import (
 from native_oled_adt import property_bytes, root_matching
 from native_xnu_layout import parse_adt
 
-from tools.trustcache.trustcache import cdhash_list
+from tools.install.overlay_index import encode_updates
+from tools.trustcache.trustcache import CDHASH_BYTES, cdhash_list
 
 # USB 2.0 device mode on the USB-C port (drivers/SwitchUSB): the USB function set configd's USBDeviceConfiguration
 # plug-in gives Apple's IOUSBDeviceFamily, by name from /System/Library/AppleUSBDevice/USBDeviceConfiguration.plist.
@@ -316,7 +318,6 @@ def _usb(tree: list) -> None:
         put(external, 'device_type', b'ext-display-subsystem\0')
 
 
-
 def _media_accel(tree: list) -> None:
     """Set the keys iOS's media frameworks read before they pick a hardware path."""
     # J120 has iommu-present (empty) on /arm-io. Its one reader in 21H461's dyld cache, VideoToolbox's
@@ -498,6 +499,22 @@ def with_cdhash_lists(data: bytes, modules: dict[str, Sequence[bytes]]) -> bytes
     return adt_serialize(tree)
 
 
+def with_pretranslated_updates(data: bytes, updates: dict[str, str], pinned: bytes) -> bytes:
+    """Return the ADT with /chosen/switch-pretranslated-updates (overlay_index.encode_updates).
+
+    Each update's CDHash must be in `pinned`, the pretranslated role's CDHash list: the kernel serves an update only if
+    it is, and a list naming one the boot package does not trust is a pins mistake, not a deploy's to discover.
+    """
+    trusted = {pinned[i : i + CDHASH_BYTES] for i in range(0, len(pinned), CDHASH_BYTES)}
+    entries = {path: bytes.fromhex(cdhash) for path, cdhash in updates.items()}
+    untrusted = sorted(path for path, cdhash in entries.items() if cdhash not in trusted)
+    if untrusted:
+        raise SystemExit(f'pretranslated updates not in the pretranslated trust module: {", ".join(untrusted)}')
+    tree, _ = adt_parse(data)
+    put(child(tree, 'chosen'), 'switch-pretranslated-updates', encode_updates(entries))
+    return adt_serialize(tree)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     for name in ('adt', 'apple-adt', 'overlay-plan', 'bt-patch', 'portrait-header', 'out'):
@@ -507,6 +524,7 @@ def main() -> None:
     parser.add_argument('--boot-manifest-hash', action='store_true', help='a zeroed slot the layout step fills')
     parser.add_argument('--a64x-cache-pretranslated', type=Path)
     parser.add_argument('--launchd-catalog-sha256', type=Path)
+    parser.add_argument('--pretranslated-updates', type=Path, help='{System path: CDHash} a deploy may place')
     parser.add_argument(
         '--cdhashes', action='append', default=[], metavar='ROLE=MODULE', help='a trust module of a role, repeatable'
     )
@@ -527,12 +545,15 @@ def main() -> None:
         adt = with_launchd_catalog_sha256(adt, args.launchd_catalog_sha256.read_bytes())
     if args.a64x_cache_pretranslated:
         adt = with_a64x_cache_pretranslated(adt, args.a64x_cache_pretranslated.read_bytes())
-    if args.cdhashes:
-        modules = {}
-        for given in args.cdhashes:
-            role, _, path = given.partition('=')
-            modules.setdefault(role, []).append(Path(path).read_bytes())
+    modules = {}
+    for given in args.cdhashes:
+        role, _, path = given.partition('=')
+        modules.setdefault(role, []).append(Path(path).read_bytes())
+    if modules:
         adt = with_cdhash_lists(adt, modules)
+    if args.pretranslated_updates:
+        pinned = cdhash_list(modules.get('pretranslated', []))
+        adt = with_pretranslated_updates(adt, json.loads(args.pretranslated_updates.read_text()), pinned)
     if ('/filesystems', 'DoNotUseSEP') not in parse_adt(adt).properties:
         raise SystemExit('ADT patch failed')
     args.out.write_bytes(adt)

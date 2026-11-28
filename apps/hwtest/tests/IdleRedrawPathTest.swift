@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// 22 Nov, boot B: an idle second gave the Metal driver's pooled memory back and the first frame after every pause
@@ -8,7 +10,8 @@ import Metal
 /// their chunks the same way (4.3-9.1 ms). Memory made again now comes from the kernel's zeroed spares: a private
 /// heap's arena and the device's chunks are cached BoAllocs (drivers/TegraGM20BMetal/arena.cpp, memory.cpp). A burst
 /// of clears into a volatile private heap's texture and a target of the device's own, and a shared buffer's fill; two
-/// idle seconds, past this app's idle give-back (which purges the heap and frees the chunks); the same burst again.
+/// trip to the background (the driver's give-back, which purges the heap and frees the chunks; no idle timer gives back);
+/// the same burst again.
 /// The second burst must import nothing, take no untouched host pages, and finish every object call (the heap's
 /// restore at NonVolatile included) under the ceiling, which a kernel zero-fill of a chunk of this size on the calling
 /// thread cannot meet. A miss of a smaller BoAlloc is named in the debug kernel's spare-misses line.
@@ -16,7 +19,7 @@ struct IdleRedrawPathTest: GPUPathTest {
     let id = "gpu.path.idle_redraw"
     let name = "Drawing after an idle pause takes its memory from the kernel's spares, nothing zeroed on the caller"
     let counters: [String] = []
-    static let ceilingUs = 1500, heapBytes = 8 << 20, width = 1280, height = 720, idleNs: UInt64 = 2_000_000_000
+    static let ceilingUs = 1500, heapBytes = 8 << 20, width = 1280, height = 720
 
     struct Calls {
         var slowestUs = 0, slowest = "-"
@@ -40,7 +43,7 @@ struct IdleRedrawPathTest: GPUPathTest {
         guard let heap = gpu.device.makeHeap(descriptor: descriptor) else { throw TestFailure("makeHeap returned nil") }
         var first = Calls()
         try await burst(gpu, heap, &first)
-        try await Task.sleep(nanoseconds: Self.idleNs)
+        await GM20BFacade.tripToBackground()
         let before = GM20BFacade.memory(of: gpu.device)
         var second = Calls()
         let purged = second.timed("heap_restore") { heap.setPurgeableState(.nonVolatile) } == .empty

@@ -8,10 +8,35 @@
 extern "C" CEError_t CESizeDeserialization(CEQueryContext_t, size_t *);
 extern "C" CEError_t CEDeserialize(CEQueryContext_t, CESerializedElement_t *, size_t);
 
-static void *switch_core_entitlements(void)
+struct SwitchCoreEntitlements {
+    decltype(&CESizeSerialization) sizeSerialization;
+    decltype(&CESerialize) serialize;
+    decltype(&CEValidate) validate;
+    decltype(&CEAcquireManagedContext) acquire;
+    decltype(&CEReleaseManagedContext) release;
+    decltype(&CESizeDeserialization) sizeDeserialization;
+    decltype(&CEDeserialize) deserialize;
+    CEError_t *noError;
+};
+
+static const SwitchCoreEntitlements *switch_core_entitlements(void)
 {
-    static void *library = dlopen("/usr/lib/libCoreEntitlements.dylib", RTLD_LAZY);
-    return library;
+    static SwitchCoreEntitlements symbols;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *library = dlopen("/usr/lib/libCoreEntitlements.dylib", RTLD_LAZY);
+        if (!library)
+            return;
+        symbols.sizeSerialization = (decltype(&CESizeSerialization))dlsym(library, "CESizeSerialization");
+        symbols.serialize = (decltype(&CESerialize))dlsym(library, "CESerialize");
+        symbols.validate = (decltype(&CEValidate))dlsym(library, "CEValidate");
+        symbols.acquire = (decltype(&CEAcquireManagedContext))dlsym(library, "CEAcquireManagedContext");
+        symbols.release = (decltype(&CEReleaseManagedContext))dlsym(library, "CEReleaseManagedContext");
+        symbols.sizeDeserialization = (decltype(&CESizeDeserialization))dlsym(library, "CESizeDeserialization");
+        symbols.deserialize = (decltype(&CEDeserialize))dlsym(library, "CEDeserialize");
+        symbols.noError = (CEError_t *)dlsym(library, "kCENoError");
+    });
+    return &symbols;
 }
 
 static void __attribute__((noreturn)) switch_entitlement_abort(CERuntime_t, const char *, ...)
@@ -76,21 +101,19 @@ static BOOL switch_append_elements(id object, std::vector<CESerializedElement_t>
 
 NSData *switch_serialize_entitlements(NSDictionary *dictionary)
 {
-    void *library = switch_core_entitlements();
-    auto size = library ? (decltype(&CESizeSerialization))dlsym(library, "CESizeSerialization") : nullptr;
-    auto serialize = library ? (decltype(&CESerialize))dlsym(library, "CESerialize") : nullptr;
-    auto success = library ? (CEError_t *)dlsym(library, "kCENoError") : nullptr;
-    if (!size || !serialize || !success)
+    const SwitchCoreEntitlements *ce = switch_core_entitlements();
+    if (!ce->sizeSerialization || !ce->serialize || !ce->noError)
         return nil;
     std::vector<CESerializedElement_t> elements;
     if (!switch_append_elements(dictionary, elements))
         return nil;
     size_t length = 0;
-    if (size(elements.data(), elements.size(), &length) != *success || !length || length > 65536)
+    if (ce->sizeSerialization(elements.data(), elements.size(), &length) != *ce->noError || !length || length > 65536)
         return nil;
     NSMutableData *data = [NSMutableData dataWithLength:length];
     uint8_t *bytes = (uint8_t *)data.mutableBytes;
-    if (serialize(&switch_entitlement_runtime, elements.data(), elements.size(), bytes, bytes + length) != *success)
+    if (ce->serialize(&switch_entitlement_runtime, elements.data(), elements.size(), bytes, bytes + length) !=
+        *ce->noError)
         return nil;
     return [switch_deserialize_entitlements(data) isEqual:dictionary] ? data : nil;
 }
@@ -143,33 +166,28 @@ static id switch_read_element(const std::vector<CESerializedElement_t> &elements
 
 NSDictionary *switch_deserialize_entitlements(NSData *data)
 {
-    void *library = switch_core_entitlements();
-    auto validate = library ? (decltype(&CEValidate))dlsym(library, "CEValidate") : nullptr;
-    auto acquire = library ? (decltype(&CEAcquireManagedContext))dlsym(library, "CEAcquireManagedContext") : nullptr;
-    auto release = library ? (decltype(&CEReleaseManagedContext))dlsym(library, "CEReleaseManagedContext") : nullptr;
-    auto size = library ? (decltype(&CESizeDeserialization))dlsym(library, "CESizeDeserialization") : nullptr;
-    auto deserialize = library ? (decltype(&CEDeserialize))dlsym(library, "CEDeserialize") : nullptr;
-    auto success = library ? (CEError_t *)dlsym(library, "kCENoError") : nullptr;
-    if (!data.length || data.length > 65536 || !validate || !acquire || !release || !size || !deserialize || !success)
+    const SwitchCoreEntitlements *ce = switch_core_entitlements();
+    if (!data.length || data.length > 65536 || !ce->validate || !ce->acquire || !ce->release ||
+        !ce->sizeDeserialization || !ce->deserialize || !ce->noError)
         return nil;
     const uint8_t *bytes = (const uint8_t *)data.bytes;
     CEValidationResult validation = {};
-    if (validate(&switch_entitlement_runtime, &validation, bytes, bytes + data.length) != *success)
+    if (ce->validate(&switch_entitlement_runtime, &validation, bytes, bytes + data.length) != *ce->noError)
         return nil;
     CEQueryContext_t context = nullptr;
-    if (acquire(&switch_entitlement_runtime, validation, &context) != *success)
+    if (ce->acquire(&switch_entitlement_runtime, validation, &context) != *ce->noError)
         return nil;
     size_t count = 0;
     NSDictionary *result = nil;
-    if (size(context, &count) == *success && count && count < 65536) {
+    if (ce->sizeDeserialization(context, &count) == *ce->noError && count && count < 65536) {
         std::vector<CESerializedElement_t> elements(count);
-        if (deserialize(context, elements.data(), count) == *success) {
+        if (ce->deserialize(context, elements.data(), count) == *ce->noError) {
             size_t position = 0;
             id value = switch_read_element(elements, position);
             if ([value isKindOfClass:NSDictionary.class] && position == count)
                 result = value;
         }
     }
-    (void)release(&context);
+    (void)ce->release(&context);
     return result;
 }

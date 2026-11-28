@@ -47,6 +47,8 @@ uint32_t switch_exec_chan_syncpt_waits(struct switch_exec_chan *waiter, uint32_t
 uint32_t switch_exec_parked_promises(void);
 uint64_t switch_exec_mutex_takes(void);
 int switch_exec_mutex_held(void);
+void switch_exec_live_lock(void);
+void switch_exec_live_unlock(void);
 void switch_exec_chan_high(struct switch_exec_chan *chan, int high);
 void switch_exec_chan_critical(struct switch_exec_chan *chan, int critical);
 void switch_exec_chan_share_vm(struct switch_exec_chan *chan, struct switch_exec_chan *with);
@@ -60,6 +62,7 @@ struct switch_exec_wfi_counts {
 	uint32_t method_wfis;
 	uint32_t fb_flushes;
 	uint32_t l2_flushes;
+	uint32_t l2_invalidates; /* L2_SYSMEM_INVALIDATE: the L2's clean lines dropped */
 	uint32_t release_wfi_en;
 	uint32_t release_wfi_dis;
 	uint32_t start_stamps_en;
@@ -72,6 +75,11 @@ struct switch_exec_wfi_counts {
 	uint32_t fence_wfi_dis;
 	uint32_t extra_wfi_en;
 	uint32_t extra_wfi_dis;
+	uint32_t syncpt_incrs;             /* SYNCPOINTB increments */
+	uint32_t syncpt_incrs_after_fence; /* of those, pushed after the fence word's release */
+	uint32_t
+		syncpt_incrs_after_drain; /* of those, pushed after an L2 flush and the FB flush behind it */
+	uint32_t syncpt_id;               /* the last increment's syncpoint */
 };
 
 void switch_exec_chan_count_wfis(struct switch_exec_chan *chan, uint32_t from_dword,
@@ -99,6 +107,9 @@ struct switch_exec_l2_inval_stats {
 };
 
 void switch_exec_reset_driver(void);
+/* The syncpoint switch_gpu_timeline_syncpt_next hands every channel (0: none), and the seqno it was last asked for */
+void switch_exec_set_syncpt(uint32_t id);
+uint32_t switch_exec_syncpt_marked(void);
 void switch_exec_set_kick(enum switch_exec_kick_kind sched_kick, int deadline_later);
 void switch_exec_set_ptimer(uint64_t pt);
 void switch_exec_chan_complete_stamp(struct switch_exec_chan *chan, uint32_t seqno,

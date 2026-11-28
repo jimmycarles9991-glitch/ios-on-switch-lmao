@@ -138,22 +138,6 @@ void switch_root_event(unsigned stage, int error, uint64_t detail)
     root_screen();
 }
 
-static void root_syscall(unsigned code, int error, int pid, uint64_t pc, uint64_t cpsr)
-{
-    if (!root_boot_enabled || !switch_root_record[18] || pid != 1 || (cpsr & 31))
-        return;
-    if (!switch_root_record[15])
-        switch_root_record[14] = pc;
-    switch_root_record[15]++;
-    switch_root_record[16] = code;
-    switch_root_record[17] = (unsigned)error;
-    switch_root_record[2] = 14;
-    if (switch_root_record[15] == 1)
-        switch_diag_stage("original PID1 EL0 syscall observed");
-    if (switch_root_record[15] == 1 || error)
-        root_screen();
-}
-
 void switch_root_record_begin(void)
 {
     root_boot_enabled = 1;

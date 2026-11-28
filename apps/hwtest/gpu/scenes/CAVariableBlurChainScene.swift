@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Core Animation's variable blur chain as backboardd draws a scroll pocket's: a 776x24 texture of 10 levels whose

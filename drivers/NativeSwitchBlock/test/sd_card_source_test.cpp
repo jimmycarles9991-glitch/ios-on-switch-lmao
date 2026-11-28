@@ -64,18 +64,57 @@ TEST(SdCardSource, Cmd23FramingIsGated)
     EXPECT_THAT(complete, HasSubstr("if (r16(AUTO_CMD_ERROR) & 0x9f)\n            return 8;"));
     EXPECT_THAT(complete, HasSubstr("if (!cmd23 && (r32(STOP_RESPONSE) & R1_STOP_ERRORS))\n            return 9;"));
     // The data path: direct (ADMA2) multi-block commands only.
-    EXPECT_THAT(body("void NativeSwitchBlock::beginBatch("),
+    EXPECT_THAT(body("void NativeSwitchBlock::prepareAndPublishSlot("),
                 HasSubstr("b.cmd23 = b.direct && sectors > 1 && autoCmd23;"));
     // Retries go back to CMD12 (command()'s default), as do transfer()/run() (the bounce path and the proofs).
     EXPECT_THAT(body("int NativeSwitchBlock::retry("),
                 HasSubstr("step = command(static_cast<uint32_t>(lba), sectors, write, descriptors, &status, false, "
-                          "window);"));
+                          "window, descPA);"));
     EXPECT_THAT(body("int NativeSwitchBlock::run("),
                 HasSubstr("command(static_cast<uint32_t>(lba), sectors, write, descriptors, &status, false, window);"));
-    EXPECT_TRUE(Search(source,
-                       R"(int command\(uint32_t lba, uint32_t sectors, bool write, unsigned descriptors, )"
-                       R"(uint32_t \*status, bool cmd23 = false,\s*const SwitchSdWindow \*window = nullptr\);)"));
+    EXPECT_TRUE(Search(source, R"(int command\(uint32_t lba, uint32_t sectors, bool write, unsigned descriptors, )"
+                               R"(uint32_t \*status, bool cmd23 = false,\s*const SwitchSdWindow \*window = nullptr,\s*)"
+                               R"(uint64_t descPA = 0\);)"));
     // setup(): from the registers (switchSdPath: ADMA2, and the SCR listing CMD23).
     EXPECT_THAT(body("bool NativeSwitchBlock::setup()"),
                 HasSubstr("autoCmd23 = switchSdPath(r32(CAPABILITIES), r16(HOST_CONTROL2), haveScr ? &scr : nullptr)"));
+}
+
+// Volatile write cache: enabled only with Power Off Notification support, FUA withdrawn when on, doSynchronize flushes,
+// suspend/shutdown flush before PON, and resume re-enables cache after power cycle.
+TEST(SdCardSource, WriteCacheContract)
+{
+    const std::string configure = body("bool NativeSwitchBlockDevice::configure(");
+    EXPECT_THAT(configure, HasSubstr("if (!provider->writeCacheEnabled())"));
+    EXPECT_THAT(body("IOReturn NativeSwitchBlockDevice::doSynchronize("), HasSubstr("owner->synchronize(window)"));
+    EXPECT_THAT(body("IOReturn NativeSwitchBlockDevice::doSynchronizeCache()"),
+                HasSubstr("owner->synchronize(window)"));
+    EXPECT_THAT(body("IOReturn NativeSwitchBlock::synchronize("), HasSubstr("syncLocked(window)"));
+    EXPECT_THAT(body("IOReturn NativeSwitchBlockDevice::getWriteCacheState("), HasSubstr("owner->writeCacheEnabled()"));
+    const std::string setup = body("bool NativeSwitchBlock::setup()");
+    EXPECT_LT(Index(setup, "identify();"), Index(setup, "configureCache();"));
+    const std::string cfgCache = body("void NativeSwitchBlock::configureCache()");
+    EXPECT_THAT(cfgCache, HasSubstr("perf.cache && havePower && power.offNotification"));
+    EXPECT_THAT(cfgCache, HasSubstr("disableFoundCache();"));
+    const std::string suspend = body("void NativeSwitchBlock::suspend()");
+    EXPECT_LT(Index(suspend, "flushCache()"), Index(suspend, "powerOffNotify();"));
+    EXPECT_LT(Index(suspend, "powerOffNotify();"), Index(suspend, "powerOffCard();"));
+    const std::string shutdown = body("void NativeSwitchBlock::shutdown()");
+    EXPECT_LT(Index(shutdown, "flushCache()"), Index(shutdown, "powerOffNotify();"));
+    const std::string resume = body("void NativeSwitchBlock::resume()");
+    EXPECT_LT(Index(resume, "dmaResume();"), Index(resume, "enableCache(true)"));
+}
+
+// UHS DDR200 uses PLLC4_OUT0 / 2.5 with SDHCI /2 in UHS_DDR50 mode, manual 128-tap tuning (>= 8 taps), and falls back
+// cleanly to SDR104 (with power-cycle at boot, or CMD6 step-down at runtime).
+TEST(SdCardSource, Ddr200HasFallbackToSdr104)
+{
+    const std::string reinit = body("bool NativeSwitchBlock::reinitialize(");
+    EXPECT_THAT(reinit,
+                HasSubstr("setTiming(UHS_DDR50, false, SOURCE_PLLC4_OUT0, kDdr200CarDivider, kDdr200SdhciDivider)"));
+    EXPECT_THAT(reinit, HasSubstr("tuneDdr200(&ddr200Window)"));
+    EXPECT_THAT(reinit, HasSubstr("powerOffCard();"));
+    EXPECT_THAT(reinit, HasSubstr("powerOnController();"));
+    EXPECT_THAT(body("void NativeSwitchBlock::retune("), HasSubstr("switchFunction(true, 1, 0)"));
+    EXPECT_THAT(body("bool NativeSwitchBlock::raiseBusSpeed()"), HasSubstr("switch-no-sd-ddr200"));
 }

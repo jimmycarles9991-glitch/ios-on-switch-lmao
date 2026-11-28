@@ -52,16 +52,12 @@ inline bool host_acquire_wanted(const switch_gpu_backing &backing,
 	       backing.host_visible_epoch != backing.host_epoch && !backing.host_acquire.engine;
 }
 
-// An ordered transaction's marks in its uses' reserved words (zero again when it ends): the use's lock is held, it was
-// found to need it, it is to be cleaned, it was cleaned with the order let go.
-constexpr uint32_t kUseLocked = 1, kUseGrown = 2, kUseDirty = 4, kUseCleaned = 8;
+// Marks in a transaction's uses' reserved words (zero again when it ends): lock/clean state and cached prepare slot.
+constexpr uint32_t kUseLocked = 1, kUseHasSlot = 2, kUseCleaned = 8, kUseSlotShift = 4;
 
-// How begin holds the transaction's uses (SwitchGpuBackingOrder.cpp): in the order with the locks of the uses that need
-// them, or every use claimed.
 void hold_ordered(switch_gpu_backing_transaction *transaction);
 void hold_claimed(switch_gpu_backing_transaction *transaction);
 
-// What begin holds on the transaction's uses: the ownership order, or each use's lock.
 inline bool holds(const switch_gpu_backing_transaction *transaction)
 {
 	return transaction->ordered || transaction->locked == transaction->count;
@@ -80,18 +76,14 @@ inline uint64_t uses_digest(const switch_gpu_backing_use *uses, uint32_t count)
 #endif
 
 // Debug kernels: the use array still holds what begin left in it, or the transaction is not touched (its backings stay
-// locked) rather than unlocked and recorded through whatever the array now holds. The ownership order, which needs no
-// array, is let go.
+// locked) rather than unlocked and recorded through whatever the array now holds.
 inline bool uses_intact(switch_gpu_backing_transaction *transaction, const char *step)
 {
 #if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
 	if (!transaction->uses_check ||
 	    uses_digest(transaction->uses, transaction->count) == transaction->uses_check)
 		return true;
-	if (transaction->ordered) {
-		transaction->ordered = 0;
-		switch_gpu_backing_order_unlock();
-	}
+	transaction->ordered = 0;
 	IOLog("SwitchGpu: engine %u queue %u job %llu: its %u uses changed between begin and %s "
 	      "(the caller's array went "
 	      "away); nothing is recorded or unlocked\n",

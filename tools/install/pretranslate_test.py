@@ -203,6 +203,23 @@ class DeltasTest(unittest.TestCase):
         with self.assertRaisesRegex(host.HostError, 'missing.bin'):
             self.roles.check_pins({'missing.bin': digest})
 
+    def test_the_update_list_is_no_deltas_output_and_is_not_among_the_pins_it_checks(self) -> None:
+        self.roles.keep()
+        self.roles.check_pins({'os.updates.json': '0' * 64})
+
+    def test_carried_updates_are_the_deltas_translations_at_their_system_paths(self) -> None:
+        out = self.dir / 'carried'
+        pretranslate.carried_updates(self.dir / 'bazel-out/delta_os', 'os', {'/usr/bin/tool': '00' * 20}, out)
+        self.assertEqual((out / 'usr/bin/tool').read_bytes(), b'arm64')
+        self.assertEqual(json.loads((out / pretranslate.UPDATES_LIST).read_text()), {'/usr/bin/tool': '00' * 20})
+
+    def test_an_update_whose_pin_is_older_than_the_translation_fails_the_build(self) -> None:
+        delta = self.dir / 'bazel-out/delta_os'
+        with self.assertRaisesRegex(host.HostError, 'regenerate'):
+            pretranslate.carried_updates(delta, 'os', {'/usr/bin/tool': '11' * 20}, self.dir / 'a')
+        with self.assertRaisesRegex(host.HostError, 'no such file'):
+            pretranslate.carried_updates(delta, 'os', {'/usr/bin/gone': '00' * 20}, self.dir / 'b')
+
     def test_unknown_roles_refused(self):
         with self.assertRaises(host.HostError):
             pretranslate.Deltas({'kernel': self.dir}, self.dir, Quiet())

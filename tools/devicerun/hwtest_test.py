@@ -209,6 +209,16 @@ class AppSources(unittest.TestCase):
             if test_id not in declared:
                 self.assertRegex(test_id, PARAMETERIZED)
 
+    def test_the_first_touch_tests_run_last_in_both_apps(self):
+        for app in ('app17/SwitchHWTest17.swift', 'app27/SwitchHWTest27.swift'):
+            suite = re.search(r'Suite\(\s*tests:([^,]+),\s*ios:', (APP / app).read_text())
+            self.assertIsNotNone(suite, app)
+            self.assertEqual(suite.group(1).split('+')[-1].strip(), 'Registry.firstTouch', app)
+        registry = (APP / 'tests/Registry.swift').read_text()
+        first_touch = re.search(r'static let firstTouch: \[any HWTest\] = \[([^\]]*)\]', registry)
+        self.assertIsNotNone(first_touch)
+        self.assertEqual(first_touch.group(1).split(',')[-1].strip(), 'GPUFirstTouchTest()')
+
     def test_each_versions_own_tests_are_its_table(self):
         shared = self.declared(SHARED)
         for ios, directories in BY_IOS.items():

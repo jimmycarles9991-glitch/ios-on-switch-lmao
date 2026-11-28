@@ -95,7 +95,7 @@
 
 - (void)resetWithRange:(NSRange)range
 {
-    std::lock_guard<gm20b::Mutex> hold(_lock);
+    std::lock_guard<gm20b::UnfairMutex> hold(_lock);
     for (NSUInteger i = range.location; i < std::min<NSUInteger>(NSMaxRange(range), _count); i++) {
         _dispatches[i] = {};
         gm20bWriteWords(self, i);
@@ -110,7 +110,7 @@
 
 - (void)edit:(void (^)(SwitchMetalICBDispatch &c))change
 {
-    std::lock_guard<gm20b::Mutex> hold(_buffer->_lock);
+    std::lock_guard<gm20b::UnfairMutex> hold(_buffer->_lock);
     change(_buffer->_dispatches[_index]);
     [_buffer write:_index];
 }
@@ -118,7 +118,7 @@
 // A barrier changes the slot's first words alone
 - (void)barrier:(bool)barrier
 {
-    std::lock_guard<gm20b::Mutex> hold(_buffer->_lock);
+    std::lock_guard<gm20b::UnfairMutex> hold(_buffer->_lock);
     SwitchMetalICBDispatch &c = _buffer->_dispatches[_index];
     c.barrier = barrier;
     if (!c.raw)

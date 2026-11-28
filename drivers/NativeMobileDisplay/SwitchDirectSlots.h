@@ -50,8 +50,9 @@ int directSlotFor(OSObject *surface, IOMemoryDescriptor *memory, uint64_t stride
             }
             const int entry = kSlot0 + static_cast<int>(k);
             const bool heldTiled = holdLayout(slot, tiled);
-            __atomic_thread_fence(__ATOMIC_SEQ_CST);
-            if (surfaceCompressed(memory)) {
+            const addr64_t firstPa = slot.firstPa ? slot.firstPa : preparedFirstPa(memory);
+            slot.firstPa = firstPa;
+            if (surfaceCompressedPa(firstPa)) {
                 if (!ring.busy(entry) && gpuDirect != entry && gpuPresentedEntry != entry)
                     dropSlot(k);
                 else if (tookSnapshot && slot.read)
@@ -90,6 +91,7 @@ int directSlotFor(OSObject *surface, IOMemoryDescriptor *memory, uint64_t stride
         switch_native_scanout_release(&snapshot);
         return kNoBuffer;
     }
+    const addr64_t firstPa = preparedFirstPa(memory);
     memory->retain();
     surface->retain();
     auto *storage = slot.read;
@@ -103,12 +105,12 @@ int directSlotFor(OSObject *surface, IOMemoryDescriptor *memory, uint64_t stride
             storage,
             snapshot.allocation.allocation_id,
             snapshot.allocation.allocation_generation,
-            offset};
+            offset,
+            firstPa};
     *slot.read = snapshot;
     holdScanoutBacking(static_cast<unsigned>(victim));
     slot.tiled = holdLayout(slot, tiled);
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    if (surfaceCompressed(memory)) {
+    if (surfaceCompressedPa(firstPa)) {
         dropSlot(static_cast<unsigned>(victim));
         return kNoBuffer;
     }
@@ -121,8 +123,7 @@ int directSlotFor(OSObject *surface, IOMemoryDescriptor *memory, uint64_t stride
 static bool holdLayout(DirectSlot &slot, bool tiled)
 {
     if (!slot.layout) {
-        IOByteCount length = 0;
-        const addr64_t pa = slot.memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
+        const addr64_t pa = slot.firstPa ? slot.firstPa : preparedFirstPa(slot.memory);
         int held = 0;
         slot.layout = pa ? tegra_gm20b_surface_hold(pa & ~0xfffULL, &held) : nullptr;
         if (slot.layout)
@@ -131,29 +132,58 @@ static bool holdLayout(DirectSlot &slot, bool tiled)
     return slot.layout ? slot.tiled : tiled;
 }
 
+static addr64_t preparedFirstPa(IOMemoryDescriptor *memory)
+{
+    IOByteCount length = 0;
+    return memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
+}
+
+addr64_t cachedFirstPa(const IOMemoryDescriptor *memory) const
+{
+    for (unsigned k = 0; k < kSlots; ++k) {
+        if (slots[k].memory == memory && slots[k].firstPa)
+            return slots[k].firstPa;
+    }
+    return 0;
+}
+
+addr64_t directFirstPa(IOMemoryDescriptor *memory) const
+{
+    if (const addr64_t pa = cachedFirstPa(memory))
+        return pa;
+    return surfaceFirstPa(memory);
+}
+
 // The GPU driver's word on the surface's pixels (by its first page): the block height of its block-linear layout, -1
 // when they are rows.
 static addr64_t surfaceFirstPa(IOMemoryDescriptor *memory)
 {
     if (!memory || memory->prepare(kIODirectionOut) != kIOReturnSuccess)
         return 0;
-    IOByteCount length = 0;
-    const addr64_t pa = memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
+    const addr64_t pa = preparedFirstPa(memory);
     memory->complete(kIODirectionOut);
     return pa;
 }
 
-static int surfaceBlockLog2(IOMemoryDescriptor *memory)
+static int surfaceBlockLog2Pa(addr64_t pa)
 {
-    const addr64_t pa = surfaceFirstPa(memory);
     tgm_layout layout = {};
     return (pa != 0u) && tegra_gm20b_surface_layout(pa & ~0xfffULL, &layout) == 1 ? layout.y_log2 : -1;
 }
 
+static bool surfaceCompressedPa(addr64_t pa)
+{
+    return (pa != 0u) && tegra_gm20b_surface_compressed(pa & ~0xfffULL) != 0;
+}
+
+static int surfaceBlockLog2(IOMemoryDescriptor *memory)
+{
+    return surfaceBlockLog2Pa(surfaceFirstPa(memory));
+}
+
 static bool surfaceCompressed(IOMemoryDescriptor *memory)
 {
-    const addr64_t pa = surfaceFirstPa(memory);
-    return (pa != 0u) && tegra_gm20b_surface_compressed(pa & ~0xfffULL) != 0;
+    return surfaceCompressedPa(surfaceFirstPa(memory));
 }
 
 // A slot's mapping and its surface given back (it is neither scanned nor asked for).

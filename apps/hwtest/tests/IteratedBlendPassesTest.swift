@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
+import HWTestKit
 import Metal
 
 /// A Core Animation state the driver draws on rung 3 (the ROP's iterated blend) drawn again in a later pass: in the

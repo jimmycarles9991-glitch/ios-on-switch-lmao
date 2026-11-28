@@ -10,6 +10,10 @@ The lines it reads, os_log's (the runtime's, TegraGM20BMetalComplete.mm and Tegr
         the n parts, 700 characters each, of "lib=<library> function=<function>[ spec] kernel | <compute key>": a kernel
         the shader compiler answered at run time (debug builds), its library a system library's path or data:<SHA-256
         of its bytes>, spec where its function was made with constant values
+    SwitchMetal: facts harvest <name> <i>/<n> <part>
+        the n parts, 700 characters each, of "lib=<library> function=<function>[ spec] facts | <compute state key>": a
+        compute state created without a dispatch whose facts the shader compiler answered (emitted as tg=0,0,0 so the
+        pack generator populates PackComputeFacts without a PackKernel)
     SwitchMetal: a kernel the pack lacks, made at its first dispatch of <x,y,z> threads in <us> us[ (<QoS>)]: <function>
     <key>
     SwitchMetal: a kernel the pack lacks <is refused|was not made> at <x,y,z> threads: <why> | <function> <key>
@@ -74,8 +78,11 @@ REFUSED = re.compile(
     re.DOTALL,
 )
 KEY = re.compile(r'kernel \| ' + AIR + r' \| (?P<constants>.*?)' + SHAPE + r'$', re.DOTALL)
+FACTS_KEY = re.compile(r'facts \| ' + AIR + r' \| (?P<constants>.*?) \| max=(?P<max>\d+) tgm=(?P<tgm>[01])$', re.DOTALL)
 HEAD = re.compile(r'lib=(?P<lib>\S+) function=(?P<function>\S+)(?P<spec> spec)? ')
 PART = re.compile(r'SwitchMetal: kernel harvest ([0-9a-f]{16}) (\d+)/(\d+) (.*)$', re.DOTALL)
+FACTS_PART = re.compile(r'SwitchMetal: facts harvest ([0-9a-f]{16}) (\d+)/(\d+) (.*)$', re.DOTALL)
+FACTS_ONLY_TG = '0,0,0'
 ROUTE = 'compute.kernel: a kernel the pack lacks ('
 PART_CHARS = 700
 PREDICATE = ' OR '.join(
@@ -83,6 +90,7 @@ PREDICATE = ' OR '.join(
     for text in (
         'a kernel the pack lacks',
         'SwitchMetal: kernel harvest ',
+        'SwitchMetal: facts harvest ',
         'OS version: ',
         'deviceBuildVersion is',
         'iPhone OS ',
@@ -113,6 +121,8 @@ class Boot:
     kernels: dict[tuple[str, Kernel], None] = field(default_factory=dict)  # (process, kernel), in the order first seen
     parts: dict[tuple[str, str], dict[int, str]] = field(default_factory=lambda: defaultdict(dict))
     totals: dict[tuple[str, str], int] = field(default_factory=dict)
+    facts_parts: dict[tuple[str, str], dict[int, str]] = field(default_factory=lambda: defaultdict(dict))
+    facts_totals: dict[tuple[str, str], int] = field(default_factory=dict)
     cut: Counter = field(default_factory=Counter)
     unkeyed: Counter = field(default_factory=Counter)  # route lines (compute.kernel) that name the kernel's shape alone
 
@@ -146,26 +156,57 @@ def read_boots(stream: Iterable[dict]) -> dict[str, Boot]:
         if m := PART.search(message):
             boot.parts[process, m[1]][int(m[2])] = m[4]
             boot.totals[process, m[1]] = int(m[3])
+        elif m := FACTS_PART.search(message):
+            boot.facts_parts[process, m[1]][int(m[2])] = m[4]
+            boot.facts_totals[process, m[1]] = int(m[3])
         elif m := MADE.search(message) or REFUSED.search(message):
             boot.kernels.setdefault((process, kernel_of(m, m['function'], m['constants'].removeprefix(' '))))
         elif ROUTE in message:
             boot.unkeyed[process] += 1
         elif 'a kernel the pack lacks' in message:
             boot.cut[process] += 1
-    for (process, name), parts in boot.parts.items():
-        total = boot.totals[process, name]
-        if sorted(parts) != list(range(1, total + 1)):
-            boot.cut[process] += 1
-            continue
-        text = ''.join(parts[i].ljust(PART_CHARS) for i in range(1, total)) + parts[total]
-        head, key = HEAD.match(text), None
-        if head:
-            key = KEY.match(text[head.end() :])
-        if not key:
-            boot.cut[process] += 1
-            continue
-        kernel = kernel_of(key, head['function'], key['constants'], head['lib'], bool(head['spec']))
-        boot.kernels.setdefault((process, kernel))
+    for boot in boots.values():
+        for (process, name), parts in boot.parts.items():
+            total = boot.totals[process, name]
+            if sorted(parts) != list(range(1, total + 1)):
+                boot.cut[process] += 1
+                continue
+            text = ''.join(parts[i].ljust(PART_CHARS) for i in range(1, total)) + parts[total]
+            head, key = HEAD.match(text), None
+            if head:
+                key = KEY.match(text[head.end() :])
+            if not key:
+                boot.cut[process] += 1
+                continue
+            kernel = kernel_of(key, head['function'], key['constants'], head['lib'], bool(head['spec']))
+            boot.kernels.setdefault((process, kernel))
+        for (process, name), parts in boot.facts_parts.items():
+            total = boot.facts_totals[process, name]
+            if sorted(parts) != list(range(1, total + 1)):
+                boot.cut[process] += 1
+                continue
+            text = ''.join(parts[i].ljust(PART_CHARS) for i in range(1, total)) + parts[total]
+            head, key = HEAD.match(text), None
+            if head:
+                key = FACTS_KEY.match(text[head.end() :])
+            if not key:
+                boot.cut[process] += 1
+                continue
+            kernel = Kernel(
+                head['function'],
+                key['air'],
+                key['constants'],
+                key['max'],
+                key['tgm'],
+                FACTS_ONLY_TG,
+                '',
+                '',
+                '',
+                False,
+                head['lib'],
+                bool(head['spec']),
+            )
+            boot.kernels.setdefault((process, kernel))
     return boots
 
 
@@ -190,7 +231,7 @@ class Libraries:
 
     def of(self, kernel: Kernel) -> tuple[str, str]:
         """Give the kernel's library, or '' and why there is none."""
-        if kernel.lib:
+        if kernel.lib and kernel.lib != 'data':
             return kernel.lib, ''
         held = self.by_air.get((kernel.function, kernel.air))
         if held:
@@ -289,15 +330,18 @@ def harvest(
             report.left[process, 'a compute.kernel route line, which names no key'] += count
         found = Libraries(files, corpus + new, build)
         held = in_corpus(corpus + new, build)
+        held_states = {s[4:] for s in held if s}
         for process, kernel in boot.kernels:
             line, why = corpus_line(kernel, found, build)
             if not line:
                 report.left[process, why] += 1
                 continue
-            if shape(line) in held:
+            key = shape(line)
+            if key in held or (kernel.tg == FACTS_ONLY_TG and key[4:] in held_states):
                 report.present[process] += 1
                 continue
-            held.add(shape(line))
+            held.add(key)
+            held_states.add(key[4:])
             new.append(line)
             report.added[process] += 1
             report.formats.update(t.split(':')[1] for t in kernel.tex.split(',') if t)

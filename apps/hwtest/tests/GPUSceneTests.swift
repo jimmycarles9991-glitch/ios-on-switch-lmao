@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A GPU scene (gpu/scenes) as one test, judged on the process's default device alone: its CPU checks, each picture it

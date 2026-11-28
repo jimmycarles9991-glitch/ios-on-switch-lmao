@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "prefetch_internal.h"
+#include "prefetch_naming.h"
 #include "prefetch_pace.h"
 
 #include <kern/clock.h>
@@ -13,25 +14,13 @@
 #include <sys/mount.h>
 #include <sys/mount_internal.h>
 #include <sys/param.h>
-#include <sys/ubc_internal.h>
+#include <sys/reboot.h>
 #include <sys/vnode.h>
 #include <uuid/uuid.h>
 
 extern uuid_string_t bootsessionuuid_string;
 extern int unlink1(vfs_context_t, vnode_t, user_addr_t, enum uio_seg, int);
 extern void qsort(void *, size_t, size_t, int (*)(const void *, const void *));
-
-struct switch_log_group {
-    struct vnode *vp;
-    uint32_t vid;
-    uint32_t first;
-    uint32_t end;
-    uint64_t file_id;
-    uint64_t file_size;
-    int64_t mtime_sec;
-    int64_t mtime_nsec;
-    uint8_t volume;
-};
 
 struct switch_naming {
     struct switch_log_group *groups;
@@ -40,112 +29,16 @@ struct switch_naming {
     uint8_t volume;
 };
 
-struct switch_run_ref {
-    uint64_t file_id;
-    uint32_t index;
-    uint8_t volume;
-};
-
-bool switch_prefetch_vnode_meta(vnode_t vp, mount_t expected_mount, uint64_t expected_file_id, vfs_context_t ctx,
-                                uint64_t *file_id_out, struct switch_prefetch_file_meta *meta_out)
-{
-    if (vp == NULLVP || expected_mount == NULL || vnode_mount(vp) != expected_mount || !vnode_isreg(vp) ||
-        vnode_isnamedstream(vp) || vnode_issystem(vp) || vnode_isswap(vp) || vnode_isrecycled(vp)) {
-        return false;
-    }
-    struct vnode_attr va;
-    VATTR_INIT(&va);
-    VATTR_WANTED(&va, va_fileid);
-    VATTR_WANTED(&va, va_data_size);
-    VATTR_WANTED(&va, va_modify_time);
-    VATTR_WANTED(&va, va_nlink);
-    if (vnode_getattr(vp, &va, ctx) != 0 || !VATTR_IS_SUPPORTED(&va, va_fileid) ||
-        !VATTR_IS_SUPPORTED(&va, va_data_size) || !VATTR_IS_SUPPORTED(&va, va_modify_time)) {
-        return false;
-    }
-    const bool nlink_supported = VATTR_IS_SUPPORTED(&va, va_nlink) != 0;
-    if (!switch_prefetch_vnode_eligible(true, false, false, false, vnode_isrecycled(vp) != 0,
-                                        vnode_mount(vp) == expected_mount, va.va_fileid, expected_file_id,
-                                        va.va_data_size, nlink_supported, va.va_nlink)) {
-        return false;
-    }
-    if (file_id_out != NULL) {
-        *file_id_out = va.va_fileid;
-    }
-    meta_out->file_size = va.va_data_size;
-    meta_out->mtime_sec = va.va_modify_time.tv_sec;
-    meta_out->mtime_nsec = va.va_modify_time.tv_nsec;
-    return true;
-}
-
-mount_t switch_prefetch_busy_mount(mount_t expected_mp, fsid_t fsid)
-{
-    if (expected_mp == NULL) {
-        return NULL;
-    }
-    /* Look up under mount_list_lock + mount_iterref so a forced unmount cannot free expected_mp before vfs_busy. */
-    mount_t mp = mount_list_lookupby_fsid(&fsid, 0, 1);
-    if (mp == NULL) {
-        return NULL;
-    }
-    if (mp != expected_mp || vfs_busy(mp, LK_NOWAIT) != 0) {
-        mount_iterdrop(mp);
-        return NULL;
-    }
-    mount_iterdrop(mp);
-    return mp;
-}
-
-bool switch_prefetch_vget_regular(mount_t mp, fsid_t fsid, uint64_t file_id, vfs_context_t ctx, vnode_t *vp_out,
-                                  struct switch_prefetch_file_meta *meta_out)
-{
-    *vp_out = NULLVP;
-    if (mp == NULL || file_id == 0u) {
-        return false;
-    }
-    /* Hold vfs_busy only across VFS_VGET so unmount never blocks on replay or save. */
-    mount_t busy_mp = switch_prefetch_busy_mount(mp, fsid);
-    if (busy_mp == NULL) {
-        return false;
-    }
-    vnode_t vp = NULLVP;
-    const int err = VFS_VGET(busy_mp, (ino64_t)file_id, &vp, ctx);
-    vfs_unbusy(busy_mp);
-    if (err != 0 || vp == NULLVP) {
-        return false;
-    }
-    if (!switch_prefetch_vnode_meta(vp, busy_mp, file_id, ctx, NULL, meta_out)) {
-        vnode_put(vp);
-        return false;
-    }
-    *vp_out = vp;
-    return true;
-}
-
 static int compare_log_entries(const void *a, const void *b)
 {
-    const struct switch_record_entry *x = (const struct switch_record_entry *)a;
-    const struct switch_record_entry *y = (const struct switch_record_entry *)b;
-    if (x->vp != y->vp) {
-        return x->vp < y->vp ? -1 : 1;
-    }
-    if (x->vid != y->vid) {
-        return x->vid < y->vid ? -1 : 1;
-    }
-    return x->index < y->index ? -1 : (int)(x->index > y->index);
+    return switch_prefetch_compare_log_entries((const struct switch_record_entry *)a,
+                                               (const struct switch_record_entry *)b);
 }
 
-static int compare_run_refs(const void *a, const void *b)
+static int compare_named_files(const void *a, const void *b)
 {
-    const struct switch_run_ref *x = (const struct switch_run_ref *)a;
-    const struct switch_run_ref *y = (const struct switch_run_ref *)b;
-    if (x->volume != y->volume) {
-        return x->volume < y->volume ? -1 : 1;
-    }
-    if (x->file_id != y->file_id) {
-        return x->file_id < y->file_id ? -1 : 1;
-    }
-    return x->index < y->index ? -1 : (int)(x->index > y->index);
+    return switch_prefetch_compare_named_files((const struct switch_named_file *)a,
+                                               (const struct switch_named_file *)b);
 }
 
 static int compare_ranges_qsort(const void *a, const void *b)
@@ -161,19 +54,22 @@ static int compare_runs_qsort(const void *a, const void *b)
 
 static int name_logged_vnode(vnode_t vp, void *argument)
 {
+    if (get_system_inshutdown()) {
+        return VNODE_RETURNED_DONE;
+    }
     const struct switch_naming *naming = (const struct switch_naming *)argument;
     uint32_t lo = 0;
     uint32_t hi = naming->count;
     while (lo < hi) {
         const uint32_t mid = lo + (hi - lo) / 2u;
-        if (naming->groups[mid].vp < vp) {
+        if ((uintptr_t)naming->groups[mid].vp < (uintptr_t)vp) {
             lo = mid + 1u;
         } else {
             hi = mid;
         }
     }
-    for (struct switch_log_group *hit = naming->groups + lo; hit < naming->groups + naming->count && hit->vp == vp;
-         ++hit) {
+    for (struct switch_log_group *hit = naming->groups + lo;
+         hit < naming->groups + naming->count && hit->vp == (const void *)vp; ++hit) {
         if (hit->file_id != 0u || hit->volume != naming->volume || hit->vid != vnode_vid(vp)) {
             continue;
         }
@@ -187,95 +83,6 @@ static int name_logged_vnode(vnode_t vp, void *argument)
         }
     }
     return VNODE_RETURNED;
-}
-
-static uint32_t collect_kept_replayed(const struct switch_prefetch_run *old_runs, uint32_t replayed_runs,
-                                      const uint8_t *replayed_bits, mount_t *mounts, const fsid_t *fsids,
-                                      uint32_t mount_count, struct switch_prefetch_range *out_ranges,
-                                      uint64_t *pages_out, uint32_t *kept_out, uint32_t *dropped_out,
-                                      uint32_t *evicted_out)
-{
-    *kept_out = 0;
-    *dropped_out = 0;
-    *evicted_out = 0;
-    if (old_runs == NULL || replayed_runs == 0u) {
-        return 0u;
-    }
-    const size_t refs_bytes = (size_t)replayed_runs * sizeof(struct switch_run_ref);
-    struct switch_run_ref *refs = (struct switch_run_ref *)kalloc_data(refs_bytes, Z_WAITOK);
-    if (refs == NULL) {
-        return 0u;
-    }
-    uint32_t ref_count = 0;
-    for (uint32_t i = 0; i < replayed_runs; ++i) {
-        if (replayed_bits != NULL && !switch_prefetch_bit_test(replayed_bits, i)) {
-            continue;
-        }
-        refs[ref_count].file_id = old_runs[i].file_id;
-        refs[ref_count].index = i;
-        refs[ref_count].volume = old_runs[i].volume;
-        ++ref_count;
-    }
-    if (ref_count == 0u) {
-        kfree_data(refs, refs_bytes);
-        return 0u;
-    }
-    qsort(refs, ref_count, sizeof(*refs), compare_run_refs);
-
-    vfs_context_t ctx = vfs_context_kernel();
-    uint32_t n = 0;
-    for (uint32_t i = 0; i < ref_count;) {
-        const uint8_t vol = refs[i].volume;
-        const uint64_t file_id = refs[i].file_id;
-        uint32_t j = i + 1u;
-        while (j < ref_count && refs[j].volume == vol && refs[j].file_id == file_id) {
-            ++j;
-        }
-        if (vol >= mount_count || mounts[vol] == NULL) {
-            i = j;
-            continue;
-        }
-        vnode_t vp = NULLVP;
-        struct switch_prefetch_file_meta meta = {0};
-        if (!switch_prefetch_vget_regular(mounts[vol], fsids[vol], file_id, ctx, &vp, &meta)) {
-            i = j;
-            continue;
-        }
-        void *control = (void *)ubc_getobject(vp, UBC_FLAGS_NONE);
-        for (uint32_t k = i; k < j; ++k) {
-            const struct switch_prefetch_run *run = &old_runs[refs[k].index];
-            if (!switch_prefetch_run_matches_file(run, meta.file_size, meta.mtime_sec, meta.mtime_nsec)) {
-                continue;
-            }
-            struct switch_prefetch_pagein in;
-            if (!switch_prefetch_run_pagein(run, SWITCH_PREFETCH_LIST_PAGE, PAGE_SIZE, meta.file_size, &in)) {
-                continue;
-            }
-            const enum switch_prefetch_run_state state = switch_vm_prefetch_check_run(control, in.offset, in.length);
-            if (state == SWITCH_PREFETCH_RUN_UNUSED) {
-                ++*dropped_out;
-                continue;
-            }
-            if (state == SWITCH_PREFETCH_RUN_EVICTED) {
-                ++*evicted_out;
-            }
-            ++*kept_out;
-            out_ranges[n].file_id = run->file_id;
-            out_ranges[n].file_size = run->file_size;
-            out_ranges[n].mtime_sec = run->mtime_sec;
-            out_ranges[n].mtime_nsec = run->mtime_nsec;
-            out_ranges[n].first = run->page;
-            out_ranges[n].end = run->page + run->pages;
-            out_ranges[n].when = run->when;
-            out_ranges[n].volume = run->volume;
-            *pages_out += run->pages;
-            ++n;
-        }
-        vnode_put(vp);
-        i = j;
-    }
-    kfree_data(refs, refs_bytes);
-    return n;
 }
 
 static int kernel_write_chunked(vnode_t vp, const void *buf, size_t len, off_t offset, vfs_context_t ctx)
@@ -329,139 +136,150 @@ static void kernel_unlink_file(void *ctx_arg, const char *path)
     (void)unlink1((vfs_context_t)ctx_arg, NULLVP, CAST_USER_ADDR_T(path), UIO_SYSSPACE, VNODE_REMOVE_NOFOLLOW_ANY);
 }
 
-void switch_prefetch_save_next(struct switch_record_entry *log, uint32_t appended,
-                               const struct switch_prefetch_run *old_runs, uint32_t replayed_runs,
-                               const uint8_t *replayed_bits, const struct switch_prefetch_header *expected_key,
-                               mount_t *mounts, const fsid_t *fsids, uint32_t mount_count)
+#if DEVELOPMENT || DEBUG
+static uint64_t switch_prefetch_save_ms(uint64_t from_abs, uint64_t to_abs)
+{
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(to_abs - from_abs, &ns);
+    return ns / NSEC_PER_MSEC;
+}
+#endif
+
+/* Names each group's vnode where XNU still has it (Data always, since its files change), and from the replay's own
+ * files otherwise: a read-only volume's file the replay opened needs no lookup, and a vnode recycled since the
+ * boot's read keeps its name. */
+static uint32_t switch_prefetch_name_groups(struct switch_log_group *groups, uint32_t group_count,
+                                            struct switch_named_file *files, uint32_t file_count, mount_t *mounts,
+                                            const fsid_t *fsids, uint32_t mount_count)
+{
+    if (file_count != 0u) {
+        qsort(files, file_count, sizeof(*files), compare_named_files);
+    }
+    uint32_t from_replay = switch_prefetch_name_from_files(groups, group_count, files, file_count, false);
+    bool unnamed[SWITCH_PREFETCH_VOLUME_COUNT] = {false};
+    for (uint32_t g = 0; g < group_count; ++g) {
+        if (groups[g].file_id == 0u) {
+            unnamed[groups[g].volume] = true;
+        }
+    }
+    for (uint32_t v = 0; v < mount_count && v < SWITCH_PREFETCH_VOLUME_COUNT && !get_system_inshutdown(); ++v) {
+        if (!unnamed[v]) {
+            continue;
+        }
+        mount_t busy_mp = switch_prefetch_busy_mount(mounts[v], fsids[v]);
+        if (busy_mp == NULL) {
+            continue;
+        }
+        struct switch_naming naming = {groups, group_count, busy_mp, (uint8_t)v};
+        (void)vnode_iterate(busy_mp, 0, name_logged_vnode, &naming);
+        vfs_unbusy(busy_mp);
+    }
+    from_replay += switch_prefetch_name_from_files(groups, group_count, files, file_count, true);
+    return from_replay;
+}
+
+void switch_prefetch_save_next(struct switch_record_entry **log_p, size_t log_bytes, uint32_t appended,
+                               struct switch_named_file *files, uint32_t file_count,
+                               const struct switch_prefetch_header *expected_key, mount_t *mounts, const fsid_t *fsids,
+                               uint32_t mount_count)
 {
 #if DEVELOPMENT || DEBUG
     const uint64_t start_abs = mach_absolute_time();
 #endif
+    struct switch_record_entry *log = *log_p;
     const uint32_t entries = appended < SWITCH_PREFETCH_LOG_ENTRIES ? appended : SWITCH_PREFETCH_LOG_ENTRIES;
-    const uint32_t max_ranges = entries + replayed_runs;
-    if (max_ranges == 0u) {
-        return;
-    }
-    const size_t groups_bytes = (size_t)(entries ? entries : 1u) * sizeof(struct switch_log_group);
-    const size_t ranges_bytes = (size_t)max_ranges * sizeof(struct switch_prefetch_range);
-    struct switch_log_group *groups = (struct switch_log_group *)kalloc_data(groups_bytes, Z_WAITOK);
-    struct switch_prefetch_range *ranges = (struct switch_prefetch_range *)kalloc_data(ranges_bytes, Z_WAITOK);
-    if (groups == NULL || ranges == NULL) {
-        if (groups != NULL) {
-            kfree_data(groups, groups_bytes);
-        }
-        if (ranges != NULL) {
-            kfree_data(ranges, ranges_bytes);
-        }
-        os_log(OS_LOG_DEFAULT, "SwitchBootPrefetch: list not saved: %d (%u reads logged)", ENOMEM, appended);
+    if (entries == 0u) {
         return;
     }
 
+    qsort(log, entries, sizeof(*log), compare_log_entries);
+    const uint32_t group_cap = switch_prefetch_count_groups(log, entries, mount_count);
+    struct switch_log_group *groups = NULL;
+    size_t groups_bytes = 0;
     uint32_t group_count = 0;
-    bool vol_logged[SWITCH_PREFETCH_VOLUME_COUNT] = {false};
-    if (entries != 0u) {
-        qsort(log, entries, sizeof(*log), compare_log_entries);
-        for (uint32_t i = 0; i < entries;) {
-            uint32_t j = i + 1u;
-            while (j < entries && log[j].vp == log[i].vp && log[j].vid == log[i].vid && log[j].index == log[i].index) {
-                ++j;
-            }
-            if (log[i].index < mount_count && log[i].index < SWITCH_PREFETCH_VOLUME_COUNT) {
-                groups[group_count].vp = log[i].vp;
-                groups[group_count].vid = log[i].vid;
-                groups[group_count].first = i;
-                groups[group_count].end = j;
-                groups[group_count].file_id = 0;
-                groups[group_count].file_size = 0;
-                groups[group_count].mtime_sec = 0;
-                groups[group_count].mtime_nsec = 0;
-                groups[group_count].volume = (uint8_t)log[i].index;
-                vol_logged[log[i].index] = true;
-                ++group_count;
-            }
-            i = j;
+    uint32_t from_replay = 0;
+    if (group_cap != 0u) {
+        groups_bytes = (size_t)group_cap * sizeof(struct switch_log_group);
+        groups = (struct switch_log_group *)kalloc_data(groups_bytes, Z_WAITOK);
+        if (groups == NULL) {
+            os_log(OS_LOG_DEFAULT, "SwitchBootPrefetch: list not saved: %d (%u reads logged)", ENOMEM, appended);
+            return;
         }
-        for (uint32_t v = 0; v < mount_count && v < SWITCH_PREFETCH_VOLUME_COUNT; ++v) {
-            if (!vol_logged[v]) {
-                continue;
-            }
-            mount_t busy_mp = switch_prefetch_busy_mount(mounts[v], fsids[v]);
-            if (busy_mp == NULL) {
-                continue;
-            }
-            struct switch_naming naming = {groups, group_count, busy_mp, (uint8_t)v};
-            (void)vnode_iterate(busy_mp, 0, name_logged_vnode, &naming);
-            vfs_unbusy(busy_mp);
-        }
+        group_count = switch_prefetch_group_log(log, entries, mount_count, groups);
+        from_replay = switch_prefetch_name_groups(groups, group_count, files, file_count, mounts, fsids, mount_count);
     }
-
-    uint32_t n = 0;
-    uint64_t total_pages = 0;
+#if DEVELOPMENT || DEBUG
+    const uint64_t named_abs = mach_absolute_time();
+#else
+    (void)from_replay;
+#endif
+    uint32_t named_entries = 0;
     for (uint32_t g = 0; g < group_count; ++g) {
-        if (groups[g].file_id == 0u) {
-            continue;
-        }
-        for (uint32_t i = groups[g].first; i < groups[g].end; ++i) {
-            if (log[i].when == 0u || log[i].length == 0u || log[i].index >= mount_count ||
-                log[i].offset > UINT64_MAX - log[i].length - SWITCH_PREFETCH_LIST_PAGE) {
-                continue;
-            }
-            const uint64_t first = log[i].offset / SWITCH_PREFETCH_LIST_PAGE;
-            const uint64_t end =
-                (log[i].offset + log[i].length + SWITCH_PREFETCH_LIST_PAGE - 1u) / SWITCH_PREFETCH_LIST_PAGE;
-            if (end <= first || end > UINT32_MAX) {
-                continue;
-            }
-            ranges[n].file_id = groups[g].file_id;
-            ranges[n].file_size = groups[g].file_size;
-            ranges[n].mtime_sec = groups[g].mtime_sec;
-            ranges[n].mtime_nsec = groups[g].mtime_nsec;
-            ranges[n].first = (uint32_t)first;
-            ranges[n].end = (uint32_t)end;
-            ranges[n].when = log[i].when;
-            ranges[n].volume = groups[g].volume;
-            total_pages += end - first;
-            ++n;
+        if (groups[g].file_id != 0u) {
+            named_entries += groups[g].end - groups[g].first;
         }
     }
-    kfree_data(groups, groups_bytes);
+    struct switch_prefetch_range *ranges = NULL;
+    size_t ranges_bytes = 0;
+    if (named_entries != 0u) {
+        ranges_bytes = (size_t)named_entries * sizeof(struct switch_prefetch_range);
+        ranges = (struct switch_prefetch_range *)kalloc_data(ranges_bytes, Z_WAITOK);
+        if (ranges == NULL) {
+            kfree_data(groups, groups_bytes);
+            os_log(OS_LOG_DEFAULT, "SwitchBootPrefetch: list not saved: %d (%u reads logged)", ENOMEM, appended);
+            return;
+        }
+    }
 
-    uint32_t kept = 0;
-    uint32_t dropped_unused = 0;
-    uint32_t evicted = 0;
-    n += collect_kept_replayed(old_runs, replayed_runs, replayed_bits, mounts, fsids, mount_count, ranges + n,
-                               &total_pages, &kept, &dropped_unused, &evicted);
+    uint64_t total_pages = 0;
+    uint64_t unnamed_bytes = 0;
+    const uint32_t n =
+        group_count != 0u ? switch_prefetch_log_ranges(log, groups, group_count, ranges, &total_pages, &unnamed_bytes)
+                          : 0u;
+    if (groups != NULL) {
+        kfree_data(groups, groups_bytes);
+    }
+    kfree_data(log, log_bytes);
+    *log_p = NULL;
 
     struct switch_prefetch_run *runs = NULL;
     size_t runs_bytes = 0;
     uint32_t built = 0;
-    uint32_t files = 0;
+    uint32_t list_files = 0;
     if (n != 0u) {
         qsort(ranges, n, sizeof(*ranges), compare_ranges_qsort);
-        const uint64_t cap =
+        uint64_t cap =
             switch_prefetch_run_capacity(n, total_pages, SWITCH_PREFETCH_MAX_RUN_PAGES, SWITCH_PREFETCH_MAX_GAP_PAGES);
-        if (cap <= SWITCH_PREFETCH_MAX_RUNS * 4ULL) {
-            runs_bytes = (size_t)cap * sizeof(*runs);
-            runs = (struct switch_prefetch_run *)kalloc_data(runs_bytes, Z_WAITOK);
-            if (runs != NULL) {
-                built = switch_prefetch_merge_runs(ranges, n, runs, cap, SWITCH_PREFETCH_MAX_RUN_PAGES,
-                                                   SWITCH_PREFETCH_MAX_GAP_PAGES, &files);
-                qsort(runs, built, sizeof(*runs), compare_runs_qsort);
-            }
+        if (cap > SWITCH_PREFETCH_MAX_RUNS) {
+            cap = SWITCH_PREFETCH_MAX_RUNS;
+        }
+        runs_bytes = (size_t)cap * sizeof(*runs);
+        runs = (struct switch_prefetch_run *)kalloc_data(runs_bytes, Z_WAITOK);
+        if (runs != NULL) {
+            built = switch_prefetch_merge_runs(ranges, n, runs, cap, SWITCH_PREFETCH_MAX_RUN_PAGES,
+                                               SWITCH_PREFETCH_MAX_GAP_PAGES, &list_files);
+            qsort(runs, built, sizeof(*runs), compare_runs_qsort);
         }
     }
-    kfree_data(ranges, ranges_bytes);
+    if (ranges != NULL) {
+        kfree_data(ranges, ranges_bytes);
+    }
 
     const uint32_t count =
         runs != NULL ? switch_prefetch_cap_runs(runs, built, SWITCH_PREFETCH_CAP_PAGES, SWITCH_PREFETCH_MAX_RUNS) : 0u;
-    int error = count == 0u ? ENOENT : 0;
+    /* Shutdown waits for this thread (switch_prefetch_shutdown). Once reboot_kernel sets system_inshutdown, the naming
+     * above stops at its next vnode or volume, so what it built is incomplete: nothing is written and the last list
+     * stays. Tested first, so a save a reboot cut short says so even when it named nothing. */
+    int error = get_system_inshutdown() ? ECANCELED : count == 0u ? ENOENT : 0;
     char path[192];
     switch_prefetch_list_path(path, sizeof(path));
+#if DEVELOPMENT || DEBUG
+    const uint64_t write_abs = mach_absolute_time();
+#endif
     if (error == 0) {
         struct switch_prefetch_header header = *expected_key;
         header.runs = count;
-        header.files = files;
-        header.checksum = switch_prefetch_fnv((const uint8_t *)runs, (uint64_t)count * sizeof(*runs));
+        header.files = list_files;
         static const struct switch_prefetch_file_ops ops = {
             .write_file = kernel_write_file,
             .rename_file = kernel_rename_file,
@@ -490,18 +308,20 @@ void switch_prefetch_save_next(struct switch_record_entry *log, uint32_t appende
     }
 #if DEVELOPMENT || DEBUG
     else {
-        uint64_t ns = 0;
-        absolutetime_to_nanoseconds(mach_absolute_time() - start_abs, &ns);
+        const uint64_t end_abs = mach_absolute_time();
         const uint64_t cx_mib = ((vol_pages[SWITCH_PREFETCH_VOL_SYSTEM] + vol_pages[SWITCH_PREFETCH_VOL_APP]) *
                                  SWITCH_PREFETCH_LIST_PAGE) >>
                                 20;
         const uint64_t root_mib = (vol_pages[SWITCH_PREFETCH_VOL_ROOT] * SWITCH_PREFETCH_LIST_PAGE) >> 20;
         const uint64_t data_mib = (vol_pages[SWITCH_PREFETCH_VOL_DATA] * SWITCH_PREFETCH_LIST_PAGE) >> 20;
-        os_log(OS_LOG_DEFAULT,
-               "SwitchBootPrefetch: list saved: %u runs, %llu MiB (%llu/%llu/%llu MiB cx/root/Data; %u kept of the "
-               "last list, %u dropped unused, %u evicted) in %llu ms",
-               count, (saved_pages * SWITCH_PREFETCH_LIST_PAGE) >> 20, cx_mib, root_mib, data_mib, kept, dropped_unused,
-               evicted, ns / NSEC_PER_MSEC);
+        os_log(
+            OS_LOG_DEFAULT,
+            "SwitchBootPrefetch: list saved: %u runs, %llu MiB (%llu/%llu/%llu MiB cx/root/Data; %u files named from "
+            "the replay, %llu MiB unnamed) in %llu ms (sort and naming %llu, runs %llu, write %llu)",
+            count, (saved_pages * SWITCH_PREFETCH_LIST_PAGE) >> 20, cx_mib, root_mib, data_mib, from_replay,
+            unnamed_bytes >> 20, switch_prefetch_save_ms(start_abs, end_abs),
+            switch_prefetch_save_ms(start_abs, named_abs), switch_prefetch_save_ms(named_abs, write_abs),
+            switch_prefetch_save_ms(write_abs, end_abs));
     }
 #endif
 }

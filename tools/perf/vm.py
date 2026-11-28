@@ -23,8 +23,10 @@ PAGEIN_ROW = re.compile(
 )
 UNNEST = re.compile(
     r'^SwitchUnnest: (?P<proc>.+?)\[(?P<pid>-?\d+)\] unnest 0x(?P<start>[0-9a-fA-F]+)->0x(?P<end>[0-9a-fA-F]+): '
-    r'call (?P<call>-?\d+) from user pc (?P<pc>.+?) lr (?P<lr>.+?); kernel(?P<kernel>.*)$'
+    r'call (?P<call>-?\d+) from user pc (?P<pc>.+?) lr (?P<lr>[^,;]+?)'
+    r'(?:, frames(?P<frames>[^;]*))?; kernel(?P<kernel>.*)$'
 )
+WHERE_TOKEN = re.compile(r'dsc\s+0x[0-9a-fA-F]+|main\+0x[0-9a-fA-F]+|0x[0-9a-fA-F]+')
 PAIR_GAP = timedelta(seconds=2)
 TOP = 5
 
@@ -83,6 +85,7 @@ class UnnestEvent:
     pc: str
     lr: str
     kernel: tuple[int, ...] = ()
+    frames: tuple[str, ...] = ()
 
     @property
     def size(self) -> int:
@@ -179,6 +182,12 @@ def pagein_summary(w: Window, ws: list[PageinWindow], focus_proc: str = '') -> l
     return out
 
 
+def _parse_where_frames(text: str | None) -> tuple[str, ...]:
+    if not text:
+        return ()
+    return tuple(re.sub(r'\s+', ' ', m.group(0)) for m in WHERE_TOKEN.finditer(text))
+
+
 def unnest_lines(recs: list[Rec]) -> list[UnnestEvent]:
     """Parse SwitchUnnest log lines emitted when a process unnests part of the dyld shared cache."""
     out: list[UnnestEvent] = []
@@ -186,7 +195,7 @@ def unnest_lines(recs: list[Rec]) -> list[UnnestEvent]:
         if r.proc != 'kernel':
             continue
         if m := UNNEST.match(r.msg):
-            frames = tuple(int(tok, 16) for tok in m['kernel'].split() if tok.startswith('0x'))
+            kernel_frames = tuple(int(tok, 16) for tok in m['kernel'].split() if tok.startswith('0x'))
             out.append(
                 UnnestEvent(
                     time=r.time,
@@ -197,7 +206,8 @@ def unnest_lines(recs: list[Rec]) -> list[UnnestEvent]:
                     call=int(m['call']),
                     pc=m['pc'].strip(),
                     lr=m['lr'].strip(),
-                    kernel=frames,
+                    kernel=kernel_frames,
+                    frames=_parse_where_frames(m['frames']),
                 )
             )
     return out
@@ -231,6 +241,10 @@ def unnest_summary(events: list[UnnestEvent], syms: Symbols | None = None, limit
     for e in events:
         pc = syms.resolve_where(e.pc, e.proc) if syms else e.pc
         lr = syms.resolve_where(e.lr, e.proc) if syms else e.lr
-        sites[f'{e.proc} {call_label(e.call)} pc {pc} lr {lr}'] += 1
+        site = f'{e.proc} {call_label(e.call)} pc {pc} lr {lr}'
+        if e.frames:
+            chain = ' <- '.join(syms.resolve_where(f, e.proc) if syms else f for f in e.frames)
+            site = f'{site} <- {chain}'
+        sites[site] += 1
     out += [f'  {site} x{n}' for site, n in sites.most_common(limit)]
     return out

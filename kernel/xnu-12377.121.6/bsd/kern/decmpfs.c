@@ -77,6 +77,7 @@ UNUSED_SYMBOL(decmpfs_validate_compressed_file)
 #include <sys/kdebug_triage.h>
 
 #include <ptrauth.h>
+#include <switch/prefetch_vm.h>
 
 #pragma mark --- debugging ---
 
@@ -1282,14 +1283,15 @@ commit_upl(upl_t upl, upl_offset_t pl_offset, size_t uplSize, int flags, int abo
  * fault's cluster size (4 KiB pages here, 16 KiB on the iPad): requested bytes against the chunks they touch is the
  * decompression done per byte used.
  */
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
 extern uint64_t switch_decmpfs_pageins, switch_decmpfs_small, switch_decmpfs_bytes, switch_decmpfs_chunk_bytes;
 uint64_t switch_decmpfs_pageins, switch_decmpfs_small, switch_decmpfs_bytes, switch_decmpfs_chunk_bytes;
 /* osfmk/kern/switch_kprof.c */
 extern void switch_kprof_wait(unsigned int kind, uint64_t elapsed, uint64_t bytes);
+#endif
 static void
 switch_decmpfs_count_pagein(vnode_t vp, uint32_t type, off_t offset, user_ssize_t size)
 {
-	const uint64_t chunk = 64 * 1024;
 	struct ubc_info *uip;
 
 	if (size <= 0 || (type & 1) != 0) {
@@ -1303,6 +1305,8 @@ switch_decmpfs_count_pagein(vnode_t vp, uint32_t type, off_t offset, user_ssize_
 		}
 		vnode_unlock(vp);
 	}
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
+	const uint64_t chunk = 64 * 1024;
 	switch_kprof_wait(2 /* decmpfs page-in, this process */, 0, (uint64_t)size);
 	os_atomic_inc(&switch_decmpfs_pageins, relaxed);
 	if (size <= (user_ssize_t)PAGE_SIZE) {
@@ -1311,6 +1315,9 @@ switch_decmpfs_count_pagein(vnode_t vp, uint32_t type, off_t offset, user_ssize_
 	os_atomic_add(&switch_decmpfs_bytes, (uint64_t)size, relaxed);
 	os_atomic_add(&switch_decmpfs_chunk_bytes,
 	    ((((uint64_t)offset + (uint64_t)size - 1) / chunk) - ((uint64_t)offset / chunk) + 1) * chunk, relaxed);
+#else
+	(void)offset;
+#endif
 }
 
 errno_t
@@ -1417,6 +1424,8 @@ decmpfs_pagein_compressed(struct vnop_pagein_args *ap, int *is_compressed, decmp
 			goto out;
 		}
 	}
+
+	switch_cluster_record_file(vp, f_offset, (uint64_t)MIN((off_t)size, cachedSize - f_offset), SWITCH_RECORD_DECMPFS);
 
 #if CONFIG_IOSCHED
 	/* Mark the UPL as the requesting UPL for decompression */
@@ -1809,6 +1818,8 @@ decmpfs_read_compressed(struct vnop_read_args *ap, int *is_compressed, decmpfs_c
 	uplSize = (uplSize + (alignment_size - 1)) & ~(alignment_size - 1);
 
 	VerboseLogWithPath("new uplPos %lld uplSize %lld\n", (uint64_t)uplPos, (uint64_t)uplSize);
+
+	switch_cluster_record_file(vp, uplPos, (uint64_t)uplSize, SWITCH_RECORD_DECMPFS);
 
 	uplRemaining = uplSize;
 	curUplPos = uplPos;

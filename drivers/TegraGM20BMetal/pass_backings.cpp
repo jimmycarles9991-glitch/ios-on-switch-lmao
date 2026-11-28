@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <utility>
 
 #include "gm20b_gpu_internal.h"
 
@@ -88,7 +89,6 @@ Device::Backing *Device::plainBacking(std::unique_lock<gm20b::Mutex> &l, const T
             mem = existing;
         } else {
             SWITCH_METAL_DIAGNOSTIC(stats.backingBytes += made->span.bytes);
-            SWITCH_METAL_DIAGNOSTIC(glassMemEvent("memoryless plain memory made", made->span.bytes));
             plainMems_.push_back(std::move(made));
             mem = plainMems_.back().get();
             // the views of its tag's smaller memory: no pass takes them again (an animated layer seldom asks a size twice), so it
@@ -121,7 +121,8 @@ Device::Backing *Device::plainBacking(std::unique_lock<gm20b::Mutex> &l, const T
         if (blockLinear) {
             uint32_t w[8];
             fx::mipChainTic(c, t.va, f->tic0, f->srgb, 0, 1, w);
-            memcpy(tic_.cpu + 32 * t.tic, w, 32);  // visible at the next submission's header invalidate
+            memcpy(tic_.cpu + 32 * t.tic, w, 32);
+            noteTicWrite();
         } else {
             t.renderable = t.renderable && linearTarget(t);
             writeTic(t);
@@ -150,7 +151,6 @@ void Device::freePlainSpan(PlainMem &mem, DeferredFrees &deferred)
 void Device::dropPlain(PlainMem *mem, DeferredFrees &deferred)
 {
     SWITCH_METAL_DIAGNOSTIC(stats.backingBytes -= mem->span.bytes);
-    SWITCH_METAL_DIAGNOSTIC(glassMemEvent("memoryless plain memory freed", mem->span.bytes));
     freePlainSpan(*mem, deferred);
     plainMems_.erase(std::find_if(plainMems_.begin(), plainMems_.end(), [&](const std::unique_ptr<PlainMem> &p) {
         return p.get() == mem;
@@ -170,13 +170,18 @@ void Device::plainFree(Backing &b, DeferredFrees &deferred)
 
 Texture *Device::lastBacking(const Texture &m, uint32_t tag, bool blockLinear, bool compression, bool copied)
 {
-    const uint64_t epoch = backingEpoch_.load(std::memory_order_seq_cst);
+    const uint64_t epoch = backingEpoch_.load(std::memory_order_acquire);
     for (const BackingAsk &ask : asks_) {
         if (ask.epoch != epoch || !ask.same(m, tag, blockLinear, compression, copied, kindProbes()))
             continue;
         Backing *b = ask.backing;
-        b->lastCommit.store(commitCount_, std::memory_order_relaxed);
-        b->lastClosed.store(closedCount_, std::memory_order_seq_cst);
+        const uint64_t closed = closedCount_.load(std::memory_order_relaxed);
+        // Once this command buffer has published lastClosed == closed, trimBackings sees backingStale == false until
+        // closedCount_ advances; re-checking backingEpoch_ catches replacement by larger memory.
+        if (b->lastClosed.load(std::memory_order_relaxed) == closed)
+            return backingEpoch_.load(std::memory_order_acquire) == epoch ? &b->texture : nullptr;
+        b->lastCommit.store(commitCount_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        b->lastClosed.store(closed, std::memory_order_seq_cst);
         // a trim moves the epoch before it reads the stamps: one that began since reads ours or is seen here
         return backingEpoch_.load(std::memory_order_seq_cst) == epoch ? &b->texture : nullptr;
     }
@@ -195,8 +200,8 @@ Texture *Device::backing(std::unique_lock<gm20b::Mutex> &l, DeferredFrees &defer
     Backing *plain = nullptr;
     blockLinear |= m.samples > 1;
     const auto asked = [&](Backing *b) {
-        b->lastCommit.store(commitCount_, std::memory_order_relaxed);
-        b->lastClosed.store(closedCount_, std::memory_order_relaxed);
+        b->lastCommit.store(commitCount_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        b->lastClosed.store(closedCount_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         if (tag < lastBackings_.size())
             lastBackings_[tag] = b;
         ask.backing = b;
@@ -240,6 +245,68 @@ Texture *Device::backing(std::unique_lock<gm20b::Mutex> &l, DeferredFrees &defer
     return asked(view);
 }
 
+Texture *Device::copyScratch(std::unique_lock<gm20b::Mutex> &l, DeferredFrees &deferred, uint64_t bytes, uint32_t tag)
+{
+    if (!bytes)
+        return nullptr;
+    const uint64_t want = sizeClassBytes(bytes, kBlAlign);
+    PlainMem *mem = largestPlain(tag, kPlainPool, false);
+    if (!mem || mem->span.bytes < bytes) {
+        auto made = std::make_unique<PlainMem>();
+        made->tag = tag;
+        made->memory = kPlainPool;
+        made->layered = false;
+        made->align = kBlAlign;
+        if (!poolAlloc(l, want, made->span))
+            return nullptr;
+        PlainMem *existing = largestPlain(tag, kPlainPool, false);
+        if (existing && existing->span.bytes >= bytes) {
+            freePlainSpan(*made, deferred);
+            mem = existing;
+        } else {
+            SWITCH_METAL_DIAGNOSTIC(stats.backingBytes += made->span.bytes);
+            plainMems_.push_back(std::move(made));
+            mem = plainMems_.back().get();
+            for (Backing *b : backings_)
+                if (b->plain && b->plain != mem && b->plain->holds(tag, kPlainPool, false))
+                    b->retired = true;
+            backingsChanged();
+            compRearm_ = true;
+            compStart();
+        }
+    }
+    for (Backing *b : backings_) {
+        if (!b->retired && b->tag == tag && b->plain == mem) {
+            b->lastCommit.store(commitCount_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            b->lastClosed.store(closedCount_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            return &b->texture;
+        }
+    }
+    auto *b = new Backing;
+    b->texture.va = mem->span.va;
+    b->texture.storage = {mem->span.va, mem->span.bytes, false};
+    b->texture.cpu = mem->span.cpu;
+    b->tag = tag;
+    b->plain = mem;
+    b->usedNs = compClock();
+    b->lastCommit.store(commitCount_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    b->lastClosed.store(closedCount_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    mem->views++;
+    SWITCH_METAL_DIAGNOSTIC(stats.backings++);
+    backings_.push_back(b);
+    return &b->texture;
+}
+
+#if SWITCH_METAL_DIAGNOSTICS
+void Device::reclaimIdleNow()
+{
+    std::lock_guard<gm20b::Mutex> l(lock_);
+    reclaimAhead_ = kCompIdleNs + 1;
+    compRearm_ = true;
+    compStart();
+}
+#endif
+
 // Backings no pass used for 600 command buffers (~10 s of frames) and whose last use completed go back to the pool; a retired
 // one (a compressed backing, or one on larger memory of its tag, replaced it) as soon as its last use completed, as no pass
 // takes it again; one on compressed or shared plain memory after 10 s unused too, also while the process commits nothing
@@ -248,7 +315,10 @@ void Device::trimBackings(DeferredFrees &deferred)
 {
     // the counts before the backings' stamps: a commit stores its stamps before it moves them
     const uint64_t committed = commits(), closedNow = closedCount_.load(std::memory_order_acquire);
-    const uint64_t now = compClock();
+    uint64_t now = compClock();
+#if SWITCH_METAL_DIAGNOSTICS
+    now += std::exchange(reclaimAhead_, 0);
+#endif
     const auto stale = [&](const Backing *b) {
         return backingStale(committed, b->lastCommit.load(std::memory_order_seq_cst), closedNow,
                             b->lastClosed.load(std::memory_order_seq_cst), now,

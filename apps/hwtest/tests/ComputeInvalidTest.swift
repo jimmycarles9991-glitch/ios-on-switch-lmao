@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Compute work Metal's validation would stop, on the driver. A dispatch with no compute state set fails its command

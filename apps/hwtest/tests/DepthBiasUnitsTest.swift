@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// The units of a constant depth bias (setDepthBias:slopeScale:clamp:) on the driver: a flat quad at z drawn with bias b

@@ -9,8 +9,26 @@
 # (switch_charging_source_test).
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
+load("//ipsw:ipsw.bzl", "ipsw_volumes_header")
 
 lint_files()
+
+# Each kind's header as the kernel's IPSW_KIND_FLAGS force it in, so the driver and the tests see every macro it gives.
+[ipsw_volumes_header(
+    name = "kind_" + kind,
+    out = kind + "/switch_ipsw_volumes.h",
+    kind = kind,
+) for kind in ("21H461", "24B119")]
+
+KIND_21H461 = [
+    "-include",
+    "$(execpath :kind_21H461)",
+]
+
+KIND_24B119 = [
+    "-include",
+    "$(execpath :kind_24B119)",
+]
 
 host_shims(
     name = "kernel",
@@ -25,6 +43,7 @@ host_shims(
         "IOKit/pwr_mgt/IOPM.h",
         "IOKit/pwr_mgt/IOPMPowerSource.h",
         "IOKit/pwr_mgt/RootDomain.h",
+        "kern/clock.h",
         "libkern/c++/OSBoolean.h",
         "libkern/c++/OSDictionary.h",
         "libkern/c++/OSNumber.h",
@@ -40,6 +59,7 @@ host_library(
     hdrs = [
         "//drivers/SwitchBattery:SwitchBattery.h",
         "//drivers/SwitchBattery:SwitchBatteryPack.h",
+        "//drivers/SwitchBattery:SwitchBatteryStore.h",
         "//drivers/SwitchBattery:SwitchChargePolicy.h",
         "//drivers/SwitchPower:SwitchPower.h",
         "//drivers/SwitchPower:SwitchSensorModels.h",
@@ -63,25 +83,28 @@ host_library(
     srcs = [
         "//drivers/SwitchBattery:SwitchBattery.cpp",
         "//drivers/SwitchBattery:SwitchBatteryPack.cpp",
+        "//drivers/SwitchBattery:SwitchBatteryStore.cpp",
     ],
-    copts = ["-Wno-unused-parameter"],
+    additional_compiler_inputs = [":kind_21H461"],
+    copts = KIND_21H461 + ["-Wno-unused-parameter"],
+    defines = ["SWITCH_STATS_POWER=1"],
     deps = [
         ":headers",
         ":kernel",
     ],
 )
 
-# The same driver as a 24B119 kernel builds it (the kind header's SWITCH_IPSW_KIND_24B119): with the battery pack.
+# The same driver as a 24B119 kernel builds it: with the battery pack.
 host_library(
     name = "switch_battery_24b119",
     srcs = [
         "//drivers/SwitchBattery:SwitchBattery.cpp",
         "//drivers/SwitchBattery:SwitchBatteryPack.cpp",
+        "//drivers/SwitchBattery:SwitchBatteryStore.cpp",
     ],
-    copts = [
-        "-DSWITCH_IPSW_KIND_24B119=1",
-        "-Wno-unused-parameter",
-    ],
+    additional_compiler_inputs = [":kind_24B119"],
+    copts = KIND_24B119 + ["-Wno-unused-parameter"],
+    defines = ["SWITCH_STATS_POWER=1"],
     deps = [
         ":headers",
         ":kernel",
@@ -118,7 +141,9 @@ host_library(
 host_test(
     name = "switch_charging_test",
     srcs = ["switch_charging_test.cpp"],
-    copts = ["-Wno-unused-parameter"],
+    additional_compiler_inputs = [":kind_21H461"],
+    copts = KIND_21H461 + ["-Wno-unused-parameter"],
+    defines = ["SWITCH_STATS_POWER=1"],
     deps = [
         ":headers",
         ":kernel",
@@ -131,10 +156,9 @@ host_test(
 host_test(
     name = "switch_charging_24b119_test",
     srcs = ["switch_charging_test.cpp"],
-    copts = [
-        "-DSWITCH_IPSW_KIND_24B119=1",
-        "-Wno-unused-parameter",
-    ],
+    additional_compiler_inputs = [":kind_24B119"],
+    copts = KIND_24B119 + ["-Wno-unused-parameter"],
+    defines = ["SWITCH_STATS_POWER=1"],
     deps = [
         ":headers",
         ":kernel",

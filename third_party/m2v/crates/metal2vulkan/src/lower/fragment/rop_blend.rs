@@ -22,8 +22,9 @@
 //! - a format without alpha reads a destination alpha of one;
 //! - `f32` denormals are flushed to zero, as the shader's arithmetic flushes them;
 //! - the store converts as the device's color write does: a normalized channel clamped to `[0, 1]`
-//!   (a NaN to 0) and rounded to the nearest code, a `half` rounded to nearest even, an sRGB
-//!   channel by Metal's encode.
+//!   (a NaN to 0) and rounded to the nearest code, a `half` rounded to nearest even, an unsigned
+//!   packed float (`RG11B10Float`) as the storage write converts it (the surface unit's format
+//!   conversion, no shader packing), an sRGB channel by Metal's encode.
 
 use crate::error::{Error, Feature, Unsupported};
 use crate::lower::arith::legal::{FloatFmt, Form, Held};
@@ -47,7 +48,8 @@ pub enum Assumption {
     /// A normalized source clamped to `[0, 1]` (NaN to 0), and the store rounding to the nearest
     /// code.
     UnormRounding = 4,
-    /// A `half` store rounding to nearest even.
+    /// A `half` store rounding to nearest even, and an unsigned packed float store rounding as the
+    /// storage write's does.
     HalfRounding = 8,
     /// An sRGB channel decoded and encoded by Metal's tables.
     SrgbTables = 16,
@@ -64,6 +66,8 @@ pub(crate) enum Channels {
     Unorm { steps: [u32; 4], srgb: bool },
     /// Float: nothing clamped, of a `half` (`half`) or an `f32` format.
     Float { half: bool },
+    /// Unsigned packed float (`B10G11R11_UFLOAT_PACK32`): nothing clamped, no alpha.
+    PackedFloat,
 }
 
 /// The device's blend of one attachment, computed in the shader.
@@ -117,7 +121,7 @@ fn unorm_steps(format: vk::Format, bits: Option<u32>) -> Option<[u32; 4]> {
 
 impl RopBlend {
     /// The blend `eq` of an attachment held directly in `format`: `Err` for a format the model
-    /// does not hold (a signed normalized, integer, packed float or narrow packed one).
+    /// does not hold (a signed normalized, integer, shared-exponent or narrow packed one).
     pub(crate) fn of(eq: &BlendEquation, format: vk::Format) -> Result<RopBlend, Error> {
         let refused = || Error::from(Unsupported::not_implemented(Feature::FramebufferFetch));
         for f in factors(eq) {
@@ -145,6 +149,9 @@ impl RopBlend {
                 Some(32) => Channels::Float { half: false },
                 _ => return Err(refused()),
             },
+            Some(vk::NumericFormat::Ufloat) if format == vk::Format::B10G11R11_UFLOAT_PACK32 => {
+                Channels::PackedFloat
+            }
             _ => return Err(refused()),
         };
         let alpha = block.color_components.contains(vk::ColorComponentFlags::A);
@@ -192,7 +199,7 @@ impl RopBlend {
         out | match self.channels {
             Channels::Unorm { srgb: true, .. } => A::UnormRounding as u8 | A::SrgbTables as u8,
             Channels::Unorm { .. } => A::UnormRounding as u8,
-            Channels::Float { half: true } => A::HalfRounding as u8,
+            Channels::Float { half: true } | Channels::PackedFloat => A::HalfRounding as u8,
             Channels::Float { half: false } => 0,
         }
     }
@@ -430,7 +437,7 @@ pub(crate) fn blend(
             };
             (s, s1, c, d)
         }
-        Channels::Float { .. } => (s, s1, c, d),
+        Channels::Float { .. } | Channels::PackedFloat => (s, s1, c, d),
     };
     let d = match b.alpha {
         true => d,

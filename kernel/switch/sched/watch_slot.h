@@ -31,7 +31,7 @@ struct watch_slot {
 extern struct switch_slots switch_watch_table;
 extern struct watch_slot switch_watch_slots[SWITCH_SLOTS];
 extern struct switch_watch_launch switch_watch_launch;
-extern uint32_t switch_watch_claimed, switch_watch_refused;
+extern uint32_t switch_watch_claimed, switch_watch_freed, switch_watch_refused;
 
 void switch_watch_write(thread_call_param_t p0, thread_call_param_t p1);
 

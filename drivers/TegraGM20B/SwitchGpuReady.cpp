@@ -41,7 +41,7 @@ void unlink(State *owner, switch_gpu_ready_watch *watch)
 		at = &(*at)->next;
 	*at = watch->next;
 	watch->finished = true;
-	__atomic_sub_fetch(&owner->count, 1u, __ATOMIC_RELEASE);
+	__atomic_store_n(&owner->count, owner->count - 1u, __ATOMIC_RELEASE);
 }
 
 void complete(switch_gpu_ready_watch *watch, int result)
@@ -149,7 +149,7 @@ int switch_gpu_ready_observe(switch_gpu_ready_query query, switch_gpu_ready_call
 		while (*at)
 			at = &(*at)->next;
 		*at = watch;
-		__atomic_add_fetch(&owner->count, 1u, __ATOMIC_RELEASE);
+		__atomic_store_n(&owner->count, owner->count + 1u, __ATOMIC_RELEASE);
 		*out = watch;
 	}
 	IOLockUnlock(owner->lock);

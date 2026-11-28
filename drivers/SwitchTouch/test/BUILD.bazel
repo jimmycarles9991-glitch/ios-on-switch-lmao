@@ -21,6 +21,7 @@ host_shims(
         "IOKit/IOTimerEventSource.h",
         "IOKit/IOWorkLoop.h",
         "kern/clock.h",
+        "kern/sched_prim.h",
         "libkern/OSAtomic.h",
         "os/log.h",
         "pexpert/pexpert.h",
@@ -34,15 +35,17 @@ host_library(
     hdrs = [
         "//drivers/ArmGIC:SwitchInterrupts.h",
         "//drivers/NativeMobileDisplay:SwitchPortrait.h",
+        "//drivers/SwitchJoyCon:SwitchJoyConTouch.h",
         "//drivers/SwitchPower:SwitchPower.h",
         "//drivers/SwitchTouch:SwitchHID.h",
+        "//drivers/SwitchTouch:SwitchHIDTouchEvent.h",
         "//drivers/SwitchTouch:SwitchTouch.h",
         "//drivers/SwitchTouch:SwitchTouchFilter.h",
         "//drivers/SwitchTouch:SwitchTouchTrace.h",
-        "//kits/SwitchMath:SwitchMath.h",
         "//drivers/TegraAPBDMA:TegraAPBDMA.h",
         "//drivers/TegraGPIO:TegraGPIO.h",
         "//drivers/TegraI2C:TegraI2C.h",
+        "//kits/SwitchMath:SwitchMath.h",
     ],
 )
 
@@ -59,10 +62,17 @@ host_library(
     ],
 )
 
+# SwitchHID.h has per-build report lengths: 21H461's here (the touch and button reports are every build's).
 host_library(
     name = "switch_touch",
     srcs = ["//drivers/SwitchTouch:SwitchTouch.cpp"],
     copts = ["-Wno-unused-parameter"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_IPSW_KIND_21H461=1",
+        "SWITCH_STATS_IO=1",
+        "SWITCH_STATS_FRAME=1",
+    ],
     deps = [
         ":headers",
         ":kernel",
@@ -76,6 +86,7 @@ host_test(
         "tegra_i2c_host_model.h",
     ],
     copts = ["-Wno-unused-parameter"],
+    defines = ["SWITCH_IPSW_KIND_21H461=1"],
     deps = [
         ":headers",
         ":kernel",
@@ -89,7 +100,9 @@ host_test(
     srcs = ["switch_touch_source_test.cpp"],
     data = [
         "//drivers/SwitchTouch:SwitchHIDDevice.cpp",
+        "//drivers/SwitchTouch:SwitchHIDTouchEvent.cpp",
         "//drivers/SwitchTouch:SwitchTouch.cpp",
+        "//kits/SwitchABI:interface/IOHIDDevice.json",
         "//kits/SwitchABI:kinds/21H461/IOHIDDevice.json",
         "//kits/SwitchABI:kinds/24B119/IOHIDDevice.json",
     ],
@@ -121,5 +134,69 @@ host_test(
     deps = [
         ":headers",
         ":kernel",
+    ],
+)
+
+host_test(
+    name = "switch_hid_touch_event_test",
+    srcs = ["switch_hid_touch_event_test.cpp"],
+    defines = ["SWITCH_IPSW_KIND_21H461=1"],
+    deps = [
+        ":headers",
+        ":kernel",
+    ],
+)
+
+host_shims(
+    name = "fastpath_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "IOKit/IOReturn.h",
+        "IOKit/IOService.h",
+        "libkern/c++/OSBoolean.h",
+        "libkern/c++/OSDictionary.h",
+        "libkern/c++/OSNumber.h",
+        "libkern/c++/OSString.h",
+    ],
+    stubs = "switch_hid_fastpath_stubs.h",
+)
+
+host_library(
+    name = "fastpath_headers",
+    hdrs = [
+        "//drivers/NativeMobileDisplay:SwitchPortrait.h",
+        "//drivers/SwitchTouch:SwitchHID.h",
+        "//drivers/SwitchTouch:SwitchHIDFastPath.h",
+    ],
+)
+
+host_test(
+    name = "switch_hid_fastpath_test",
+    srcs = ["switch_hid_fastpath_test.cpp"],
+    additional_compiler_inputs = ["//drivers/SwitchTouch:SwitchHIDFastPath.cpp"],
+    copts = [
+        "-DDEVELOPMENT=1",
+        "-DSWITCH_IPSW_KIND_21H461=1",
+        "-Wno-unused-parameter",
+    ],
+    deps = [
+        ":fastpath_headers",
+        ":fastpath_kernel",
+    ],
+)
+
+host_test(
+    name = "switch_hid_fastpath_24b119_test",
+    srcs = ["switch_hid_fastpath_test.cpp"],
+    additional_compiler_inputs = ["//drivers/SwitchTouch:SwitchHIDFastPath.cpp"],
+    copts = [
+        "-DDEVELOPMENT=1",
+        "-DSWITCH_IPSW_KIND_24B119=1",
+        "-Wno-unused-parameter",
+    ],
+    deps = [
+        ":fastpath_headers",
+        ":fastpath_kernel",
     ],
 )

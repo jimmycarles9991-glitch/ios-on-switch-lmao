@@ -2,22 +2,18 @@
 // HEVC tile sessions on NVENC: HEIC grids. ImageIO hands an image to CMPhoto, which opens a VTTileCompressionSession
 // ('hvc1', 512x512 tiles unless the image is smaller) and encodes the picture a tile at a time; HEIF keeps each tile
 // as an item of its own in a grid, and a grid's tiles are all one size. So every tile here is one NVENC IDR picture of
-// the session's tile size: the tile's region of the source copied into the input buffer, edge-replicated where the
-// source ends, and answered with VTEncoderSessionEmitEncodedTile before EncodeTile returns. The source is CMPhoto's
-// whole picture with the tile's origin, or its own copy of the tile at (0, 0) (VTTileCompressionPluginClass_encode,
-// 24B119 0x1a6bb353c).
+// the session's tile size. When TegraNVENC completion notifications are active, up to AVE_TILE_SLOTS tiles pipeline
+// asynchronously and emit in submission order on the completion queue before ave_complete_tiles returns.
 //
 // The contract is that of Apple's AVE HEVC encoder (ave.videoencoder, 24B119): AVE_Session_HEVC_StartTileSession
 // 0x2c4617800 states the size it codes tiles at (never under its smallest picture) with the source pixel buffer
 // attributes (VTTileEncoderSessionSetTileAttributes 0x2c4617e34), then the same attributes for the canvas and the tile
 // requirements: origins on even samples both ways (0x2c46180a0..0x2c4618100), and source padding, which AVE states
-// on its newer devices (0x2c4618110). Without it CMPhoto copies every tile that runs past the picture into a padded
-// buffer of its own first (__needsPixelBufferCopy 0x1a6bb59fc: EncoderSupportsSourcePadding, read from +0x40 of its
-// state, 0x1a6bb58a4); with it the tile comes as the region the picture covers. VIC reads that region straight from
-// CMPhoto's picture (AVEInput.c); the coded tile past it is what the buffer held, which the grid crops away.
-// One hvcC serves every tile.
+// on its newer devices (0x2c4618110). One hvcC serves every tile.
 #include <CoreVideo/CoreVideo.h>
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
 #include <mach/mach_time.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include "AVEEncoder.h"
@@ -94,8 +90,13 @@ OSStatus ave_prepare_to_encode_tiles(VTVideoEncoderRef ref, Boolean unused)
 
 OSStatus ave_complete_tiles(VTVideoEncoderRef ref)
 {
-    (void)ref;
-    return noErr;  // every tile is out before EncodeTile returns
+    Encoder *e = CMBaseObjectGetDerivedStorage(ref);
+    pthread_mutex_lock(&e->lock);
+    AVEEmitter *emitter = e->emitter;
+    pthread_mutex_unlock(&e->lock);
+    if (emitter)
+        ave_emitter_flush_tiles(emitter);
+    return noErr;
 }
 
 static bool isNV12(OSType format)
@@ -135,47 +136,6 @@ static uint8_t tileQP(const Encoder *e)
     return (uint8_t)rc_qp(&rc, true);
 }
 
-// One IDR picture on NVENC from the tile's region of `source`; its length-prefixed NAL units land in e->avcc. 0, or why
-// not.
-static OSStatus codeTile(Encoder *e, CVPixelBufferRef source, const AVERegion *r, size_t *size, uint64_t *put)
-{
-    TegraNVENCSubmit *submit = malloc(sizeof(*submit));
-    if (!submit)
-        return kVTAllocationFailedErr;
-    const HEVCEncPicture idr = {.idr = true, .poc = 0, .qp = tileQP(e)};
-    hevcnvenc_fill_submit(&e->hevc, e->config.input_layout, e->info.chroma_mode, &e->layout, &idr, &e->handles, submit);
-    if (!ave_input_put(e, source, r, submit)) {
-        free(submit);
-        return kVTVideoEncoderMalfunctionErr;
-    }
-    *put = mach_absolute_time();
-    // A job that ends without writing its record must not leave the previous tile's record to be read as its own.
-    memset(e->auxVA, 0, sizeof(nvenc_pic_stat_s));
-    submit->clean[submit->clean_count++] = (TegraNVENCRange){e->handles.aux, 0, sizeof(nvenc_pic_stat_s), 0};
-    TegraNVENCWait wait = {.timeout_us = 1000000, .invalidate_count = 1};
-    wait.invalidate[0] = (TegraNVENCRange){e->handles.aux, 0, sizeof(nvenc_pic_stat_s), 0};
-    const int submitted = ave_input_submit(e, submit, &wait.fence);
-    free(submit);
-    if (submitted || nvenc_wait(e->client, &wait))
-        return kVTVideoEncoderMalfunctionErr;
-    const nvenc_pic_stat_s *stat = (const nvenc_pic_stat_s *)e->auxVA;
-    const uint32_t produced = (stat->total_bit_count + 7) / 8;
-    // error_status is 2 in every record NVENC 5.0's H.265 app writes; its errors are ucode_error_status (AVEEncoder.c).
-    if (stat->ucode_error_status || !produced || produced > e->layout.bitstream_bytes) {
-        static int logged;
-        if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED))
-            os_log_error(gLog, "AVE: NVENC tile picture failed: error_status %u ucode %#x, %u bits", stat->error_status,
-                         stat->ucode_error_status, stat->total_bit_count);
-        return kVTVideoEncoderMalfunctionErr;
-    }
-    TegraNVENCWait bits = {.fence = wait.fence, .timeout_us = 1000000, .invalidate_count = 1};
-    bits.invalidate[0] = (TegraNVENCRange){e->handles.bitstream, 0, produced, 0};
-    if (nvenc_wait(e->client, &bits))
-        return kVTVideoEncoderMalfunctionErr;
-    *size = h264enc_annexb_to_avcc(e->bitstreamVA, produced, e->avcc, e->avccCap);
-    return *size ? noErr : kVTVideoEncoderMalfunctionErr;
-}
-
 static OSStatus createSample(const Encoder *e, size_t size, CMSampleBufferRef *out)
 {
     CMBlockBufferRef block = NULL;
@@ -190,23 +150,135 @@ static OSStatus createSample(const Encoder *e, size_t size, CMSampleBufferRef *o
     return status;
 }
 
-static OSStatus encodeTile(Encoder *e, CVPixelBufferRef source, const AVERegion *r, CMSampleBufferRef *out)
+// Fallback single-slot tile path when completion notifications are unavailable. Called OFF e->lock with e->encoding set.
+static OSStatus encodeTileSync(Encoder *e, CVPixelBufferRef source, const AVERegion *r, uint8_t qp,
+                               CMSampleBufferRef *out)
 {
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     const uint64_t began = mach_absolute_time();
+#endif
+    TegraNVENCSubmit *submit = nvenc_submit_buffer(e->client);
+    if (!submit)
+        return kVTAllocationFailedErr;
+    const HEVCEncPicture idr = {.idr = true, .poc = 0, .qp = qp};
+    hevcnvenc_fill_submit(&e->hevc, e->config.input_layout, e->info.chroma_mode, &e->layout, &idr, &e->handles, submit);
+    bool inputRefused = false;
+    const bool putOk = ave_input_put_buffer(e, source, r, e->handles.input, e->inputVA, submit, &inputRefused);
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     uint64_t copied = began;
+#endif
+    int submitted = -1;
+    uint32_t fence = 0, route = TEGRA_NVENC_INPUT_CPU;
+    AVEJobStatus job = {0};
+    bool waitedOk = false;
+    if (putOk) {
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+        copied = mach_absolute_time();
+#endif
+        memset(e->auxVA, 0, sizeof(nvenc_pic_stat_s));
+        submit->clean[submit->clean_count++] = (TegraNVENCRange){e->handles.aux, 0, sizeof(nvenc_pic_stat_s), 0};
+        submitted = ave_input_submit_raw(e->client, submit, &fence, &route);
+        if (!submitted)
+            waitedOk =
+                ave_wait_job(e, fence, e->handles.aux, e->auxVA, e->handles.bitstream, e->layout.bitstream_bytes, &job);
+    }
+    const uint32_t produced = (job.total_bit_count + 7) / 8;
+    OSStatus status = kVTVideoEncoderMalfunctionErr;
     size_t size = 0;
-    const OSStatus status = codeTile(e, source, r, &size, &copied);
+    if (waitedOk) {
+        if (job.ucode_error_status || !produced || produced > e->layout.bitstream_bytes) {
+            static int logged;
+            if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED))
+                os_log_error(gLog, "AVE: NVENC tile picture failed: error_status %u ucode %#x, %u bits",
+                             job.error_status, job.ucode_error_status, job.total_bit_count);
+        } else {
+            size = h264enc_annexb_to_avcc(e->bitstreamVA, produced, e->avcc, e->avccCap);
+            if (size)
+                status = createSample(e, size, out);
+        }
+    }
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    const uint64_t finished = mach_absolute_time();
+#endif
+    pthread_mutex_lock(&e->lock);
+    if (inputRefused)
+        e->inputRefused++;
+    if (putOk)
+        ave_input_record_route(e, submit, submitted, route);
     if (status) {
         e->errors++;
-        return status;
+    } else {
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+        e->copyTicks += copied - began;
+        e->encodeTicks += finished - copied;
+#endif
+        e->frames++;
+        e->keyFrames++;
+        e->tiles++;
+        e->bytes += size;
     }
-    e->copyTicks += copied - began;
-    e->encodeTicks += mach_absolute_time() - copied;
-    e->frames++;
-    e->keyFrames++;
-    e->tiles++;
-    e->bytes += size;
-    return createSample(e, size, out);
+    pthread_mutex_unlock(&e->lock);
+    return status;
+}
+
+static OSStatus submitTileAsync(Encoder *e, AVEEmitter *emitter, VTEncoderTile tile, CVPixelBufferRef source,
+                                const AVERegion *r, uint8_t qp, VTEncodeInfoFlags *info)
+{
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    const uint64_t began = mach_absolute_time();
+#else
+    const uint64_t began = 0;
+#endif
+    const int slotIndex = ave_emitter_acquire_tile_slot(emitter);
+    if (slotIndex < 0)
+        return noErr;
+    TegraNVENCSubmit *submit = nvenc_tile_submit_buffer(e->client, (uint32_t)slotIndex);
+    if (!submit) {
+        ave_emitter_release_tile_slot(emitter, slotIndex);
+        ave_tile_record_stats(e, kVTAllocationFailedErr, 0, 0, 0);
+        ave_emitter_push_tile(emitter, tile, NULL, -1, 0, 0, 0, kVTAllocationFailedErr);
+        return noErr;
+    }
+    const AVETileSlot *slot = &e->tileSlots[slotIndex];
+    H264EncHandles handles = e->handles;
+    handles.input = slot->inputHandle;
+    handles.bitstream = slot->bitstreamHandle;
+    handles.aux = slot->auxHandle;
+    const HEVCEncPicture idr = {.idr = true, .poc = 0, .qp = qp};
+    hevcnvenc_fill_submit(&e->hevc, e->config.input_layout, e->info.chroma_mode, &e->layout, &idr, &handles, submit);
+    bool inputRefused = false;
+    const bool putOk = ave_input_put_buffer(e, source, r, slot->inputHandle, slot->inputVA, submit, &inputRefused);
+    uint64_t copied = began;
+    int submitted = -1;
+    uint32_t fence = 0, route = TEGRA_NVENC_INPUT_CPU;
+    if (putOk) {
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+        copied = mach_absolute_time();
+#endif
+        memset(slot->auxVA, 0, sizeof(nvenc_pic_stat_s));
+        submit->clean[submit->clean_count++] = (TegraNVENCRange){slot->auxHandle, 0, sizeof(nvenc_pic_stat_s), 0};
+        CVPixelBufferRetain(source);
+        submitted = ave_input_submit_raw(e->client, submit, &fence, &route);
+        if (submitted)
+            CVPixelBufferRelease(source);
+    }
+    pthread_mutex_lock(&e->lock);
+    if (inputRefused)
+        e->inputRefused++;
+    if (putOk)
+        ave_input_record_route(e, submit, submitted, route);
+    if (!putOk || submitted)
+        e->errors++;
+    pthread_mutex_unlock(&e->lock);
+    if (!putOk || submitted) {
+        ave_emitter_release_tile_slot(emitter, slotIndex);
+        ave_emitter_push_tile(emitter, tile, NULL, -1, 0, 0, 0, kVTVideoEncoderMalfunctionErr);
+        return noErr;
+    }
+    if (info)
+        *info = kVTEncodeInfo_Asynchronous;
+    ave_emitter_push_tile(emitter, tile, source, slotIndex, fence, began, copied, noErr);
+    return noErr;
 }
 
 OSStatus ave_encode_tile(VTVideoEncoderRef ref, VTEncoderTile tile, CVImageBufferRef source, VTInt32Point origin,
@@ -219,22 +291,50 @@ OSStatus ave_encode_tile(VTVideoEncoderRef ref, VTEncoderTile tile, CVImageBuffe
     pthread_mutex_lock(&e->lock);
     AVERegion region;
     OSStatus status = e->failed ? kVTVideoEncoderMalfunctionErr : tileRegion(e, source, origin, size, &region);
-    if (!status && !e->configured && (status = ave_configure(e, source))) {
-        e->failed = true;
-        os_log_error(gLog, "AVE: tile session %dx%d in %{public}s could not start on NVENC (%d)", e->size.width,
-                     e->size.height, getprogname(), (int)status);
+    if (!status && !e->configured) {
+        ave_begin_encode(e);
+        if (!e->failed && !e->configured && (status = ave_configure(e, source))) {
+            e->failed = true;
+            os_log_error(gLog, "AVE: tile session %dx%d in %{public}s could not start on NVENC (%d)", e->size.width,
+                         e->size.height, getprogname(), (int)status);
+        } else if (e->failed) {
+            status = kVTVideoEncoderMalfunctionErr;
+        }
+        ave_end_encode(e);
     }
-    CMSampleBufferRef sample = NULL;
-    if (!status)
-        status = encodeTile(e, source, &region, &sample);
+    AVEEmitter *emitter = e->emitter;
+    const uint32_t tileSlots = e->tileSlotCount;
+    const uint8_t qp = tileQP(e);
     VTTileEncoderSession session = e->tileSession;
+    if (emitter && tileSlots > 0) {
+        if (status)
+            e->errors++;
+        pthread_mutex_unlock(&e->lock);
+        if (status) {
+            ave_emitter_push_tile(emitter, tile, NULL, -1, 0, 0, 0, status);
+            return noErr;
+        }
+        return submitTileAsync(e, emitter, tile, source, &region, qp, info);
+    }
+    if (status) {
+        pthread_mutex_unlock(&e->lock);
+        if (session)
+            VTEncoderSessionEmitEncodedTile(session, tile, status, kVTEncodeInfo_FrameDropped, NULL);
+        return noErr;
+    }
+    ave_begin_encode(e);
     pthread_mutex_unlock(&e->lock);
-    // Outside the lock: VideoToolbox runs the client's output inside this call (0x18f20a7e4), and it may call back in.
+    CMSampleBufferRef sample = NULL;
+    status = encodeTileSync(e, source, &region, qp, &sample);
+    pthread_mutex_lock(&e->lock);
+    session = e->tileSession;
+    ave_end_encode(e);
+    pthread_mutex_unlock(&e->lock);
     if (session)
         VTEncoderSessionEmitEncodedTile(session, tile, status, status ? kVTEncodeInfo_FrameDropped : 0, sample);
     if (sample)
         CFRelease(sample);
-    return noErr;  // the tile was answered (with its status) above
+    return noErr;
 }
 
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG

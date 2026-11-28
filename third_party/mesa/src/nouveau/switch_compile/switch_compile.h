@@ -79,6 +79,11 @@ struct switch_nvk_stage_info {
     * (nvk_switch_xr_planes.h)
     */
    uint64_t xr_plane_bindings[SWITCH_XR_PLANE_WORDS];
+   /* The colour attachments that store a half denormal as they store zero
+    * (bit j: attachment j): NAK widens a half output to them on the half ALU
+    * (nak/opt_unorm_outputs.rs)
+    */
+   uint32_t unorm_targets;
 };
 
 struct switch_nvk_stage {

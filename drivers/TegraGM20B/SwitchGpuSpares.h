@@ -10,13 +10,25 @@ enum switch_gpu_spare_miss : uint8_t {
 	SWITCH_GPU_SPARE_ZEROING,     // its spares were still on the copy engine
 	SWITCH_GPU_SPARE_DRAINED,     // warm, and every ready spare taken
 	SWITCH_GPU_SPARE_PRESSURE,    // memory pressure: no spares kept
-	SWITCH_GPU_SPARE_INELIGIBLE,  // contiguous or write-combined: never served by a spare
+	SWITCH_GPU_SPARE_INELIGIBLE,  // contiguous: never served by a spare
+	SWITCH_GPU_SPARE_RESERVED,    // its one ready spare is kept for the compositor
 	SWITCH_GPU_SPARE_MISSES
+};
+
+// A spare's kind. Cached spares are cacheable pages (the cached BOs), write-combined ones a system coherent BO's
+// buffer, whose own VM object holds the attribute (BoAlloc's PBENTRY note), so the two never serve each other. One
+// budget under the cap holds both kinds, each class's depth learned from its own misses, with no share fixed between
+// them; only the warm table's floors are fixed, all of them cached.
+enum switch_gpu_spare_kind : uint32_t {
+	SWITCH_GPU_SPARE_CACHED,
+	SWITCH_GPU_SPARE_WC,
+	SWITCH_GPU_SPARE_KINDS
 };
 
 constexpr uint64_t SWITCH_GPU_SPARE_UNIT_BYTES = 128ULL << 10;
 constexpr uint64_t SWITCH_GPU_SPARE_UNITS_FROM = 512ULL << 10;
-constexpr uint64_t SWITCH_GPU_SPARE_CAP_BYTES = 96ULL << 20;
+// 96 MiB plus the compositor's reserved 24 MiB spare (owner, 25 Nov: up to 24 MiB more wired for it)
+constexpr uint64_t SWITCH_GPU_SPARE_CAP_BYTES = 120ULL << 20;
 
 // The size classes cached BoAllocs and their spares are made in: 4 KiB to 64 KiB by doubling, then four to an octave, to
 // 256 MiB (kMaxBoBytes)
@@ -46,12 +58,18 @@ constexpr bool switch_gpu_spare_serves(uint32_t asked, uint32_t spare)
 struct switch_gpu_spare_warm {
 	uint64_t bytes;
 	uint16_t ready;
+	bool reserved;  // other clients leave the class's last ready spare to the compositor
 };
 
-// The classes kept ready from boot, before a miss teaches any a depth. 24 MiB: an app's launch target, Photos' 1792x1472
-// RGBA16F attachment in backboardd (22 Nov: 17.3 ms of zero-fill and clean on its render thread, no spare of the class)
-constexpr switch_gpu_spare_warm SWITCH_GPU_SPARE_WARM[] = {
-	{64ULL << 10, 8}, {4ULL << 20, 2}, {8ULL << 20, 1}, {16ULL << 20, 2}, {24ULL << 20, 1}};
+// The classes kept ready from boot, before a miss teaches any a depth; a miss never takes one below its count here.
+// 24 MiB: Photos' 1792x1472 RGBA16F attachment in backboardd (22 Nov: 17.3 ms of zero-fill and clean on its render
+// thread, no spare of the class), which an app's launch target of the same size took first: two, the last one
+// reserved for the compositor.
+constexpr switch_gpu_spare_warm SWITCH_GPU_SPARE_WARM[] = {{64ULL << 10, 8, false},
+							   {4ULL << 20, 2, false},
+							   {8ULL << 20, 1, false},
+							   {16ULL << 20, 2, false},
+							   {24ULL << 20, 2, true}};
 
 constexpr uint64_t switch_gpu_spare_warm_bytes()
 {
@@ -79,6 +97,15 @@ inline switch_gpu_spare_units switch_gpu_spare_layout(uint64_t bytes)
 	return {uint32_t(bytes / SWITCH_GPU_SPARE_UNIT_BYTES), bytes % SWITCH_GPU_SPARE_UNIT_BYTES};
 }
 
+// Whether a class's spares, ready or on their way (zeroing on the copy engine, or on the dirty list waiting for it), fall
+// short of its depth. The refill makes one only then: a spare it made is counted from the moment it exists, so a copy
+// engine too busy to take the dirty list bounds the refill at the depth, not at memory pressure.
+constexpr bool switch_gpu_spare_short(uint16_t ready, uint16_t zeroing, uint16_t dirty,
+				      uint16_t target)
+{
+	return uint32_t(ready) + zeroing + dirty < target;
+}
+
 inline switch_gpu_spare_miss switch_gpu_spare_miss_of(uint16_t target, uint16_t zeroing,
 						      bool pressure)
 {
@@ -103,11 +130,13 @@ constexpr bool switch_gpu_spares_give_back(int pressure_level, uint64_t availabl
 constexpr uint16_t SWITCH_GPU_SPARE_DEPTH_MAX = 8;
 
 // The deepest a class of `bytes` is kept: its spares together a quarter of the pool's cap at most, one at least, so a
-// class of 16-32 MiB (a render server's dedicated chunk) learns a depth without crowding out the smaller ones
-inline uint16_t switch_gpu_spare_depth_cap(uint64_t bytes, uint64_t cap)
+// class of 16-32 MiB (a render server's dedicated chunk) learns a depth without crowding out the smaller ones; never
+// below its warm count (`floor`), which the cap's static_assert already makes room for
+inline uint16_t switch_gpu_spare_depth_cap(uint64_t bytes, uint64_t cap, uint16_t floor = 1)
 {
 	const uint64_t most = bytes ? cap / 4 / bytes : SWITCH_GPU_SPARE_DEPTH_MAX;
-	return most < 1                            ? 1
+	const uint16_t least = floor ? floor : 1;
+	return most < least                        ? least
 	       : most < SWITCH_GPU_SPARE_DEPTH_MAX ? uint16_t(most)
 						   : SWITCH_GPU_SPARE_DEPTH_MAX;
 }

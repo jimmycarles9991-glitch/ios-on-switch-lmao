@@ -1590,3 +1590,102 @@ fn the_switched_operand_is_the_constant_offset() {
         assert!(seen > 0);
     }
 }
+
+/// Each region loads two distinct per-trip images in the same block with interleaved fetches
+/// (each at its own constant offset), exercising multi-load per-block removal and split-index
+/// adjustment across multiple removed loads in one block.
+#[test]
+fn regions_fetching_two_images_per_trip_in_one_block_roll_with_exact_split_indices() {
+    let k = 4u32;
+    let mut b = ModuleBuilder::new();
+    let input = buffer(&mut b, 0);
+    let out = buffer(&mut b, 1);
+    let ty = sampled_image_ty(&mut b);
+    let images: Vec<GlobalId> = (0..2 * k)
+        .map(|i| {
+            b.resource(
+                slot(ResourceKind::Texture, i),
+                StorageClass::UniformConstant,
+                ty,
+            )
+            .expect("image")
+        })
+        .collect();
+    let u32_ = u32_ty(&mut b);
+    let uvec2 = b.ty(Type::Vector { elem: u32_, len: 2 }).expect("uvec2");
+    let void = b.ty(Type::Void).expect("void");
+    let mut f = b.function(void).expect("function");
+    let body = |f: &mut FunctionBuilder<'_>| -> BResult<()> {
+        let seed = load_at(f, input, 0)?;
+        let gate = load_at(f, input, 1)?;
+        let obase = load_at(f, input, 2)?;
+        let mut last = seed;
+        for j in 0..k {
+            let zero = c32(f, 0);
+            let at = f.composite_construct(uvec2, &[seed, zero])?;
+            let p0 = f.module().global_value(images[(2 * j) as usize])?;
+            let t0 = f.load(p0, MemAccess::default())?;
+            let ops0 = ImageOperands {
+                const_offset: Some(ivec2(f, fetch_offset(j), 0)?),
+                ..ImageOperands::default()
+            };
+            let tex0 = f.fetch(t0, at, &ops0)?;
+            let a = f.composite_extract(tex0, &[0])?;
+            let p1 = f.module().global_value(images[(2 * j + 1) as usize])?;
+            let t1 = f.load(p1, MemAccess::default())?;
+            let ops1 = ImageOperands {
+                const_offset: Some(ivec2(f, fetch_offset(j) + 1, 0)?),
+                ..ImageOperands::default()
+            };
+            let tex1 = f.fetch(t1, at, &ops1)?;
+            let b_val = f.composite_extract(tex1, &[0])?;
+            let sum = f.binary(BinOp::IAdd, a, b_val)?;
+            let open = f.binary(BinOp::INotEqual, gate, zero)?;
+            f.if_(
+                &mut (),
+                open,
+                Box::new(move |f, _| {
+                    let w = c32(f, j + 1);
+                    let r = f.binary(BinOp::IMul, sum, w)?;
+                    let dst = c32(f, 2 + j);
+                    let idx = f.binary(BinOp::IAdd, obase, dst)?;
+                    store_at(f, out, idx, r)?;
+                    Ok(ArmEnd::FallThrough(Vec::new()))
+                }),
+                None,
+            )?;
+            last = sum;
+        }
+        let zero = c32(f, 0);
+        store_at(f, out, zero, last)?;
+        f.ret(None)
+    };
+    body(&mut f).expect("body");
+    let main = f.finish().expect("finish");
+    b.entry(
+        ExecModel::GLCompute,
+        main,
+        vec![ExecMode::LocalSize { x: 1, y: 1, z: 1 }],
+    )
+    .expect("entry");
+    let orig = b.finalize().expect("finalize");
+    let mut m = orig.clone();
+    assert_eq!(roll(&mut m, 0, 1, &mut meter()).expect("roll"), 1);
+    let arms = switch_arms(&m, |i| matches!(i, Inst::ImageFetch { .. }));
+    assert_eq!(arms.len(), 2, "two switches for the two fetches in the block");
+    for (cases, fetches) in &arms {
+        assert_eq!(*cases, k as usize - 1);
+        assert_eq!(fetches.len(), k as usize);
+    }
+    assert_valid(m.clone(), &moltenvk());
+    for (seed, gate) in [(2u32, 1u32), (5, 1), (8, 0), (11, 1)] {
+        let res = || resources(&[seed, gate, 0], k as usize + 3);
+        let (a, _) =
+            run_with_images(&orig, &Config::default(), res(), fetch_images(2 * k))
+                .expect("unrolled");
+        let (b, _) =
+            run_with_images(&m, &Config::default(), res(), fetch_images(2 * k))
+                .expect("rolled");
+        assert_eq!(words(&b.buffers[1]), words(&a.buffers[1]), "seed {seed}");
+    }
+}

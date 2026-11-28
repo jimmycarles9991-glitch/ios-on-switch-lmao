@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import HWTestCore
+import HWTestKit
 
 /// The overlay's directories are union mounts over the sealed system's (/usr/libexec, /usr/sbin, /Applications):
 /// readdir must list both layers' entries, as getattrlistbulk does, or CFBundle cannot find the sealed layer's

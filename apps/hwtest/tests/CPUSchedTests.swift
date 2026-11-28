@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import HWTestCore
+import HWTestKit
 import SwitchSchedProbe
 
 /// Threads for cpu.sched (cpu/switch_sched_probe.c): each runs its C loop on a thread of its own at a given class.

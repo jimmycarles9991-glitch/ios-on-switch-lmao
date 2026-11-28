@@ -3,6 +3,8 @@ import CoreImage
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import ImageIO
 import Metal
 

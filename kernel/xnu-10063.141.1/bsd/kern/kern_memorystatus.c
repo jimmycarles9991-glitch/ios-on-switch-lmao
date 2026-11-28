@@ -29,6 +29,7 @@
 
 #include <kern/sched_prim.h>
 #include <kern/kalloc.h>
+#include <switch/memstat_warn.h>
 #include <kern/assert.h>
 #include <kern/debug.h>
 #include <kern/locks.h>
@@ -215,6 +216,7 @@ MACRO_END
 
 #define CACHE_INACTIVE_LIMITS_LOCKED(p, is_fatal)                       \
 MACRO_BEGIN                                                             \
+(p)->p_memstat_inactive_warned = 0; /* Switch: switch/memstat_warn.h */ \
 (p)->p_memstat_memlimit = (p)->p_memstat_memlimit_inactive;             \
    if ((p)->p_memstat_state & P_MEMSTAT_MEMLIMIT_INACTIVE_FATAL) {      \
 	   (p)->p_memstat_state |= P_MEMSTAT_FATAL_MEMLIMIT;            \
@@ -3089,6 +3091,7 @@ memorystatus_dirty_set(proc_t p, boolean_t self, uint32_t pcontrol)
 	boolean_t reschedule = FALSE;
 	boolean_t was_dirty = FALSE;
 	boolean_t now_dirty = FALSE;
+	boolean_t warn_inactive = FALSE, warn_fatal = FALSE;
 
 	memorystatus_log_debug("memorystatus_dirty_set(): %d %d 0x%x 0x%x\n", self, proc_getpid(p), pcontrol, p->p_memstat_dirty);
 	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_DIRTY_SET), proc_getpid(p), self, pcontrol);
@@ -3217,6 +3220,27 @@ memorystatus_dirty_set(proc_t p, boolean_t self, uint32_t pcontrol)
 
 				if (p->p_memstat_dirty & P_DIRTY_ALLOW_IDLE_EXIT) {
 					ledger_update_needed = FALSE;
+					/*
+					 * Switch: a clean process that ages before its idle exit keeps its active
+					 * limit until its demotion, on another thread, applies the inactive one, and
+					 * its footprint meets that limit only at its next allocation, which a fatal
+					 * limit answers with a kill. Warn it now (PROC_LIMIT_WARN, as the ledger does
+					 * at 80% of the limit it runs on), while it can still give back what it holds:
+					 * the GPU's driver releases its idle memory on this warning. Only while it ages,
+					 * as 12377's memstat_proc_is_active_locked: one without deferral is in the idle
+					 * band already, where the ledger warns on the inactive limit. Once per growth, not
+					 * per transaction (switch/memstat_warn.h).
+					 */
+					if (was_dirty && p == current_proc() && p->p_memstat_memlimit_inactive > 0 &&
+					    (p->p_memstat_dirty & P_DIRTY_AGING_IN_PROGRESS)) {
+						const uint64_t limit = (uint64_t)p->p_memstat_memlimit_inactive << 20;
+						const uint64_t footprint = get_task_phys_footprint(proc_task(p));
+						if (switch_memstat_inactive_warn(footprint, limit,
+						    &p->p_memstat_inactive_warned)) {
+							warn_inactive = TRUE;
+							warn_fatal = (p->p_memstat_state & P_MEMSTAT_MEMLIMIT_INACTIVE_FATAL) != 0;
+						}
+					}
 				} else {
 					CACHE_INACTIVE_LIMITS_LOCKED(p, is_fatal);
 					use_active = FALSE;
@@ -3279,6 +3303,10 @@ memorystatus_dirty_set(proc_t p, boolean_t self, uint32_t pcontrol)
 
 exit:
 	proc_list_unlock();
+	if (warn_inactive && !kill) {
+		/* a warning even past the limit: the critical note panics for a fatal one, and the demotion is still to come */
+		(void)memorystatus_warn_process(p, FALSE, warn_fatal, FALSE);
+	}
 
 	return ret;
 }

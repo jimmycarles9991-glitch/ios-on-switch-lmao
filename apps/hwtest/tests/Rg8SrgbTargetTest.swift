@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// RG8Unorm_sRGB as a colour target, against RGBA8Unorm_sRGB, which the driver renders natively: 64x64 targets of

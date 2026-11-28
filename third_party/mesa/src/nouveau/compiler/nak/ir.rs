@@ -7119,11 +7119,17 @@ impl_display_for_op!(OpCCtl);
 #[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpMemBar {
     pub scope: MemScope,
+    /// SM50-SM6x MEMBAR.VC, which takes no scope
+    pub vc: bool,
 }
 
 impl DisplayOp for OpMemBar {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "membar.sc{}", self.scope)
+        if self.vc {
+            write!(f, "membar.vc")
+        } else {
+            write!(f, "membar.sc{}", self.scope)
+        }
     }
 }
 impl_display_for_op!(OpMemBar);
@@ -8337,7 +8343,10 @@ impl Op {
             | Op::FSwzAdd(_) => true,
 
             // Multi-function unit is variable latency
-            Op::Rro(_) | Op::MuFu(_) => false,
+            Op::MuFu(_) => false,
+            // ios-on-switch-lmao: RRO is not, on GM20B: NVIDIA's code sets
+            // no barrier on it and reads it 2 cycles later
+            Op::Rro(_) => true,
 
             // Double-precision float ALU
             Op::DAdd(_)
@@ -8352,7 +8361,9 @@ impl Op {
             // Integer ALU
             Op::BRev(_) | Op::Flo(_) | Op::PopC(_) => false,
             Op::IMad(_) | Op::IMul(_) => sm >= 70,
-            Op::Xmad(_) => false,
+            // ios-on-switch-lmao: GM20B's XMAD is fixed-latency 6: NVIDIA's
+            // code sets no barrier on it and its readers wait at least 6
+            Op::Xmad(_) => true,
             Op::BMsk(_)
             | Op::IAbs(_)
             | Op::IAdd2(_)
@@ -8493,6 +8504,7 @@ impl Op {
                 | Op::PCnt(_)
                 | Op::Bra(_)
                 | Op::Nanosleep(_)
+                | Op::SrcBar(_)
                 | Op::Exit(_)
         )
     }
@@ -9036,6 +9048,7 @@ impl Instr {
             | Op::OutFinal(_)
             | Op::Isbewr(_)
             | Op::Nanosleep(_)
+            | Op::SrcBar(_)
             | Op::Annotate(_) => false,
             Op::BMov(op) => !op.clear,
             _ => true,

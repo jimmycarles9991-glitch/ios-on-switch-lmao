@@ -15,6 +15,31 @@ constexpr uint32_t routeToAbi(rt5639::Route route)
 }
 }  // namespace
 
+void SwitchAudio::CodecSeqHost::armTimer(uint32_t ms) const
+{
+    audio->codecTimer->setTimeoutMS(ms);
+}
+
+void SwitchAudio::CodecSeqHost::cancelTimer() const
+{
+    audio->codecTimer->cancelTimeout();
+}
+
+void SwitchAudio::CodecSeqHost::onBiasReady() const
+{
+    audio->codecBiasReady();
+}
+
+void SwitchAudio::CodecSeqHost::onRouteReady(rt5639::Route route) const
+{
+    audio->codecRouteReady(route);
+}
+
+void SwitchAudio::CodecSeqHost::onOff() const
+{
+    audio->codecNowOff();
+}
+
 rt5639::Route SwitchAudio::wantedRoute() const
 {
     const uint32_t req = __atomic_load_n(&requestedRoute, __ATOMIC_RELAXED);
@@ -25,28 +50,95 @@ rt5639::Route SwitchAudio::wantedRoute() const
     return jackIn && !speakerOnly ? rt5639::kRouteHeadphones : rt5639::kRouteSpeaker;
 }
 
+void SwitchAudio::codecBiasReady()
+{
+    if (codecOff || codecQuiescing)
+        return;
+    if (headsetDetectPending && jackIn && tegraCapture) {
+        headsetDetectPending = false;
+        headsetDetectActive = true;
+        codec.detectHeadsetBegin();
+        headsetTimer->setTimeoutMS(switch_audio::kCodecHeadsetDetectMS);
+    }
+    if (wantCaptureCodec && codecOn && !captureCodecOn)
+        captureCodec(true);
+}
+
+void SwitchAudio::codecRouteReady(rt5639::Route route)
+{
+    const uint32_t nextAbi = routeToAbi(route);
+    const uint32_t prevAbi = __atomic_exchange_n(&control->active_route, nextAbi, __ATOMIC_ACQ_REL);
+    if (route != lastAppliedOpeRoute || prevAbi != nextAbi) {
+        lastAppliedOpeRoute = route;
+        reconfigureOpeForRoute();
+    }
+    applyMvcLive(true);
+    if (wantUnmuted && control->state && !pauseRampPending && !unmuteTimerArmed && !codecQuiescing && !codecOff)
+        codec.mute(false);
+    codecGate->commandWakeup(&codecSeq, false);
+}
+
+void SwitchAudio::codecNowOff()
+{
+    codecOn = false;
+    captureCodecOn = false;
+    wantCaptureCodec = false;
+    lastAppliedOpeRoute = rt5639::kRouteNone;
+    const bool release = wantReleaseApe;
+    wantReleaseApe = false;
+    if (release && !control->state && !codecOff && !codecQuiescing)
+        releaseApe();
+    codecGate->commandWakeup(&codecSeq, false);
+}
+
+void SwitchAudio::codecWaitGateMS(void *ctx, uint32_t ms)
+{
+    auto *self = static_cast<SwitchAudio *>(ctx);
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(ms, kMillisecondScale, &deadline);
+    while (mach_absolute_time() < deadline) {
+        if (self->codecOff)
+            return;
+        self->codecGate->commandSleep(&self->codecWaitToken, deadline, THREAD_UNINT);
+    }
+}
+
 void SwitchAudio::codecPowerUp()
 {
     idleTimer->cancelTimeout();
+    unmuteTimer->cancelTimeout();
+    unmuteTimerArmed = false;
+    if (pauseRampPending) {
+        pauseTimer->cancelTimeout();
+        pauseRampPending = false;
+        codec.mute(true);
+    }
+    wantReleaseApe = false;
+    wantUnmuted = false;
     if (!acquireApe())
         return;
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
     statsResume();
 #endif
     tegra_gpio_check_delivery(kCodecIrq, "SwitchAudio");  // before trusting the jack state
-    if (!codecOn) {
-        codec.biasStandby();
-        codec.powerDac();
-        codecOn = true;
-    }
     const rt5639::Route want = wantedRoute();
     const bool routeChanged = codec.route() != want;
-    if (routeChanged) {
-        codec.routeDown();
-        codec.routeUp(want);
+    codecOn = true;
+    codecSeq.setTarget(true, true, want);
+    codecSeq.reconcile();
+    if (!codecSeq.isRouteSettled()) {
+        uint64_t deadline = 0;
+        clock_interval_to_deadline(2000, kMillisecondScale, &deadline);
+        while (!codecOff && !codecQuiescing && !hardwareLost && SwitchRT5639::answering() && codecSeq.wantsCodecOn() &&
+               !codecSeq.isRouteSettled()) {
+            if (codecGate->commandSleep(&codecSeq, deadline, THREAD_UNINT) == THREAD_TIMED_OUT)
+                break;
+        }
     }
-    __atomic_store_n(&control->active_route, routeToAbi(want), __ATOMIC_RELEASE);
-    if (routeChanged) {
+    const rt5639::Route active = codecSeq.targetRoute() != rt5639::kRouteNone ? codecSeq.targetRoute() : want;
+    __atomic_store_n(&control->active_route, routeToAbi(active), __ATOMIC_RELEASE);
+    if (routeChanged && lastAppliedOpeRoute != codec.route()) {
+        lastAppliedOpeRoute = codec.route();
         reconfigureOpeForRoute();
         applyMvcLive(true);
     }
@@ -54,7 +146,8 @@ void SwitchAudio::codecPowerUp()
 
 void SwitchAudio::captureCodec(bool on)
 {
-    if (on && tegraCapture && codecOn && !captureCodecOn) {
+    wantCaptureCodec = on && tegraCapture;
+    if (on && tegraCapture && codecOn && codec.biasIsOn() && !captureCodecOn) {
         codec.micBias(headset);
         codec.powerCapture();
         captureCodecOn = true;
@@ -65,16 +158,47 @@ void SwitchAudio::captureCodec(bool on)
     }
 }
 
-void SwitchAudio::codecPowerDown()
+void SwitchAudio::codecPowerDown(bool wait, bool releaseWhenOff)
 {
-    if (codecOn)
-        codec.routeDown();
-    if (codec.biasIsOn()) {
-        codec.biasOff();
-        IOSleep(5);
+    unmuteTimer->cancelTimeout();
+    unmuteTimerArmed = false;
+    wantUnmuted = false;
+    bootPrecharge = false;
+    wantCaptureCodec = false;
+    captureCodec(false);
+    if (pauseRampPending) {
+        pauseTimer->cancelTimeout();
+        pauseRampPending = false;
+        codec.mute(true);
+        if (gate)
+            gate->runAction(&SwitchAudio::finishStopGated);
     }
-    codecOn = false;
-    captureCodecOn = false;
+    if (wait) {
+        headsetTimer->cancelTimeout();
+        headsetDetectPending = false;
+        headsetDetectActive = false;
+        codec.micBias(false);
+    }
+    wantReleaseApe = releaseWhenOff;
+    const bool keepBias = headsetDetectPending || headsetDetectActive;
+    codecSeq.setTarget(keepBias, false, rt5639::kRouteNone);
+    codecSeq.reconcile();
+    if (codecSeq.isOff()) {
+        codecNowOff();
+        return;
+    }
+    if (!wait)
+        return;
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(500, kMillisecondScale, &deadline);
+    while (!codecSeq.isOff() && !codecSeq.wantsBias() && SwitchRT5639::answering()) {
+        if (codecGate->commandSleep(&codecSeq, deadline, THREAD_UNINT) == THREAD_TIMED_OUT)
+            break;
+    }
+    if (!SwitchRT5639::answering() && !codecSeq.isOff()) {
+        codecSeq.reset();
+        codecNowOff();
+    }
 }
 
 IOReturn SwitchAudio::codecGated(OSObject *owner, void *step, void *, void *, void *)
@@ -82,24 +206,56 @@ IOReturn SwitchAudio::codecGated(OSObject *owner, void *step, void *, void *, vo
     auto *self = static_cast<SwitchAudio *>(owner);
     if (self->codecOff)
         return kIOReturnSuccess;
-    switch (reinterpret_cast<uintptr_t>(step)) {
+    const auto action = static_cast<CodecStep>(reinterpret_cast<uintptr_t>(step));
+    if (self->codecQuiescing && action != kCodecMute && action != kCodecIdleNow)
+        return kIOReturnSuccess;
+    switch (action) {
     case kCodecPowerUp:
         self->codecPowerUp();
         break;
     case kCodecUnmute:
-        if (self->control->state)
-            self->codec.mute(false);
+        if (self->control->state && !self->pauseRampPending) {
+            self->wantUnmuted = true;
+            if (self->codec.isMuted()) {
+                if (!self->unmuteTimerArmed) {
+                    self->unmuteTimerArmed = true;
+                    self->unmuteTimer->setTimeoutMS(switch_audio::kCodecUnmuteSettleMS);
+                }
+            }
+        }
         break;
     case kCodecMute:
+        self->unmuteTimer->cancelTimeout();
+        self->unmuteTimerArmed = false;
+        self->wantUnmuted = false;
+        if (self->pauseRampPending) {
+            self->pauseTimer->cancelTimeout();
+            self->pauseRampPending = false;
+        }
         self->codec.mute(true);
         break;
     case kCodecPause:
-        self->codec.mute(true);
-        self->idleTimer->setTimeoutMS(kIdleMS);
+        self->unmuteTimer->cancelTimeout();
+        self->unmuteTimerArmed = false;
+        self->wantUnmuted = false;
+        if (self->codecOn && self->rampMvcMute()) {
+            self->pauseRampPending = true;
+            self->pauseTimer->setTimeoutMS(switch_audio::kCodecPauseRampMS);
+        } else {
+            self->pauseTimer->cancelTimeout();
+            self->pauseRampPending = false;
+            self->codec.mute(true);
+            if (self->codecOn || self->codec.biasIsOn() || !self->codecSeq.isOff())
+                self->idleTimer->setTimeoutMS(kIdleMS);
+        }
         break;
     case kCodecIdleNow:
         self->idleTimer->cancelTimeout();
-        codecIdle(self, self->idleTimer);
+        if (!self->control->state) {
+            if (self->codec.biasIsOn())
+                tegra_gpio_check_delivery(kCodecIrq, "SwitchAudio");
+            self->codecPowerDown(true, true);
+        }
         break;
     case kCodecHeadphoneLevel: {
         const uint32_t att = __atomic_load_n(&self->headphoneAttenuationMdB, __ATOMIC_RELAXED);
@@ -124,18 +280,18 @@ IOReturn SwitchAudio::codecGated(OSObject *owner, void *step, void *, void *, vo
         break;
     case kCodecRouteSync: {
         const rt5639::Route want = self->wantedRoute();
-        const bool switchCodec = self->codecOn && self->codec.route() != want;
-        if (switchCodec) {
-            self->codec.routeDown();
-            self->codec.routeUp(want);
-        }
         const uint32_t nextAbi = routeToAbi(want);
         const uint32_t prevAbi = __atomic_exchange_n(&self->control->active_route, nextAbi, __ATOMIC_ACQ_REL);
-        if (switchCodec || prevAbi != nextAbi)
+        if (self->codecOn && (!self->codecSeq.isRouteSettled() || self->codecSeq.activeRoute() != want)) {
+            if (self->control->state && !self->pauseRampPending)
+                self->wantUnmuted = true;
+            self->codecSeq.setTarget(true, true, want);
+            self->codecSeq.reconcile();
+            break;
+        }
+        if (prevAbi != nextAbi)
             self->reconfigureOpeForRoute();
         self->applyMvcLive(false);
-        if (switchCodec && self->control->state)
-            self->codec.mute(false);
         break;
     }
     default:
@@ -149,15 +305,72 @@ void SwitchAudio::codecStep(CodecStep step)
     codecGate->runAction(&SwitchAudio::codecGated, reinterpret_cast<void *>(step));
 }
 
+void SwitchAudio::codecSeqTimerFired(OSObject *owner, IOTimerEventSource *)
+{
+    auto *self = static_cast<SwitchAudio *>(owner);
+    if (self->codecOff)
+        return;
+    self->codecSeq.timerFired();
+}
+
+void SwitchAudio::headsetDetectSettled(OSObject *owner, IOTimerEventSource *)
+{
+    auto *self = static_cast<SwitchAudio *>(owner);
+    if (!self->headsetDetectActive || self->codecOff || self->codecQuiescing)
+        return;
+    self->headsetDetectActive = false;
+    self->headset = self->tegraCapture && self->jackIn && self->codec.detectHeadsetFinish();
+    if (!self->captureCodecOn || !self->headset)
+        self->codec.micBias(false);
+    self->publishJack();
+}
+
+void SwitchAudio::codecUnmuteFired(OSObject *owner, IOTimerEventSource *)
+{
+    auto *self = static_cast<SwitchAudio *>(owner);
+    self->unmuteTimerArmed = false;
+    if (!self->control->state || !self->wantUnmuted || self->pauseRampPending || self->codecOff || self->codecQuiescing)
+        return;
+    if (self->codecSeq.isRouteSettled())
+        self->codec.mute(false);
+}
+
+void SwitchAudio::codecPauseFired(OSObject *owner, IOTimerEventSource *)
+{
+    auto *self = static_cast<SwitchAudio *>(owner);
+    if (!self->pauseRampPending || self->codecOff || self->codecQuiescing)
+        return;
+    self->pauseRampPending = false;
+    if (self->control->state)
+        return;
+    self->codec.mute(true);
+    self->idleTimer->setTimeoutMS(kIdleMS);
+    if (self->gate)
+        self->gate->runAction(&SwitchAudio::finishStopGated);
+}
+
+void SwitchAudio::codecNoMicFired(OSObject *owner, IOInterruptEventSource *, int)
+{
+    auto *self = static_cast<SwitchAudio *>(owner);
+    if (self->codecOff || self->codecQuiescing)
+        return;
+    self->captureCodec(false);
+    self->codec.micBias(false);
+    self->publishJack();
+}
+
 void SwitchAudio::codecIdle(OSObject *owner, IOTimerEventSource *)
 {
     auto *self = static_cast<SwitchAudio *>(owner);
-    if (self->control->state || self->codecOff)
+    if (self->control->state || self->codecOff || self->codecQuiescing)
         return;
+    if (self->headsetDetectPending || self->headsetDetectActive) {
+        self->idleTimer->setTimeoutMS(kIdleMS);
+        return;
+    }
     if (self->codec.biasIsOn())
         tegra_gpio_check_delivery(kCodecIrq, "SwitchAudio");
-    self->codecPowerDown();
-    self->releaseApe();
+    self->codecPowerDown(false, true);
 }
 
 // PBB4 and PV6, both edges: wait for jack contacts to settle before probing the codec.
@@ -168,12 +381,23 @@ void SwitchAudio::jackEdge(OSObject *owner, IOInterruptEventSource *, int)
 
 void SwitchAudio::noteJack()
 {
-    if (tegraCapture && jackIn && !codec.biasIsOn()) {
-        codec.biasStandby();
+    headsetTimer->cancelTimeout();
+    headsetDetectPending = false;
+    headsetDetectActive = false;
+    if (tegraCapture && jackIn) {
+        if (codec.biasIsOn()) {
+            headsetDetectActive = true;
+            codec.detectHeadsetBegin();
+            headsetTimer->setTimeoutMS(switch_audio::kCodecHeadsetDetectMS);
+        } else {
+            headsetDetectPending = true;
+            codecSeq.setWantBias(true);
+        }
         if (!control->state)
             idleTimer->setTimeoutMS(kIdleMS);
+        return;
     }
-    headset = tegraCapture && codec.detectHeadset(jackIn);
+    headset = false;
     if (!captureCodecOn || !headset)
         codec.micBias(false);
     publishJack();
@@ -193,7 +417,7 @@ void SwitchAudio::publishJack()
 void SwitchAudio::jackSettled(OSObject *owner, IOTimerEventSource *)
 {
     auto *self = static_cast<SwitchAudio *>(owner);
-    if (self->codecOff || self->hardwareLost || !self->acquireApe())
+    if (self->codecOff || self->codecQuiescing || self->hardwareLost || !self->acquireApe())
         return;
     if (!self->control->state)
         self->idleTimer->setTimeoutMS(kIdleMS);
@@ -213,22 +437,22 @@ void SwitchAudio::jackSettled(OSObject *owner, IOTimerEventSource *)
     // boot the VREF capacitor starts from 0 V: charged by the first stream instead, its 15 ms of fast charge left
     // the reference still rising when the class-D amplifier came on, the loud click of the first sound after
     // boot. Later power-ups start from a charged capacitor.
-    if (first && !self->codec.biasIsOn())
-        self->codec.biasStandby();
+    if (first && !self->codec.biasIsOn()) {
+        self->bootPrecharge = true;
+        self->codecSeq.setWantBias(true);
+    }
     self->noteJack();
     const rt5639::Route want = self->wantedRoute();
     __atomic_store_n(&self->control->active_route, routeToAbi(want), __ATOMIC_RELEASE);
-    if (!self->codecOn || self->codec.route() == want)
-        return;
-    self->codec.routeDown();
-    self->codec.routeUp(want);
-    self->reconfigureOpeForRoute();
-    self->applyMvcLive(true);
-    if (self->control->state)
-        self->codec.mute(false);
+    if (self->codecOn) {
+        if (self->control->state && !self->pauseRampPending)
+            self->wantUnmuted = true;
+        self->codecSeq.setTarget(true, true, want);
+    }
+    self->codecSeq.reconcile();
 }
 
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
 void SwitchAudio::statsFired(OSObject *owner, IOTimerEventSource *sender)
 {
     auto *self = static_cast<SwitchAudio *>(owner);
@@ -316,15 +540,29 @@ void SwitchAudio::statsResume()
 
 void SwitchAudio::codecStart()
 {
+    codecSeq.init(&codec, CodecSeqHost{this});
     codecLoop = IOWorkLoop::workLoop();
     codecGate = codecLoop ? IOCommandGate::commandGate(this) : nullptr;
     jackTimer = codecGate ? IOTimerEventSource::timerEventSource(this, &SwitchAudio::jackSettled) : nullptr;
     idleTimer = jackTimer ? IOTimerEventSource::timerEventSource(this, &SwitchAudio::codecIdle) : nullptr;
-    if (!idleTimer || codecLoop->addEventSource(codecGate) != kIOReturnSuccess ||
+    codecTimer = idleTimer ? IOTimerEventSource::timerEventSource(this, &SwitchAudio::codecSeqTimerFired) : nullptr;
+    headsetTimer =
+        codecTimer ? IOTimerEventSource::timerEventSource(this, &SwitchAudio::headsetDetectSettled) : nullptr;
+    unmuteTimer = headsetTimer ? IOTimerEventSource::timerEventSource(this, &SwitchAudio::codecUnmuteFired) : nullptr;
+    pauseTimer = unmuteTimer ? IOTimerEventSource::timerEventSource(this, &SwitchAudio::codecPauseFired) : nullptr;
+    codecEvent =
+        pauseTimer ? IOInterruptEventSource::interruptEventSource(this, &SwitchAudio::codecNoMicFired) : nullptr;
+    if (!codecEvent || codecLoop->addEventSource(codecGate) != kIOReturnSuccess ||
         codecLoop->addEventSource(jackTimer) != kIOReturnSuccess ||
-        codecLoop->addEventSource(idleTimer) != kIOReturnSuccess) {
+        codecLoop->addEventSource(idleTimer) != kIOReturnSuccess ||
+        codecLoop->addEventSource(codecTimer) != kIOReturnSuccess ||
+        codecLoop->addEventSource(headsetTimer) != kIOReturnSuccess ||
+        codecLoop->addEventSource(unmuteTimer) != kIOReturnSuccess ||
+        codecLoop->addEventSource(pauseTimer) != kIOReturnSuccess ||
+        codecLoop->addEventSource(codecEvent) != kIOReturnSuccess) {
         panic("SwitchAudio: codec work loop setup failed");
     }
+    codecEvent->enable();
     codec.probe(true, tegraCapture);
     // PV6 sits directly on the headphone-detect net so idle jack edges wake us even with APE/PLLA/AUD_MCLK gated off.
     // NOLINTNEXTLINE(clang-analyzer-osx.cocoa.RetainCount): TegraGPIO keeps its nubs; this reference is not ours
@@ -343,7 +581,7 @@ void SwitchAudio::codecStart()
     }
     jackSource->enable();
     jackTimer->setTimeoutMS(kJackSettleMS);
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
     statsTimer = IOTimerEventSource::timerEventSource(this, &SwitchAudio::statsFired);
     if (!statsTimer || codecLoop->addEventSource(statsTimer) != kIOReturnSuccess)
         panic("SwitchAudio: stats timer setup failed");
@@ -353,15 +591,22 @@ void SwitchAudio::codecStart()
 
 void SwitchAudio::codecQuiesce()
 {
+    codecQuiescing = true;
     jackSource->disable();
     pv6Source->disable();
+    codecEvent->disable();
     jackTimer->cancelTimeout();
     idleTimer->cancelTimeout();
-#if DEVELOPMENT || DEBUG
+    headsetTimer->cancelTimeout();
+    unmuteTimer->cancelTimeout();
+    pauseTimer->cancelTimeout();
+    unmuteTimerArmed = false;
+    pauseRampPending = false;
+#if SWITCH_STATS_IO
     if (statsTimer)
         statsTimer->cancelTimeout();
 #endif
-    codecPowerDown();
+    codecPowerDown(true, false);
 }
 
 IOReturn SwitchAudio::codecSleepGated(OSObject *owner, void *entering, void *, void *, void *)
@@ -373,20 +618,28 @@ IOReturn SwitchAudio::codecSleepGated(OSObject *owner, void *entering, void *, v
         self->codecQuiesce();
         return kIOReturnSuccess;
     }
+    self->codecQuiescing = false;
     if (self->hardwareLost)
         return kIOReturnSuccess;
-    self->codec.probe(true, self->tegraCapture);
+    self->codec.probe(true, self->tegraCapture, &SwitchAudio::codecWaitGateMS, self);
+    self->codecSeq.reset();
+    self->codecOn = false;
+    self->captureCodecOn = false;
+    self->lastAppliedOpeRoute = rt5639::kRouteNone;
     self->jackKnown = false;
+    self->codecEvent->enable();
     self->jackSource->enable();
     self->pv6Source->enable();
     self->jackTimer->setTimeoutMS(kJackSettleMS);
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
     if (self->statsTimer)
         self->statsResume();
 #endif
     if (self->control->state) {  // the I2S already runs again (sleepGated)
-        self->codecPowerUp();
-        self->codec.mute(false);
+        self->codecOn = true;
+        self->wantUnmuted = true;
+        self->codecSeq.setTarget(true, true, self->wantedRoute());
+        self->codecSeq.reconcile();
     }
     return kIOReturnSuccess;
 }
@@ -399,6 +652,8 @@ IOReturn SwitchAudio::codecShutdownGated(OSObject *owner, void *, void *, void *
     self->codecQuiesce();
     self->codec.powerOff();
     self->codecOff = true;
+    self->codecGate->commandWakeup(&self->codecWaitToken, false);
+    self->codecGate->commandWakeup(&self->codecSeq, false);
     return kIOReturnSuccess;
 }
 

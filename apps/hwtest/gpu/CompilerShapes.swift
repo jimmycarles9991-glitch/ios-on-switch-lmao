@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// The fragment programs of shaders/CompilerShapes.metal drawn over an RGBA32F target, against the same code run on
@@ -62,6 +63,38 @@ public enum CompilerShapes {
         return flags.enumerated().reduce(0) { $0 | ($1.element ? 1 << UInt32($1.offset) : 0) }
     }
 
+    /// The halves whose pairs powr_specials takes: every special and class boundary, and curve exponents
+    public static let powrHalves: [UInt16] = [
+        0x0000, 0x8000, 0x0001, 0x8001, 0x03FF, 0x0400, 0x3BFF, 0x3C00, 0x3C01, 0xBC00, 0x3800, 0x4000, 0x4066,
+        0x36AB, 0x7BFF, 0xFBFF, 0x7C00, 0xFC00, 0x7E00, 0xFE00,
+    ]
+
+    public static let powrPairs: [SIMD2<UInt16>] = powrHalves.flatMap { x in powrHalves.map { SIMD2(x, $0) } }
+
+    /// Metal's `powr` of two halves at a special operand, as an M3 and an M4 answer it (metal2vulkan's
+    /// math::fast_powr_special, measured there): a NaN for a NaN operand, x below zero (-0 is not), 0 to the 0 or
+    /// inf of a zero exponent and 1 to an infinite one; otherwise, where log2(x) or y is infinite, 0 or inf by the
+    /// signs of log2(x) and y. nil where the answer is finite.
+    public static func powrSpecial(_ x: Float16, _ y: Float16) -> Float? {
+        if x.isNaN || y.isNaN || x < 0 || (y == 0 && (x == 0 || x == .infinity)) || (y.isInfinite && x == 1) {
+            return .nan
+        }
+        guard (x == 0 || x.isInfinite) || y.isInfinite else { return nil }
+        let logNegative = x == 0 || (x.isFinite && x < 1)
+        return logNegative != (y.sign == .minus) ? 0 : .infinity
+    }
+
+    /// Whether `got` is Metal's powr of the pair: its special answer exactly (a NaN any NaN), else within two half ulps
+    /// of the value correctly rounded to half
+    public static func powrRight(_ x: Float16, _ y: Float16, _ got: Float) -> Bool {
+        if let want = powrSpecial(x, y) {
+            return want.isNaN ? got.isNaN : got == want && got.sign == want.sign
+        }
+        let want = Float16(Float(pow(Double(x), Double(y)))), half = Float16(got)
+        guard Float(half) == got, !want.isNaN, half.sign == want.sign else { return false }
+        return abs(Int(half.bitPattern) - Int(want.bitPattern)) <= 2
+    }
+
     static func target(_ gpu: GPU) throws -> MTLTexture {
         try gpu.texture(.rgba32Float, width, height, usage: [.renderTarget, .shaderRead])
     }
@@ -117,5 +150,52 @@ public enum CompilerShapes {
         guard !timing.path.hasPrefix("error:") else { return (nil, timing) }
         let got = try await texels(gpu, texture)
         return (floatValues.indices.map { UInt32(got[$0].x) }, timing)
+    }
+}
+
+extension CompilerShapes {
+    /// fmax of two halves as Apple's GPUs answer it (an M1, host gpu_test SignedZeroTests): x where x > y or y is a
+    /// NaN, y otherwise, so a NaN loses and a tie of +0 and -0 gives y
+    public static func metalMax(_ x: Float16, _ y: Float16) -> Float16 { y.isNaN || x > y ? x : y }
+
+    /// fmin likewise: x where x < y or y is a NaN, y otherwise
+    public static func metalMin(_ x: Float16, _ y: Float16) -> Float16 { y.isNaN || x < y ? x : y }
+
+    /// Whether `got` is `want` as the GPU wrote it to an RGBA32F target: the same half, zeros by sign, a NaN any NaN
+    public static func sameHalf(_ got: Float, _ want: Float16) -> Bool {
+        want.isNaN ? got.isNaN : Float(want) == got && got.sign == want.sign
+    }
+
+    /// half_min_max's tests of a pair: abs(x) < y, plus two for x < 0 (a NaN compares false)
+    public static func curveTests(_ x: Float16, _ y: Float16) -> Float {
+        Float(abs(x) < y ? 1 : 0) + Float(x < 0 ? 2 : 0)
+    }
+
+    /// half_min_max's fmax, fmin, clamp and tests of each pair (nil where the command buffer failed)
+    public static func minMaxAnswers(_ gpu: GPU) async throws -> ([SIMD4<Float>]?, GPU.Timing) {
+        let texture = try target(gpu)
+        let pairs = try gpu.buffer(powrPairs)
+        var shape = SIMD2<UInt32>(UInt32(width), UInt32(powrPairs.count))
+        let timing = try await draw(gpu, "half_min_max", into: texture) { encoder in
+            encoder.setFragmentBuffer(pairs, offset: 0, index: 0)
+            encoder.setFragmentBytes(&shape, length: 8, index: 1)
+        }
+        guard !timing.path.hasPrefix("error:") else { return (nil, timing) }
+        let got = try await texels(gpu, texture)
+        return (powrPairs.indices.map { got[$0] }, timing)
+    }
+
+    /// powr_specials' answer to each pair (nil where the command buffer failed)
+    public static func powrAnswers(_ gpu: GPU) async throws -> ([Float]?, GPU.Timing) {
+        let texture = try target(gpu)
+        let pairs = try gpu.buffer(powrPairs)
+        var shape = SIMD2<UInt32>(UInt32(width), UInt32(powrPairs.count))
+        let timing = try await draw(gpu, "powr_specials", into: texture) { encoder in
+            encoder.setFragmentBuffer(pairs, offset: 0, index: 0)
+            encoder.setFragmentBytes(&shape, length: 8, index: 1)
+        }
+        guard !timing.path.hasPrefix("error:") else { return (nil, timing) }
+        let got = try await texels(gpu, texture)
+        return (powrPairs.indices.map { got[$0].x }, timing)
     }
 }

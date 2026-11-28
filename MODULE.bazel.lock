@@ -312,7 +312,7 @@
         "usagesDigest": "Rbx5C2Nt6ylZ8f6fqPlzddZmHo0OBHMMEUpSb0k+dkc=",
         "recordedInputs": [
           "REPO_MAPPING:,bazel_tools bazel_tools",
-          "FILE:@@//bootstrap/sources.json 3904739d379321ea64a630155b6aa662644a51d9bcfc0d29a657eedf463d35d2"
+          "FILE:@@//bootstrap/sources.json c93d1f1687a6190017c326287fca72ee84d6acbe3be0aeb66c583a2dd295ee7a"
         ],
         "generatedRepoSpecs": {
           "bootstrap_launchctl": {
@@ -511,6 +511,33 @@
               "sha256": "8354c3aa1ecdad8ebc47d9a76dfca6f830a2b757278068bd33b98bf1d638a9cb"
             }
           },
+          "bootstrap_openssh_client": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/openssh/openssh-client_9.7p1-1_iphoneos-arm64.deb"
+              ],
+              "sha256": "deafb689997363b3d86e0f5616c6878299fefb2ad292b6aede4227c2bb64af5d"
+            }
+          },
+          "bootstrap_openssh_server": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/openssh/openssh-server_9.7p1-1_iphoneos-arm64.deb"
+              ],
+              "sha256": "578a172e679c961d2966caaf300bd0a43cfdf0a311741712690cfdb6e16eca54"
+            }
+          },
+          "bootstrap_openssh_sftp_server": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/openssh/openssh-sftp-server_9.7p1-1_iphoneos-arm64.deb"
+              ],
+              "sha256": "d31534b270710381ddf5763f38458498c6bfe7308cbe09d1c45a1109d40dfb19"
+            }
+          },
           "bootstrap_sileo_release": {
             "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
             "attributes": {
@@ -519,13 +546,22 @@
               ],
               "sha256": "8e3c90e5a7d32f4ca207a0ac30d3cfa8a13dca86a2b4e11cb3f9e5c68d7bc97a"
             }
+          },
+          "bootstrap_top": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "urls": [
+                "https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/top/top_125_iphoneos-arm64.deb"
+              ],
+              "sha256": "597cb277df8b5700e1eebfabd951b5d4861cde6199730b5ba3e700edf65c2d55"
+            }
           }
         }
       }
     },
     "//install:release.bzl%release": {
       "general": {
-        "bzlTransitiveDigest": "U8wQVBN1n4LhGNfUymFt6hAKnVe9ye43zxaFrvBUXVI=",
+        "bzlTransitiveDigest": "yP4OMifuFVnUnJElADN5jr1GKxmt5Ug+B2COoRnXNh8=",
         "usagesDigest": "kz4Bx3yrUSQachzleMrWfwpEYNS1LXH8mdZTjqB7yg4=",
         "recordedInputs": [],
         "generatedRepoSpecs": {

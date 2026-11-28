@@ -9,7 +9,7 @@
  * high channel's kick preempts the app channel GR or the PBDMA is on (PFIFO_PREEMPT, as gf100_chan_preempt), so the host
  * leaves it at its next wait-for-idle instead of at the end of its timeslice. Nothing waits for a preempt: a context that
  * never saves trips the engine's context-switch timeout, which recovers its channel (TegraGM20BRecover.h). Apps run at
- * runningboardd's background or foreground level below the compositor's, three levels interleaved the same way.
+ * runningboardd's background, foreground, or app-high level below the compositor's, four levels interleaved the same way.
  */
 #include <core/device.h>
 #include <core/memory.h>
@@ -295,12 +295,14 @@ static u32 sched_gr_status(struct nvkm_device *device, struct nvkm_runl *runl)
 }
 
 /* The app channel GR or the PBDMA serving the runlist is on (TegraGM20BSchedPolicy.h) */
-static int sched_victim(struct nvkm_device *device, struct nvkm_runl *runl)
+static int sched_victim(struct nvkm_device *device, struct nvkm_runl *runl, u32 *eng_out)
 {
 	u32 eng = sched_gr_status(device, runl);
 	u32 pbdma = 0;
 	u32 chid = 0;
 
+	if (eng_out)
+		*eng_out = eng;
 	if (runl->runq_nr && runl->runq[0]) {
 		pbdma = nvkm_rd32(device, PBDMA_STATUS(runl->runq[0]->id)) & PBDMA_BUSY;
 		chid = PBDMA_CHID(nvkm_rd32(device, PBDMA_CHANNEL(runl->runq[0]->id)));
@@ -391,7 +393,7 @@ int tgm_sched_resident(struct nvkm_device *device)
 		nvkm_runl_foreach_engn(engn, runl)
 		{
 			if (engn->engine->subdev.type == NVKM_ENGINE_GR)
-				return sched_victim(device, runl);
+				return sched_victim(device, runl, NULL);
 		}
 	}
 	return TGM_VICTIM_NONE;
@@ -429,11 +431,12 @@ enum tgm_sched_kick tgm_sched_kicked(struct nvkm_device *device, unsigned int ch
 			queued->unread = 1;
 			return counted(TGM_KICK_CLEAR);
 		}
-		victim = sched_victim(device, runl);
-		if (victim == TGM_VICTIM_SWITCHING) {
-			const u32 eng = sched_gr_status(device, runl);
+		{
+			u32 eng = 0;
 
-			victim = tgm_kick_loading(eng, is_high(PFIFO_ENG_NEXT_ID(eng)));
+			victim = sched_victim(device, runl, &eng);
+			if (victim == TGM_VICTIM_SWITCHING)
+				victim = tgm_kick_loading(eng, is_high(PFIFO_ENG_NEXT_ID(eng)));
 		}
 		if (victim == TGM_VICTIM_SWITCHING)
 			return counted(TGM_KICK_SWITCHING);

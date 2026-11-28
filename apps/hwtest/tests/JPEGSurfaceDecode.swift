@@ -2,6 +2,7 @@ import CoreGraphics
 import Darwin
 import Foundation
 import HWTestCore
+import HWTestShared
 import ImageIO
 import IOSurface
 import UniformTypeIdentifiers
@@ -9,14 +10,14 @@ import UniformTypeIdentifiers
 /// A JPEG decoded by NVJPG straight into an IOSurface of the caller's: selector 7 of AppleJPEGDriverUserClient, the
 /// synchronous request CMPhoto sends (drivers/TegraNVJPG/TegraNVJPGRequest.h), from a surface holding the file into a
 /// BGRA destination at full size.
-enum JPEGSurfaceDecode {
+public enum JPEGSurfaceDecode {
     /// Within this of the picture a byte is right: JPEG at quality 1 and NVJPG's YCbCr to RGB stay inside it, a byte a
     /// layout mistake moves by a GOB's 16-byte run or more does not.
-    static let tolerance = 10
+    public static let tolerance = 10
 
     /// Triangle waves 64 pixels across (blue) and 128 rows down (green), red their sum: smooth enough for JPEG, steep
     /// enough that a texel moved by a GOB's run reads another value.
-    static func byte(_ x: Int, _ y: Int, _ c: Int) -> UInt8 {
+    public static func byte(_ x: Int, _ y: Int, _ c: Int) -> UInt8 {
         func wave(_ v: Int, _ period: Int) -> Int {
             let at = v % period
             return (at < period / 2 ? at : period - at) * 510 / period
@@ -29,7 +30,7 @@ enum JPEGSurfaceDecode {
         }
     }
 
-    static func file(_ size: Int) -> Data? {
+    public static func file(_ size: Int) -> Data? {
         var pixels = [UInt8](repeating: 0, count: size * size * 4)
         for y in 0 ..< size {
             for x in 0 ..< size {
@@ -54,7 +55,7 @@ enum JPEGSurfaceDecode {
     }
 
     /// The file's TEGRA_NVJPG_SUB_* code from its frame header's first component: 4:2:0 0, 4:2:2 1, 4:4:4 2
-    static func subsampling(_ file: Data) -> UInt32? {
+    public static func subsampling(_ file: Data) -> UInt32? {
         let bytes = [UInt8](file)
         var at = 2
         while at + 12 < bytes.count, bytes[at] == 0xff {
@@ -74,7 +75,14 @@ enum JPEGSurfaceDecode {
     }
 
     /// NVJPG's decode of `file` into `surface` (BGRA, the file's size), or why there is none
-    static func decode(_ file: Data, into surface: IOSurface) -> TestFailure? {
+    /// `tile`: a debug kernel's tile probe (TegraNVJPGRoute.h tegra_nvjpg_route_tile_probe): NVJPG writes the
+    /// destination's blocks told this tile_mode and block height code
+    /// `magic`: a debug kernel's probe word at +0xcac (TegraNVJPGUserClient.cpp), 0 for none
+    public static func decode(
+        _ file: Data, into surface: IOSurface, tile: (mode: UInt32, gob: UInt32)? = nil, magic: UInt32 = 0
+    )
+        -> TestFailure?
+    {
         guard let sub = subsampling(file) else { return TestFailure("no baseline frame header in the JPEG") }
         let rowBytes = 4096
         let rows = (file.count + rowBytes - 1) / rowBytes
@@ -113,7 +121,8 @@ enum JPEGSurfaceDecode {
             (0x08, IOSurfaceGetID(unsafeBitCast(surface, to: IOSurfaceRef.self))),
             (0x0c, UInt32(surface.allocationSize)), (0x14, UInt32(surface.width)), (0x18, UInt32(surface.height)),
             (0x2c, sub), (0x4c, UInt32(surface.width)), (0x50, UInt32(surface.height)),
-        ]
+        ] + (tile.map { [(0xcac, UInt32(0x5054)), (0xcb0, $0.mode), (0xcb4, $0.gob)] } ?? [])
+            + (magic != 0 ? [(0xcac, magic)] : [])
         request.withUnsafeMutableBytes { raw in
             for (offset, value) in fields {
                 raw.storeBytes(of: value.littleEndian, toByteOffset: offset, as: UInt32.self)
@@ -132,43 +141,18 @@ enum JPEGSurfaceDecode {
         return kr == KERN_SUCCESS ? nil : TestFailure("selector 7 \(String(UInt32(bitPattern: kr), radix: 16))")
     }
 
-    /// The layout NVJPG's writes match when a read is wrong: the picture written as rows (`rows`) or into blocks of 2^n
-    /// GOBs (`y<n>`), read back through the blocks GM20B decided for the surface (TegraGM20BLayoutFit.h); `-` for none
-    static func explained(_ got: [UInt8], _ surface: IOSurface) -> String {
-        let rowBytes = (surface.width * 4 + 63) & ~63
-        var decided = SurfaceCrossProcessTest.blockHeightLog2(surface.height)
-        while decided > 0, rowBytes * blockRows(surface.height, decided) > surface.allocationSize { decided -= 1 }
-        var best = ("-", Int.max)
-        for candidate in [-1, 0, 1, 2, 3, 4, 5] {
-            var memory = [UInt8](repeating: 0, count: rowBytes * blockRows(surface.height, 5))
-            for y in 0 ..< surface.height {
-                for xB in 0 ..< (surface.width * 4) {
-                    let at =
-                        candidate < 0
-                            ? y * rowBytes + xB : SurfaceCrossProcessTest.gobOffset(rowBytes, candidate, xB, y)
-                    if at < memory.count { memory[at] = byte(xB / 4, y, xB % 4) }
-                }
-            }
-            var wrong = 0
-            for y in 0 ..< surface.height {
-                for xB in 0 ..< (surface.width * 4) {
-                    let at = SurfaceCrossProcessTest.gobOffset(rowBytes, decided, xB, y)
-                    let read = at < memory.count ? Int(memory[at]) : 0
-                    if abs(read - Int(got[y * surface.width * 4 + xB])) > tolerance { wrong += 1 }
-                }
-            }
-            if wrong < best.1 { best = (candidate < 0 ? "rows" : "y\(candidate)", wrong) }
-        }
-        return best.1 == 0 ? best.0 : "-"
-    }
-
-    static func blockRows(_ height: Int, _ yLog2: Int) -> Int {
-        let block = 8 << yLog2
-        return (height + block - 1) / block * block
+    /// The arrangement NVJPG's writes match when a read is wrong, and how many bytes even that one leaves off
+    /// (JpegLayoutGuess)
+    public static func explained(_ got: [UInt8], _ surface: IOSurface) -> String {
+        JpegLayoutGuess.best(
+            got,
+            JpegLayoutGuess.Surface(width: surface.width, height: surface.height, allocation: surface.allocationSize),
+            tolerance: tolerance, picture: byte
+        )
     }
 
     /// Bytes further than `tolerance` from the picture, and the first one's offset in the rows (-1: none)
-    static func wrong(_ got: [UInt8], _ surface: IOSurface) -> (Int, Int) {
+    public static func wrong(_ got: [UInt8], _ surface: IOSurface) -> (Int, Int) {
         var wrong = 0, first = -1
         for y in 0 ..< surface.height {
             for x in 0 ..< surface.width {

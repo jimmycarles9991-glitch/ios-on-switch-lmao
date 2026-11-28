@@ -59,7 +59,7 @@ struct switch_prefetch_header {
     uint8_t data_uuid[16];
     uint32_t runs;
     uint32_t files;
-    uint64_t checksum;
+    uint64_t reserved; /* 0: a list is synced before it is renamed in, so nothing checks its runs again */
 };
 
 struct switch_prefetch_run {
@@ -109,15 +109,6 @@ static_assert(sizeof(struct switch_list_run_v2) == 16, "SWCHPF02 run");
 static_assert(sizeof(struct switch_prefetch_header) == 128, "SWCHPF03 header");
 static_assert(sizeof(struct switch_prefetch_run) == 40, "SWCHPF03 run");
 #endif
-
-static inline uint64_t switch_prefetch_fnv(const uint8_t *p, uint64_t n)
-{
-    uint64_t h = 0xcbf29ce484222325ULL;
-    for (uint64_t i = 0; i < n; ++i) {
-        h = (h ^ p[i]) * 0x100000001b3ULL;
-    }
-    return h;
-}
 
 static inline int switch_prefetch_hex_nibble(char c)
 {
@@ -205,16 +196,6 @@ static inline bool switch_prefetch_ready_add(struct switch_prefetch_ready *r, un
     }
     const uint32_t prev = __atomic_fetch_or(&r->mask, bit, __ATOMIC_ACQ_REL);
     return (prev & bit) == 0u && (prev | bit) == SWITCH_PREFETCH_READY_ALL;
-}
-
-static inline void switch_prefetch_bit_set(uint8_t *bits, uint32_t index)
-{
-    bits[index >> 3] |= (uint8_t)(1u << (index & 7u));
-}
-
-static inline bool switch_prefetch_bit_test(const uint8_t *bits, uint32_t index)
-{
-    return (bits[index >> 3] & (uint8_t)(1u << (index & 7u))) != 0u;
 }
 
 static inline bool switch_prefetch_vnode_eligible(bool is_reg, bool is_namedstream, bool is_system, bool is_swap,
@@ -389,9 +370,6 @@ static inline const char *switch_prefetch_validate_runs(const struct switch_pref
     if (byte_len != want) {
         return "torn (short list)";
     }
-    if (switch_prefetch_fnv((const uint8_t *)runs, (uint64_t)want) != header->checksum) {
-        return "torn (its runs do not match its checksum)";
-    }
     for (uint32_t i = 0; i < header->runs; ++i) {
         if (runs[i].volume >= SWITCH_PREFETCH_VOLUME_COUNT || runs[i].file_id == 0u || runs[i].file_size == 0u ||
             runs[i].pages == 0u || runs[i].pages > SWITCH_PREFETCH_MAX_RUN_LIMIT) {
@@ -421,9 +399,6 @@ static inline const char *switch_prefetch_validate_file(const uint8_t *bytes, si
     const size_t want = (size_t)header.runs * sizeof(struct switch_prefetch_run);
     if (body_len != want) {
         return "torn (short list)";
-    }
-    if (switch_prefetch_fnv(bytes + sizeof(header), (uint64_t)want) != header.checksum) {
-        return "torn (its runs do not match its checksum)";
     }
     for (uint32_t i = 0; i < header.runs; ++i) {
         struct switch_prefetch_run run;

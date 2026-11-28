@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestKit
 
 /// system.dispatch_sync with locationd's waiters as its crash reports show them: workqueue threads draining a silo's
 /// own serial queue (a workloop of its own) that dispatch_sync into another workloop's hierarchy, the cohort. Such a

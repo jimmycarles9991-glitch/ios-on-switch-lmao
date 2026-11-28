@@ -1,17 +1,13 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // The colour unit's state between its three writers, with no lock any of them shares (TegraDisplayColor.h has the
-// contract; TegraDisplayColorSequence.h decides what goes to DC A when):
+// contract; TegraDisplayColorSequence.h documents DC A's unshadowed LUT/CSC and shadowed CMU_ENABLE rules):
 //   * the setters (IOMobileFramebuffer's calls, any thread, serialized by their own lock) build each new set of tables
 //     into a spare snapshot and publish it with one store;
-//   * the filter (DC A's frame end, primary interrupt context) adopts the newest snapshot and is the only writer of the
-//     CMU's LUT1, CSC and LUT2 words and of the windows' palettes;
-//   * the action (the frame-end work-loop pass) is the only writer of CMU_ENABLE, which needs GENERAL_ACT_REQ, a
-//     request other window A writers share on the gate.
-// Each writer publishes its own state in one word the others read. Two exchanges need both sides to see each other
-// (store, then load, both sequentially consistent; ARMv8's STLR then LDAR are ordered): a setter choosing a spare
-// against the filter claiming the snapshot it reads, and the action enabling the CMU against the filter writing whole
-// tables while it is off. Each generation published takes one frame-end hold before it is published, and the action
-// releases the holds of every generation it has seen settled. C++, header only, for the driver and its host tests.
+//   * the action (the frame-end work-loop pass, interrupts enabled) is the sole writer of CMU_ENABLE, whole-table
+//     LUT1/LUT2/CSC programming (only while CMU_ENABLE is off and its bypass has latched), and the windows' palettes;
+//   * the filter (DC A's frame end, primary interrupt context) only writes the <=9 changed CSC words during vertical
+//     blanking when CMU_ENABLE is already live and LUT1/LUT2 are unchanged; steady-state frames return after two loads.
+// C++, header only, for the driver and its host tests.
 #pragma once
 #include <stdint.h>
 #include <string.h>
@@ -38,36 +34,50 @@ struct Snapshot {
 // Platform: hold() and release() a frame-end hold; deviceWritesDone() after a register read-back (a dsb in the kernel).
 template <class Platform> class ColourPublication {
 public:
-    static constexpr unsigned kSnapshots = 3, kNone = kSnapshots;
+    static constexpr unsigned kSnapshots = 4, kNone = kSnapshots;
 
-    // With the filter and the action stopped and the setters' lock held (attach, detach): the filter adopts the newest
+    // With the filter and the action stopped and the setters' lock held (attach, detach): the action adopts the newest
     // snapshot at its first frame end and writes it whole; no generation published before holds the frame end.
     void reset(uint32_t colorControlFound)
     {
         colorControl = colorControlFound;
-        released = generationOf(load(publishedWord, __ATOMIC_RELAXED));
-        filter = {};
+        const uint32_t pubGen = generationOf(load(publishedWord, __ATOMIC_RELAXED));
+        released = pubGen;
+        filterGen = 0;
+        filterSeenCmuState = 0;
+        filterTablesEpoch = 0;
+        memset(filterCsc, 0, sizeof(filterCsc));
         filterAdopted = false;
-        filterIndex = kNone;
-        filterPaletteGeneration = 0;
-        filterPaletteEpoch = 0;
-        filterPaletteDirty = filterPaletteShown = false;
+        filterPending = false;
         action = {};
-        filterStored = packFilter();
-        store(filterWord, filterStored, __ATOMIC_RELEASE);
-        store(actionWord, packAction(false), __ATOMIC_RELEASE);
-        store(reading, kNone, __ATOMIC_RELEASE);
+        actionLatchedEpoch = 0;
+        actionLiveEpoch = 0;
+        actionTablesEpoch = 0;
+        actionSettledGen = 0;
+        actionCscWrittenGen = 0;
+        actionPaletteGen = 0;
+        actionPaletteEpoch = 0;
+        actionAdopted = false;
+        actionActiveValid = false;
+        actionPaletteShown = false;
+        store(filterBusy, 0u, __ATOMIC_RELEASE);
+        store(actionCmuState, 0u, __ATOMIC_RELEASE);
+        store(filterCscDoneGen, pubGen, __ATOMIC_RELEASE);
+        store(paletteWord, 0u, __ATOMIC_RELEASE);
+        store(filterReading, kNone, __ATOMIC_RELEASE);
+        store(actionReading, kNone, __ATOMIC_RELEASE);
     }
 
     // --- setters (the caller's own lock held) ---
 
-    // The snapshot neither published nor the filter's; the setter fills it in and publishes it.
+    // The snapshot neither published nor held by the filter or action; the setter fills it in and publishes it.
     Snapshot &spare()
     {
         const uint64_t published = load(publishedWord, __ATOMIC_SEQ_CST);
-        const unsigned busy = load(reading, __ATOMIC_SEQ_CST);
+        const unsigned fBusy = load(filterReading, __ATOMIC_SEQ_CST);
+        const unsigned aBusy = load(actionReading, __ATOMIC_SEQ_CST);
         for (unsigned i = 0; i < kSnapshots; ++i) {
-            if (i != indexOf(published) && i != busy) {
+            if (i != indexOf(published) && i != fBusy && i != aBusy) {
                 spareIndex = i;
                 return snapshots[i];
             }
@@ -75,7 +85,6 @@ public:
         __builtin_trap();
     }
 
-    // The spare goes out: one hold for its generation, then one store.
     // The spare (its tables and palette filled in) goes out with one store. Attached, its generation takes a frame-end
     // hold first, which the action releases once it has seen the generation settled; detached, nothing will.
     void publish(bool paletteOn, bool paletteChanged, bool attached)
@@ -117,38 +126,51 @@ public:
 
     template <class Dc> void frameEnd(Dc &dc)
     {
-        adoptNewest();
-        const Tables &pending = snapshots[filterIndex].tables;
-        // An action between its intent to enable and its enable published counts as enabled: whole tables are written
-        // only with the CMU off. The adoption's store is before this load, the action's intent store before its re-read
-        // of this word, so one of the two sees the other (and while this word says pendingDirty, no action enables).
-        const uint64_t asking = load(actionWord, __ATOMIC_SEQ_CST);
-        ActionSequence asked = actionOf(asking);
-        asked.enableAsked = asked.enableAsked || intentOf(asking);
-        const auto actRequestOut = [&dc] {
-            return (dc[kDcStateControl] & kGeneralActReq) != 0u;
-        };
-        const auto inBlank = [&dc] {
-            return (dc[kDcDispDbgTiming] & kDbgVBlank) != 0u;
-        };
-        const Tables *written = filter.activeValid ? &active : nullptr;
-        const Write write = atFrameEnd(filter, asked, pending, written, actRequestOut, inBlank);
-        if (write == Write::kAll)
-            writeTables(dc, pending, written);
-        else if (write == Write::kCsc)
-            writeCsc(dc, pending, active);
-        if (write != Write::kNothing)
-            active = pending;
-        if (filterPaletteDirty && inBlank()) {
-            writePalettes(dc, snapshots[filterIndex].palette);
-            filterPaletteDirty = false;
-            filterPaletteShown = true;
-            filterPaletteEpoch = paletteEpochOf(filterPublished);
+        const uint64_t published = load(publishedWord, __ATOMIC_ACQUIRE);
+        const uint32_t pubGen = generationOf(published);
+        const uint32_t cmuState = load(actionCmuState, __ATOMIC_ACQUIRE);
+        if (!filterPending && filterAdopted && pubGen == filterGen && cmuState == filterSeenCmuState)
+            return;
+        // Dekker with frameEndAction: filterBusy=1 before reading actionCmuState guarantees action never mutates
+        // actionActive or DC A CMU tables while we inspect actionActive and write the <=9 CSC words.
+        store(filterBusy, 1u, __ATOMIC_SEQ_CST);
+        const uint32_t liveState = load(actionCmuState, __ATOMIC_SEQ_CST);
+        if ((liveState & 1u) == 0u) {
+            filterGen = pubGen;
+            filterSeenCmuState = liveState;
+            filterAdopted = true;
+            filterPending = false;
+            store(filterBusy, 0u, __ATOMIC_RELEASE);
+            return;
         }
-        publishFilter(__ATOMIC_RELEASE);
+        const uint64_t cur = claimNewest(published, filterReading);
+        const uint32_t curGen = generationOf(cur);
+        const Tables &pending = snapshots[indexOf(cur)].tables;
+        if (filterTablesEpoch != actionTablesEpoch) {
+            memcpy(filterCsc, actionActive.csc, sizeof(filterCsc));
+            filterTablesEpoch = actionTablesEpoch;
+        }
+        if (!pending.enabled || lutsDiffer(pending, actionActive)) {
+            filterGen = curGen;
+            filterSeenCmuState = liveState;
+            filterAdopted = true;
+            filterPending = false;
+        } else if ((dc[kDcDispDbgTiming] & kDbgVBlank) != 0u) {
+            writeCsc(dc, pending.csc, filterCsc);
+            memcpy(filterCsc, pending.csc, sizeof(filterCsc));
+            filterGen = curGen;
+            filterSeenCmuState = liveState;
+            filterAdopted = true;
+            filterPending = false;
+            store(filterCscDoneGen, curGen, __ATOMIC_RELEASE);
+        } else {
+            filterPending = true;
+        }
+        store(filterReading, kNone, __ATOMIC_RELEASE);
+        store(filterBusy, 0u, __ATOMIC_RELEASE);
     }
 
-    // --- the action (the frame-end work-loop pass, under the gate) ---
+    // --- the action (the frame-end work-loop pass, under the gate, interrupts enabled) ---
 
     // What changed at DC A for the log: kKeep, or the enable written, with the reasons of the tables it is for.
     struct Step {
@@ -159,40 +181,99 @@ public:
 
     template <class Dc> Step frameEndAction(Dc &dc, bool mayRequest)
     {
-        const uint64_t seen = load(filterWord, __ATOMIC_SEQ_CST);
         const uint64_t published = load(publishedWord, __ATOMIC_ACQUIRE);
-        FilterSequence f = filterOf(seen);
-        const bool newer = !adoptedOf(seen) || adoptedGenerationOf(seen) != generationOf(published);
-        f.pendingDirty = f.pendingDirty || newer;
+        const uint32_t pubGen = generationOf(published);
         const bool want = enabledOf(published);
-        Enable enable = atFrameEndAction(f, action, want, mayRequest);
-        if (enable == Enable::kOn) {
-            store(actionWord, packAction(true), __ATOMIC_SEQ_CST);
-            if (load(filterWord, __ATOMIC_SEQ_CST) != seen ||
-                generationOf(load(publishedWord, __ATOMIC_SEQ_CST)) != generationOf(published))
-                enable = Enable::kKeep;
+        if (actionAdopted && pubGen == actionSettledGen)
+            return {Enable::kKeep, want, reasonsOf(published)};
+
+        const uint64_t cur = claimNewest(published, actionReading);
+        const uint32_t curGen = generationOf(cur);
+        const bool curWant = enabledOf(cur);
+        const uint32_t curReasons = reasonsOf(cur);
+        const Snapshot &snap = snapshots[indexOf(cur)];
+
+        if (paletteOnOf(cur)) {
+            const uint8_t ep = paletteEpochOf(cur);
+            if (!actionPaletteShown || snap.paletteGeneration != actionPaletteGen || ep != actionPaletteEpoch) {
+                writePalettes(dc, snap.palette);
+                actionPaletteGen = snap.paletteGeneration;
+                actionPaletteEpoch = ep;
+                actionPaletteShown = true;
+                store(paletteWord, packPalette(true, ep), __ATOMIC_RELEASE);
+            }
+        } else if (actionPaletteShown) {
+            actionPaletteShown = false;
+            store(paletteWord, packPalette(false, actionPaletteEpoch), __ATOMIC_RELEASE);
         }
-        if (enable != Enable::kKeep) {
-            dc[kDcDispColorControl] = colorControl | (enable == Enable::kOn ? kCmuEnable : 0);
-            dc[kDcStateControl] = kGeneralUpdate;
-            dc[kDcStateControl] = kGeneralActReq;
-            (void)static_cast<uint32_t>(dc[kDcStateControl]);
-            Platform::deviceWritesDone();
-            enableWritten(action, enable == Enable::kOn);
+
+        Enable enable = Enable::kKeep;
+        bool cmuSettled = false;
+
+        if (action.enableAsked) {
+            const bool needBypass = !curWant || !actionActiveValid || lutsDiffer(snap.tables, actionActive);
+            if (needBypass) {
+                if ((load(actionCmuState, __ATOMIC_RELAXED) & 1u) != 0u)
+                    store(actionCmuState, actionLiveEpoch << 1, __ATOMIC_SEQ_CST);
+                if (load(filterBusy, __ATOMIC_SEQ_CST) == 0u && mayRequest) {
+                    writeEnable(dc, false);
+                    enable = Enable::kOff;
+                }
+            } else {
+                if ((load(actionCmuState, __ATOMIC_RELAXED) & 1u) == 0u) {
+                    ++actionLiveEpoch;
+                    store(actionCmuState, (actionLiveEpoch << 1) | 1u, __ATOMIC_SEQ_CST);
+                }
+                const uint32_t cscDone = load(filterCscDoneGen, __ATOMIC_ACQUIRE);
+                if (curGen == actionCscWrittenGen || static_cast<int32_t>(cscDone - curGen) >= 0)
+                    cmuSettled = true;
+            }
+        } else {
+            if (action.bypassEpoch != actionLatchedEpoch && (dc[kDcStateControl] & kGeneralActReq) == 0u)
+                actionLatchedEpoch = action.bypassEpoch;
+            if (action.bypassEpoch == actionLatchedEpoch) {
+                if ((load(actionCmuState, __ATOMIC_RELAXED) & 1u) != 0u)
+                    store(actionCmuState, actionLiveEpoch << 1, __ATOMIC_SEQ_CST);
+                if (load(filterBusy, __ATOMIC_SEQ_CST) == 0u) {
+                    if (!curWant) {
+                        cmuSettled = true;
+                    } else {
+                        if (!actionActiveValid || tablesDiffer(snap.tables, actionActive) ||
+                            curGen != actionCscWrittenGen) {
+                            writeTables(dc, snap.tables, actionActiveValid ? &actionActive : nullptr);
+                            actionActive = snap.tables;
+                            actionActiveValid = true;
+                            ++actionTablesEpoch;
+                            actionCscWrittenGen = curGen;
+                        }
+                        if (mayRequest) {
+                            writeEnable(dc, true);
+                            enable = Enable::kOn;
+                            ++actionLiveEpoch;
+                            store(actionCmuState, (actionLiveEpoch << 1) | 1u, __ATOMIC_SEQ_CST);
+                            cmuSettled = true;
+                        }
+                    }
+                }
+            }
         }
-        store(actionWord, packAction(false), __ATOMIC_RELEASE);
-        if (!newer && settled(f, action, want))
-            releaseThrough(adoptedGenerationOf(seen));
-        return {enable, want, reasonsOf(published)};
+
+        store(actionReading, kNone, __ATOMIC_RELEASE);
+        if (cmuSettled) {
+            actionAdopted = true;
+            actionSettledGen = curGen;
+            releaseThrough(curGen);
+        }
+        return {enable, curWant, curReasons};
     }
 
     // Any thread: CP_ENABLE once the newest per-channel gamma table's palette is in the windows (TegraDisplayPalette.h).
     uint32_t windowOptions() const
     {
         const uint64_t published = load(publishedWord, __ATOMIC_ACQUIRE);
-        const uint64_t filtered = load(filterWord, __ATOMIC_ACQUIRE);
-        const bool shown = paletteOnOf(published) && paletteShownOf(filtered) &&
-                           filteredPaletteEpochOf(filtered) == paletteEpochOf(published);
+        const uint32_t pal = load(paletteWord, __ATOMIC_ACQUIRE);
+        const bool shown =
+            paletteOnOf(published) && ((pal & 1u) != 0u) && static_cast<uint8_t>(pal >> 8) == paletteEpochOf(published);
         return shown ? kCpEnable : 0;
     }
 
@@ -201,25 +282,49 @@ public:
     // After DC A's power-up reset, before the request the resume latches it with: the newest tables, palette and enable.
     template <class Dc> void restore(Dc &dc)
     {
-        filter = {};
         action = {};
-        adoptNewest();
-        filter.pendingDirty = false;
-        const Snapshot &now = snapshots[filterIndex];
-        if (paletteOnOf(filterPublished)) {
+        actionLatchedEpoch = 0;
+        actionActiveValid = false;
+        actionPaletteShown = false;
+        actionAdopted = false;
+        filterAdopted = false;
+        filterPending = false;
+        store(filterBusy, 0u, __ATOMIC_RELEASE);
+        store(filterReading, kNone, __ATOMIC_RELEASE);
+        store(actionReading, kNone, __ATOMIC_RELEASE);
+        const uint64_t published = load(publishedWord, __ATOMIC_ACQUIRE);
+        const uint32_t pubGen = generationOf(published);
+        const Snapshot &now = snapshots[indexOf(published)];
+        if (paletteOnOf(published)) {
             writePalettes(dc, now.palette);
-            filterPaletteDirty = false;
-            filterPaletteShown = true;
-            filterPaletteEpoch = paletteEpochOf(filterPublished);
+            actionPaletteGen = now.paletteGeneration;
+            actionPaletteEpoch = paletteEpochOf(published);
+            actionPaletteShown = true;
+            store(paletteWord, packPalette(true, actionPaletteEpoch), __ATOMIC_RELEASE);
+        } else {
+            store(paletteWord, packPalette(false, 0), __ATOMIC_RELEASE);
         }
         if (now.tables.enabled) {
             writeTables(dc, now.tables, nullptr);
-            active = now.tables;
-            filter.activeValid = action.enableAsked = true;
+            actionActive = now.tables;
+            actionActiveValid = true;
+            ++actionTablesEpoch;
+            actionCscWrittenGen = pubGen;
+            action.enableAsked = true;
             dc[kDcDispColorControl] = colorControl | kCmuEnable;
+            ++actionLiveEpoch;
+            store(actionCmuState, (actionLiveEpoch << 1) | 1u, __ATOMIC_RELEASE);
+        } else {
+            store(actionCmuState, actionLiveEpoch << 1, __ATOMIC_RELEASE);
         }
-        publishFilter(__ATOMIC_RELEASE);
-        store(actionWord, packAction(false), __ATOMIC_RELEASE);
+        memcpy(filterCsc, actionActive.csc, sizeof(filterCsc));
+        filterTablesEpoch = actionTablesEpoch;
+        filterGen = pubGen;
+        filterSeenCmuState = load(actionCmuState, __ATOMIC_RELAXED);
+        filterAdopted = true;
+        store(filterCscDoneGen, pubGen, __ATOMIC_RELEASE);
+        actionAdopted = true;
+        actionSettledGen = pubGen;
     }
 
     // The display going away: the CMU bypassed, every hold out released.
@@ -274,8 +379,6 @@ private:
         __atomic_store_n(&word, value, order);
     }
 
-    // The published word: generation, snapshot index, the tables' enable and reasons (the action's), the palette's state
-    // (windowOptions'), so nothing but the filter reads a snapshot a later setter may reuse.
     static uint64_t packPublished(uint32_t generation, unsigned index, const Tables &tables, bool paletteOn,
                                   uint8_t epoch)
     {
@@ -313,100 +416,36 @@ private:
         return static_cast<uint8_t>(w >> 48);
     }
 
-    // The filter's word: the generation it adopted, its sequence, the palette it has shown.
-    uint64_t packFilter() const
+    static uint32_t packPalette(bool shown, uint8_t epoch)
     {
-        return uint64_t(filterAdopted ? generationOf(filterPublished) : 0) | uint64_t(filterAdopted) << 32 |
-               uint64_t(filter.pendingDirty) << 33 | uint64_t(filter.activeValid) << 34 |
-               uint64_t(filter.bypassWanted) << 35 | uint64_t(filterPaletteShown) << 36 |
-               uint64_t(filter.latchedEpoch) << 40 | uint64_t(filterPaletteEpoch) << 56;
+        return uint32_t(shown) | (uint32_t(epoch) << 8);
     }
 
-    static bool adoptedOf(uint64_t w)
+    static bool tablesDiffer(const Tables &a, const Tables &b)
     {
-        return ((w >> 32) & 1u) != 0u;
+        return lutsDiffer(a, b) || memcmp(a.csc, b.csc, sizeof(a.csc)) != 0;
     }
 
-    static uint32_t adoptedGenerationOf(uint64_t w)
+    uint64_t claimNewest(uint64_t published, unsigned &readingSlot)
     {
-        return static_cast<uint32_t>(w);
-    }
-
-    static FilterSequence filterOf(uint64_t w)
-    {
-        FilterSequence f;
-        f.pendingDirty = ((w >> 33) & 1u) != 0u;
-        f.activeValid = ((w >> 34) & 1u) != 0u;
-        f.bypassWanted = ((w >> 35) & 1u) != 0u;
-        f.latchedEpoch = static_cast<uint16_t>(w >> 40);
-        return f;
-    }
-
-    static bool paletteShownOf(uint64_t w)
-    {
-        return ((w >> 36) & 1u) != 0u;
-    }
-
-    static uint8_t filteredPaletteEpochOf(uint64_t w)
-    {
-        return static_cast<uint8_t>(w >> 56);
-    }
-
-    // The action's word: its sequence, and the intent to enable it holds while it checks the filter has not moved.
-    uint64_t packAction(bool intent) const
-    {
-        return uint64_t(action.enableAsked) | uint64_t(intent) << 1 | uint64_t(action.bypassEpoch) << 16;
-    }
-
-    static ActionSequence actionOf(uint64_t w)
-    {
-        ActionSequence a;
-        a.enableAsked = (w & 1u) != 0u;
-        a.bypassEpoch = static_cast<uint16_t>(w >> 16);
-        return a;
-    }
-
-    static bool intentOf(uint64_t w)
-    {
-        return ((w >> 1) & 1u) != 0u;
-    }
-
-    // The newest snapshot becomes the filter's: claimed (the setters skip it) before it is read, the claim checked
-    // against a publish that came meanwhile, its generation stored before anything decides on it.
-    void adoptNewest()
-    {
-        uint64_t published = load(publishedWord, __ATOMIC_ACQUIRE);
-        if (filterAdopted && generationOf(published) == generationOf(filterPublished))
-            return;
+        uint64_t cur = published;
         for (;;) {
-            store(reading, indexOf(published), __ATOMIC_SEQ_CST);
+            store(readingSlot, indexOf(cur), __ATOMIC_SEQ_CST);
             const uint64_t again = load(publishedWord, __ATOMIC_SEQ_CST);
-            if (again == published)
-                break;
-            published = again;
+            if (again == cur)
+                return cur;
+            cur = again;
         }
-        const unsigned index = indexOf(published);
-        filterPaletteDirty =
-            paletteOnOf(published) &&
-            (filterPaletteDirty || !filterAdopted || snapshots[index].paletteGeneration != filterPaletteGeneration ||
-             paletteEpochOf(published) != filterPaletteEpoch || !filterPaletteShown);
-        filterPaletteGeneration = snapshots[index].paletteGeneration;
-        if (!paletteOnOf(published))
-            filterPaletteShown = false;
-        filterIndex = index;
-        filterPublished = published;
-        filterAdopted = true;
-        filter.pendingDirty = true;
-        publishFilter(__ATOMIC_SEQ_CST);
     }
 
-    void publishFilter(int order)
+    template <class Dc> void writeEnable(Dc &dc, bool on)
     {
-        const uint64_t word = packFilter();
-        if (word == filterStored && order != __ATOMIC_SEQ_CST)
-            return;
-        filterStored = word;
-        store(filterWord, word, order);
+        dc[kDcDispColorControl] = colorControl | (on ? kCmuEnable : 0u);
+        dc[kDcStateControl] = kGeneralUpdate;
+        dc[kDcStateControl] = kGeneralActReq;
+        (void)static_cast<uint32_t>(dc[kDcStateControl]);
+        Platform::deviceWritesDone();
+        enableWritten(action, on);
     }
 
     template <class Dc> static void writeTables(Dc &dc, const Tables &tables, const Tables *written)
@@ -415,21 +454,21 @@ private:
             if (!written || written->lut1[i] != tables.lut1[i])
                 dc[kDcCmuLut1] = i | static_cast<uint32_t>(tables.lut1[i]) << 16;
         }
-        for (unsigned i = 0; i < kCscWords; ++i) {
-            if (!written || written->csc[i] != tables.csc[i])
-                dc[kDcCmuCsc + i] = tables.csc[i];
-        }
+        // Always write all 9 CSC words: the filter may have updated DC A's CSC while CMU was live.
+        for (unsigned i = 0; i < kCscWords; ++i)
+            dc[kDcCmuCsc + i] = tables.csc[i];
         for (unsigned k = 0; k < kLut2Entries; ++k) {
             if (!written || written->lut2[k] != tables.lut2[k])
                 dc[kDcCmuLut2] = k | static_cast<uint32_t>(tables.lut2[k]) << 16;
         }
     }
 
-    template <class Dc> static void writeCsc(Dc &dc, const Tables &tables, const Tables &written)
+    template <class Dc>
+    static void writeCsc(Dc &dc, const uint16_t (&csc)[kCscWords], const uint16_t (&written)[kCscWords])
     {
         for (unsigned i = 0; i < kCscWords; ++i) {
-            if (written.csc[i] != tables.csc[i])
-                dc[kDcCmuCsc + i] = tables.csc[i];
+            if (written[i] != csc[i])
+                dc[kDcCmuCsc + i] = csc[i];
         }
     }
 
@@ -442,21 +481,28 @@ private:
     }
 
     Snapshot snapshots[kSnapshots];
-    uint64_t publishedWord = 0;  // the setters'
-    unsigned reading = kNone;    // the filter's: the snapshot it reads
-    unsigned spareIndex = 0;     // the setters'
-    uint32_t released = 0;       // the action's: holds released through this generation
+    uint64_t publishedWord = 0;
+    unsigned filterReading = kNone;
+    unsigned actionReading = kNone;
+    unsigned spareIndex = 0;
+    uint32_t released = 0;
+    uint32_t filterBusy = 0;
+    uint32_t actionCmuState = 0;
+    uint32_t filterCscDoneGen = 0;
+    uint32_t paletteWord = 0;
     // The filter's.
-    uint64_t filterWord = 0, filterPublished = 0, filterStored = 0;
-    FilterSequence filter;
-    Tables active;
-    unsigned filterIndex = kNone;
-    uint32_t filterPaletteGeneration = 0;
-    uint8_t filterPaletteEpoch = 0;
-    bool filterAdopted = false, filterPaletteDirty = false, filterPaletteShown = false;
+    uint32_t filterGen = 0, filterSeenCmuState = 0, filterTablesEpoch = 0;
+    uint16_t filterCsc[kCscWords] = {};
+    bool filterAdopted = false, filterPending = false;
     // The action's.
-    uint64_t actionWord = 0;
     ActionSequence action;
+    uint16_t actionLatchedEpoch = 0;
+    uint32_t actionLiveEpoch = 0, actionTablesEpoch = 0;
+    uint32_t actionSettledGen = 0, actionCscWrittenGen = 0;
+    uint32_t actionPaletteGen = 0;
+    uint8_t actionPaletteEpoch = 0;
+    bool actionAdopted = false, actionActiveValid = false, actionPaletteShown = false;
+    Tables actionActive;
 };
 
 }  // namespace switch_color

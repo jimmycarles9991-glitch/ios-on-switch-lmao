@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: MIT
 // The shader compiler's store (compiler/compiler_store.h) and request log (compiler_log.h): a store per stack and pack
 // rules, read whole by other processes and threads while the compiler writes it, whole after a writer killed mid-put, and
-// a full one keeping its newest entries; the log keeps whole requests across a torn tail and only those a replay keeps.
+// a full one keeping its newest entries; the log keeps whole requests across a torn tail and only those a replay keeps,
+// and a later boot reads no further than either one's durable end.
 #include "../compiler/compiler_log.h"
 #include "../compiler/compiler_store.h"
 #include "../gm20b_cache.h"
 #include "../compute_slot.h"
 #include "../program_pages.h"
 #include "../record_parts.h"
+#include "../store_key.h"
 
 #include <gtest/gtest.h>
 
 #include <signal.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <atomic>
@@ -135,6 +138,92 @@ TEST_F(SharedStore, AStoreIsKeyedByStackAndPackRulesAndAnOldOneStaysWholeForItsR
     switch_compiler::Store next;
     open(next, kStack + 1, otherRules);
     EXPECT_NE(next.path(), store.path());
+}
+
+// Two contents compiled at once under one name (a name any client can steer, store_key.h): each found the name free
+// before its compile, and the second to publish takes the next candidate rather than replacing the first. A content's
+// entry is found and replaced wherever it sits, past a free candidate too; a content-checked retire leaves another's.
+TEST_F(SharedStore, AContentsEntryIsFoundAndReplacedUnderWhicheverCandidateHoldsIt)
+{
+    using switch_compiler::Store;
+    Store store;
+    open(store);
+    const gm20b::Digest name = digest(0x53);
+    const auto candidate = [&](uint32_t k) {
+        return gm20b::candidateName(name, k);
+    };
+    gm20b::Digest at{};
+    std::string bytes;
+    ASSERT_EQ(store.put(name, keyOf(1), entryOf(1), at), Store::Put::Added);
+    EXPECT_EQ(at, candidate(0));
+    ASSERT_EQ(store.put(name, keyOf(2), entryOf(2), at), Store::Put::Added);
+    EXPECT_EQ(at, candidate(1));
+    ASSERT_EQ(store.put(name, keyOf(2), entryOf(2), at), Store::Put::Added);
+    EXPECT_EQ(at, candidate(1));
+
+    store.retire(candidate(0));
+    ASSERT_TRUE(store.find(name, keyOf(2), bytes, at));
+    EXPECT_EQ(at, candidate(1));
+    EXPECT_TRUE(whole(bytes, 2));
+    ASSERT_EQ(store.put(name, keyOf(2), entryOf(2), at), Store::Put::Added);
+    EXPECT_EQ(at, candidate(1));
+    EXPECT_FALSE(store.find(name, keyOf(3), bytes, at));
+    EXPECT_EQ(at, candidate(0));
+
+    store.retire(candidate(1), keyOf(3));
+    EXPECT_TRUE(store.find(name, keyOf(2), bytes, at));
+    store.retire(candidate(1), keyOf(2));
+    EXPECT_FALSE(store.find(name, keyOf(2), bytes, at));
+
+    for (uint32_t n = 1; n <= gm20b::kStoreCandidates; ++n) {
+        ASSERT_EQ(store.put(name, keyOf(n), entryOf(n), at), Store::Put::Added);
+        EXPECT_EQ(at, candidate(n - 1));
+    }
+    ASSERT_EQ(store.put(name, keyOf(9), entryOf(9), at), Store::Put::Added);
+    EXPECT_EQ(at, candidate(gm20b::kStoreCandidates - 1));
+    for (uint32_t n = 1; n < gm20b::kStoreCandidates; ++n) {
+        ASSERT_TRUE(store.find(name, keyOf(n), bytes, at)) << n;
+        EXPECT_TRUE(whole(bytes, n)) << n;
+    }
+    EXPECT_FALSE(store.find(name, keyOf(gm20b::kStoreCandidates), bytes, at));
+    EXPECT_TRUE(store.find(name, keyOf(9), bytes, at));
+}
+
+// A put told to keep what is there leaves an entry of its content as it is, decided under the store's lock: a plain
+// compile racing a full form's filing (compiler_service.mm filedAsPlain) can't put the plain record back over the full
+// one. Another content at the name is not asked about; the put goes to the next candidate.
+TEST_F(SharedStore, AKeptEntryOfTheContentStaysWhereAPutIsToldToKeepIt)
+{
+    using switch_compiler::Store;
+    Store store;
+    open(store);
+    const gm20b::Digest name = digest(0x54);
+    gm20b::Digest at{};
+    std::string bytes;
+    const std::string full = entryOf(1), plain = gm20b::encodeEntry(keyOf(1), nullptr, "plain");
+    ASSERT_EQ(store.put(name, keyOf(1), full, at), Store::Put::Added);
+    std::vector<std::string> asked;
+    const auto keep = [&](const std::string &held) {
+        asked.push_back(held);
+        return true;
+    };
+    EXPECT_EQ(store.put(name, keyOf(1), plain, at, keep), Store::Put::Kept);
+    EXPECT_EQ(at, name);
+    ASSERT_TRUE(store.find(name, keyOf(1), bytes, at));
+    EXPECT_EQ(bytes, full);
+    ASSERT_EQ(asked.size(), 1u);
+    EXPECT_EQ(asked[0], full);
+    EXPECT_EQ(store.put(name, keyOf(1), plain, at,
+                        [](const std::string &) {
+                            return false;
+                        }),
+              Store::Put::Added);
+    ASSERT_TRUE(store.find(name, keyOf(1), bytes, at));
+    EXPECT_EQ(bytes, plain);
+    asked.clear();
+    ASSERT_EQ(store.put(name, keyOf(2), entryOf(2), at, keep), Store::Put::Added);
+    EXPECT_EQ(at, gm20b::candidateName(name, 1));
+    EXPECT_TRUE(asked.empty());
 }
 
 // A made record's program slots of a page or more land on pages of their own, found by their bytes' name, ahead of the
@@ -342,6 +431,94 @@ TEST_F(SharedStore, TheLogKeepsWholeRequestsAcrossATornTail)
         return true;
     });
     EXPECT_EQ(seen, (std::vector<std::string>{"request 0", "request 2", "request 9"}));
+}
+
+TEST_F(SharedStore, ALaterBootReadsTheLogToItsDurableEnd)
+{
+    const std::string path = (root / "requests").string();
+    {
+        switch_compiler::RequestLog log;
+        ASSERT_TRUE(log.open(path, "boot A"));
+        log.add(digest(0x60), "request 0");
+        log.add(digest(0x61), "request 1");
+        ASSERT_TRUE(log.persist());
+        log.add(digest(0x62), "request 2");
+    }
+    const auto replayed = [&](const char *boot) {
+        switch_compiler::RequestLog log;
+        EXPECT_TRUE(log.open(path, boot));
+        std::vector<std::string> seen;
+        log.replay([&](const std::string &request, gm20b::Digest &name) {
+            seen.push_back(request);
+            name = digest(0x63, uint32_t(seen.size()));
+            return true;
+        });
+        return seen;
+    };
+    EXPECT_EQ(replayed("boot A"), (std::vector<std::string>{"request 0", "request 1", "request 2"}));
+    EXPECT_EQ(replayed("boot B"), (std::vector<std::string>{"request 0", "request 1"}));
+}
+
+// The first layout: each request's length and its FNV-1a, with no header. Its requests are kept, unchecked, in the second.
+TEST_F(SharedStore, ALogOfTheFirstLayoutIsReadAndWrittenInTheSecond)
+{
+    const std::string path = (root / "requests").string();
+    {
+        std::ofstream file(path, std::ios::binary);
+        for (const std::string request : {"request 0", "request 1"}) {
+            const uint32_t head[2] = {uint32_t(request.size()), 0x12345678};
+            file.write(reinterpret_cast<const char *>(head), sizeof head);
+            file.write(request.data(), std::streamsize(request.size()));
+        }
+    }
+    switch_compiler::RequestLog log;
+    ASSERT_TRUE(log.open(path));
+    std::vector<std::string> seen;
+    log.replay([&](const std::string &request, gm20b::Digest &name) {
+        seen.push_back(request);
+        name = digest(0x64, uint32_t(seen.size()));
+        return true;
+    });
+    EXPECT_EQ(seen, (std::vector<std::string>{"request 0", "request 1"}));
+    std::ifstream file(path, std::ios::binary);
+    char magic[8] = {};
+    file.read(magic, sizeof magic);
+    EXPECT_EQ(std::string(magic, sizeof magic), "SWCLOG02");
+}
+
+TEST_F(SharedStore, AReplayThatDropsNothingLeavesTheLogFileAsItIs)
+{
+    const std::string path = (root / "requests").string();
+    {
+        switch_compiler::RequestLog log;
+        ASSERT_TRUE(log.open(path));
+        for (uint8_t i = 0; i < 3; ++i)
+            log.add(digest(0x65, i), "request " + std::to_string(i));
+    }
+    struct stat before = {}, after = {};
+    ASSERT_EQ(stat(path.c_str(), &before), 0);
+    switch_compiler::RequestLog log;
+    ASSERT_TRUE(log.open(path));
+    uint32_t seen = 0;
+    log.replay([&](const std::string &, gm20b::Digest &name) {
+        name = digest(0x66, seen++);
+        return true;
+    });
+    EXPECT_EQ(seen, 3u);
+    ASSERT_EQ(stat(path.c_str(), &after), 0);
+    EXPECT_EQ(after.st_ino, before.st_ino) << "the log was written again with what it already held";
+}
+
+TEST_F(SharedStore, APersistedStoreSyncsOnceForWhatWasPublished)
+{
+    switch_compiler::Store store;
+    open(store);
+    EXPECT_TRUE(store.persist());
+    ASSERT_EQ(store.put(digest(0x54, 1), entryOf(1)), switch_compiler::Store::Put::Added);
+    EXPECT_TRUE(store.persist());
+    EXPECT_TRUE(store.persist());
+    std::string bytes;
+    EXPECT_TRUE(store.find(digest(0x54, 1), bytes) && whole(bytes, 1));
 }
 
 TEST_F(SharedStore, AFullLogDropsItsOldestRequests)

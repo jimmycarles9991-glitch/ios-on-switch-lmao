@@ -38,6 +38,11 @@ def _mesa_relocatable_impl(ctx):
     force_load = _archive(ctx.attr.force_load)
     archives = [_archive(t) for t in ctx.attr.archives]
 
+    # -S: ld -r writes a debug map for the Rust standard library's objects (the only members with debug information),
+    # naming them by the worker's absolute path to the archive, so each link differed with the worker slot and the
+    # output directory, and so did every key hashed from the object (//gpu:stack_key). No debugger can open those paths.
+    no_debug_map = ["-Wl,-S"]
+
     def driver(arguments, inputs, output, mnemonic, message):
         args = ctx.actions.args()
         args.add_all(target_flags)
@@ -54,7 +59,8 @@ def _mesa_relocatable_impl(ctx):
         )
 
     driver(
-        ["-r", "-nostdlib", "-o", link1.path, "-Wl,-force_load," + force_load.path] + [a.path for a in archives],
+        ["-r", "-nostdlib"] + no_debug_map + ["-o", link1.path, "-Wl,-force_load," + force_load.path] +
+        [a.path for a in archives],
         [force_load] + archives,
         link1,
         "MesaRelocatable",
@@ -83,7 +89,8 @@ rm "$3.names"
     )
     driver(["-c", "-x", "assembler", stubs_s.path, "-o", stubs_o.path], [stubs_s], stubs_o, "MesaAbsentEntrypointsObject", "Assembling %{output}")
     driver(
-        ["-r", "-nostdlib", "-o", out.path, "-Wl,-exported_symbols_list," + exported.path, link1.path, stubs_o.path],
+        ["-r", "-nostdlib"] + no_debug_map +
+        ["-o", out.path, "-Wl,-exported_symbols_list," + exported.path, link1.path, stubs_o.path],
         [exported, link1, stubs_o],
         out,
         "MesaRelocatable",

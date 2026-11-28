@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestX1
 import Metal
 
 /// Whether any ROP control our context sets differently from NVIDIA's golden defaults (sw_method_init) moves the

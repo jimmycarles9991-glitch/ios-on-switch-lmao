@@ -52,7 +52,7 @@ static void eventJobFailure(SwitchMetalCommandBuffer *cb, int result, const std:
             ? [NSString
                   stringWithFormat:@"The kernel refused an event job (0x%x): a producer failed or is lost", result]
             : [NSString stringWithUTF8String:setRefused.c_str()];
-    std::lock_guard<gm20b::Mutex> lock(cb->_lock);
+    std::lock_guard<gm20b::UnfairMutex> lock(cb->_lock);
     if (!cb->_segError)
         cb->_segError = [NSError errorWithDomain:MTLCommandBufferErrorDomain
                                             code:MTLCommandBufferErrorInternal

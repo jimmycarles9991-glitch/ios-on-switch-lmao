@@ -244,6 +244,7 @@ static int pl_switch(u32 pl)
 	u32 back = 0;
 
 	if (old != pl) {
+		preempt_disable();
 		/* the VCO divider at 1:2 around the change, written twice (linear divider operation) */
 		/* nouveau's nvkm_mask computes in int and declares two locals. */
 		/* NOLINTNEXTLINE(bugprone-signed-bitwise,readability-isolate-declaration) */
@@ -268,6 +269,7 @@ static int pl_switch(u32 pl)
 		/* NOLINTNEXTLINE(bugprone-signed-bitwise,readability-isolate-declaration) */
 		nvkm_mask(device, GPC2CLK_OUT_R, 0x3f00, 0);
 		nvkm_rd32(device, GPC2CLK_OUT_R);
+		preempt_enable();
 	}
 	back = nvkm_rd32(device, GPCPLL_COEFF_R);
 	return ((back >> 16) & 0x3f) == pl &&
@@ -350,7 +352,7 @@ static void idle_hint_raise(void *arg)
 		nvxnu_mutex_unlock(tgm_idle.clk);
 	}
 }
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 /* Debug kernels: fn on a GPU held still, once the bring-up has reached M3: up and kept up under tgm_gpu.lock (no rail-down,
  * rail-up or system sleep), its GPCPLL divider fixed under tgm_idle.clk (taken inside tgm_gpu.lock, as sleep_idle_off takes it).
  * 0, or -EBUSY before M3. */

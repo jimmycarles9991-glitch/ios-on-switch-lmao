@@ -191,6 +191,18 @@ static int switch_apply_app(NSString *path, NSString *oldIdentifier, BOOL remove
     return remove ? EX_OK : switch_apply_package_registration(path, identifier, bundles);
 }
 
+static NSMutableDictionary<NSString *, NSString *> *switch_registered_bootstrap_apps(void)
+{
+    NSMutableDictionary<NSString *, NSString *> *registered = [NSMutableDictionary new];
+    NSDictionary *installed = switch_registered_app_paths();
+    for (NSString *path in installed) {
+        NSString *canonical = switch_app_path(path);
+        if (canonical)
+            registered[canonical] = installed[path];
+    }
+    return registered;
+}
+
 int switch_registration_apps(NSArray<NSString *> *arguments, NSString **output)
 {
     const BOOL migration = [arguments isEqual:@[ @"--finish-migration" ]];
@@ -224,13 +236,7 @@ int switch_registration_apps(NSArray<NSString *> *arguments, NSString **output)
         os_log_error(OS_LOG_DEFAULT, "SwitchAppRegistration: %{public}@", nativeError);
         return EX_UNAVAILABLE;
     }
-    NSMutableDictionary<NSString *, NSString *> *registered = [NSMutableDictionary new];
-    NSDictionary *installed = switch_registered_app_paths();
-    for (NSString *path in installed) {
-        NSString *canonical = switch_app_path(path);
-        if (canonical)
-            registered[canonical] = installed[path];
-    }
+    NSMutableDictionary<NSString *, NSString *> *registered = switch_registered_bootstrap_apps();
     NSMutableOrderedSet<NSString *> *paths = [NSMutableOrderedSet new];
     NSMutableSet<NSString *> *remove = [NSMutableSet new];
     if (options.all) {
@@ -264,6 +270,8 @@ int switch_registration_apps(NSArray<NSString *> *arguments, NSString **output)
             status = result;
     }
     if (options.list) {
+        if (paths.count)
+            registered = switch_registered_bootstrap_apps();
         NSMutableString *text = [NSMutableString new];
         for (NSString *path in [registered.allKeys sortedArrayUsingSelector:@selector(compare:)])
             [text appendFormat:@"%@ %@\n", registered[path], path];

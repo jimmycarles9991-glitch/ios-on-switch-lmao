@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// RenderBox's draw shape for an icon: an indexed triangle strip of four whose fragment fetches the colour it writes

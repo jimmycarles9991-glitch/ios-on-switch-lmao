@@ -2,6 +2,7 @@
 #include "SwitchNativeSurface.h"
 #include "SwitchVICSurfaceAccess.h"
 #include <IOKit/IOMemoryDescriptor.h>
+#include "../../kits/SwitchRefusal/SwitchRefusal.h"
 #include "../TegraGM20B/SwitchGpuNativeSurface.h"
 
 namespace {
@@ -10,8 +11,11 @@ int pitchView(const TegraVICSurface &surface, switch_gpu_native_surface_view *ou
     const auto &desc = surface.desc;
     if ((desc.fourcc != 0x34323076 && desc.fourcc != 0x34323066) || desc.planes != 2 || desc.protection)
         return -2;
-    if (!desc.width || !desc.height)
+    if (!desc.width || !desc.height) {
+        switch_refusal("native-view", "pitch-empty", "a %#x pitch surface of %ux%u: no GPU view of an empty picture",
+                       desc.fourcc, desc.width, desc.height);
         return -22;
+    }
     SwitchVICSurfaceAccess access;
     int error = switch_vic_surface_access(&surface, false, &access);
     if (error)
@@ -31,6 +35,11 @@ int pitchView(const TegraVICSurface &surface, switch_gpu_native_surface_view *ou
         const uint32_t sample = p ? 2 : 1;
         if (desc.planeWidth[p] > UINT32_MAX || desc.planeHeight[p] > UINT32_MAX ||
             desc.planeBytesPerRow[p] > UINT32_MAX) {
+            switch_refusal("native-view", "pitch-plane-field",
+                           "a %#x pitch surface's plane %u of %llux%llu, %llu bytes a row: a field past 32 bits, no "
+                           "GPU view",
+                           desc.fourcc, p, (unsigned long long)desc.planeWidth[p],
+                           (unsigned long long)desc.planeHeight[p], (unsigned long long)desc.planeBytesPerRow[p]);
             error = -22;
             break;
         }
@@ -39,6 +48,14 @@ int pitchView(const TegraVICSurface &surface, switch_gpu_native_surface_view *ou
         if (desc.planeWidth[p] < width || desc.planeHeight[p] < height ||
             uint64_t(desc.planeWidth[p]) * sample > desc.planeBytesPerRow[p] || offset > desc.length ||
             bytes > desc.length - offset || offset > UINT64_MAX - access.offset) {
+            switch_refusal(
+                "native-view", "pitch-plane-extent",
+                "a %ux%u %#x pitch surface's plane %u of %llux%llu, %llu bytes a row, at %llu of %llu bytes: "
+                "narrower or shorter than the picture, rows shorter than its width, or past the surface; no "
+                "GPU view",
+                desc.width, desc.height, desc.fourcc, p, (unsigned long long)desc.planeWidth[p],
+                (unsigned long long)desc.planeHeight[p], (unsigned long long)desc.planeBytesPerRow[p],
+                (unsigned long long)offset, (unsigned long long)desc.length);
             error = -22;
             break;
         }
@@ -51,8 +68,13 @@ int pitchView(const TegraVICSurface &surface, switch_gpu_native_surface_view *ou
                             SWITCH_GPU_BACKING_PITCH,
                             0};
     }
-    if (!error && layout.planes[0].offset + layout.planes[0].bytes > layout.planes[1].offset)
+    if (!error && layout.planes[0].offset + layout.planes[0].bytes > layout.planes[1].offset) {
+        switch_refusal("native-view", "pitch-planes-overlap",
+                       "a %#x pitch surface's luma (%llu bytes at %llu) runs into its chroma at %llu: no GPU view",
+                       desc.fourcc, (unsigned long long)layout.planes[0].bytes,
+                       (unsigned long long)layout.planes[0].offset, (unsigned long long)layout.planes[1].offset);
         error = -22;
+    }
     if (!error) {
         surface.memory->retain();
         switch_gpu_backing_retain(access.backing);
@@ -82,6 +104,24 @@ extern "C" int switch_native_surface_gpu_acquire(void *object, switch_gpu_native
         *out = {view.owner,    view.descriptor, view.logical, view.native, view.guard,      view.representation,
                 view.producer, view.layout,     view.crop.x,  view.crop.y, view.crop.width, view.crop.height};
     }
+    tegra_vic_surface_release(&surface);
+    return error;
+}
+
+extern "C" int switch_native_surface_gpu_acquire_write(void *object, switch_gpu_native_surface_view *out)
+{
+    if (!out)
+        return -22;
+    *out = {};
+    TegraVICSurface surface = {};
+    const int described = switch_vic_surface_from_object(static_cast<OSObject *>(object), 0, &surface);
+    if (described)
+        return described;
+    SwitchNativeSurfaceView view = {};
+    const int error = switch_native_surface_publish_gpu(&surface, &view);
+    if (!error)
+        *out = {view.owner,    view.descriptor, view.logical, view.native, view.guard,      view.representation,
+                view.producer, view.layout,     view.crop.x,  view.crop.y, view.crop.width, view.crop.height};
     tegra_vic_surface_release(&surface);
     return error;
 }

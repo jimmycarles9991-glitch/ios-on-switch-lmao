@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Metal's three SIMD-group feature rows on the GPU's own SIMD width, each lane's word against the CPU's: permute and

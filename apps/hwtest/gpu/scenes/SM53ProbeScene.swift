@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 // Candidate instruction semantics are classified separately from the transport and rewrite checks.

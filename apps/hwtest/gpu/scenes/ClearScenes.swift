@@ -1,11 +1,13 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Load-action clears of every common format into private (block-linear where the shape tiles) targets, small and
 /// large, read back by the blit engine. A pass with nothing but a clear needs no pipeline state, so on the facade
 /// it is the driver's own: its fast clears and the kernel's zero-bandwidth-clear table (ZBC, method 19), whose
-/// few entries the many distinct colours here overflow, so both kinds of clear run.
+/// few entries the many distinct colours here overflow where gpu.gm20b.compressed_targets has not already taken them,
+/// so both kinds of clear run.
 struct ClearFormatsScene: GPUScene {
     let id = "gpu.clear.formats"
     let name = "Fast and ZBC clears of every common format"

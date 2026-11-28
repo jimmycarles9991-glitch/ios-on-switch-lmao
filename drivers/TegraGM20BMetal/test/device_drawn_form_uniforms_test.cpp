@@ -280,7 +280,7 @@ std::string variantPack(bool requiredTurned = false, bool iterated = false)
     pp.uniform[0] = {0, 1, 0, 0};
     pp.variantCount[1] = 1;
     const gm20b::PackVariant variant = {requiredTurned ? gm20b::AssumeTurned : gm20b::AssumeUniformAligned,
-                                        kVariantProgram};
+                                        kVariantProgram, 0};
     gm20b::PackPipeline pipelines[2] = {pp, pp};
     pipelines[1].keyHash = kVariantKey + 1;
     pipelines[1].variantCount[1] = 0;
@@ -353,9 +353,11 @@ TEST_F(VariantUniforms, AResidualZeroVariantSwapBindsEachDrawsOwnUniformBuffer)
     ASSERT_NE(pl, nullptr);
     const uint64_t placed = dev.stats.programsPlaced;
     EXPECT_EQ(placed, 3u);
-    ASSERT_EQ(pl->chosen.size(), 2u);
-    EXPECT_NE(pl->chosen[0], pl);
-    EXPECT_EQ(dev.variant(*pl, gm20b::AssumeUniformAligned), pl->chosen[0]);
+    const gm20b::VariantTable *table = pl->variantTable;
+    ASSERT_NE(table, nullptr);
+    ASSERT_EQ(table->chosen.size(), 2u);
+    EXPECT_NE(table->chosen[0], pl);
+    EXPECT_EQ(dev.variant(*pl, gm20b::AssumeUniformAligned), table->chosen[0]);
     EXPECT_EQ(dev.variant(*pl, 0), pl);
     EXPECT_EQ(dev.stats.programsPlaced, placed);
     gm20b::CommandBuffer *cb = dev.begin();

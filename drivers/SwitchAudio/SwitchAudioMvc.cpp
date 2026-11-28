@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #include "SwitchAudioAhub.h"
-#ifndef SWITCH_MMIO_HOST_MODEL
-#include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
-#endif
 
 namespace switch_audio_ahub {
 namespace {
@@ -19,21 +16,6 @@ constexpr uint32_t kMvcMaxChannels = 8u;
 constexpr int32_t kDefaultPolyCoeffs[9] = {
     23738319, 659403, -3680, 15546680, 2530732, -120985, 12048422, 5527252, -785042,
 };
-
-bool waitReg(const volatile uint8_t *ahub, uint32_t offset, uint32_t mask, uint32_t value, uint32_t timeoutUs)
-{
-#ifdef SWITCH_MMIO_HOST_MODEL
-    const uint32_t limit = timeoutUs < 1024u ? timeoutUs : 1024u;
-    for (uint32_t i = 0; i < limit; ++i) {
-        if ((switch_mmio_read32(ahub, offset) & mask) == value) {
-            return true;
-        }
-    }
-    return (switch_mmio_read32(ahub, offset) & mask) == value;
-#else
-    return switch_mmio_wait32(ahub, offset, mask, value, timeoutUs);
-#endif
-}
 
 bool writeCfgRam(volatile uint8_t *ahub, uint32_t addr, uint32_t value)
 {

@@ -6318,7 +6318,7 @@ upl_deallocate(upl_t upl)
 
 		if (__improbable(upl->flags & UPL_SWITCH_PREFETCH)) {
 			if (switch_vm_prefetch_inflight_done != NULL) {
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
 				uint64_t elapsed = mach_absolute_time() - upl->switch_start_abs;
 #else
 				uint64_t elapsed = 0;
@@ -6326,7 +6326,7 @@ upl_deallocate(upl_t upl)
 				switch_vm_prefetch_inflight_done(upl->switch_prefetch_bytes, elapsed);
 			}
 		}
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
 		else if (__improbable(upl->flags & UPL_SWITCH_DEMAND)) {
 			if (switch_vm_prefetch_demand_done != NULL) {
 				switch_vm_prefetch_demand_done(mach_absolute_time() - upl->switch_start_abs);
@@ -6352,6 +6352,13 @@ upl_mark_decmp(upl_t upl)
 		upl->flags |= UPL_DECMP_REQ;
 		upl->upl_creator->decmp_upl = (void *)upl;
 	}
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
+	/* Switch: whether the replay's page-ins of compressed files are tagged as its own (UPL_SWITCH_PREFETCH). */
+	if (__improbable(switch_vm_prefetch_is_replay_thread != NULL &&
+	    switch_vm_prefetch_is_replay_thread(current_thread())) && switch_vm_prefetch_count_replay_decmp != NULL) {
+		switch_vm_prefetch_count_replay_decmp(upl->u_size, (upl->flags & UPL_SWITCH_PREFETCH) != 0);
+	}
+#endif
 }
 
 void
@@ -7421,7 +7428,7 @@ try_next_page:
 	if (__improbable(switch_replay && switch_absent_pages != 0)) {
 		upl->flags |= UPL_SWITCH_PREFETCH;
 		upl->switch_prefetch_bytes = switch_absent_pages * PAGE_SIZE;
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
 		upl->switch_start_abs = mach_absolute_time();
 #endif
 		if (switch_vm_prefetch_inflight_add != NULL) {
@@ -10864,7 +10871,7 @@ switch_vm_pressure_headroom_pages(void)
 	return avail > thresh ? avail - thresh : 0;
 }
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
 void
 switch_vm_prefetch_mark_demand_upl(void *upl_arg)
 {

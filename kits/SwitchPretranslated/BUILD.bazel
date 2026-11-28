@@ -10,6 +10,7 @@ lint_files()
 exports_files([
     "switch_pretranslated.h",
     "switch_pretranslated_originals.h",
+    "switch_pretranslated_updates.h",
 ])
 
 kernel_headers()

@@ -22,16 +22,9 @@
 #include "../../kits/SwitchDT/SwitchDTProperty.h"
 #include "SwitchNVRAM.h"
 
-// Observation counters describe actual published nubs, not started drivers.
-extern "C" {
-volatile uint32_t armdt_platform_configured = 0;
-volatile uint32_t armdt_platform_child_count = 0;
-volatile uint32_t armdt_platform_cpu_count = 0;
-volatile uint32_t armdt_platform_bus_count = 0;
-volatile uint32_t armdt_platform_defaults_count = 0;
-volatile uint32_t armdt_platform_nvram_proxy = 0;
-volatile uint32_t armdt_platform_device_count = 0;
-}
+namespace {
+IORTC *gCachedRtc = nullptr;
+}  // namespace
 
 // NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class ArmDTPlatform : public IODTPlatformExpert {
@@ -87,8 +80,16 @@ void ArmDTPlatform::PMRegisterDevice(IOService *theNub, IOService *theDevice)
 // this), as IOKitInitializeTime() expects; without one the inherited stubs answer 0, the 1970 epoch.
 static IORTC *publishedRTC()
 {
+    IORTC *cached = __atomic_load_n(&gCachedRtc, __ATOMIC_ACQUIRE);
+    if (cached != nullptr) {
+        return cached;
+    }
     const IOService *resources = IOService::getResourceService();
-    return resources ? OSDynamicCast(IORTC, resources->getProperty("IORTC")) : nullptr;
+    IORTC *rtc = resources ? OSDynamicCast(IORTC, resources->getProperty("IORTC")) : nullptr;
+    if (rtc != nullptr) {
+        __atomic_store_n(&gCachedRtc, rtc, __ATOMIC_RELEASE);
+    }
+    return rtc;
 }
 
 void ArmDTPlatform::getUTCTimeOfDay(clock_sec_t *secs, clock_nsec_t *nsecs)
@@ -135,7 +136,6 @@ bool ArmDTPlatform::createDeviceNubs(IOService *provider)
     if (iterator == nullptr) {
         return false;
     }
-    uint32_t count = 0;
     IORegistryEntry *entry = nullptr;
     while ((entry = OSDynamicCast(IORegistryEntry, iterator->getNextObject())) != nullptr) {
         IOService *nub = createNub(entry);
@@ -148,10 +148,8 @@ bool ArmDTPlatform::createDeviceNubs(IOService *provider)
         }
         nub->registerService();
         nub->release();
-        count++;
     }
     iterator->release();
-    armdt_platform_device_count = count;
     return true;
 }
 
@@ -189,35 +187,6 @@ bool ArmDTPlatform::configure(IOService *provider)
     if (!IODTPlatformExpert::configure(provider)) {
         return false;
     }
-
-    OSIterator *iterator = getChildIterator(gIOServicePlane);
-    if (iterator == nullptr) {
-        return false;
-    }
-    uint32_t count = 0;
-    uint32_t cpuCount = 0;
-    uint32_t busCount = 0;
-    uint32_t defaultsCount = 0;
-    const IORegistryEntry *child = nullptr;
-    while ((child = OSDynamicCast(IORegistryEntry, iterator->getNextObject())) != nullptr) {
-        count++;
-        if (switch_dt_string_is(child, "device_type", "cpu")) {
-            cpuCount++;
-        }
-        if (strcmp(child->getName(), "arm-io") == 0) {
-            busCount++;
-        }
-        if (strcmp(child->getName(), "defaults") == 0) {
-            defaultsCount++;
-        }
-    }
-    iterator->release();
-    armdt_platform_child_count = count;
-    armdt_platform_cpu_count = cpuCount;
-    armdt_platform_bus_count = busCount;
-    armdt_platform_defaults_count = defaultsCount;
-    armdt_platform_nvram_proxy = 1;
-    armdt_platform_configured = 1;
     // Publish the bus child devices (interrupt controller, VirtIO MMIO, ...)
     // as real IOPlatformDevice nubs. No driver is started here.
     if (!createDeviceNubs(provider)) {

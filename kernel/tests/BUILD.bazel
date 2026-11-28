@@ -9,7 +9,8 @@
 #   xnu_kernel_classes_source_test  both trees' OSKext.cpp register our drivers' classes under sKextLock, as OSKext::start
 #                            does, and no driver calls OSMetaClass::preModLoad/postModLoad itself
 #   switch_icon_cache_<xnu>_test  kernel/switch/boot/icon_cache.c over a host Data tree in that XNU's cache layout:
-#                            __cache_info__ alone goes, once per GPU build the deploy names
+#                            __cache_info__ alone goes, once per GPU build the deploy names; _release_test as a
+#                            release kernel builds it (no restore record)
 #   xnu_icon_cache_source_test  both trees' boot setup runs it once before launchd, with one error line
 #   xnu_stall_test           kernel/switch/diag/stall.h's decisions: which samples of a UI main thread are a stall,
 #                            one report and one end per episode, wait names by block_hint.h value (both trees), the
@@ -29,6 +30,17 @@
 #                            to its swap into running, blocked and waiting for a core
 #   xnu_sched_cpu_test       kernel/switch/sched/cpu.h: each process's CPU in a window, counted once across its exit and
 #                            an exec, a full table's misses counted; the cores and tasks lines
+#   xnu_sched_limit_shadow_test  kernel/switch/sched/limit_shadow.h: Apple's blocking CPU limit replayed beside a lifted
+#                            one, its blocks and the time run past each budget; thread slots ended and reused, rows by
+#                            process and limit; both trees end a slot for any limit but a lifted one and at exit
+#   xnu_sched_callouts_test  kernel/switch/sched/callouts.h: thread call functions and timer actions by CPU, each window's
+#                            top four; both trees bracket thread_call_invoke's function and IOTimerEventSource's actions
+#   xnu_diag_deployed_test   kernel/switch/diag/deployed.h: the commit, branch, build and dirty flag deployed.json gives
+#   xnu_a64x_traps_test      <switch/a64x_traps.h>: the translator's traps by CPU ring, window and line, one writer and
+#                            one reader losing nothing a ring kept; every handled trap in a64x_emulate_user is noted
+#   xnu_sched_systime_test   kernel/switch/sched/systime.h: user threads' kernel time by what entered the kernel and its
+#                            line; both trees' sleh_synchronous count each entry and recount hands over each slice,
+#                            the trap kept per thread until recount_enter_user has handed over its last one
 #   xnu_sched_watch_test     kernel/switch/sched/watch.h and commit.h: a committing or touch-sending thread's stretch to
 #                            each event, one per burst, its cause and line; a commit through the render server to the
 #                            display thread's wake; nothing under the thread lock that locks or logs
@@ -38,7 +50,11 @@
 #   xnu_sched_slots_test     kernel/switch/sched/slots.h: watched threads' slots taken without a lock, freed only from
 #                            the report's snapshot, filter bits cleared only when no taken id needs them
 #   xnu_recorder_test        kernel/switch/recorder/recorder.h: a UI main thread's busy stretch as one hang, latched
-#                            only when taken; a hang taking a queued tail; the gap, the slots, the status line's cost
+#                            only when taken; every mark taken and served first, one automatic ask at a time outside
+#                            the gap; refusals logged once a second; the slot a capture replaces (never a mark for an
+#                            automatic one); the dump header read back; the status line HW Test reads
+#   xnu_focal_test           kernel/switch/include/switch/focal.h: one place per focal app, one leaving the role
+#                            leaving the others watched
 #   xnu_recorder_hooks_source_test  every source in kernel/switch and both trees' bsd and osfmk that names
 #                            SWITCH_RECORDER is in objects.bzl's _RECORDER_OBJECTS, and every listed one names it
 #   xnu_kprof_role_test      kernel/switch/include/switch/kprof_role.h: main-thread vs worker user-sample bucketing,
@@ -117,11 +133,13 @@
 #                            no hook, and a release kernel compiles them to nothing
 #   xnu_workloop_owner_test  12377's filt_wlupdate over reference-counted threads: iOS 27's owner hint (0x388) never
 #                            wakes or attaches, takes an idle workloop, and costs a current owner no reference
+#   xnu_idle_cpc_test        kernel/switch/idle/idle.c as 12377 builds it with CPU counters: a C7 request saves the PMU
+#                            counters first and restarts them if the firmware returns; a WFI idle leaves them running
 #
 #   bazel test //kernel/tests:all
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 load("//bazel/lint:defs.bzl", "lint_files")
-load("//bazel/testing:defs.bzl", "host_library", "host_test")
+load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
 
 lint_files()
 
@@ -199,6 +217,20 @@ host_test(
         "//kernel/switch:srcs",
         "//kernel/xnu-10063.141.1/libkern:c++/OSKext.cpp",
         "//kernel/xnu-12377.121.6/libkern:c++/OSKext.cpp",
+    ],
+)
+
+host_test(
+    name = "xnu_kalloc_nofail_source_test",
+    srcs = ["xnu_kalloc_nofail_source_test.cpp"],
+    data = [
+        "//kernel:lint_sources",
+        "//kernel/switch:headers",
+        "//kernel/switch:srcs",
+        "//kernel/xnu-10063.141.1/bsd:kern/kern_exec.c",
+        "//kernel/xnu-10063.141.1/osfmk:kern/switch_kprof.c",
+        "//kernel/xnu-12377.121.6/bsd:kern/kern_exec.c",
+        "//kernel/xnu-12377.121.6/osfmk:kern/switch_kprof.c",
     ],
 )
 
@@ -307,6 +339,51 @@ host_test(
         "//kernel/switch:vm/shared_cache.c",
         "//kernel/xnu-10063.141.1/bsd:vm/vm_unix.c",
         "//kernel/xnu-12377.121.6/bsd:vm/vm_unix.c",
+    ],
+)
+
+# --- kernel/switch/idle/idle.c with 12377's CPU counters ---------------------------------------------------------
+host_shims(
+    name = "idle_cpc_kernel",
+    headers = [
+        "arm/cpu_data_internal.h",
+        "arm/rtclock.h",
+        "arm64/switch_smp.h",
+        "kern/clock.h",
+        "kern/cpc.h",
+        "kern/thread_call.h",
+        "machine/machine_cpc.h",
+        "os/atomic_private.h",
+        "os/log.h",
+    ],
+    stubs = "xnu_idle_cpc_stubs.h",
+)
+
+IDLE_HEADERS = [
+    "//kernel/switch:include/switch/idle.h",
+    "//kits/SwitchIdle:switch_idle.h",
+    "//kits/SwitchIdle:switch_idle_governor.h",
+]
+
+host_library(
+    name = "idle_cpc",
+    srcs = ["//kernel/switch:idle/idle.c"] + IDLE_HEADERS,
+    copts = ["-Ikernel/switch/include"],
+    defines = [
+        "CONFIG_CPU_COUNTERS=1",
+        "DEVELOPMENT=1",
+        "XNU_12377_121_6=1",
+    ],
+    deps = [":idle_cpc_kernel"],
+)
+
+host_test(
+    name = "xnu_idle_cpc_test",
+    srcs = ["xnu_idle_cpc_test.cpp"] + IDLE_HEADERS,
+    copts = ["-Ikernel/switch/include"],
+    deps = [
+        ":idle_cpc",
+        ":idle_cpc_kernel",
     ],
 )
 
@@ -443,6 +520,108 @@ host_test(
     includes = ["."],
 )
 
+# --- kernel/switch/sched/systime.h ----------------------------------------------------------------------------------------
+copy_file(
+    name = "switch_sched_systime",
+    src = "//kernel/switch:sched/systime.h",
+    out = "sched/systime.h",
+)
+
+host_test(
+    name = "xnu_sched_systime_test",
+    srcs = [
+        "sched/systime.h",
+        "xnu_sched_systime_test.cpp",
+    ],
+    data = [
+        "//kernel/switch:include/switch/sched.h",
+        "//kernel/switch:sched/systime.c",
+        "//kernel/xnu-10063.141.1/osfmk:arm/thread.h",
+        "//kernel/xnu-10063.141.1/osfmk:arm64/sleh.c",
+        "//kernel/xnu-10063.141.1/osfmk:kern/recount.c",
+        "//kernel/xnu-12377.121.6/osfmk:arm/thread.h",
+        "//kernel/xnu-12377.121.6/osfmk:arm64/sleh.c",
+        "//kernel/xnu-12377.121.6/osfmk:kern/recount.c",
+    ],
+    includes = ["."],
+)
+
+# --- kernel/switch/include/switch/a64x_traps.h ----------------------------------------------------------------------------
+copy_file(
+    name = "switch_a64x_traps",
+    src = "//kernel/switch:include/switch/a64x_traps.h",
+    out = "switch/a64x_traps.h",
+)
+
+host_test(
+    name = "xnu_a64x_traps_test",
+    srcs = [
+        "switch/a64x_traps.h",
+        "xnu_a64x_traps_test.cpp",
+    ],
+    data = ["//kernel/switch:translate/a64x_xnu.c"],
+    includes = ["."],
+)
+
+# --- kernel/switch/diag/deployed.h ----------------------------------------------------------------------------------------
+copy_file(
+    name = "switch_diag_deployed",
+    src = "//kernel/switch:diag/deployed.h",
+    out = "diag/deployed.h",
+)
+
+host_test(
+    name = "xnu_diag_deployed_test",
+    srcs = [
+        "diag/deployed.h",
+        "xnu_diag_deployed_test.cpp",
+    ],
+    includes = ["."],
+)
+
+# --- kernel/switch/sched/callouts.h ---------------------------------------------------------------------------------------
+copy_file(
+    name = "switch_sched_callouts",
+    src = "//kernel/switch:sched/callouts.h",
+    out = "sched/callouts.h",
+)
+
+host_test(
+    name = "xnu_sched_callouts_test",
+    srcs = [
+        "sched/callouts.h",
+        "xnu_sched_callouts_test.cpp",
+    ],
+    data = [
+        "//kernel/xnu-10063.141.1/iokit:Kernel/IOTimerEventSource.cpp",
+        "//kernel/xnu-10063.141.1/osfmk:kern/thread_call.c",
+        "//kernel/xnu-12377.121.6/iokit:Kernel/IOTimerEventSource.cpp",
+        "//kernel/xnu-12377.121.6/osfmk:kern/thread_call.c",
+    ],
+    includes = ["."],
+)
+
+# --- kernel/switch/sched/limit_shadow.h -----------------------------------------------------------------------------------
+copy_file(
+    name = "switch_sched_limit_shadow",
+    src = "//kernel/switch:sched/limit_shadow.h",
+    out = "sched/limit_shadow.h",
+)
+
+host_test(
+    name = "xnu_sched_limit_shadow_test",
+    srcs = [
+        "sched/limit_shadow.h",
+        "xnu_sched_limit_shadow_test.cpp",
+    ],
+    data = [
+        "//kernel/switch:include/switch/sched.h",
+        "//kernel/xnu-10063.141.1/osfmk:kern/thread.c",
+        "//kernel/xnu-12377.121.6/osfmk:kern/thread.c",
+    ],
+    includes = ["."],
+)
+
 # --- kernel/switch/recorder/recorder.h ------------------------------------------------------------------------------------
 copy_file(
     name = "switch_recorder",
@@ -455,6 +634,26 @@ host_test(
     srcs = [
         "recorder/recorder.h",
         "xnu_recorder_test.cpp",
+    ],
+    includes = ["."],
+)
+
+# --- kernel/switch/include/switch/focal.h ---------------------------------------------------------------------------------
+copy_file(
+    name = "switch_focal",
+    src = "//kernel/switch:include/switch/focal.h",
+    out = "switch/focal.h",
+)
+
+host_test(
+    name = "xnu_focal_test",
+    srcs = [
+        "switch/focal.h",
+        "xnu_focal_test.cpp",
+    ],
+    data = [
+        "//kernel/switch:diag/exit.c",
+        "//kernel/switch:sched/stats.c",
     ],
     includes = ["."],
 )
@@ -701,6 +900,10 @@ host_test(
             "switch_ui_scale_sites_24B119.h",
             "vm_unix.c",
         ]
+    ] + [
+        "//ipsw:pins.bzl",
+        "//kernel/xnu-10063.141.1/bsd:kern/kern_exec.c",
+        "//kernel/xnu-12377.121.6/bsd:kern/kern_exec.c",
     ],
     includes = ["."],
 )
@@ -864,6 +1067,52 @@ host_test(
         "switch_pmap_test.cpp",
     ],
     includes = ["."],
+)
+
+copy_file(
+    name = "switch_vm_protect",
+    src = "//kernel/switch:include/switch/vm_protect.h",
+    out = "switch/vm_protect.h",
+)
+
+host_test(
+    name = "switch_vm_protect_test",
+    srcs = [
+        "switch/vm_protect.h",
+        "switch_vm_protect_test.cpp",
+    ],
+    includes = ["."],
+)
+
+copy_file(
+    name = "switch_vm_lazy_cow",
+    src = "//kernel/switch:include/switch/vm_lazy_cow.h",
+    out = "switch/vm_lazy_cow.h",
+)
+
+host_test(
+    name = "switch_vm_lazy_cow_test",
+    srcs = [
+        "switch/vm_lazy_cow.h",
+        "switch_vm_lazy_cow_test.cpp",
+    ],
+    data = [
+        "//kernel/xnu-10063.141.1/osfmk:vm/vm_fault.c",
+        "//kernel/xnu-10063.141.1/osfmk:vm/vm_map.c",
+        "//kernel/xnu-10063.141.1/osfmk:vm/vm_map_internal.h",
+        "//kernel/xnu-12377.121.6/osfmk:vm/vm_fault.c",
+        "//kernel/xnu-12377.121.6/osfmk:vm/vm_map.c",
+    ],
+    includes = ["."],
+)
+
+host_test(
+    name = "xnu_vm_protect_unnest_source_test",
+    srcs = ["xnu_vm_protect_unnest_source_test.cpp"],
+    data = [
+        "//kernel/xnu-10063.141.1/osfmk:vm/vm_map.c",
+        "//kernel/xnu-12377.121.6/osfmk:vm/vm_map.c",
+    ],
 )
 
 copy_file(
@@ -1057,29 +1306,66 @@ copy_file(
     out = "switch/icon_cache.h",
 )
 
-# One build per XNU, each in its iOS's cache layout: 24B119's salt folders, 21H461's top.
+# One build per XNU, each in its iOS's cache layout: 24B119's salt folders, 21H461's top. Each as a debug kernel builds
+# it (DEVELOPMENT), and 24B119's also as a release kernel does (no restore record).
+ICON_CACHE_BUILDS = [
+    ("12377_121_6", ""),
+    ("10063_141_1", ""),
+    ("12377_121_6", "_release"),
+]
+
+RELEASE_COPTS = [
+    "-UDEVELOPMENT",
+    "-DDEVELOPMENT=0",
+    "-UDEBUG",
+    "-DDEBUG=0",
+]
+
 [
     host_library(
-        name = "icon_cache_" + xnu,
+        name = "icon_cache_" + xnu + suffix,
         srcs = ["//kernel/switch:boot/icon_cache.c"],
         hdrs = ["switch/icon_cache.h"],
-        defines = ["XNU_%s=1" % xnu],
+        copts = RELEASE_COPTS if suffix else [],
+        defines = ["XNU_%s=1" % xnu] + ([] if suffix else ["DEVELOPMENT=1"]),
         includes = ["."],
     )
-    for xnu in ("12377_121_6", "10063_141_1")
+    for xnu, suffix in ICON_CACHE_BUILDS
 ]
 
 [
     host_test(
-        name = "switch_icon_cache_%s_test" % xnu,
+        name = "switch_icon_cache_%s%s_test" % (xnu, suffix),
         srcs = ["switch_icon_cache_test.cpp"],
-        defines = ["XNU_%s=1" % xnu],
-        deps = [":icon_cache_" + xnu],
+        defines = ["XNU_%s=1" % xnu] + (["SWITCH_TEST_RELEASE=1"] if suffix else []),
+        deps = [":icon_cache_" + xnu + suffix],
     )
-    for xnu in ("12377_121_6", "10063_141_1")
+    for xnu, suffix in ICON_CACHE_BUILDS
 ]
 
-# Both kernels' setup runs it once before launchd, with one error line, and reads the record the deploy writes.
+# A daemon going clean above 80% of its inactive limit is warned once per growth, in both trees
+copy_file(
+    name = "switch_memstat_warn_header",
+    src = "//kernel/switch:include/switch/memstat_warn.h",
+    out = "switch/memstat_warn.h",
+)
+
+host_test(
+    name = "xnu_memstat_warn_test",
+    srcs = [
+        "switch/memstat_warn.h",
+        "xnu_memstat_warn_test.cpp",
+    ],
+    data = [
+        "//kernel/xnu-10063.141.1/bsd:kern/kern_memorystatus.c",
+        "//kernel/xnu-10063.141.1/bsd:sys/proc_internal.h",
+        "//kernel/xnu-12377.121.6/bsd:kern/kern_memorystatus.c",
+        "//kernel/xnu-12377.121.6/bsd:sys/proc_internal.h",
+    ],
+    includes = ["."],
+)
+
+# Both kernels' setup runs it once before launchd, with one error line, and reads the record the GPU stager writes.
 host_test(
     name = "xnu_icon_cache_source_test",
     srcs = ["xnu_icon_cache_source_test.cpp"],
@@ -1090,7 +1376,7 @@ host_test(
         "//kernel/xnu-10063.141.1/iokit:Kernel/IOPMrootDomain.cpp",
         "//kernel/xnu-12377.121.6/bsd:kern/kern_exec.c",
         "//kernel/xnu-12377.121.6/iokit:Kernel/IOPMrootDomain.cpp",
-        "//tools/deploy:icon_cache.py",
+        "//drivers/TegraGM20BMetal:stage-tegra-gm20b-metal.py",
     ],
 )
 
@@ -1176,6 +1462,43 @@ copy_file(
     out = "switch/prefetch_quiesce.h",
 )
 
+copy_file(
+    name = "switch_prefetch_naming_hdr",
+    src = "//kernel/switch:vm/prefetch_naming.h",
+    out = "switch/prefetch_naming.h",
+)
+
+copy_file(
+    name = "switch_prefetch_vm_hdr",
+    src = "//kernel/switch:include/switch/prefetch_vm.h",
+    out = "switch/prefetch_vm.h",
+)
+
+host_test(
+    name = "switch_prefetch_record_test",
+    srcs = [
+        "switch/prefetch_list.h",
+        "switch/prefetch_naming.h",
+        "switch/prefetch_pace.h",
+        "switch/prefetch_vm.h",
+        "switch_prefetch_record_test.cpp",
+    ],
+    data = [
+        "//kernel/switch:vm/prefetch.c",
+        "//kernel/switch:vm/prefetch_save.c",
+        "//kernel/switch:vm/prefetch_vm.c",
+        "//kernel/xnu-10063.141.1/bsd:kern/decmpfs.c",
+        "//kernel/xnu-10063.141.1/bsd:vfs/vfs_cluster.c",
+        "//kernel/xnu-10063.141.1/osfmk:vm/vm_page.h",
+        "//kernel/xnu-10063.141.1/osfmk:vm/vm_pageout.c",
+        "//kernel/xnu-12377.121.6/bsd:kern/decmpfs.c",
+        "//kernel/xnu-12377.121.6/bsd:vfs/vfs_cluster.c",
+        "//kernel/xnu-12377.121.6/osfmk:vm/vm_page_internal.h",
+        "//kernel/xnu-12377.121.6/osfmk:vm/vm_pageout.c",
+    ],
+    includes = ["."],
+)
+
 host_test(
     name = "switch_prefetch_test",
     srcs = [
@@ -1188,19 +1511,24 @@ host_test(
         "//kernel/switch:shutdown/shutdown.c",
         "//kernel/switch:vm/prefetch.c",
         "//kernel/switch:vm/prefetch_save.c",
+        "//kernel/switch:vm/prefetch_vnode.c",
         "//kernel/switch:vm/prefetch_vm.c",
         "//kernel/xnu-10063.141.1/bsd:kern/kern_exec.c",
+        "//kernel/xnu-10063.141.1/bsd:kern/kern_shutdown.c",
         "//kernel/xnu-10063.141.1/bsd:vfs/vfs_cluster.c",
         "//kernel/xnu-10063.141.1/osfmk:vm/memory_object.c",
         "//kernel/xnu-10063.141.1/osfmk:vm/vm_fault.c",
+        "//kernel/xnu-10063.141.1/osfmk:vm/vm_object.c",
         "//kernel/xnu-10063.141.1/osfmk:vm/vm_object.h",
         "//kernel/xnu-10063.141.1/osfmk:vm/vm_page.h",
         "//kernel/xnu-10063.141.1/osfmk:vm/vm_pageout.c",
         "//kernel/xnu-10063.141.1/osfmk:vm/vm_resident.c",
         "//kernel/xnu-12377.121.6/bsd:kern/kern_exec.c",
+        "//kernel/xnu-12377.121.6/bsd:kern/kern_shutdown.c",
         "//kernel/xnu-12377.121.6/bsd:vfs/vfs_cluster.c",
         "//kernel/xnu-12377.121.6/osfmk:vm/memory_object.c",
         "//kernel/xnu-12377.121.6/osfmk:vm/vm_fault.c",
+        "//kernel/xnu-12377.121.6/osfmk:vm/vm_object.c",
         "//kernel/xnu-12377.121.6/osfmk:vm/vm_object_xnu.h",
         "//kernel/xnu-12377.121.6/osfmk:vm/vm_page.h",
         "//kernel/xnu-12377.121.6/osfmk:vm/vm_page_internal.h",
@@ -1885,4 +2213,126 @@ host_test(
         ":launchd_policy_tail_27",
     ],
     includes = ["."],
+)
+
+copy_file(
+    name = "switch_pmuv3",
+    src = "//kernel/switch:include/switch/pmuv3.h",
+    out = "switch/pmuv3.h",
+)
+
+host_test(
+    name = "xnu_pmuv3_test",
+    srcs = [
+        "switch/pmuv3.h",
+        "xnu_pmuv3_test.cpp",
+    ],
+    data = [
+        "//drivers/ArmCpu:ArmCpu.cpp",
+        "//drivers/ArmGIC:ArmGIC.cpp",
+        "//kernel/switch:include/switch/pmuv3.h",
+        "//kernel/xnu-10063.141.1/config:MASTER.arm64.bcm2837",
+        "//kernel/xnu-10063.141.1/osfmk:arm64/kpc.c",
+        "//kernel/xnu-10063.141.1/osfmk:arm64/monotonic.h",
+        "//kernel/xnu-10063.141.1/osfmk:arm64/monotonic_arm64.c",
+        "//kernel/xnu-10063.141.1/osfmk:kern/kern_monotonic.c",
+        "//kernel/xnu-10063.141.1/pexpert:pexpert/arm64/BCM2837.h",
+        "//kernel/xnu-10063.141.1/pexpert:pexpert/arm64/board_config.h",
+        "//kernel/xnu-12377.121.6/config:MASTER.arm64.bcm2837",
+        "//kernel/xnu-12377.121.6/osfmk:arm64/cpc_arm64.c",
+        "//kernel/xnu-12377.121.6/osfmk:arm64/cpc_arm64.h",
+        "//kernel/xnu-12377.121.6/osfmk:arm64/kpc.c",
+        "//kernel/xnu-12377.121.6/pexpert:pexpert/arm64/BCM2837.h",
+        "//kernel/xnu-12377.121.6/pexpert:pexpert/arm64/board_config.h",
+    ],
+    defines = [
+        'ARM_CPU_PATH=\\"$(rootpath //drivers/ArmCpu:ArmCpu.cpp)\\"',
+        'ARM_GIC_PATH=\\"$(rootpath //drivers/ArmGIC:ArmGIC.cpp)\\"',
+        'BCM2837_10063_PATH=\\"$(rootpath //kernel/xnu-10063.141.1/pexpert:pexpert/arm64/BCM2837.h)\\"',
+        'BCM2837_12377_PATH=\\"$(rootpath //kernel/xnu-12377.121.6/pexpert:pexpert/arm64/BCM2837.h)\\"',
+        'BOARD_10063_PATH=\\"$(rootpath //kernel/xnu-10063.141.1/pexpert:pexpert/arm64/board_config.h)\\"',
+        'BOARD_12377_PATH=\\"$(rootpath //kernel/xnu-12377.121.6/pexpert:pexpert/arm64/board_config.h)\\"',
+        'CPC_ARM64_C_12377_PATH=\\"$(rootpath //kernel/xnu-12377.121.6/osfmk:arm64/cpc_arm64.c)\\"',
+        'CPC_ARM64_H_12377_PATH=\\"$(rootpath //kernel/xnu-12377.121.6/osfmk:arm64/cpc_arm64.h)\\"',
+        'KERN_MONOTONIC_10063_PATH=\\"$(rootpath //kernel/xnu-10063.141.1/osfmk:kern/kern_monotonic.c)\\"',
+        'KPC_10063_PATH=\\"$(rootpath //kernel/xnu-10063.141.1/osfmk:arm64/kpc.c)\\"',
+        'KPC_12377_PATH=\\"$(rootpath //kernel/xnu-12377.121.6/osfmk:arm64/kpc.c)\\"',
+        'MASTER_10063_PATH=\\"$(rootpath //kernel/xnu-10063.141.1/config:MASTER.arm64.bcm2837)\\"',
+        'MASTER_12377_PATH=\\"$(rootpath //kernel/xnu-12377.121.6/config:MASTER.arm64.bcm2837)\\"',
+        'MONOTONIC_ARM64_10063_PATH=\\"$(rootpath //kernel/xnu-10063.141.1/osfmk:arm64/monotonic_arm64.c)\\"',
+        'MONOTONIC_H_10063_PATH=\\"$(rootpath //kernel/xnu-10063.141.1/osfmk:arm64/monotonic.h)\\"',
+        'PMUV3_HEADER_PATH=\\"$(rootpath //kernel/switch:include/switch/pmuv3.h)\\"',
+    ],
+    includes = ["."],
+)
+
+host_test(
+    name = "switch_fvariant_test",
+    srcs = ["switch_fvariant_test.cpp"],
+    additional_compiler_inputs = [
+        "//kernel/switch:include/switch/fvariant.h",
+        "//kernel/switch:include/switch/fvariant_24B119.h",
+        "//kernel/switch:include/switch/fvariant_types.h",
+    ],
+)
+
+host_test(
+    name = "xnu_fvariant_source_test",
+    srcs = ["xnu_fvariant_source_test.cpp"],
+    data = [
+        "//kernel/switch:objects.bzl",
+        "//kernel/switch:vm/fvariant.c",
+        "//kernel/xnu-10063.141.1/osfmk:vm/vm_shared_region.c",
+        "//kernel/xnu-10063.141.1/osfmk:vm/vm_shared_region_pager.c",
+        "//kernel/xnu-12377.121.6/osfmk:vm/vm_shared_region.c",
+        "//kernel/xnu-12377.121.6/osfmk:vm/vm_shared_region_pager.c",
+        "//kernel/xnu-12377.121.6/osfmk:vm/vm_shared_region_xnu.h",
+    ],
+)
+
+# decmp_reprioritize_<tree>.h: vm_object.c from "void\nvm_decmp_upl_reprioritize(" through its closing brace.
+[
+    genrule(
+        name = "decmp_reprioritize_" + tree,
+        srcs = ["//kernel/xnu-{}/osfmk:vm/vm_object.c".format(version)],
+        outs = ["decmp_reprioritize_{}.h".format(tree)],
+        cmd = """awk '
+            prev == "void" && $$0 ~ /^vm_decmp_upl_reprioritize\\(/ { on = 1; print prev }
+            on { print }
+            on && $$0 == "}" { done = 1; exit }
+            { prev = $$0 }
+            END { if (!done) exit 1 }
+        ' $< > $@""",
+    )
+    for tree, version in [
+        ("10063", "10063.141.1"),
+        ("12377", "12377.121.6"),
+    ]
+]
+
+host_library(
+    name = "decmp_reprio",
+    srcs = [
+        "decmp_reprioritize_10063.h",
+        "decmp_reprioritize_12377.h",
+        "xnu_decmp_reprio_harness.c",
+    ],
+    hdrs = ["xnu_decmp_reprio_harness.h"],
+    includes = ["."],
+)
+
+host_test(
+    name = "xnu_decmp_reprio_test",
+    srcs = ["xnu_decmp_reprio_test.cpp"],
+    deps = [":decmp_reprio"],
+)
+
+host_test(
+    name = "xnu_unnest_source_test",
+    srcs = ["xnu_unnest_source_test.cpp"],
+    data = [
+        "//kernel/switch:diag/unnest.c",
+        "//kernel/xnu-10063.141.1/osfmk:arm/pmap/pmap.c",
+        "//kernel/xnu-12377.121.6/osfmk:arm/pmap/pmap.c",
+    ],
 )

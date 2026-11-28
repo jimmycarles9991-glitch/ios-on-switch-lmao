@@ -187,6 +187,19 @@ def _set_uuids(image: Path, partition_bytes: int, spec: dict, log: host.Log) -> 
                 len(patched), ', '.join(f'{o}->{n}' for _, o, n in patched)
             )
         )
+        features = {
+            uuid.UUID(want['uuid']): (want.get('rocompat_features', 0), want.get('incompat_features', 0))
+            for want in spec['volumes'].values()
+            if want.get('rocompat_features') or want.get('incompat_features')
+        }
+        if features:
+            flagged = container.set_volume_features(features)
+            log(
+                'compose: volume feature flags set offline in {} superblock copies: {}'.format(
+                    len(flagged),
+                    ', '.join(f'{u}(ro={r:#x},incompat={i:#x})' for _, u, r, i in flagged),
+                )
+            )
         if not ours(spec, container.volumes()):
             raise host.HostError(f'UUID rewrite did not take: {container.volumes()}')
         nx_blocks = int.from_bytes(container.superblocks()[0][40:48], 'little')

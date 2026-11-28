@@ -44,12 +44,18 @@ def profile_tests(name, source, objcxx_source):
         out = name + "/ios_binary",
         tags = ["manual"],
     )
+    native.genrule(
+        name = name + "_stub",
+        outs = [name + "/stub.a"],
+        cmd = ": > $@",
+        tags = ["manual"],
+    )
     metal_plugin(
         name = name + "_plugin",
         srcs = [objcxx_source],
-        compile = source,
+        compile = ":" + name + "_stub",
         tags = ["manual"],
-        translate = source,
+        translate = ":" + name + "_stub",
     )
     tests = {
         "_ios_binary_debug": (_ios_debug_test, "_ios_binary"),

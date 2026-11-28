@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Texture moves run on the submit worker, which gives back an open encode ahead first (private_comp.h; the

@@ -2,6 +2,7 @@ import CoreVideo
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// More RGB10A8_2P_XR10 (550) storage images in one pass than a draw binds: 25, then 40, 64x64 textures over 'b3a8'

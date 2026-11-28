@@ -215,13 +215,17 @@ enum running_timer {
 	RUNNING_TIMER_KPERF,
 #endif /* KPERF */
 	RUNNING_TIMER_PERFCONTROL,
+#if DEVELOPMENT || DEBUG
 	RUNNING_TIMER_SWITCH_KPROF,   /* switch_kprof.c: the kernel sampling profiler (kprof_wanted) */
+#endif
 	RUNNING_TIMER_MAX,
 };
 
+#if DEVELOPMENT || DEBUG
 /* switch_kprof.c: the sample (running timer callback) and the re-arm when a CPU leaves idle (thread_dispatch). */
 void switch_kprof_expire(void *processor, void *unused);
 void switch_kprof_running_setup(processor_t processor, uint64_t now);
+#endif
 
 /*
  * Get the earliest active deadline for this processor.

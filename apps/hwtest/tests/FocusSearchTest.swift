@@ -1,5 +1,7 @@
 import GameController
 import HWTestCore
+import HWTestKit
+import HWTestShared
 import UIKit
 
 /// With a game controller connected, what one focus update costs over a Settings-like list and why it finds no item:

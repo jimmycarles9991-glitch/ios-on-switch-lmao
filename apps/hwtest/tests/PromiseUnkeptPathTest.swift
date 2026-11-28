@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import IOSurface
 import Metal
 import UIKit
@@ -8,11 +10,11 @@ import UIKit
 /// Writer promises given up on since boot, from kern.switch_gpu_promises (debug kernels): each is reported once in a
 /// "writer promise ... was not kept" line, and lastWaitedMs is how long the last one's reader had waited. direct are
 /// the direct presents of promised frames: watched on their promise, handed to the job that kept it, given up.
-struct PromiseTotals {
-    let abandoned: Int, lastWaitedMs: Int
-    let directPromised: Int, directKept: Int, directGivenUp: Int
+public struct PromiseTotals {
+    public let abandoned: Int, lastWaitedMs: Int
+    public let directPromised: Int, directKept: Int, directGivenUp: Int
 
-    static func read() throws -> PromiseTotals {
+    public static func read() throws -> PromiseTotals {
         switch KernelSysctl.string("kern.switch_gpu_promises") {
         case .value(let line):
             var fields: [String: Int] = [:]
@@ -26,26 +28,26 @@ struct PromiseTotals {
                 directGivenUp: fields["direct_given_up"] ?? -1
             )
         case .failed(let error):
-            throw TestFailure(KernelSysctl.unreadable("kern.switch_gpu_promises", error))
+            throw TestFailure(KernelSysctl.unreadable("kern.switch_gpu_promises", error, flag: "--//bazel:stats_gpu"))
         }
     }
 }
 
 /// The maker's cancel of its promise (TegraGM20BJobABI.h method 34), `afterSeconds` from its making or at once through
 /// `cancel()`, whichever comes first, made once; `at` is when it was made (nil before).
-final class PromiseMakerCancel: @unchecked Sendable {
+public final class PromiseMakerCancel: @unchecked Sendable {
     private let lock = NSLock()
     private let maker: GPUConnection, promise: UInt32
     private var made: DispatchTime?
     private var answer = KERN_SUCCESS
 
-    init(_ maker: GPUConnection, promise: UInt32, afterSeconds: Double) {
+    public init(_ maker: GPUConnection, promise: UInt32, afterSeconds: Double) {
         self.maker = maker
         self.promise = promise
         DispatchQueue.global().asyncAfter(deadline: .now() + afterSeconds) { [self] in cancel() }
     }
 
-    func cancel() {
+    public func cancel() {
         lock.lock()
         defer { lock.unlock() }
         guard made == nil else { return }
@@ -54,13 +56,13 @@ final class PromiseMakerCancel: @unchecked Sendable {
         answer = maker.call(PromiseCancelPathTest.writerPromise, words, outputSize: 8).0
     }
 
-    var at: DispatchTime? {
+    public var at: DispatchTime? {
         lock.lock()
         defer { lock.unlock() }
         return made
     }
 
-    var result: kern_return_t {
+    public var result: kern_return_t {
         lock.lock()
         defer { lock.unlock() }
         return answer
@@ -84,16 +86,18 @@ final class PromiseMakerCancel: @unchecked Sendable {
 /// (its park after the start, then PromiseCancelPathTest.goesOnMs for a parked reader to see the raised word); no
 /// reader left for the safety cancel; the frame before shown and read; the copy completed; and the maker's cancel of
 /// the promise the kernel gave up still accepted.
-struct PromiseUnkeptPathTest: GPUPathTest {
-    let id = "gpu.path.promise_unkept"
-    let name = "A promise nobody keeps or arms is given up at the 5 s bound, its readers seeing the frame before"
-    let counters = ["writer_promises", "promise_waits"]
-    static let size = 64
-    static let fill: [UInt8] = [0, 0, 255, 255] // BGRA red: the frame before the promised one
-    static let boundMs = 5000.0, boundLateMs = 50.0, safetySeconds = 8.0
-    static let readerLateMs = boundLateMs + PromiseCancelPathTest.goesOnMs
+public struct PromiseUnkeptPathTest: GPUPathTest {
+    public let id = "gpu.path.promise_unkept"
+    public let name = "A promise nobody keeps or arms is given up at the 5 s bound, its readers seeing the frame before"
+    public let counters = ["writer_promises", "promise_waits"]
+    public static let size = 64
+    public static let fill: [UInt8] = [0, 0, 255, 255] // BGRA red: the frame before the promised one
+    public static let boundMs = 5000.0, boundLateMs = 50.0, safetySeconds = 8.0
+    public static let readerLateMs = boundLateMs + PromiseCancelPathTest.goesOnMs
 
-    func exercise(_ gpu: GPU, _ context: TestContext, _ metrics: inout Metrics) async throws -> [String] {
+    public init() {}
+
+    public func exercise(_ gpu: GPU, _ context: TestContext, _ metrics: inout Metrics) async throws -> [String] {
         let rowBytes = Self.size * 4
         let properties: [IOSurfacePropertyKey: Any] = [
             .width: Self.size, .height: Self.size, .bytesPerElement: 4, .bytesPerRow: rowBytes,
@@ -211,7 +215,7 @@ struct PromiseUnkeptPathTest: GPUPathTest {
     }
 
     /// A reader that went on `ms` after the test began: never before the bound, at most readerLateMs past it
-    static func late(_ reader: String, _ ms: Double) -> [String] {
+    public static func late(_ reader: String, _ ms: Double) -> [String] {
         if ms < boundMs { return [String(format: "the %@ went on %.0f ms in, before the bound", reader, ms)] }
         guard ms > boundMs + readerLateMs else { return [] }
         return [
@@ -223,7 +227,7 @@ struct PromiseUnkeptPathTest: GPUPathTest {
     }
 
     /// What the copy and the CPU lock read once the promise was given up: the frame before, the copy completed
-    static func frameBefore(cpuLock: [UInt8], copy: [UInt8], copyStatus: MTLCommandBufferStatus) -> [String] {
+    public static func frameBefore(cpuLock: [UInt8], copy: [UInt8], copyStatus: MTLCommandBufferStatus) -> [String] {
         var failures: [String] = []
         if cpuLock != fill { failures.append("the CPU lock read \(cpuLock), not the frame before \(fill)") }
         if copyStatus != .completed { failures.append("the copy ended \(copyStatus.rawValue)") }
@@ -231,21 +235,21 @@ struct PromiseUnkeptPathTest: GPUPathTest {
         return failures
     }
 
-    static func ms(_ from: DispatchTime, _ to: DispatchTime) -> Double {
+    public static func ms(_ from: DispatchTime, _ to: DispatchTime) -> Double {
         Double(Int64(to.uptimeNanoseconds) - Int64(from.uptimeNanoseconds)) / 1e6
     }
 
-    static func ms(since start: DispatchTime) -> Double {
+    public static func ms(since start: DispatchTime) -> Double {
         Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e6
     }
 }
 
 /// A read-only CPU lock of the surface on its own thread: when it woke and the first pixel it read.
-final class CpuReader: @unchecked Sendable {
+public final class CpuReader: @unchecked Sendable {
     private let done = DispatchSemaphore(value: 0)
     private var result: (woken: DispatchTime, pixel: [UInt8]) = (DispatchTime.now(), [])
 
-    init(_ surface: IOSurface) {
+    public init(_ surface: IOSurface) {
         DispatchQueue.global().async { [self] in
             surface.lock(options: .readOnly, seed: nil)
             let woken = DispatchTime.now()
@@ -256,7 +260,7 @@ final class CpuReader: @unchecked Sendable {
         }
     }
 
-    func wait() -> (woken: DispatchTime, pixel: [UInt8]) {
+    public func wait() -> (woken: DispatchTime, pixel: [UInt8]) {
         done.wait()
         return result
     }

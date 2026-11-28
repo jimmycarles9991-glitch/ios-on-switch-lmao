@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A pass whose depth and stencil attachments are two textures, a Depth32Float and a Stencil8 (boot 21 pass.ds a=252 b=253:

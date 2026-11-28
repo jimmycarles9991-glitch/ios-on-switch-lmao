@@ -2449,7 +2449,7 @@ static inline void
 switch_wl_line(enum switch_wl_kind kind, struct kqworkloop *kqwl, uint64_t ident, const struct kevent_qos_s *kev,
     thread_t waiter)
 {
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_DIAG_WORKLOOP) && SWITCH_DIAG_WORKLOOP
 	struct switch_wl_event event = {
 		.workloop = kqwl->kqwl_dynamicid,
 		.ident = ident,

@@ -32,13 +32,16 @@ static void stridedBinding(SwitchMetalCommandBuffer *cb, Op op, int stage, NSUIn
                 atIndex:(NSUInteger)index
 {
     SWITCH_API(ApiBind);
-    SwitchMetalBuffer *x = [(id)b isKindOfClass:[SwitchMetalBuffer class]] ? (SwitchMetalBuffer *)b : nil;
+    static const Class bufCls = [SwitchMetalBuffer class];
+    SwitchMetalBuffer *x = gm20bIsClass(b, bufCls) ? (SwitchMetalBuffer *)b : nil;
     if (b && !x)
         return gm20bCallInvalid(_cb, PredCallBufForeign, uint64_t(1) << 8 | index, b.length,
                                 "a buffer not made by this device");
     if (index < 31) {
-        _buf[1][index] = x;
-        _bufVa[1][index] = x ? x->_raw.va + offset : 0;
+        if (x)
+            _bufBound[0] |= 1u << index;
+        else
+            _bufBound[0] &= ~(1u << index);
         _eligibility++;
     }
     stridedBinding(_cb, OpBuffer, 1, index, b, offset, stride);
@@ -47,10 +50,8 @@ static void stridedBinding(SwitchMetalCommandBuffer *cb, Op op, int stage, NSUIn
 - (void)setVertexBufferOffset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index
 {
     SWITCH_API(ApiBind);
-    if (index < 31 && _buf[1][index]) {
-        _bufVa[1][index] = _buf[1][index]->_raw.va + offset;
+    if (index < 31 && (_bufBound[0] & (1u << index)))
         _eligibility++;
-    }
     stridedBinding(_cb, OpBufferOffset, 1, index, nil, offset, stride);
 }
 
@@ -69,10 +70,8 @@ static void stridedBinding(SwitchMetalCommandBuffer *cb, Op op, int stage, NSUIn
                atIndex:(NSUInteger)index
 {
     SWITCH_API(ApiBind);
-    if (index < 31) {
-        _bufVa[1][index] = 0;
-        _buf[1][index] = nil;
-    }
+    if (index < 31)
+        _bufBound[0] &= ~(1u << index);
     Cmd m = cmd(OpBytes, 1, uint16_t(index));
     m.x = strideWord(stride);
     recordBytes(_cb, m, bytes, length);

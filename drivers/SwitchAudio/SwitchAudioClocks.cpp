@@ -1,26 +1,100 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // SwitchAudio: APE power-gating, CAR/PMC clocks and pads, AHUB/ADMA/AGIC setup, and multi-rate switching.
 #include "SwitchAudioDriver.h"
+#include "../TegraSMMU/TegraSMMU.h"
+#include "../TegraSMMU/TegraSMMURamView.h"
+#include <kern/sched_prim.h>
 
 using namespace switch_audio_hw;
 
 namespace {
 constexpr unsigned kApeClocks[] = {kClkIdApe, kClkIdDAudio, kClkIdApb2Ape, kClkIdExtern1, kClkIdI2s0};
+constexpr uint32_t kFastSpinUs = 50u;
+constexpr uint32_t kSleepSliceUs = 250u;
+
+// APE's ADMA through the SMMU (swgroup APE: aper and apew, one ASID field): it reaches the playback and capture rings,
+// held for good, and nothing else. Made once; SC7's tegra_smmu_resume programs it again.
+TegraSMMURamView gApeView;
+constexpr uint32_t kApeClients = 1u << 26 | 1u << 27;
+
+void confineApe(const uint32_t *ringPA)
+{
+    static bool attached;
+    if (attached)
+        return;
+    char line[160] = "no memory for its directories";
+    attached = gApeView.init(TEGRA_SMMU_ASID_APE, TEGRA_SMMU_ASID_APE) &&
+               gApeView.hold(ringPA[SwitchAudioMemoryOutput], kOutBytes) &&
+               gApeView.hold(ringPA[SwitchAudioMemoryInput], kInBytes);
+    if (attached) {
+        gApeView.commit();
+        attached = !gApeView.attachNarrow(TEGRA_SMMU_APE_ASID, TEGRA_SMMU_TRANSLATION_ENABLE_3, kApeClients, line,
+                                          sizeof(line));
+    }
+    if (attached)
+        IOLog("SwitchAudio: APE DMA through the SMMU (ASID %u): it reaches its two rings\n", TEGRA_SMMU_ASID_APE);
+    else
+        IOLog("SwitchAudio: APE DMA not behind the SMMU (%s): it can reach all of RAM below 4 GiB\n", line);
+}
 
 bool waitPmcClear(uint32_t offset, uint32_t mask, uint32_t timeoutUs)
 {
     if ((switch_pmc_read(offset) & mask) == 0u)
         return true;
-    uint64_t deadline = 0;
-    clock_interval_to_deadline(timeoutUs, NSEC_PER_USEC, &deadline);
-    while (mach_absolute_time() < deadline) {
+    uint64_t fastDeadline = 0;
+    const uint32_t fastUs = timeoutUs < kFastSpinUs ? timeoutUs : kFastSpinUs;
+    clock_interval_to_deadline(fastUs, NSEC_PER_USEC, &fastDeadline);
+    while (mach_absolute_time() < fastDeadline) {
         if ((switch_pmc_read(offset) & mask) == 0u)
             return true;
-        IODelay(1);
+    }
+    if ((switch_pmc_read(offset) & mask) == 0u)
+        return true;
+    if (timeoutUs <= kFastSpinUs)
+        return false;
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(timeoutUs - kFastSpinUs, NSEC_PER_USEC, &deadline);
+    while (mach_absolute_time() < deadline) {
+        delay_for_interval(kSleepSliceUs, NSEC_PER_USEC);
+        if ((switch_pmc_read(offset) & mask) == 0u)
+            return true;
     }
     return (switch_pmc_read(offset) & mask) == 0u;
 }
 }  // namespace
+
+namespace switch_audio_ahub {
+bool waitReg(const volatile uint8_t *ahub, uint32_t offset, uint32_t mask, uint32_t value, uint32_t timeoutUs)
+{
+    return SwitchAudio::waitMmioActive(ahub, offset, mask, value, timeoutUs);
+}
+}  // namespace switch_audio_ahub
+
+bool SwitchAudio::waitMmio(const volatile uint8_t *base, uint32_t offset, uint32_t mask, uint32_t value,
+                           uint32_t timeoutUs)
+{
+    const uint32_t fastUs = timeoutUs < kFastSpinUs ? timeoutUs : kFastSpinUs;
+    if (switch_mmio_wait32(base, offset, mask, value, fastUs))
+        return true;
+    if (timeoutUs <= kFastSpinUs)
+        return false;
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(timeoutUs - kFastSpinUs, NSEC_PER_USEC, &deadline);
+    const bool releaseGate = loop && gate && loop->inGate() && !loop->onThread();
+    while (mach_absolute_time() < deadline) {
+        uint64_t next = 0;
+        clock_interval_to_deadline(kSleepSliceUs, NSEC_PER_USEC, &next);
+        if (next > deadline)
+            next = deadline;
+        if (releaseGate)
+            gate->commandSleep(&mmioWait, next, THREAD_UNINT);
+        else
+            delay_for_interval(kSleepSliceUs, NSEC_PER_USEC);
+        if ((switch_mmio_read32(base, offset) & mask) == value)
+            return true;
+    }
+    return (switch_mmio_read32(base, offset) & mask) == value;
+}
 
 // Programs PLLA and PLLA_OUT0 for `clock` in clk-pll.c SDM lock order, leaving them untouched if already locked to it.
 void SwitchAudio::startPlla()
@@ -44,7 +118,29 @@ void SwitchAudio::startPlla()
         switch_car_rmw(PLLA_BASE, PLLA_IDDQ, 0);
         IODelay(5);
         switch_car_rmw(PLLA_BASE, 0, PLL_ENABLE);
-        if (!switch_car_wait(PLLA_BASE, PLL_LOCK, PLL_LOCK, 600)) {
+        bool locked = switch_car_wait(PLLA_BASE, PLL_LOCK, PLL_LOCK, kFastSpinUs);
+        if (!locked) {
+            uint64_t deadline = 0;
+            clock_interval_to_deadline(600u - kFastSpinUs, NSEC_PER_USEC, &deadline);
+            const bool releaseGate = loop && gate && loop->inGate() && !loop->onThread();
+            while (mach_absolute_time() < deadline) {
+                uint64_t next = 0;
+                clock_interval_to_deadline(100u, NSEC_PER_USEC, &next);
+                if (next > deadline)
+                    next = deadline;
+                if (releaseGate)
+                    gate->commandSleep(&mmioWait, next, THREAD_UNINT);
+                else
+                    delay_for_interval(100u, NSEC_PER_USEC);
+                if ((switch_car_read(PLLA_BASE) & PLL_LOCK) == PLL_LOCK) {
+                    locked = true;
+                    break;
+                }
+            }
+            if (!locked)
+                locked = (switch_car_read(PLLA_BASE) & PLL_LOCK) == PLL_LOCK;
+        }
+        if (!locked) {
             panic("SwitchAudio: PLLA did not lock: BASE %#x MISC0 %#x MISC1 %#x MISC2 %#x", switch_car_read(PLLA_BASE),
                   switch_car_read(PLLA_MISC0), switch_car_read(PLLA_MISC1), switch_car_read(PLLA_MISC2));
         }
@@ -112,7 +208,7 @@ void SwitchAudio::tegraAhubAndDma()
     switch_audio_ahub::xbarRouteCapture(ahub, false);
     switch_mmio_write32(adma, GLOBAL_INT_CLEAR, 1);
     switch_mmio_write32(adma, GLOBAL_SOFT_RESET, 1);
-    if (!switch_mmio_wait32(adma, GLOBAL_SOFT_RESET, 1, 0, 10000))
+    if (!waitMmio(adma, GLOBAL_SOFT_RESET, 1, 0, 10000))
         panic("SwitchAudio: ADMA soft reset did not finish");
     switch_mmio_write32(adma, GLOBAL_CMD, 1);
 }
@@ -167,6 +263,7 @@ void SwitchAudio::tegraInit()
             panic("SwitchAudio: ring %u at %#llx is not DMA-able", type, pa);
         ringPA[type] = static_cast<uint32_t>(pa);
     }
+    confineApe(ringPA);
     tegraClocksAndPads();
     tegraAhubAndDma();
     tegraAgic();
@@ -185,7 +282,7 @@ void SwitchAudio::tegraInit()
 void SwitchAudio::softReset(uint32_t reg, const char *what)
 {
     switch_mmio_write32(ahub, reg, 1);
-    if (!switch_mmio_wait32(ahub, reg, 1, 0, 10000))
+    if (!waitMmio(ahub, reg, 1, 0, 10000))
         panic("SwitchAudio: %s soft reset did not finish", what);
 }
 
@@ -197,7 +294,7 @@ void SwitchAudio::i2sSoftReset(uint32_t reg, const char *what)
     for (unsigned i = 0; i < 5; ++i)
         values[i] = switch_mmio_read32(ahub, saved[i]);
     switch_mmio_write32(ahub, reg, 1);
-    if (!switch_mmio_wait32(ahub, reg, 1, 0, 10000)) {
+    if (!waitMmio(ahub, reg, 1, 0, 10000)) {
         panic("SwitchAudio: %s soft reset did not finish (I2S CTRL %#x EN %#x TIMING %#x RX %#x TX %#x; CAR I2S0 "
               "src %#x enb %u rst %u PLLA %#x OUT %#x)",
               what, switch_mmio_read32(ahub, I2S_CTRL), switch_mmio_read32(ahub, I2S_ENABLE),
@@ -213,7 +310,7 @@ void SwitchAudio::i2sSoftReset(uint32_t reg, const char *what)
 void SwitchAudio::stopUnit(uint32_t enable, uint32_t status, const char *what)
 {
     switch_mmio_write32(ahub, enable, 0);
-    if (!switch_mmio_wait32(ahub, status, 1, 0, 10000))
+    if (!waitMmio(ahub, status, 1, 0, 10000))
         panic("SwitchAudio: %s did not stop (status %#x)", what, switch_mmio_read32(ahub, status));
 }
 
@@ -252,15 +349,29 @@ bool SwitchAudio::apePartitionOff()
     if (!switch_pmc_partition_is_on(kPartitionAudId))
         return true;
     tegra_mc_hot_reset(kMcHotResetCtrl1, kMcHotResetApe, true);
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(10000u, NSEC_PER_USEC, &deadline);
     uint32_t settled = 0;
-    for (uint32_t i = 0; i < 1000 && settled < 5; ++i) {
+    uint32_t fastChecks = 0;
+    while (settled < 5) {
         if (!(tegra_smmu_read(kMcHotResetCtrl1) & kMcHotResetApe)) {
             tegra_mc_hot_reset(kMcHotResetCtrl1, kMcHotResetApe, false);
             return false;
         }
-        settled = (tegra_smmu_read(kMcHotResetStatus1) & kMcHotResetApe) ? settled + 1 : 0;
-        if (settled < 5)
+        if (tegra_smmu_read(kMcHotResetStatus1) & kMcHotResetApe) {
+            if (++settled < 5)
+                IODelay(10);
+            continue;
+        }
+        settled = 0;
+        if (mach_absolute_time() >= deadline)
+            break;
+        if (fastChecks < 5) {
+            ++fastChecks;
             IODelay(10);
+        } else {
+            delay_for_interval(kSleepSliceUs, NSEC_PER_USEC);
+        }
     }
     if (settled < 5) {
         tegra_mc_hot_reset(kMcHotResetCtrl1, kMcHotResetApe, false);
@@ -322,7 +433,7 @@ void SwitchAudio::noteClock()
 {
     control->rate = clientRate;
     control->ticks_per_frame_q32 = tegra ? tegraTicksPerFrame(38400000) : (hz << 32) / clientRate;
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
     periodTicksQ16 = static_cast<uint64_t>(kOutPeriodFrames) * control->ticks_per_frame_q32 >> 16;
 #endif
 }
@@ -330,11 +441,16 @@ void SwitchAudio::noteClock()
 IOReturn SwitchAudio::rateGated(OSObject *owner, void *rateArg, void *, void *, void *)
 {
     auto *self = static_cast<SwitchAudio *>(owner);
+    const HwTransitionGuard guard(self);
     const uint32_t rate = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(rateArg));
     if (self->control->state) {
         switch_refusal("audio", "rate-while-running", "%u Hz asked while a stream runs at %u Hz", rate,
                        self->clientRate);
         return kIOReturnBusy;
+    }
+    if (self->ahubDraining) {
+        self->ahubDraining = false;
+        self->tegraStop();
     }
     const switch_audio_clock *wantLink = switch_audio_is_44k_family(rate) ? &kClocks[1] : &kClocks[0];
     const bool linkChanged = wantLink != self->clock;

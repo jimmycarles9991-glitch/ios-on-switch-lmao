@@ -55,13 +55,23 @@ void CommandBuffer::useStorage(uint64_t va, uint64_t bytes, bool write, bool hos
 void CommandBuffer::nameHeaps(std::unique_lock<gm20b::Mutex> &l)
 {
     Device &d = *dev_;
-    for (const HeapMembers *heap : heaps_) {
+    for (const HeapUse &entry : heaps_) {
+        const HeapMembers *heap = entry.heap;
+        const bool write = entry.write;
+        const uint32_t access = write ? uint32_t(TegraGM20BSurfaceWrite) : uint32_t(TegraGM20BSurfaceRead);
         const uint32_t written = heap->hostVisible() ? uint32_t(TegraGM20BSurfaceHostWritten) : 0u;
+        if (write && heap->hostVisible())
+            externalWrites_ = true;
         const auto name = [&](const Bo &bo) {
-            if (bo.handle && !d.member(bo)) {
-                SWITCH_METAL_ENCODE_COUNT(UseAdds);
-                surfaces_.addAccess(bo.handle, TegraGM20BSurfaceRead | written);
+            if (!bo.handle)
+                return;
+            if (d.member(bo)) {
+                if (write || heap->hostVisible())
+                    useMember(bo.va, bo.bytes, write, heap->hostVisible());
+                return;
             }
+            SWITCH_METAL_ENCODE_COUNT(UseAdds);
+            surfaces_.addAccess(bo.handle, access | written);
         };
         if (heap->arena() < d.arenas_.size()) {
             d.waitArena(l, heap->arena());
@@ -76,9 +86,14 @@ void CommandBuffer::nameHeaps(std::unique_lock<gm20b::Mutex> &l)
         }
         heap->each([&](const HeapMember &m) {
             SWITCH_METAL_ENCODE_COUNT(UseAdds);
-            if (!d.member(m.va, m.bytes))
-                surfaces_.addAddress(m.va, m.bytes, false,
-                                     (m.hostVisible && !m.gpuVolatile ? uint32_t(TegraGM20BSurfaceHostWritten) : 0u) |
+            const bool cachedHost = m.hostVisible && !m.gpuVolatile;
+            if (write) {
+                externalWrites_ |= cachedHost;
+                volatileWrites_ |= m.hostVisible && m.gpuVolatile;
+            }
+            if (!useMember(m.va, m.bytes, write, cachedHost))
+                surfaces_.addAddress(m.va, m.bytes, write,
+                                     (cachedHost ? uint32_t(TegraGM20BSurfaceHostWritten) : 0u) |
                                          (m.bytes <= UINT32_MAX ? uint32_t(TegraGM20BSurfaceRange) : 0u));
         });
     }
@@ -114,10 +129,8 @@ void CommandBuffer::requestKindSwitch()
     }
 }
 
-void CommandBuffer::noteArenaKind(const ArenaStorage *arena)
+void CommandBuffer::noteArenaKindSlow(const ArenaStorage *arena)
 {
-    if (!arena || !arena->multiKindGen)
-        return;
     const uint64_t gen = arena->multiKindGen->load(std::memory_order_acquire);
     if (!gen)
         return;
@@ -159,17 +172,27 @@ void CommandBuffer::use(const Buffer &buffer, bool write, bool noted)
         if (inRender_)
             passBufferWrites_ = true;
     }
-    noteArenaKind(buffer.span.storage);
-    if (named_.named(&buffer, buffer.va, buffer.length, buffer.import, write))
+    if (named_.named(&buffer, buffer.va, buffer.length, buffer.import, write)) {
+        noteArenaKind(buffer.span.storage);
         return;
+    }
+    noteArenaKind(buffer.span.storage);
     SWITCH_METAL_ENCODE_SPAN(Use);
     const bool cachedHost = buffer.hostVisible && !buffer.gpuVolatile;
+    bool hostWritten = cachedHost;
+    if (cachedHost && !buffer.import && buffer.span.valid()) {
+        const uint64_t dirty = __atomic_load_n(&buffer.cpuDirtyGen, __ATOMIC_ACQUIRE);
+        const uint64_t seen = __atomic_load_n(&buffer.cpuSeenGen, __ATOMIC_ACQUIRE);
+        hostWritten = dirty != seen;
+        if (hostWritten)
+            dirtyBuffers_.push_back({&buffer, dirty});
+    }
     externalWrites_ |= write && cachedHost;
     volatileWrites_ |= write && buffer.hostVisible && buffer.gpuVolatile;
     const bool ranged = dev_->k_.exactJobs() && buffer.length && buffer.length <= UINT32_MAX;
     if (!ranged || !importContains(buffer.import, buffer.va, buffer.length))
         use(buffer.import, write);
-    useStorage(buffer.va, buffer.length, write, cachedHost, buffer.span.storage);
+    useStorage(buffer.va, buffer.length, write, hostWritten, buffer.span.storage);
 }
 
 void CommandBuffer::use(const Texture &texture, bool write)
@@ -178,13 +201,18 @@ void CommandBuffer::use(const Texture &texture, bool write)
     const auto range = texture.storageRange();
     if (write) {
         publication_.wrote(range.hostVisible || (texture.import && !texture.import->id) || texture.callerPages);
-        zcullPlanes_.wrote(range.va ? range.va : texture.va, range.bytes ? range.bytes : 1);
+        if (!namingResources_)
+            zcullPlanes_.wrote(range.va ? range.va : texture.va, range.bytes ? range.bytes : 1);
+        if (range.va || texture.va)
+            textureWrites_.note(range.va ? range.va : texture.va, range.bytes ? range.bytes : 1);
+    }
+    if (named_.named(&texture, texture.va, range.bytes, texture.import, write)) {
+        noteArenaKind(range.arena);
+        return;
     }
     noteArenaKind(range.arena);
-    if (named_.named(&texture, texture.va, range.bytes, texture.import, write))
-        return;
     SWITCH_METAL_ENCODE_SPAN(Use);
-    const Texture *view = write ? &texture : readTexture(&texture);
+    const Texture *view = write ? writeTexture(&texture) : readTexture(&texture);
     const auto storage = view->storageRange();
     const bool ranged = dev_->k_.exactJobs() && storage.bytes && storage.bytes <= UINT32_MAX;
     if (!ranged || !importContains(view->import, storage.va, storage.bytes))
@@ -193,13 +221,8 @@ void CommandBuffer::use(const Texture &texture, bool write)
     const bool gpuVolatile = storage.gpuVolatile && !(view->import && !view->import->id);
     const bool cachedHost = hostVisible && !gpuVolatile;
     // a write into a copied no-copy texture goes on to its caller's pages (TegraGM20BMetalEncodeBlit.mm copyToCallerPages)
-    externalWrites_ |= (cachedHost || texture.callerPages) && write;
+    externalWrites_ |= (cachedHost || texture.callerPages || view->nativeGeneration != 0) && write;
     volatileWrites_ |= write && hostVisible && gpuVolatile && !texture.callerPages;
-#if SWITCH_METAL_DIAGNOSTICS
-    if (write && dev_->glassMemLive_)
-        dev_->glassMem->wrote(storage.va ? storage.va : view->va, dev_->commitCount_,
-                              dev_->stats.memEvents.load(std::memory_order_relaxed));
-#endif
     if (view->va)
         useStorage(storage.bytes ? storage.va : view->va, storage.bytes ? storage.bytes : 1, write, cachedHost,
                    storage.arena);

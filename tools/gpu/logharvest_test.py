@@ -67,6 +67,12 @@ def parts(boot: str, process: str, name: str, label: str, key: str) -> list[dict
     ]
 
 
+def tier1(boot: str, process: str, name: str, fast: str = '0000000000000001', pieces: int = 2, card: int = 1) -> dict:
+    return record(
+        boot, process, f'SwitchMetal: tier-1 pack state {fast} {name} in {process}: {pieces} pieces, card={card}'
+    )
+
+
 def interleaved(first: list[dict], second: list[dict]) -> list[dict]:
     out = []
     for i in range(max(len(first), len(second))):
@@ -209,6 +215,9 @@ class LogHarvestTest(unittest.TestCase):
         added, report = logharvest.harvest(boots, CORPUS.splitlines(), None, Path('/nonexistent'))
         self.assertEqual(added, [])
         self.assertEqual(report.left['backboardd', 'refused on the device'], 1)
+        added, report = logharvest.harvest(boots, CORPUS.splitlines(), None, Path('/nonexistent'), refused=True)
+        self.assertEqual([logharvest.make_pack.state_key(line) for line in added], [CA])
+        self.assertNotIn(('backboardd', 'refused on the device'), report.left)
 
     def test_a_harvested_ca_line_gives_caspec_the_fields_of_its_untagged_line(self):
         added, _ = self.run_tool(boot_records())
@@ -308,12 +317,81 @@ class LogHarvestTest(unittest.TestCase):
         boot = logharvest.read_boots(logged)[BOOT]
         self.assertEqual(logharvest.whole(boot, 'backboardd', '000000000000000a'), (CA_LABEL, key))
 
+    def test_a_miss_line_takes_its_key_from_its_parts_under_its_own_hash(self):
+        miss = f'SwitchMetal: backboardd: a render state the pack lacks 0000000000000015 ({CA_LABEL})'
+        records = [
+            record(BOOT, 'x', 'OS version: 24B119'),
+            record(BOOT, 'backboardd', miss),
+            *parts(BOOT, 'backboardd', '0000000000000015', CA_LABEL, CA),
+        ]
+        new, _ = logharvest.harvest(logharvest.read_boots(records), CORPUS.splitlines(), None, Path('/nonexistent'))
+        self.assertEqual([logharvest.make_pack.state_key(line) for line in new], [CA])
+
+    def test_a_miss_whose_parts_are_not_all_there_gives_no_line(self):
+        miss = f'SwitchMetal: backboardd: a render state the pack lacks 0000000000000016 ({CA_LABEL})'
+        long_key = CA + ' ' * 0 + ''.join(f' | x{i}' for i in range(300))
+        cut = parts(BOOT, 'backboardd', '0000000000000016', CA_LABEL, long_key)
+        self.assertGreater(len(cut), 1)
+        records = [record(BOOT, 'x', 'OS version: 24B119'), record(BOOT, 'backboardd', miss), *cut[:-1]]
+        new, report = logharvest.harvest(
+            logharvest.read_boots(records), CORPUS.splitlines(), None, Path('/nonexistent')
+        )
+        self.assertEqual(new, [])
+        self.assertEqual(report.left['backboardd', 'a missed state has no whole harvest parts'], 1)
+        old = f'{miss}: {CA}'
+        new, _ = logharvest.harvest(
+            logharvest.read_boots([record(BOOT, 'x', 'OS version: 24B119'), record(BOOT, 'backboardd', old)]),
+            CORPUS.splitlines(),
+            None,
+            Path('/nonexistent'),
+        )
+        self.assertEqual(new, [], 'a line that carries its key is no miss line: its key may be cut')
+
     def test_left_out_states_are_counted_by_reason(self):
         boots = logharvest.read_boots(boot_records())
         _, report = logharvest.harvest(boots, CORPUS.splitlines(), None, Path('/nonexistent'))
         self.assertEqual(report.left['SwitchHWTest', 'our own app'], 1)
         self.assertEqual(report.left['cameracaptured', 'refused on the device'], 1)
         self.assertEqual(report.left['backboardd', 'key cut at 400 characters, no whole parts'], 1)
+
+    def test_a_tier1_pack_state_is_promoted_to_corpus_and_fails_check_until_added(self):
+        records = [
+            record(BOOT, 'x', 'OS version: 24B119'),
+            tier1(BOOT, 'backboardd', '0000000000000011', fast='fedcba9876543210', pieces=2, card=3),
+            *parts(BOOT, 'backboardd', '0000000000000011', CA_LABEL, CA),
+            tier1(BOOT, 'WidgetRenderer', '0000000000000012', fast='1111222233334444', pieces=1, card=0),
+            *parts(BOOT, 'WidgetRenderer', '0000000000000012', '-', COLOR),
+            tier1(BOOT, 'SwitchHWTest', '0000000000000013', fast='5555666677778888', pieces=2, card=2),
+            *parts(BOOT, 'SwitchHWTest', '0000000000000013', '-', COLOR.replace('4501', '4509')),
+        ]
+        with tempfile.TemporaryDirectory() as scratch:
+            corpus = Path(scratch) / 'corpus.log'
+            corpus.write_text(CORPUS)
+            ndjson = Path(scratch) / 'boot.ndjson'
+            ndjson.write_text(''.join(json.dumps(r) + '\n' for r in records))
+            check = ['--ndjson', str(ndjson), '--corpus', str(corpus), '--check']
+            self.assertEqual(logharvest.main(check), 1)
+            self.assertEqual(corpus.read_text(), CORPUS)
+            self.assertEqual(logharvest.main(['--ndjson', str(ndjson), '--corpus', str(corpus)]), 0)
+            added = corpus.read_text().splitlines()[2:]
+            self.assertEqual(sorted(logharvest.make_pack.state_key(line) for line in added), sorted([CA, COLOR]))
+            self.assertTrue(all(' os=24B119 ' in line for line in added))
+            self.assertEqual(logharvest.main(check), 0)
+
+    def test_a_tier1_pack_state_without_harvest_parts_fails_check(self):
+        records = [
+            record(BOOT, 'x', 'OS version: 24B119'),
+            tier1(BOOT, 'backboardd', '0000000000000014'),
+        ]
+        with tempfile.TemporaryDirectory() as scratch:
+            corpus = Path(scratch) / 'corpus.log'
+            corpus.write_text(CORPUS)
+            ndjson = Path(scratch) / 'boot.ndjson'
+            ndjson.write_text(''.join(json.dumps(r) + '\n' for r in records))
+            self.assertEqual(logharvest.main(['--ndjson', str(ndjson), '--corpus', str(corpus), '--check']), 1)
+            boots = logharvest.read_boots(records)
+            _, report = logharvest.harvest(boots, CORPUS.splitlines(), None, Path('/nonexistent'))
+            self.assertEqual(report.left['backboardd', 'tier-1 pack state has no whole harvest parts'], 1)
 
 
 IR = '/System/Library/PrivateFrameworks/IconRendering.framework/default.metallib'

@@ -7,10 +7,10 @@ import Metal
 /// the app or the peer ends. The peer exits when its app connection goes, and on 27 launchd starts it for the app's
 /// Mach message no sooner than its throttle interval after the last start: a connection each test opened and closed
 /// made the next test wait that interval out (boot 2: 9.4 s and 9.0 s). Each test drops what it had the peer keep.
-enum TexturePeerLink {
-    static let link = PeerLink<TexturePeerAcceptor> { try await start() }
+public enum TexturePeerLink {
+    public static let link = PeerLink<TexturePeerAcceptor> { try await start() }
 
-    static func connection() async throws -> NSXPCConnection {
+    public static func connection() async throws -> NSXPCConnection {
         guard let connection = try await link.connected().connection else {
             throw TestFailure("the texture peer's connection went")
         }
@@ -18,7 +18,7 @@ enum TexturePeerLink {
     }
 
     /// The judgement every peer test adds: the run's tests share the one peer this process started.
-    static func startedOnce(_ metrics: inout Metrics) async -> (String, Bool) {
+    public static func startedOnce(_ metrics: inout Metrics) async -> (String, Bool) {
         let starts = await link.starts
         metrics.set("peer_starts", starts)
         return ("the texture peer this process started once serves it (\(starts) started)", starts == 1)
@@ -46,32 +46,32 @@ enum TexturePeerLink {
 }
 
 /// The app's anonymous listener's side: the peer connects to it, and its connection is the one the app writes through.
-final class TexturePeerAcceptor: NSObject, NSXPCListenerDelegate, SharedTexturePeerHost, @unchecked Sendable {
-    let accepted = DispatchSemaphore(value: 0)
-    let listener = NSXPCListener.anonymous()
+public final class TexturePeerAcceptor: NSObject, NSXPCListenerDelegate, SharedTexturePeerHost, @unchecked Sendable {
+    public let accepted = DispatchSemaphore(value: 0)
+    public let listener = NSXPCListener.anonymous()
     private let lost: @Sendable (TexturePeerAcceptor) -> Void
     private let lock = NSLock()
     private var held: NSXPCConnection?
 
-    init(lost: @escaping @Sendable (TexturePeerAcceptor) -> Void) {
+    public init(lost: @escaping @Sendable (TexturePeerAcceptor) -> Void) {
         self.lost = lost
         super.init()
         listener.delegate = self
         listener.resume()
     }
 
-    var connection: NSXPCConnection? {
+    public var connection: NSXPCConnection? {
         lock.lock()
         defer { lock.unlock() }
         return held
     }
 
-    func close() {
+    public func close() {
         connection?.invalidate()
         listener.invalidate()
     }
 
-    func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
+    public func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         guard held == nil else { return false }
@@ -99,5 +99,5 @@ final class TexturePeerAcceptor: NSObject, NSXPCListenerDelegate, SharedTextureP
         return true
     }
 
-    func ready(_ pid: Int32) { accepted.signal() }
+    public func ready(_ pid: Int32) { accepted.signal() }
 }

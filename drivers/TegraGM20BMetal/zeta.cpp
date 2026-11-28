@@ -89,6 +89,14 @@ bool DepthStencilDesc::active() const
     return depthCompare != 7 || depthWrite || !stencilNoop(front) || !stencilNoop(back);
 }
 
+bool DepthStencilDesc::writes(bool depth, bool stencil) const
+{
+    const auto faceWrites = [](const StencilFace &s) {
+        return (s.writeMask & 0xff) && (s.fail || s.depthFail || s.pass);
+    };
+    return (depth && depthWrite) || (stencil && (faceWrites(front) || faceWrites(back)));
+}
+
 bool DepthStencilRegs::operator==(const DepthStencilRegs &o) const
 {
     return !memcmp(v, o.v, sizeof v);
@@ -177,8 +185,10 @@ void RenderEncoder::copySeparateZeta(Push &p, uint8_t aspects, bool toAttachment
     if (aspects & kShaderTestStencil)
         cb_->use(*separate_.stencil, !toAttachment);
     cb_->use(zeta, toAttachment);
-    tiledCacheDrain(p, dev_->k_.info());
-    cb_->tiledCacheDirty_ = false;
+    if (cb_->tiledCacheDirty_) {
+        tiledCacheDrain(p, dev_->k_.info());
+        cb_->tiledCacheDirty_ = false;
+    }
     p.m(WAIT_FOR_IDLE, 0);
     if (toAttachment)
         p.m(INVALIDATE_SHADER_CACHES, kFlushData | kInvalidateData);

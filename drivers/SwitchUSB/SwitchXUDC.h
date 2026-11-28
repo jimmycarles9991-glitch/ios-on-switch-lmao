@@ -40,6 +40,7 @@
 #include "SwitchXUDCStats.h"
 #include "UsbSmmuSpace.h"
 #include "XudcIova.h"
+#include <IOKit/IOCommandGate.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOFilterInterruptEventSource.h>
 #include <IOKit/IOTimerEventSource.h>
@@ -150,6 +151,12 @@ class SwitchXUDC : public IOUSBDeviceController {
     IOWorkLoop *loop;
     IOFilterInterruptEventSource *interrupt;
     IOTimerEventSource *busReturn;  // forceReEnumeration's off time
+    IOCommandGate *settleGate;
+    IOTimerEventSource *settleTimer;
+    uint64_t settleDeadline;
+    uint32_t settlingDcis, settleWaiters, settleBlockedWaiters;
+    uint8_t settleEvent;
+    bool settleTimerArmed, settleDeferredDrain;
     Endpoint endpoints[kMaxDci];
     _IOUSBDeviceIORequestTag *ep0Queue[kEp0Depth];
     uint32_t ep0Head, ep0Count;
@@ -165,7 +172,7 @@ class SwitchXUDC : public IOUSBDeviceController {
     Piece *scratchPieces;
     Run *scratchIova;
     UsbSmmuSpace smmu;
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
     UsbSmmuSpace::Cost windowLogged;  // the window's cost at the last stats line
 #endif
     uint8_t secondLogged, eventsLogged;  // one-shot lines: the first second event; events for no request, errors
@@ -192,6 +199,42 @@ class SwitchXUDC : public IOUSBDeviceController {
     static bool interruptFilter(OSObject *owner, IOFilterInterruptEventSource *sender);
     static void interruptOccurred(OSObject *owner, IOInterruptEventSource *sender, int count);
     static void busReturned(OSObject *owner, IOTimerEventSource *sender);
+    static void settleTimerFired(OSObject *owner, IOTimerEventSource *sender);
+    static void waitForSettle(void *context, uint32_t mask, uint64_t remainingNs);
+    void sleepForSettle(uint32_t mask, uint64_t remainingNs);
+    void waitForSettling(uint32_t mask);
+
+    class DciOp {
+        SwitchXUDC *self;
+        uint32_t mask;
+
+    public:
+        DciOp(SwitchXUDC *owner, uint32_t bits) : self(owner), mask(bits)
+        {
+            self->waitForSettling(mask);
+            self->settlingDcis |= mask;
+        }
+
+        ~DciOp()
+        {
+            end();
+        }
+
+        void end()
+        {
+            if (!mask)
+                return;
+            self->settlingDcis &= ~mask;
+            mask = 0;
+            if (self->settleBlockedWaiters && self->settleGate)
+                self->settleGate->commandWakeup(&self->settleWaiters, false);
+            if (self->settleDeferredDrain && !self->settlingDcis) {
+                self->settleDeferredDrain = false;
+                self->drainSoon();
+            }
+        }
+    };
+
     bool endReturn();
     void portEvent();
     void setupEvent(const Event &e);
@@ -257,7 +300,7 @@ class SwitchXUDC : public IOUSBDeviceController {
     void setBus(bool on);
 
     // The stats line (SwitchXUDCStats.cpp): DEVELOPMENT and DEBUG kernels only.
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
     void statsBegin();
     void drained(uint64_t entered);
     void logStats(uint64_t now);

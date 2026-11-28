@@ -3,11 +3,14 @@
 // record is drawn as the pack holds it): the generator's tests scan the built pack (test/directcheck_test.py) and the
 // packs host tests write with this.
 #pragma once
+#include "guest_bases.h"
 #include "dynamic_push.h"
 #include "pack.h"
+#include "program_facts.h"
 #include "program_pages.h"
 #include "program_stores.h"
 #include "set_entries.h"
+#include "slm.h"
 #include "storage.h"
 
 #include <cstdio>
@@ -25,14 +28,18 @@ inline const char *packRecordRefusal(const Pack &pack, const PackPipeline &pp)
         return "its dynamic push words are not this runtime's";
     if (!usableStorageMetadata(pp, pack.section<uint32_t>(PackBlob) + pp.blob, pp.blobDwords, pack.far(pp)))
         return "its storage metadata is not this runtime's";
+    if (!usableGuestBases(pp))
+        return "its buffers' Metal address words are not this runtime's";
     return nullptr;
 }
 
 // Each way `pack` is not what the runtime reads: its pipelines out of keyHash order within a tier, a record's far block or
 // a program's far table past the blob section, a record of more entries than any holds, a record refused
 // (packRecordRefusal), a fast key out of order within its tier or not naming the first of its state's records and every
-// one of them, or naming another tier's; a program whose facts are not its code's, or one a launch-set record draws
-// outside tier 0's part of the heap; a stride twin past the pipelines or of a later tier than its record
+// one of them, or naming another tier's; a program whose facts are not its code's and its header's, one in tier 0's
+// part of the heap above the tier-0 local memory ceiling, or one a launch-set record draws outside it; a variant whose
+// set reads are not its code's; a segment outside the segments' words block; a stride twin past the pipelines or of a
+// later tier than its record
 inline std::vector<std::string> packScan(const Pack &pack)
 {
     std::vector<std::string> out;
@@ -75,6 +82,16 @@ inline std::vector<std::string> packScan(const Pack &pack)
             end > kCodeInSlot && programWritesMemory(heap + program.heapOffset + kCodeInSlot, end - kCodeInSlot);
         if (writes != bool(program.facts & kProgramWritesMemory))
             say("program", index, "its facts are not its code's");
+        if (uint64_t(program.program) + kProgramHeaderBytes > h.section[PackHeap].bytes) {
+            say("program", index, "its header past the heap section");
+            return;
+        }
+        const uint8_t *header = heap + program.program;
+        if ((program.facts & kHeaderFacts) != headerFacts(header))
+            say("program", index, "its facts are not its header's");
+        if (uint64_t(program.heapOffset) + program.bytes + kProgramPrefetchBytes <= h.tier0[PackHeap] &&
+            slmPerWarpOfHeader(header) > h.tier0SlmPerWarp)
+            say("program", index, "in tier 0 above the tier-0 local memory ceiling");
     };
     for (uint32_t i = 0; i < h.pipelines; i++) {
         if (i && i != launchRecords && p[i].keyHash < p[i - 1].keyHash)
@@ -101,8 +118,15 @@ inline std::vector<std::string> packScan(const Pack &pack)
         for (uint32_t stage = 0; stage < 2; stage++) {
             uint32_t count = 0;
             const PackVariant *variants = pack.variants(p[i], stage, count);
-            for (uint32_t v = 0; v < count; v++)
+            for (uint32_t v = 0; v < count; v++) {
                 drawn(variants[v].program, launch);
+                const PackProgram *program =
+                    variants[v].program < h.programs ? &programs[variants[v].program] : nullptr;
+                if (program && uint64_t(program->program) + kProgramHeaderBytes <= h.section[PackHeap].bytes &&
+                    variants[v].memoryEntries !=
+                        placedSetReads(heap + program->program, *program, SetEntries(p[i], pack.far(p[i]))))
+                    say("pipeline", p[i].keyHash, "a variant's set reads not its code's");
+            }
         }
         if (p[i].strideTwin && (p[i].strideTwin > h.pipelines || p[i].strideTwin - 1 == i ||
                                 (launch && p[i].strideTwin - 1 >= launchRecords)))
@@ -139,6 +163,63 @@ inline std::vector<std::string> packScan(const Pack &pack)
             one &= p[k.first + r].keyHash == state;
         if (!whole || !one)
             say("fast key", k.fast, "not its state's records alone and all of them");
+    }
+    if (const uint64_t segBytes = pack.bytes(PackSegments)) {
+        if (segBytes < sizeof(PackSegmentTable)) {
+            say("segments", segBytes, "shorter than table header");
+        } else {
+            PackSegmentTable tbl = {};
+            memcpy(&tbl, pack.section<uint8_t>(PackSegments), sizeof tbl);
+            const uint64_t need = sizeof(PackSegmentTable) +
+                                  uint64_t(tbl.pipelineCount) * (sizeof(PackSegment) + sizeof(uint32_t)) +
+                                  uint64_t(tbl.variantComboCount) * sizeof(PackSegment);
+            if (need != segBytes || tbl.pipelineCount != launchRecords) {
+                say("segments", tbl.pipelineCount, "table size or count does not match tier 0");
+            } else {
+                const uint64_t tier0Heap = h.tier0[PackHeap];
+                const uint64_t wordsEnd = uint64_t(tbl.wordsOffset) + tbl.wordsBytes;
+                if (wordsEnd > tier0Heap)
+                    say("segments", tbl.wordsOffset, "their words block outside tier-0 heap");
+                const auto checkSeg = [&](const PackSegment &seg, uint64_t id) {
+                    if (!seg.words)
+                        return;
+                    if ((seg.heapOffset & 15u) != 0 || uint64_t(seg.heapOffset) > tier0Heap ||
+                        uint64_t(seg.words) * 4 > tier0Heap - seg.heapOffset)
+                        say("segment", id, "unaligned or outside tier-0 heap");
+                    else if (seg.heapOffset < tbl.wordsOffset || seg.heapOffset + uint64_t(seg.words) * 4 > wordsEnd)
+                        say("segment", id, "outside the segments' words block");
+                };
+                uint64_t maxSlm = 0;
+                const auto noteSlm = [&](uint32_t progIdx) {
+                    if (progIdx < h.programs && uint64_t(programs[progIdx].program) + 16 <= h.section[PackHeap].bytes)
+                        maxSlm = std::max(maxSlm, slmPerWarpOfHeader(heap + programs[progIdx].program));
+                };
+                for (uint32_t i = 0; i < tbl.pipelineCount; i++) {
+                    if (const PackSegment *s = pack.pipelineSegment(i))
+                        checkSeg(*s, i);
+                    noteSlm(p[i].vs);
+                    if (pixelStage(p[i]))
+                        noteSlm(p[i].fs);
+                    if (tessellates(p[i])) {
+                        noteSlm(p[i].tessPrograms[0]);
+                        noteSlm(p[i].tessPrograms[1]);
+                    }
+                    uint32_t c0 = 0, c1 = 0;
+                    const PackVariant *v0 = pack.variants(p[i], 0, c0);
+                    const PackVariant *v1 = pack.variants(p[i], 1, c1);
+                    for (uint32_t k = 0; k < c0; k++)
+                        noteSlm(v0[k].program);
+                    for (uint32_t k = 0; k < c1; k++)
+                        noteSlm(v1[k].program);
+                    const uint32_t combos = (c0 || c1) ? (c0 + 1u) * (c1 + 1u) - 1u : 0u;
+                    for (uint32_t slot = 0; slot < combos; slot++)
+                        if (const PackSegment *vs = pack.variantSegment(i, slot))
+                            checkSeg(*vs, (uint64_t(i) << 32) | slot);
+                }
+                if (uint64_t(h.tier0SlmPerWarp) < maxSlm)
+                    say("slm", h.tier0SlmPerWarp, "below tier-0 graphics programs' requirement");
+            }
+        }
     }
     return out;
 }

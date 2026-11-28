@@ -21,8 +21,9 @@ int switch_user_turnstile_sleep(lck_mtx_t *mtx, struct switch_user_turnstile *ut
         inheritor = THREAD_NULL;
     }
 
-    /* Acquire interlock before dropping mtx so retarget/wakeup cannot overtake waitq registration. */
+    /* Acquire interlock and publish waiter presence before dropping mtx so retarget/wakeup cannot overtake waitq registration. */
     lck_spin_lock(&user_turnstile_lock);
+    __atomic_store_n(&ut->waiters, ut->waiters + 1u, __ATOMIC_RELAXED);
     lck_mtx_unlock(mtx);
 
     /* Leave block_hint at kThreadWaitNone: XNU's kdp_sleep_with_inheritor_find_owner asserts
@@ -41,6 +42,7 @@ int switch_user_turnstile_sleep(lck_mtx_t *mtx, struct switch_user_turnstile *ut
 
     lck_spin_lock(&user_turnstile_lock);
     turnstile_complete((uintptr_t)ut, &ut->turnstile, NULL, TURNSTILE_EPOCH_USER);
+    __atomic_store_n(&ut->waiters, ut->waiters - 1u, __ATOMIC_RELEASE);
     lck_spin_unlock(&user_turnstile_lock);
 
     turnstile_cleanup();
@@ -51,6 +53,10 @@ int switch_user_turnstile_sleep(lck_mtx_t *mtx, struct switch_user_turnstile *ut
 void switch_user_turnstile_retarget(struct switch_user_turnstile *ut, thread_t inheritor)
 {
     struct turnstile *ts;
+
+    if (__atomic_load_n(&ut->waiters, __ATOMIC_ACQUIRE) == 0u) {
+        return;
+    }
 
     lck_spin_lock(&user_turnstile_lock);
     if (ut->turnstile == TURNSTILE_NULL) {
@@ -73,6 +79,10 @@ void switch_user_turnstile_retarget(struct switch_user_turnstile *ut, thread_t i
 void switch_user_turnstile_wakeup_all(struct switch_user_turnstile *ut, int result)
 {
     struct turnstile *ts;
+
+    if (__atomic_load_n(&ut->waiters, __ATOMIC_ACQUIRE) == 0u) {
+        return;
+    }
 
     lck_spin_lock(&user_turnstile_lock);
     if (ut->turnstile == TURNSTILE_NULL) {

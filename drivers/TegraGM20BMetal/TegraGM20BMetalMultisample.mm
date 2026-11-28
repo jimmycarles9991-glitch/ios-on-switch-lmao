@@ -19,11 +19,5 @@ bool passSamplePositions(MTLRenderPassDescriptor *pass, NSUInteger count, uint32
     };
     if (!gm20b::readSamplePositions(uint32_t(std::min<NSUInteger>(count, 9)), samples, read, out))
         return false;
-    static std::atomic<bool> said{false};
-    if (!said.exchange(true))
-        os_log(
-            gm20bLog(),
-            "SwitchMetal: a pass's own sample positions on (first: %u of %u samples, x | y << 4 %02x %02x %02x %02x)",
-            unsigned(out.count), samples, out.xy[0], out.xy[1], out.xy[2], out.xy[3]);
     return true;
 }

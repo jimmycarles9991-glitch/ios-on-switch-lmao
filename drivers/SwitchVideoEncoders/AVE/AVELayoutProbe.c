@@ -53,15 +53,16 @@ static bool put(H264EncConfig *c, const H264EncSurface *s, uint8_t *va, CVPixelB
 }
 
 // One IDR from `input` (a buffer laid out as c->input_layout) into e->avcc: its size, or the negative failure.
+// Called OFF e->lock while e->encoding is held.
 static int32_t code(Encoder *e, const H264EncConfig *c, const H264EncSurface *s, uint32_t input, bool vic,
-                    CVPixelBufferRef image)
+                    CVPixelBufferRef image, uint32_t pictureIndex)
 {
     H264EncLayout layout = e->layout;
     layout.input = *s;
     H264EncHandles handles = e->handles;
     handles.input = input;
-    const H264EncPicture idr = {.type = H264ENC_IDR, .qp = kProbeQP, .picture_index = e->pictureIndex++};
-    TegraNVENCSubmit *submit = malloc(sizeof(*submit));
+    const H264EncPicture idr = {.type = H264ENC_IDR, .qp = kProbeQP, .picture_index = pictureIndex};
+    TegraNVENCSubmit *submit = nvenc_submit_buffer(e->client);
     if (!submit)
         return -1;
     h264enc_fill_submit(c, &layout, &idr, &handles, submit);
@@ -77,47 +78,52 @@ static int32_t code(Encoder *e, const H264EncConfig *c, const H264EncSurface *s,
     }
     memset(e->auxVA, 0, sizeof(nvenc_pic_stat_s));
     submit->clean[submit->clean_count++] = (TegraNVENCRange){e->handles.aux, 0, sizeof(nvenc_pic_stat_s), 0};
-    TegraNVENCWait wait = {.timeout_us = 1000000, .invalidate_count = 1};
-    wait.invalidate[0] = (TegraNVENCRange){e->handles.aux, 0, sizeof(nvenc_pic_stat_s), 0};
-    const int submitted = nvenc_submit(e->client, submit, &wait.fence, NULL);
-    free(submit);
+    uint32_t fence = 0;
+    const int submitted = nvenc_submit(e->client, submit, &fence, NULL);
     if (submitted)
         return -2;
-    if (nvenc_wait(e->client, &wait))
+    AVEJobStatus job = {0};
+    if (!ave_wait_job(e, fence, e->handles.aux, e->auxVA, e->handles.bitstream, e->layout.bitstream_bytes, &job))
         return -3;
-    const nvenc_pic_stat_s *stat = (const nvenc_pic_stat_s *)e->auxVA;
-    const uint32_t produced = (stat->total_bit_count + 7) / 8;
-    if (stat->ucode_error_status || !produced || produced > e->layout.bitstream_bytes)
+    const uint32_t produced = (job.total_bit_count + 7) / 8;
+    if (job.ucode_error_status || !produced || produced > e->layout.bitstream_bytes)
         return -4;
-    TegraNVENCWait bits = {.fence = wait.fence, .timeout_us = 1000000, .invalidate_count = 1};
-    bits.invalidate[0] = (TegraNVENCRange){e->handles.bitstream, 0, produced, 0};
-    if (nvenc_wait(e->client, &bits))
-        return -5;
     const size_t size = h264enc_annexb_to_avcc(e->bitstreamVA, produced, e->avcc, e->avccCap);
     return size ? (int32_t)size : -6;
 }
 
 CFDictionaryRef ave_copy_layout_probe(Encoder *e)
 {
+    pthread_mutex_lock(&e->lock);
+    ave_begin_encode(e);
     CVPixelBufferRef image = e->probeSource;
-    if (!e->configured || e->codec != kCMVideoCodecType_H264 || e->config.reorder || !image)
+    if (!e->configured || e->codec != kCMVideoCodecType_H264 || e->config.reorder || !image) {
+        ave_end_encode(e);
+        pthread_mutex_unlock(&e->lock);
         return NULL;
+    }
+    CVPixelBufferRetain(image);
+    const H264EncConfig baseConfig = e->config;
+    const uint32_t features = e->info.features;
+    uint32_t pictureIndex = e->pictureIndex;
+    pthread_mutex_unlock(&e->lock);
+
     CFMutableDictionaryRef result = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks,
                                                               &kCFTypeDictionaryValueCallBacks);
     for (unsigned i = 0; i < sizeof(kCases) / sizeof(kCases[0]); i++) {
         const ProbeCase *k = &kCases[i];
         CFStringRef name = CFStringCreateWithCString(kCFAllocatorDefault, k->name, kCFStringEncodingUTF8);
-        H264EncConfig c = e->config;
+        H264EncConfig c = baseConfig;
         c.input_layout = k->layout;
         H264EncSurface s;
         h264enc_surface(k->layout, h264enc_width_mbs(&c) * 16, h264enc_height_mbs(&c) * 16, &s);
         uint32_t handle = 0;
         void *va = NULL;
         int32_t size = -7;
-        if ((k->vic && !(e->info.features & TEGRA_NVENC_FEATURE_SURFACE_INPUT)) || !CVPixelBufferGetIOSurface(image)) {
+        if ((k->vic && !(features & TEGRA_NVENC_FEATURE_SURFACE_INPUT)) || !CVPixelBufferGetIOSurface(image)) {
             size = -8;
         } else if (!nvenc_alloc(e->client, s.bytes, &handle, &va)) {
-            size = k->vic || put(&c, &s, va, image) ? code(e, &c, &s, handle, k->vic, image) : -9;
+            size = k->vic || put(&c, &s, va, image) ? code(e, &c, &s, handle, k->vic, image, pictureIndex++) : -9;
             nvenc_free(e->client, handle);
         }
         CFTypeRef value = size > 0 ? CFDataCreate(kCFAllocatorDefault, e->avcc, size) : failure(size);
@@ -125,7 +131,13 @@ CFDictionaryRef ave_copy_layout_probe(Encoder *e)
         CFRelease(value);
         CFRelease(name);
     }
+    CVPixelBufferRelease(image);
+
+    pthread_mutex_lock(&e->lock);
+    e->pictureIndex = pictureIndex;
     e->keyPending = true;
+    ave_end_encode(e);
+    pthread_mutex_unlock(&e->lock);
     return result;
 }
 #endif

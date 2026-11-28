@@ -65,6 +65,7 @@ bool Device::createSurfaceImage(uint64_t surfaceId, void *base, uint64_t allocBy
         uint32_t w[8];
         fx::mipChainTic(c, t.va, f->tic0, f->srgb, 0, c.levels, w);
         memcpy(tic_.cpu + 32 * t.tic, w, 32);
+        noteTicWrite();
         SWITCH_METAL_DIAGNOSTIC(stats.chains++);
         SWITCH_METAL_DIAGNOSTIC(stats.chainBytes += c.bytes);
         return true;

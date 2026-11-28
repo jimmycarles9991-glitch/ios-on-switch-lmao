@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Buffers bound off the descriptor base alignment on the driver: twenty vertex uniform buffers each 4

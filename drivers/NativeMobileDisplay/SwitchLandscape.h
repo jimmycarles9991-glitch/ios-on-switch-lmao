@@ -116,6 +116,27 @@ inline bool turnedVideoImage(const native_planes::Layer &layer, const switch_gpu
            !image.convert;
 }
 
+// A decoder's picture the swap itself carries turned (Core Animation hands the display a quarter-turned video once it
+// publishes rotation): the same image as the recorded turn above, with the layer's own word and source rectangle.
+inline bool swapTurnedVideoImage(const native_planes::Layer &layer, const switch_gpu_backing_layout &layout,
+                                 uint32_t cropX, uint32_t cropY, uint32_t width, uint32_t height, uint32_t panelWidth,
+                                 uint32_t panelHeight, native_planes::Image &image)
+{
+    using namespace native_planes;
+    if (!native_planes::turnOf(layer.transform).transpose || layout.plane_count != 2 || layout.color_matrix > 3)
+        return false;
+    Layer picture;
+    picture.kind = layout.format == fourcc('4', '2', '0', 'v')   ? kKindNv12Video
+                   : layout.format == fourcc('4', '2', '0', 'f') ? kKindNv12Full
+                                                                 : kKindNone;
+    picture.surface.format = layout.format;
+    picture.surface.width = width;
+    picture.surface.height = height;
+    return videoImage(picture, layout, cropX, cropY, layer.src, layer.transform, layer.dst, panelWidth, panelHeight,
+                      image) &&
+           !image.convert;
+}
+
 // Window A's and B's blend while B carries the UI over the video on A: B in front, premultiplied; A opaque behind it.
 struct Blend {
     uint32_t layer, match, nomatch;

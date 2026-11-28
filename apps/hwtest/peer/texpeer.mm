@@ -7,8 +7,8 @@
 // The app is sandboxed and can start no process, so it hands its anonymous NSXPCListener's endpoint to whoever starts this
 // one. 21H461: launchd starts nothing from the overlay, so the BlueTool stand-in starts it and holds the endpoint until it
 // asks (drivers/SwitchBluetooth/BlueTool/BlueTool.c). 24B119: launchd starts it for its Mach service
-// (com.brunostjohn.switch.texpeer.plist), which the app sends the endpoint to. Either way it then connects to the app and
-// serves that one connection.
+// (com.brunostjohn.switch.texpeer.plist), which the app sends the endpoint to. Under launchd it stays up across
+// connections and exits once idle for kIdleSeconds; under BlueTool it serves that one connection and exits.
 #import <Foundation/Foundation.h>
 #import <IOSurface/IOSurfaceObjC.h>
 #import <Metal/Metal.h>
@@ -210,8 +210,11 @@ NSString *footprint()
     [blit endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
-    if (keep)
-        [self.kept addObject:t];
+    if (keep) {
+        @synchronized(self.kept) {
+            [self.kept addObject:t];
+        }
+    }
     const SEL path = NSSelectorFromString(@"switchMetalPath");
     NSString *taken = [(id)cb respondsToSelector:path] ? [(id)cb valueForKey:@"switchMetalPath"] : @"device";
     return [NSString stringWithFormat:@"%@ pid=%d id=%u path=%@",
@@ -239,10 +242,20 @@ NSString *footprint()
           surface ? [self render:surface keep:keep] : [NSString stringWithFormat:@"fail=no_surface pid=%d", getpid()]);
 }
 
+- (void)clearKept
+{
+    @synchronized(self.kept) {
+        [self.kept removeAllObjects];
+    }
+}
+
 - (void)dropSurfaces:(void (^)(NSString *))reply
 {
-    const NSUInteger n = self.kept.count;
-    [self.kept removeAllObjects];
+    NSUInteger n = 0;
+    @synchronized(self.kept) {
+        n = self.kept.count;
+        [self.kept removeAllObjects];
+    }
     reply([NSString stringWithFormat:@"ok pid=%d dropped=%lu", getpid(), (unsigned long)n]);
 }
 
@@ -250,15 +263,42 @@ NSString *footprint()
 
 static TexturePeer *gPeer;
 static NSXPCConnection *gConnection;
+static uint64_t gIdleGeneration = 0;
+static dispatch_source_t gIdleTimer;
+
+static void cancelIdleExit()
+{
+    ++gIdleGeneration;
+    if (gIdleTimer) {
+        dispatch_source_cancel(gIdleTimer);
+        gIdleTimer = nil;
+    }
+}
+
+static void armIdleExit()
+{
+    cancelIdleExit();
+    const uint64_t generation = gIdleGeneration;
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, kIdleSeconds * NSEC_PER_SEC),
+                              DISPATCH_TIME_FOREVER, NSEC_PER_SEC);
+    dispatch_source_set_event_handler(timer, ^{
+        if (!gConnection && gIdleGeneration == generation)
+            exit(0);
+    });
+    gIdleTimer = timer;
+    dispatch_resume(timer);
+}
 
 // Connects to the app's listener and serves it until the app lets the connection go
-static void serve(xpc_object_t endpoint)
+static bool serve(xpc_object_t endpoint)
 {
     if (gConnection || !endpoint || xpc_get_type(endpoint) != XPC_TYPE_ENDPOINT)
-        return;
+        return false;
+    cancelIdleExit();
     NSXPCListenerEndpoint *app = [NSXPCListenerEndpoint new];
     [app _setEndpoint:endpoint];
-    gConnection = [[NSXPCConnection alloc] initWithListenerEndpoint:app];
+    NSXPCConnection *connection = [[NSXPCConnection alloc] initWithListenerEndpoint:app];
     NSXPCInterface *interface = [NSXPCInterface interfaceWithProtocol:@protocol(SharedTexturePeer)];
     [interface setClasses:[NSSet setWithObject:[MTLSharedTextureHandle class]]
               forSelector:@selector(write:reply:)
@@ -272,18 +312,40 @@ static void serve(xpc_object_t endpoint)
               forSelector:@selector(makeSurfaceWidth:height:keep:reply:)
             argumentIndex:0
                   ofReply:YES];
-    gConnection.exportedInterface = interface;
-    gConnection.exportedObject = gPeer;
-    gConnection.remoteObjectInterface = [NSXPCInterface interfaceWithProtocol:@protocol(SharedTexturePeerHost)];
-    gConnection.invalidationHandler = ^{
+    connection.exportedInterface = interface;
+    connection.exportedObject = gPeer;
+    connection.remoteObjectInterface = [NSXPCInterface interfaceWithProtocol:@protocol(SharedTexturePeerHost)];
+#if SWITCH_TEXPEER_LAUNCHD
+    __weak NSXPCConnection *weakConnection = connection;
+    void (^disconnect)(void) = ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSXPCConnection *strong = weakConnection;
+            if (!strong || gConnection != strong)
+                return;
+            strong.invalidationHandler = nil;
+            strong.interruptionHandler = nil;
+            gConnection = nil;
+            [strong invalidate];
+            [gPeer clearKept];
+            os_log(OS_LOG_DEFAULT, "texpeer: client disconnected, awaiting idle exit (pid %d)", getpid());
+            armIdleExit();
+        });
+    };
+    connection.invalidationHandler = disconnect;
+    connection.interruptionHandler = disconnect;
+#else
+    connection.invalidationHandler = ^{
         exit(0);
     };
-    gConnection.interruptionHandler = ^{
+    connection.interruptionHandler = ^{
         exit(0);
     };
-    [gConnection resume];
-    [(id<SharedTexturePeerHost>)gConnection.remoteObjectProxy ready:getpid()];
+#endif
+    gConnection = connection;
+    [connection resume];
+    [(id<SharedTexturePeerHost>)connection.remoteObjectProxy ready:getpid()];
     os_log(OS_LOG_DEFAULT, "texpeer: serving the app's endpoint (pid %d)", getpid());
+    return true;
 }
 
 int main(void)
@@ -297,10 +359,7 @@ int main(void)
             os_log_error(OS_LOG_DEFAULT, "texpeer: no Metal device");
             return 1;
         }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, kIdleSeconds * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-            if (!gConnection)
-                exit(0);
-        });
+        armIdleExit();
 #if SWITCH_TEXPEER_LAUNCHD
         xpc_connection_t listener = texpeer_mach_service("com.brunostjohn.switch.texpeer", dispatch_get_main_queue(),
                                                          XPC_CONNECTION_MACH_SERVICE_LISTENER);
@@ -308,14 +367,15 @@ int main(void)
             if (xpc_get_type(peer) != XPC_TYPE_CONNECTION)
                 return;
             xpc_connection_t connection = (xpc_connection_t)peer;
+            xpc_connection_set_target_queue(connection, dispatch_get_main_queue());
             xpc_connection_set_event_handler(connection, ^(xpc_object_t message) {
                 if (xpc_get_type(message) != XPC_TYPE_DICTIONARY)
                     return;
-                serve(xpc_dictionary_get_value(message, "endpoint"));
+                const bool served = serve(xpc_dictionary_get_value(message, "endpoint"));
                 xpc_object_t answer = xpc_dictionary_create_reply(message);
                 if (!answer)
                     return;
-                xpc_dictionary_set_int64(answer, "result", gConnection ? 0 : EINVAL);
+                xpc_dictionary_set_int64(answer, "result", served ? 0 : EINVAL);
                 xpc_dictionary_set_int64(answer, "pid", getpid());
                 xpc_connection_send_message(connection, answer);
             });

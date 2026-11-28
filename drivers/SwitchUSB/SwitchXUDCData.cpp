@@ -60,12 +60,15 @@ void SwitchXUDC::kickWaiting()
 
 IOReturn SwitchXUDC::ioGated(_IOUSBDeviceIORequestTag *request)
 {
+    const int address = get<int32_t>(request, kReqEndpoint);
+    const uint32_t waitDci = dciFor(address);
+    if (waitDci < kMaxDci && __builtin_expect((settlingDcis & (1u << waitDci)) != 0u, 0))
+        waitForSettling(1u << waitDci);
     if (!onBus)
         return kIOReturnNotReady;
-    const int address = get<int32_t>(request, kReqEndpoint);
     if (!(static_cast<uint32_t>(address) & 0x7fu))
         return ep0Io(request, (static_cast<uint32_t>(address) & 0x80u) != 0);
-    const uint32_t dci = dciFor(address);
+    const uint32_t dci = waitDci;
     if (dci >= kMaxDci || !endpoints[dci].active)
         return kIOReturnNotReady;
     Endpoint &ep = endpoints[dci];
@@ -124,7 +127,8 @@ void SwitchXUDC::kick(uint32_t dci)
     bool queued = false;
     bool waiting = false;
     HeldTrb held = {};
-    while (ep.active && !ep.serialBusy && !ep.tds->fenced() && ep.tds->onRing() < ep.count && !hw.halted(dci)) {
+    while (ep.active && !ep.serialBusy && !ep.tds->fenced() && !(settlingDcis & (1u << dci)) &&
+           ep.tds->onRing() < ep.count && !hw.halted(dci)) {
         Request &r = ep.queue[(ep.head + ep.tds->onRing()) % kQueueDepth];
         HeldTrb last = {};
         const Admit a = admit(dci, r, &last);
@@ -477,6 +481,7 @@ void SwitchXUDC::cancel(uint32_t dci, IOReturn status)
         cancelIsoc(dci, status);
         return;
     }
+    DciOp op(this, 1u << dci);
     if (ep.tds->busy())
         hw.dropQueued(dci);
 
@@ -493,6 +498,7 @@ void SwitchXUDC::cancel(uint32_t dci, IOReturn status)
     ep.serialBusy = false;
     if (ep.tds->cancel() && !draining && !hw.eventPending())
         ep.tds->liftFence();
+    op.end();
     drainSoon();
     for (uint32_t i = 0; i < count; ++i)
         finish(pending[i], status, 0);

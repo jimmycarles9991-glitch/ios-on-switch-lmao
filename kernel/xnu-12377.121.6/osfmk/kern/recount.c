@@ -37,6 +37,7 @@
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/work_interval.h>
+#include <switch/sched.h>
 #include <mach/mach_time.h>
 #include <mach/mach_types.h>
 #include <machine/config.h>
@@ -1063,6 +1064,9 @@ recount_absorb_snap(struct recount_snap *to_add, thread_t thread, task_t task,
 			recount_usage_add_snap(&wi_track->rt_usage, level, to_add);
 		}
 		recount_usage_add_snap(&tk_track->rt_usage, level, to_add);
+		if (level == RCT_LVL_KERNEL) {
+			switch_systime_absorb(thread, task, to_add->rsn_time_mach);
+		}
 		recount_usage_add_snap(&pr_track->rt_usage, level, to_add);
 	}
 
@@ -1277,6 +1281,7 @@ void
 recount_enter_user(void)
 {
 	recount_transition(RCT_LVL_KERNEL, RCT_LVL_USER);
+	switch_systime_returned(current_thread());
 }
 
 void

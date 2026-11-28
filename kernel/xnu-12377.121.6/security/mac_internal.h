@@ -274,37 +274,49 @@ enum mac_iterate_types {
     });                                                                  \
 } while (0)
 
-#define SWITCH_BOOTSTRAP_MAC_CHECK(skip_sandbox, skip_amfi, check, args...) \
-    SWITCH_BOOTSTRAP_MAC_CHECK_WITH_CRED(skip_sandbox, NULL, skip_amfi, check, args)
+#define SWITCH_BOOTSTRAP_MAC_CHECK(skip_sandbox, skip_amfi, check, args...) do { \
+    int switch_skip_sandbox_state = -1; \
+    error = 0; \
+    MAC_POLICY_ITERATE({ \
+        if (mpc->mpc_ops->mpo_ ## check == NULL) continue; \
+        if (switch_app_code_amfi(mpc->mpc_name) && (skip_amfi)) continue; \
+        int step = mpc->mpc_ops->mpo_ ## check (args); \
+        if (__builtin_expect((step != 0), 0) && !strcmp(mpc->mpc_name, "Sandbox")) { \
+            if (switch_skip_sandbox_state < 0) \
+                switch_skip_sandbox_state = (skip_sandbox) ? 1 : 0; \
+            if (switch_skip_sandbox_state) \
+                step = 0; \
+        } \
+        error = mac_error_select(step, error); \
+    }); \
+} while (0)
 
 #define SWITCH_BOOTSTRAP_MAC_CHECK_WITH_CRED(skip_sandbox, mapping_cred, skip_amfi, check, args...) do { \
     const bool switch_skip_sandbox = (skip_sandbox); \
     kauth_cred_t switch_mapping_cred = (mapping_cred); \
     struct label *switch_mapping_label = switch_mapping_cred ? mac_cred_label(switch_mapping_cred) : NULL; \
-    const bool switch_skip_bootstrap_amfi = (skip_amfi); \
     error = 0; \
     MAC_POLICY_ITERATE({ \
         if (mpc->mpc_ops->mpo_ ## check == NULL) continue; \
         if ((switch_skip_sandbox || switch_mapping_label) && !strcmp(mpc->mpc_name, "Sandbox") && \
             (switch_skip_sandbox || (mpc->mpc_field_off && !mac_label_get(switch_mapping_label, *mpc->mpc_field_off)))) \
             continue; \
-        if (switch_skip_bootstrap_amfi && switch_app_code_amfi(mpc->mpc_name)) continue; \
+        if (switch_app_code_amfi(mpc->mpc_name) && (skip_amfi)) continue; \
         int step = mpc->mpc_ops->mpo_ ## check (args); \
         error = mac_error_select(step, error); \
     }); \
 } while (0)
 
 #define SWITCH_MAC_CHECK(skip_amfi, check, args...) do {                 \
-    const bool switch_skip_amfi = (skip_amfi);                           \
     error = 0;                                                           \
     MAC_POLICY_ITERATE({                                                 \
-        if (mpc->mpc_ops->mpo_ ## check != NULL &&                        \
-            !(switch_skip_amfi && switch_app_code_amfi(mpc->mpc_name))) { \
+        if (mpc->mpc_ops->mpo_ ## check != NULL &&                       \
+            !(switch_app_code_amfi(mpc->mpc_name) && (skip_amfi))) {     \
             MAC_CHECK_CALL(check, mpc);                                  \
-            int __step_err = mpc->mpc_ops->mpo_ ## check (args);           \
+            int __step_err = mpc->mpc_ops->mpo_ ## check (args);         \
             MAC_CHECK_RSLT(check, mpc);                                  \
             error = mac_error_select(__step_err, error);                 \
-        }                                                               \
+        }                                                                \
     });                                                                  \
 } while (0)
 

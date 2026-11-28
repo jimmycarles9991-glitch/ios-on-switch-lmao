@@ -1,11 +1,13 @@
 //! The storage form of a packed unsigned normalized attachment a device grants no storage access
-//! (NVK): `BGR5A1Unorm` (`A1R5G5B5_UNORM_PACK16`), viewed in `R16_UINT`, and `BGR10A2Unorm`
-//! (`A2R10G10B10_UNORM_PACK32`), viewed in `R32_UINT` (`StorageView::uint_view`): the function
-//! reads and writes the texel's bits. A read is what Metal's tile holds of a loaded texel: for
-//! `BGR10A2Unorm` each channel's exact value, `c / (2^b - 1)` correctly rounded
-//! (`metal::texel_format`, `PackedTexels`), and for `BGR5A1Unorm`, whose tile holds `half`s, that
-//! value rounded to the nearest `half` (an Apple M4 Max's fetch of every 16-bit texel, as `float4`
-//! and as `half4`, 262,144 lanes each). A write packs each channel's code as Metal's write of the
+//! (NVK): `BGR5A1Unorm` (`A1R5G5B5_UNORM_PACK16`) and `B5G6R5Unorm` (`R5G6B5_UNORM_PACK16`), viewed
+//! in `R16_UINT`, and `BGR10A2Unorm` (`A2R10G10B10_UNORM_PACK32`), viewed in `R32_UINT`
+//! (`StorageView::uint_view`): the function reads and writes the texel's bits. A read is what
+//! Metal's tile holds of a loaded texel: for `BGR10A2Unorm` each channel's exact value,
+//! `c / (2^b - 1)` correctly rounded (`metal::texel_format`, `PackedTexels`), and for the 16-bit
+//! formats, whose tile holds `half`s, that value rounded to the nearest `half` (an Apple M4 Max's
+//! fetch of every 16-bit texel, as `float4` and as `half4`, 262,144 lanes each, for `BGR5A1Unorm`;
+//! HW Test's host_gpu_tests PackedFetchReadTests for `B5G6R5Unorm`). `B5G6R5Unorm` has no alpha:
+//! it reads 1 and a write leaves no bits of it. A write packs each channel's code as Metal's write of the
 //! output rounds it (`color_write::round` by the attachment's rules, else the nearest code), and
 //! takes the channels it keeps from the texel read first, inside the interlock.
 //!
@@ -29,18 +31,24 @@ use crate::spirv::ids::Value as SValue;
 use crate::spirv::ir::{BinOp, ConvOp, GlslOp, Type as SType};
 use crate::vk;
 
-/// One packed format: each channel's bit offset in the texel and its bits, red to alpha, and
-/// whether Metal's tile holds its channels as `half`s.
+/// One packed format: each channel's bit offset in the texel and its bits, red to alpha (0 bits:
+/// the format has no such channel, which reads 1), and whether Metal's tile holds its channels as
+/// `half`s.
 struct Packed {
     format: vk::Format,
     fields: [(u32, u8); 4],
     half_tile: bool,
 }
 
-const PACKED: [Packed; 2] = [
+const PACKED: [Packed; 3] = [
     Packed {
         format: vk::Format::A1R5G5B5_UNORM_PACK16,
         fields: [(10, 5), (5, 5), (0, 5), (15, 1)],
+        half_tile: true,
+    },
+    Packed {
+        format: vk::Format::R5G6B5_UNORM_PACK16,
+        fields: [(11, 5), (5, 6), (0, 5), (0, 0)],
         half_tile: true,
     },
     Packed {
@@ -63,7 +71,8 @@ fn packing(format: vk::Format) -> &'static Packed {
         .unwrap_or(&PACKED[0])
 }
 
-/// Each channel's bit offset and largest code in `format`'s texel, red to alpha.
+/// Each channel's bit offset and largest code in `format`'s texel, red to alpha (0: no such
+/// channel).
 fn fields(format: vk::Format) -> [(u32, u32); 4] {
     packing(format)
         .fields
@@ -74,7 +83,7 @@ fn fields(format: vk::Format) -> [(u32, u32); 4] {
 fn nearest(format: vk::Format) -> [Option<ChannelWrite>; 4] {
     packing(format)
         .fields
-        .map(|(_, bits)| Some(ChannelWrite::Unorm { bits }))
+        .map(|(_, bits)| (bits > 0).then_some(ChannelWrite::Unorm { bits }))
 }
 
 fn u32_const(fb: &mut FunctionBuilder<'_>, v: u32) -> BResult<SValue> {
@@ -121,6 +130,10 @@ fn channel_values(
     let fields = fields(format);
     let mut codes = Vec::with_capacity(4);
     for (at, top) in fields {
+        if top == 0 {
+            codes.push(u32_const(fb, 1)?);
+            continue;
+        }
         let shift = u32_const(fb, at)?;
         let mask = u32_const(fb, top)?;
         let field = fb.binary(BinOp::ShiftRightLogical, word, shift)?;
@@ -130,12 +143,13 @@ fn channel_values(
     let codes = fb.composite_construct(uvec4, &codes)?;
     let fvec4 = vec4(fb, SType::Float { width: 32 })?;
     let codes = fb.convert(ConvOp::ConvertUToF, codes, fvec4)?;
-    let exact = exact_quotient(fb, codes, fields.map(|(_, top)| top))?;
+    let exact = exact_quotient(fb, codes, fields.map(|(_, top)| top.max(1)))?;
     if !half_tile {
         return Ok(exact);
     }
-    // Every nonzero `c / 31` is a normal `half` more than 260 `f32` steps from a rounding boundary:
-    // its nearest `half` is the `f32` with the 13 low fraction bits rounded off to nearest even.
+    // Every nonzero `c / 31` and `c / 63` below 1 is a normal `half` at least 65 `f32` steps from a
+    // rounding boundary (tests::every_5_and_6_bit_quotient_is_far_from_a_half_boundary): its nearest
+    // `half` is the `f32` with the 13 low fraction bits rounded off to nearest even.
     let bits = fb.convert(ConvOp::Bitcast, exact, uvec4)?;
     let shift = uvec4_splat(fb, 13)?;
     let one = uvec4_splat(fb, 1)?;
@@ -187,6 +201,9 @@ pub(super) fn texel(
     let rounded = color_write::round(fb, f4, x, &rules, None)?;
     let mut word = None;
     for (lane, (at, top)) in fields(sc.view.format).into_iter().enumerate() {
+        if top == 0 {
+            continue;
+        }
         let one = Form { lanes: 1, ..f4 };
         let v = fb.composite_extract(rounded, &[lane as u32])?;
         let m = fsplat(fb, one, f64::from(top))?;
@@ -273,6 +290,11 @@ mod tests {
                 [(10, 31), (5, 31), (0, 31), (15, 1)],
             ),
             (
+                vk::Format::R5G6B5_UNORM_PACK16,
+                16,
+                [(11, 31), (5, 63), (0, 31), (0, 0)],
+            ),
+            (
                 vk::Format::A2R10G10B10_UNORM_PACK32,
                 32,
                 [(20, 1023), (10, 1023), (0, 1023), (30, 3)],
@@ -315,10 +337,36 @@ mod tests {
     /// past 0 is a normal `half`, so its nearest is the `f32`'s 13 low fraction bits rounded off to
     /// nearest even.
     fn metal_5bit(c: u32) -> u32 {
-        let b = ((f64::from(c) / 31.0) as f32).to_bits();
+        metal_half(c, 31)
+    }
+
+    /// The `f32` bits of the `half` nearest `c / m`, as the 16-bit formats' tile holds it.
+    fn metal_half(c: u32, m: u32) -> u32 {
+        let b = ((f64::from(c) / f64::from(m)) as f32).to_bits();
         let (kept, dropped) = (b >> 13, b & 0x1FFF);
         let up = dropped > 0x1000 || (dropped == 0x1000 && kept & 1 == 1);
         (kept + u32::from(up)) << 13
+    }
+
+    /// `decode`'s rounding off of an `f32`'s 13 low fraction bits gives the `half` nearest the
+    /// exact `c / m` only where the correctly rounded `f32` cannot cross a `half` rounding
+    /// boundary: each `c / m` below 1 lies at least 65 `f32` steps from one (132 for `m` 31), in
+    /// integers. With `c / m` in `[2^e, 2^(e+1))`, a `half` step is `2^(e-10)`, an `f32` step
+    /// `2^(e-23)`, and the distance to the boundary in `f32` steps is `|2r - m| 2^12 / m` for
+    /// `r = c 2^(10-e) mod m`.
+    #[test]
+    fn every_5_and_6_bit_quotient_is_far_from_a_half_boundary() {
+        for (m, least) in [(31u64, 132u64), (63, 65)] {
+            let mut nearest = u64::MAX;
+            for c in 1..m {
+                let e = 31 - i64::from(((c << 32) / m).leading_zeros());
+                let scale = u64::try_from(10 - e).expect("c / m is at least 2^-6");
+                let r = (c << scale) % m;
+                assert_ne!(2 * r, m, "{c}/{m} on a boundary");
+                nearest = nearest.min((2 * r).abs_diff(m) * 4096 / m);
+            }
+            assert_eq!(nearest, least, "m {m}");
+        }
     }
 
     fn slot(index: u32) -> ResourceSlot {
@@ -451,6 +499,36 @@ mod tests {
             let code = |at: u32| metal_5bit(w >> at & 31);
             let alpha = if w >> 15 != 0 { 1.0f32.to_bits() } else { 0 };
             assert_eq!(got, [code(10), code(5), code(0), alpha], "texel {w:#06x}");
+        }
+    }
+
+    /// Every 6-bit green code with every 5-bit red and blue code of a `B5G6R5Unorm` texel.
+    fn texels_565() -> Vec<u32> {
+        (0..64u32)
+            .map(|g| (g % 32) << 11 | g << 5 | (g * 7 % 32))
+            .collect()
+    }
+
+    /// A `B5G6R5Unorm` texel reads as Metal's tile holds a loaded one: each channel the `half`
+    /// nearest its value, alpha 1. Unrounded, each channel is its exact quotient.
+    #[test]
+    fn a_b5g6r5_texel_reads_the_half_metal_reads_and_alpha_one() {
+        let one = 1.0f32.to_bits();
+        let words = texels_565();
+        let rounded = kernel(vk::Format::R5G6B5_UNORM_PACK16, true).expect("kernel");
+        for (w, got) in words.iter().zip(decoded(&rounded, &words)) {
+            let want = [
+                metal_half(w >> 11 & 31, 31),
+                metal_half(w >> 5 & 63, 63),
+                metal_half(w & 31, 31),
+                one,
+            ];
+            assert_eq!(got, want, "texel {w:#06x}");
+        }
+        let unrounded = kernel(vk::Format::R5G6B5_UNORM_PACK16, false).expect("kernel");
+        for (w, got) in words.iter().zip(decoded(&unrounded, &words)) {
+            let want = [exact(w >> 11 & 31, 31), exact(w >> 5 & 63, 63), exact(w & 31, 31), one];
+            assert_eq!(got, want, "texel {w:#06x}");
         }
     }
 

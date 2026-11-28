@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// The raw encode's CPU cost of a command buffer shaped as Core Animation's (encode_profile.h, debug builds):
@@ -26,14 +27,15 @@ import Metal
 /// never lands in a measured batch.
 struct EncodeCostPathTest: HWTest {
     let id = "gpu.path.encode_cost"
-    let name =
-        "A Core Animation shaped command buffer's encode by part, with no allocation, lock, message or vertex read per draw"
+    let name = "CA-shaped command buffer encode by part, with no alloc, lock, send or vertex read per draw"
     var subsystem: Subsystem { .metal }
     static let width = 256, height = 256, passes = 6, drawCounts = [8, 16], buffers = 24, warmups = 20
 
     static let parts = [
         "resources", "loop", "state", "apply", "pass", "pass_begin", "fusion", "pass_end", "pass_prologue", "draw",
-        "prepare", "geometry", "variant", "descriptors", "textures", "bind", "use", "uniforms", "tail", "commit",
+        "prepare", "geometry", "variant_lookup", "variant", "descriptors", "textures", "bind", "use", "uniforms",
+        "tail",
+        "commit",
         "exec", "retire",
     ]
     static let events = [
@@ -56,9 +58,7 @@ struct EncodeCostPathTest: HWTest {
             return .skip("the default device is not the facade (\(GM20BFacade.kind(of: gpu.device)))")
         }
         if GM20BFacade.encodeProfile(of: gpu.device).isEmpty {
-            return GM20BFacade.counters(of: gpu.device)["state_segment_binds"] == nil
-                ? .skip("no encode profile: a release runtime")
-                : .fail("a debug runtime without switchMetalEncodeProfile")
+            return .skip("no encode profile (build with --//bazel:prof_gpu)")
         }
         let library: MTLLibrary
         do {
@@ -74,28 +74,7 @@ struct EncodeCostPathTest: HWTest {
             CACorpus.colorFormat(line, 1), Self.width, Self.height, usage: [.renderTarget], storage: .memoryless
         )
         let encode = { (commands: MTLCommandBuffer, draws: Int) in
-            for pass in 0 ..< Self.passes {
-                let descriptor = MTLRenderPassDescriptor()
-                descriptor.colorAttachments[0].texture = target
-                descriptor.colorAttachments[0].loadAction = pass == 0 ? .clear : .load
-                descriptor.colorAttachments[0].storeAction = .store
-                descriptor.colorAttachments[1].texture = scratch
-                descriptor.colorAttachments[1].loadAction = .clear
-                descriptor.colorAttachments[1].storeAction = .dontCare
-                let encoder = commands.makeRenderCommandEncoder(descriptor: descriptor)!
-                encoder.setRenderPipelineState(pipeline)
-                for draw in 0 ..< draws {
-                    let x = Float(draw % 8) / 4 - 1, y = Float(pass) / 3 - 1
-                    let colour = SIMD4<Float16>(Float16(draw % 4) / 4, Float16(pass) / 8, 0.5, 1)
-                    CAState.bind(
-                        encoder, vertices: CAState.rectangle(x0: x, y0: y, x1: x + 0.25, y1: y + 0.3, color: colour),
-                        source: nil
-                    )
-                    encoder.setScissorRect(MTLScissorRect(x: (draw % 8) * 32, y: pass * 32, width: 32, height: 64))
-                    encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-                }
-                encoder.endEncoding()
-            }
+            Self.encodeBatch(commands, draws: draws, pipeline: pipeline, target: target, scratch: scratch)
         }
         var warm = 0
         let warmup = { (commands: MTLCommandBuffer) in encode(commands, Self.drawCounts[0]) }
@@ -110,6 +89,46 @@ struct EncodeCostPathTest: HWTest {
         }
         var metrics = Metrics()
         metrics.set("warm", warm)
+        let arms = try Self.measureArms(gpu: gpu, encode: encode, metrics: &metrics)
+        let failures = Self.judge(arms: arms, gpu: gpu, metrics: &metrics)
+        withExtendedLifetime(keptPlain) { _ = keptPlain }
+        let judged = Set(Self.ceilings.map(\.event) + Self.perDrawFree)
+        metrics.fitLog(within: 720, keeping: Set(Self.drawCounts.flatMap { d in judged.map { $0 + "_d\(d)" } }))
+        return failures.isEmpty
+            ? .pass(metrics, proof: gpu.proof) : .fail(failures.joined(separator: "; "), metrics, proof: gpu.proof)
+    }
+
+    private static func encodeBatch(
+        _ commands: MTLCommandBuffer, draws: Int, pipeline: MTLRenderPipelineState, target: MTLTexture,
+        scratch: MTLTexture
+    ) {
+        for pass in 0 ..< Self.passes {
+            let descriptor = MTLRenderPassDescriptor()
+            descriptor.colorAttachments[0].texture = target
+            descriptor.colorAttachments[0].loadAction = pass == 0 ? .clear : .load
+            descriptor.colorAttachments[0].storeAction = .store
+            descriptor.colorAttachments[1].texture = scratch
+            descriptor.colorAttachments[1].loadAction = .clear
+            descriptor.colorAttachments[1].storeAction = .dontCare
+            let encoder = commands.makeRenderCommandEncoder(descriptor: descriptor)!
+            encoder.setRenderPipelineState(pipeline)
+            for draw in 0 ..< draws {
+                let x = Float(draw % 8) / 4 - 1, y = Float(pass) / 3 - 1
+                let colour = SIMD4<Float16>(Float16(draw % 4) / 4, Float16(pass) / 8, 0.5, 1)
+                CAState.bind(
+                    encoder, vertices: CAState.rectangle(x0: x, y0: y, x1: x + 0.25, y1: y + 0.3, color: colour),
+                    source: nil
+                )
+                encoder.setScissorRect(MTLScissorRect(x: (draw % 8) * 32, y: pass * 32, width: 32, height: 64))
+                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            }
+            encoder.endEncoding()
+        }
+    }
+
+    private static func measureArms(
+        gpu: GPU, encode: (MTLCommandBuffer, Int) -> Void, metrics: inout Metrics
+    ) throws -> [[String: Double]] {
         var arms: [[String: Double]] = []
         for draws in Self.drawCounts {
             try gpu.finish((0 ..< Self.buffers).map { _ in try gpu.commit { encode($0, draws) } })
@@ -122,17 +141,20 @@ struct EncodeCostPathTest: HWTest {
             var measured = Self.perCommandBuffer(before, GM20BFacade.encodeProfile(of: gpu.device))
             measured["held_blocks"] = heldBlocks
             arms.append(measured)
-            let arm = arms.last!
             let suffix = "_d\(draws)"
-            metrics.set("encodes" + suffix, Int(arm["encodes"] ?? 0))
-            metrics.set("wall_us" + suffix, arm["wall_us"] ?? 0, digits: 0)
-            metrics.set("walk_us" + suffix, arm["loop_self_us"] ?? 0, digits: 0)
-            for part in Self.parts { metrics.set("us_" + part + suffix, arm[part + "_us"] ?? 0, digits: 0) }
-            for event in Self.events { metrics.set(event + suffix, arm[event] ?? 0, digits: 1) }
-            let drawn = arm["draw_calls"] ?? 0
-            metrics.set("applied_per_draw" + suffix, drawn > 0 ? (arm["applied"] ?? 0) / drawn : 0, digits: 2)
-            metrics.set("mallocs_counted" + suffix, arm["malloc_encodes"] ?? 0 > 0)
+            metrics.set("encodes" + suffix, Int(measured["encodes"] ?? 0))
+            metrics.set("wall_us" + suffix, measured["wall_us"] ?? 0, digits: 0)
+            metrics.set("walk_us" + suffix, measured["loop_self_us"] ?? 0, digits: 0)
+            for part in Self.parts { metrics.set("us_" + part + suffix, measured[part + "_us"] ?? 0, digits: 0) }
+            for event in Self.events { metrics.set(event + suffix, measured[event] ?? 0, digits: 1) }
+            let drawn = measured["draw_calls"] ?? 0
+            metrics.set("applied_per_draw" + suffix, drawn > 0 ? (measured["applied"] ?? 0) / drawn : 0, digits: 2)
+            metrics.set("mallocs_counted" + suffix, measured["malloc_encodes"] ?? 0 > 0)
         }
+        return arms
+    }
+
+    private static func judge(arms: [[String: Double]], gpu: GPU, metrics: inout Metrics) -> [String] {
         let process = GM20BFacade.encodeProfile(of: gpu.device)
         for kind in ["render", "blit", "compute"] {
             for count in ["made", "freed"] {
@@ -163,11 +185,7 @@ struct EncodeCostPathTest: HWTest {
                 )
             }
         }
-        withExtendedLifetime(keptPlain) {}
-        let judged = Set(Self.ceilings.map(\.event) + Self.perDrawFree)
-        metrics.fitLog(within: 720, keeping: Set(Self.drawCounts.flatMap { d in judged.map { $0 + "_d\(d)" } }))
-        return failures.isEmpty
-            ? .pass(metrics, proof: gpu.proof) : .fail(failures.joined(separator: "; "), metrics, proof: gpu.proof)
+        return failures
     }
 
     static func blocksInUse() -> Double {

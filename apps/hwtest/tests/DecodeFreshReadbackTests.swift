@@ -1,6 +1,9 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUDecode
+import HWTestKit
+import HWTestShared
 import Metal
 
 /// A never-written texture of a format decoded on upload reads what an M4 Max reads from a new one (decoded.h

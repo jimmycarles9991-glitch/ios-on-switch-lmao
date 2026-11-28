@@ -1,6 +1,8 @@
 import Darwin
 import Foundation
 import HWTestCore
+import HWTestKit
+import HWTestShared
 
 /// What a rail Joy-Con does when the rail stops asking (debug kernels): writing debug.switch_joycon_probe runs the
 /// stages of SwitchJoyConProbe.h on every running Joy-Con, about nine seconds, and reading it gives each stage's

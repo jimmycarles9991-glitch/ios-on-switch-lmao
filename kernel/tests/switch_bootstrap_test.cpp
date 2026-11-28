@@ -62,9 +62,6 @@ int VFS_VGET(Mount *mount, ino64_t id, vnode_t *out, int)
     }
     return ENOENT;
 }
-int switch_bootstrap_lock;
-void lck_mtx_lock(int *) {}
-void lck_mtx_unlock(int *) {}
 vnode_t switch_bootstrap_root;
 Mount *switch_bootstrap_data;
 uint64_t switch_bootstrap_root_id, switch_bootstrap_data_id;

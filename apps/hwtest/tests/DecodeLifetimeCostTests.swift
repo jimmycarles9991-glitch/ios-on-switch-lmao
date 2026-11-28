@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUDecode
+import HWTestKit
 import Metal
 
 /// A view of a decoded texture holds its parent, which holds the kept blocks (TegraGM20BMetalDecodedFamily.mm): a 203

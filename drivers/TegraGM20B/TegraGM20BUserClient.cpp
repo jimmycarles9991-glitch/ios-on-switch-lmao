@@ -12,6 +12,7 @@
 #include "SwitchGpuConnectionQuota.h"
 #include "SwitchGpuShaderCompiler.h"
 #include "TegraGM20BCompilerABI.h"
+#include "TegraGM20BSchedABI.h"
 #include "TegraGM20BVolatileABI.h"
 #include "TegraGM20BZcullABI.h"
 
@@ -65,8 +66,34 @@ void giveConnection(int pid)
 constexpr uint64_t kPrefaultMaxBytes = 256ULL << 10;
 }  // namespace
 
+extern "C" bool tegra_gm20b_set_app_gpu_role(int pid, uint32_t role)
+{
+	IOLock *lock = __atomic_load_n(&gConnectionLock, __ATOMIC_ACQUIRE);
+	if (!lock)
+		return false;
+	IOLockLock(lock);
+	const bool ok = gConnections.setRole(pid, role);
+	IOLockUnlock(lock);
+	if (ok)
+		__atomic_fetch_add(&tgm_uc::appRoleGen, 1u, __ATOMIC_RELEASE);
+	return ok;
+}
+
+extern "C" bool tegra_gm20b_get_app_gpu_role(int pid, uint32_t *role)
+{
+	IOLock *lock = __atomic_load_n(&gConnectionLock, __ATOMIC_ACQUIRE);
+	if (!lock)
+		return false;
+	IOLockLock(lock);
+	const bool ok = gConnections.getRole(pid, role);
+	IOLockUnlock(lock);
+	return ok;
+}
+
 namespace tgm_uc
 {
+uint32_t appRoleGen = 1;
+
 IOOptionBits boMapOptions(bool coherent, bool system, bool fullView, bool readOnly, uint64_t bytes)
 {
 	IOOptionBits opts = coherent ? kIOMapWriteCombineCache : kIOMapDefaultCache;
@@ -87,6 +114,9 @@ OSDefineMetaClassAndStructors(AGXDeviceUserClient, IOUserClient)
 	task_ = task;
 	proc_selfname(owner_, sizeof(owner_));
 	ownerPid_ = proc_selfpid();
+	roleGen_ = __atomic_load_n(&tgm_uc::appRoleGen, __ATOMIC_ACQUIRE);
+	backgroundRole_ = clientHasPrivilege(task, kIOClientPrivilegeForeground) != kIOReturnSuccess;
+	applyLevel();
 
 	lock_ = IOLockAlloc();
 	unmapLock_ = IOLockAlloc();
@@ -108,7 +138,9 @@ OSDefineMetaClassAndStructors(AGXDeviceUserClient, IOUserClient)
 						      THREAD_CALL_OPTIONS_ONCE);
 	releaseCall_ = thread_call_allocate_with_options(
 		releaseWork, this, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
-	if (!retireCall_ || !wakeCall_ || !releaseCall_)
+	chanRetireCall_ = thread_call_allocate_with_options(
+		chanRetireWork, this, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+	if (!retireCall_ || !wakeCall_ || !releaseCall_ || !chanRetireCall_)
 		return false;
 	if (tgm_vm_new(&vm_))
 		return false;
@@ -152,6 +184,8 @@ void AGXDeviceUserClient::free()
 			thread_call_free(wakeCall_);
 		if (releaseCall_)
 			thread_call_free(releaseCall_);
+		if (chanRetireCall_)
+			thread_call_free(chanRetireCall_);
 		if (binds_)
 			IODelete(binds_, Binding, cap_binds_);
 		for (auto &job : channelJobs_)
@@ -178,7 +212,7 @@ void AGXDeviceUserClient::free()
 		IOLockFree(unmapLock_);
 		unmapLock_ = nullptr;
 	}
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 	for (tgm_bind_history *&history : bindHistory_)
 		if (history)
 			IOFree(history, sizeof(*history));
@@ -209,6 +243,7 @@ void AGXDeviceUserClient::releaseBo(Bo *bo)
 	if (!bo->ownsMem)
 		bo->mem = nullptr;
 	tgm_mem_del(&bo->mem);
+#if TGM_STATS
 	if (bo->pool_va && bo->handle) {
 		if (bo->compositorPool) {
 			tgm_stats_compositor_pool(-static_cast<int64_t>(bo->bytes));
@@ -216,46 +251,55 @@ void AGXDeviceUserClient::releaseBo(Bo *bo)
 			__atomic_sub_fetch(&gClientPoolBytes, bo->bytes, __ATOMIC_RELAXED);
 		}
 	}
+#endif
 	if (bo->chunked) {
+#if TGM_STATS
 		if (bo->handle) {
 			__atomic_sub_fetch(&gCompressibleBytes, bo->bytes, __ATOMIC_RELAXED);
 			__atomic_sub_fetch(&gCompressibles, 1, __ATOMIC_RELAXED);
 		}
+#endif
 		if (!bo->backing)
 			tgm_pool_free_chunks(bo->pas, bo->npages);
 	}
 	if (bo->smmuCompressible && bo->handle) {
 		__atomic_sub_fetch(&gSmmuCompressibleBytes, bo->bytes, __ATOMIC_RELAXED);
+#if TGM_STATS
 		__atomic_sub_fetch(&gSmmuCompressibles, 1, __ATOMIC_RELAXED);
+#endif
 	}
 	// A pool BO's view and pages go to the thread call (releaseOrphans: releasing the view can wait for an import on
 	// another connection), which keeps the pages while a task still maps the view. Cached and system BOs need no such
 	// care: their mappings hold the buffer itself, and releasing one waits for nothing.
 	PoolOrphan *orphan = nullptr;
+#if TGM_STATS
 	if (bo->system && bo->handle && !bo->parkReclaimed) {
 		__atomic_sub_fetch(&gSystemCoherent, 1, __ATOMIC_RELAXED);
 		__atomic_sub_fetch(&gSystemCoherentBytes, bo->bytes, __ATOMIC_RELAXED);
 	}
+#endif
 	if (bo->pool_va && bo->view)
 		orphan = IONew(PoolOrphan, 1);
 	if (orphan) {
 		*orphan = {nullptr, bo->view, bo->pool_va, bo->pool_pa, bo->bytes, bo->handle != 0};
+#if TGM_STATS
 		__atomic_add_fetch(&gOrphanBytes, bo->bytes, __ATOMIC_RELAXED);
 		__atomic_add_fetch(&gOrphans, 1, __ATOMIC_RELAXED);
+#endif
 		pushOrphan(orphan);
 		scheduleOrphanRelease();
 	} else {
 		if (bo->view)
 			bo->view->release();
-		// a pool BO's pages are zeroed off this thread and go back clean; a cached BO no task maps any more goes to
-		// the spares as it is (CE-zeroed before reuse, or given back to the VM)
+		// a pool BO's pages are zeroed off this thread and go back clean; a cached or system BO no task maps any more
+		// goes to the spares of its kind as it is (CE-zeroed before reuse, or given back to the VM)
 		if (bo->pool_va &&
 		    !(bo->handle && poolZeroLater(bo->pool_va, bo->pool_pa, bo->bytes)))
 			tgm_pool_free(bo->pool_va, bo->bytes, bo->pool_pa);
 	}
-	if (bo->buffer.memory && bo->handle && !bo->system &&
-	    !(bo->flags & TegraGM20BBoContiguous) &&
+	if (bo->buffer.memory && bo->handle && !(bo->flags & TegraGM20BBoContiguous) &&
 	    spareKeep(bo->buffer, bo->pas, static_cast<uint64_t>(bo->backing_pages) << 12,
+		      bo->system ? SWITCH_GPU_SPARE_WC : SWITCH_GPU_SPARE_CACHED,
 		      bo->cachedMapping)) {
 		bo->buffer = {};
 		bo->pas = nullptr;
@@ -549,7 +593,7 @@ IOReturn AGXDeviceUserClient::packImageMap(const TegraGM20BAbiPackImageMap *in,
 		IOLockUnlock(lock_);
 		return kIOReturnExclusiveAccess;
 	}
-	const bool knownCompositor = critical_ || restartNoKill_;
+	const bool knownCompositor = critical_;
 	const bool checkEntitlement = !knownCompositor && !entitlementsRead_ && in->cpu_range_count;
 	IOLockUnlock(lock_);
 
@@ -579,6 +623,7 @@ IOReturn AGXDeviceUserClient::packImageMap(const TegraGM20BAbiPackImageMap *in,
 			return wireRet;
 		}
 		staged.cpuWiredCount = in->cpu_range_count;
+		staged.cpuWiredBytes = wiredBytes;
 	}
 
 	IOLockLock(lock_);
@@ -607,9 +652,11 @@ IOReturn AGXDeviceUserClient::packImageMap(const TegraGM20BAbiPackImageMap *in,
 			if (mapErr != 0) {
 				ret = ioreturn(mapErr);
 			} else {
-				packClient_.gpuMapping = gpuMapping;
+				__atomic_store_n(&packClient_.gpuMapping, gpuMapping,
+						 __ATOMIC_RELEASE);
 				packClient_.gpuBytes = view.tier0HeapBytes;
 				packClient_.cpuWiredCount = staged.cpuWiredCount;
+				packClient_.cpuWiredBytes = staged.cpuWiredBytes;
 				for (uint32_t i = 0; i < staged.cpuWiredCount; ++i)
 					packClient_.cpuWired[i] = staged.cpuWired[i];
 				staged = {};
@@ -644,11 +691,13 @@ void AGXDeviceUserClient::releaseMappings()
 	maps_ = nullptr;
 	SwitchGpuPackClient packCpu = {};
 	packCpu.cpuWiredCount = packClient_.cpuWiredCount;
+	packCpu.cpuWiredBytes = packClient_.cpuWiredBytes;
 	for (uint32_t i = 0; i < packCpu.cpuWiredCount; ++i) {
 		packCpu.cpuWired[i] = packClient_.cpuWired[i];
 		packClient_.cpuWired[i] = nullptr;
 	}
 	packClient_.cpuWiredCount = 0;
+	packClient_.cpuWiredBytes = 0;
 	IOLockUnlock(lock_);
 	switch_gpu_pack_client_release_cpu(&packCpu);
 	while (list) {
@@ -677,7 +726,9 @@ extern "C" uint32_t switch_gpu_info_flags(void)
 			 TegraGM20BInfoSubmitAddress | TegraGM20BInfoCpuPreserveDirty |
 			 TegraGM20BInfoCanonicalSurfaceLayout | TegraGM20BInfoChannelEpoch |
 			 TegraGM20BInfoPushFences;
-	flags |= TegraGM20BInfoPackImage | TegraGM20BInfoBoPark | TegraGM20BInfoVolatileWrites;
+	flags |= TegraGM20BInfoPackImage | TegraGM20BInfoBoPark | TegraGM20BInfoVolatileWrites |
+		 TegraGM20BInfoSameUses | TegraGM20BInfoPriorityReply |
+		 TegraGM20BInfoChannelProgress;
 	if (info.comptag_lines && switch_gpu_compression_on())
 		flags |= TegraGM20BInfoCompression;
 	if (switch_tiled_cache_on())
@@ -819,7 +870,7 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type, IOOptionBits *opt
 IOReturn AGXDeviceUserClient::memoryForType(UInt32 type, IOOptionBits *options,
 					    IOMemoryDescriptor **memory)
 {
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 	if (IOMemoryDescriptor *readback = tgm_readback_memory(this, type)) {
 		*memory = readback;
 		*options = kIOMapAnywhere | kIOMapDefaultCache;

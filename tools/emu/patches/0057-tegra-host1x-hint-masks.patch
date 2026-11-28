@@ -1,0 +1,60 @@
+Emulator: host1x's HINTMASK and HINTMASK_EXT keep what is written (their Tegra X1 bits) and reset to 0, so a driver
+that reads its interrupt masks back sees them (TRM 14.9.6, 14.9.8). Before, both read 0 and dropped the write.
+
+diff --git a/hw/arm/tegra2/ahb/host1x/host1x_channel.c b/hw/arm/tegra2/ahb/host1x/host1x_channel.c
+--- a/hw/arm/tegra2/ahb/host1x/host1x_channel.c
++++ b/hw/arm/tegra2/ahb/host1x/host1x_channel.c
+@@ -37,6 +37,13 @@
+ 
+ #define CHANNEL_BASE    (0x50000000 | (s->cdma.ch_id * SZ_16K))
+ 
++/* Tegra X1 TRM 14.9.6 and 14.9.8: the bits HINTMASK and HINTMASK_EXT have. Both belong to the one sync unit, whichever
++ * channel's aperture reaches it. */
++#define HINTMASK_X1_BITS        0xE03FFFFF
++#define HINTMASK_EXT_X1_BITS    0xC0003FFF
++static uint32_t host1x_hintmask;
++static uint32_t host1x_hintmask_ext;
++
+ static const VMStateDescription vmstate_tegra_host1x_channel = {
+     .name = "tegra.host1x_channel",
+     .version_id = 1,
+@@ -96,10 +103,12 @@ static uint32_t host1x_sync_read_reg(tegra_host1x_channel *s, hwaddr base, hwadd
+     case HINTSTATUS_OFFSET:
+         break;
+     case HINTMASK_OFFSET:
++        ret = host1x_hintmask;
+         break;
+     case HINTSTATUS_EXT_OFFSET:
+         break;
+     case HINTMASK_EXT_OFFSET:
++        ret = host1x_hintmask_ext;
+         break;
+     case CF0_SETUP_OFFSET ... CF7_SETUP_OFFSET:
+         break;
+@@ -271,13 +280,15 @@ static void host1x_sync_write_reg(tegra_host1x_channel *s, hwaddr base, hwaddr o
+         TRACE_WRITE(base, offset, 0, value & HINTSTATUS_WRMASK);
+         break;
+     case HINTMASK_OFFSET:
+-        TRACE_WRITE(base, offset, 0, value);
++        TRACE_WRITE(base, offset, host1x_hintmask, value);
++        host1x_hintmask = value & HINTMASK_X1_BITS;
+         break;
+     case HINTSTATUS_EXT_OFFSET:
+         TRACE_WRITE(base, offset, 0, value);
+         break;
+     case HINTMASK_EXT_OFFSET:
+-        TRACE_WRITE(base, offset, 0, value);
++        TRACE_WRITE(base, offset, host1x_hintmask_ext, value);
++        host1x_hintmask_ext = value & HINTMASK_EXT_X1_BITS;
+         break;
+     case CF0_SETUP_OFFSET ... CF7_SETUP_OFFSET:
+         TRACE_WRITE(base, offset, 0, value);
+@@ -652,6 +663,8 @@ static void tegra_host1x_channel_priv_reset(DeviceState *dev)
+     s->raise.reg32 = RAISE_RESET;
+     s->fbbufbase.reg32 = FBBUFBASE_RESET;
+     s->cmdswap.reg32 = CMDSWAP_RESET;
++    host1x_hintmask = HINTMASK_RESET;
++    host1x_hintmask_ext = HINTMASK_EXT_RESET;
+ 
+     if (tegra_board >= TEGRAX1_BOARD) {
+         s->sync_base = 0x2100;

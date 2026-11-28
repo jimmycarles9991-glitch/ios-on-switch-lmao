@@ -188,7 +188,7 @@ void SwitchDisplayPort::chooseAndTrain(bool nextChoice)
             fail("display controller B", why);
             return;
         }
-        dcbUp = true;
+        __atomic_store_n(&dcbUp, true, __ATOMIC_RELEASE);
         dcSource->enable();
     }
     dcb.setMode(mode);

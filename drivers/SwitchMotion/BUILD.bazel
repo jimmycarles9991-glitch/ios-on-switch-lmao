@@ -1,4 +1,5 @@
 load("//bazel/lint:defs.bzl", "lint_files")
+load("//kernel/rules:driver_flags.bzl", "IPSW_KIND_FLAGS")
 
 # drivers/SwitchMotion: moved from out/native-a57/root-v1/tree/drivers/SwitchMotion by the layout move.
 load("//kernel/rules:kernel.bzl", "kernel_driver", "kernel_headers")
@@ -30,6 +31,8 @@ kernel_headers()
 # The 6-axis IMU (SPI4) as the accelerometer and gyroscope HID services; calls SwitchHIDDevice (this archive).
 kernel_driver(
     name = "SwitchMotion",
+    # SwitchHID.h's report lengths are the IPSW kind's.
+    copts = IPSW_KIND_FLAGS,
     hdr_deps = [
         "drivers/ArmGIC",
         "drivers/NativeMobileDisplay",
@@ -37,5 +40,6 @@ kernel_driver(
         "drivers/TegraGPIO",
         "drivers/TegraSPI",
         "kits/SwitchRefusal",
+        "kits/SwitchSysctl",
     ],
 )

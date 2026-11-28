@@ -4,7 +4,6 @@
 #import "TegraGM20BMetalXrPlanes.h"
 #import "TegraGM20BMetalFresh.h"
 #import "TegraGM20BMetalDecoded.h"
-#include "surface_note.h"
 #include "surface_refusal.h"
 #include <mach/vm_page_size.h>
 #import "TegraGM20BMetalMultisample.h"
@@ -46,7 +45,7 @@
     d[@"pipeline_handoff_wakes"] = @(s.handoffWakes.load());
     static const char *const vetoes[VetoKinds] = {"-",        "counters",   "shadows", "variant", "probes",
                                                   "parallel", "ops",        "refused", "planar",  "native",
-                                                  "failed",   "other_work", "device",  "zcull",   "channel"};
+                                                  "failed",   "other_work", "device",  "channel"};
     for (uint32_t k = 0; k < VetoKinds; ++k)
         if (const uint64_t n = s.pipelineAbandons[k].load())
             d[[NSString stringWithFormat:@"pipeline_abandons.%s", vetoes[k]]] = @(n);
@@ -62,6 +61,8 @@
     d[@"pass_pixel_openings"] = @(gRM->raw->stats.passPixelOpenings.load());
     d[@"raster_ordered_draws"] = @(gRM->raw->stats.rasterOrderedDraws.load());
     d[@"banded_draws"] = @(gRM->raw->stats.bandedDraws.load());
+    d[@"mixed_covering_draws"] = @(gRM->raw->stats.mixedCovering.load());
+    d[@"mixed_stage_off_draws"] = @(gRM->raw->stats.mixedStageOff.load());
     d[@"bands"] = @(gRM->raw->stats.bands.load());
     d[@"learned_draws"] = @(gRM->raw->stats.learnedDraws.load());
     d[@"priced_static"] = @(gRM->raw->stats.pricedStatic.load());
@@ -74,18 +75,35 @@
     d[@"texture_readbacks"] = @(gRM->raw->stats.textureReadbacks.load());
     d[@"blend_kill_states"] = @(gRM->raw->stats.blendKillStates.load());
     d[@"blend_kill_binds"] = @(gRM->raw->stats.blendKillBinds.load());
+    d[@"blend_kill_pack_disagreements"] = @(gRM->raw->stats.blendKillPackDisagreements.load());
+    d[@"amplified_draws"] = @(gRM->raw->stats.amplifiedDraws.load());
     d[@"resolve_twod"] = @(gRM->raw->stats.resolveTwod.load());
     d[@"fill_twod"] = @(gRM->raw->stats.fillTwod.load());
     d[@"resolve_exact"] = @(gRM->raw->stats.resolveExact.load());
     d[@"resolve_twod_compressed"] = @(gRM->raw->stats.resolveTwodCompressed.load());
+    d[@"bos_probe_direct"] = @(gRM->raw->kernel().probeDirectBos.load());
+    d[@"bos_smmu"] = @(gRM->raw->kernel().smmuBos.load());
     d[@"zcull_passes"] = @(gRM->raw->stats.zcullPasses.load());
     d[@"zcull_invalidations"] = @(gRM->raw->stats.zcullInvalidations.load());
     d[@"zcull_loads"] = @(gRM->raw->stats.zcullLoads.load());
+    d[@"nvn_bounds_opened"] = @(gRM->raw->stats.nvnBoundsOpened.load());
+    d[@"nvn_stencil_passes"] = @(gRM->raw->stats.nvnStencilPasses.load());
+    d[@"nvn_format_passes"] = @(gRM->raw->stats.nvnFormatPasses.load());
+    d[@"nvn_discards"] = @(gRM->raw->stats.nvnDiscards.load());
+    d[@"subtile_writes"] = @(gRM->raw->stats.subtileWrites.load());
+    d[@"zcull_rules_kept"] = @(gRM->raw->stats.zcullRulesKept.load());
+    d[@"residency_set_uses"] = @(gRM->raw->stats.residencySetUses.load());
+    d[@"residency_named"] = @(gRM->raw->stats.residencyNamed.load());
+    d[@"zcull_carried"] = @(gRM->raw->stats.zcullCarried.load());
+    d[@"zcull_stores"] = @(gRM->raw->stats.zcullStores.load());
+    d[@"zcull_unstored"] = @(gRM->raw->stats.zcullUnstored.load());
+    d[@"zcull_carries_lost"] = @(gRM->raw->stats.zcullCarriesLost.load());
     d[@"state_segment_binds"] = @(gRM->raw->stats.segmentBinds.load());
     d[@"state_segment_words"] = @(gRM->raw->stats.segmentWords.load());
     d[@"state_segment_skips"] = @(gRM->raw->stats.segmentSkips.load());
     d[@"state_segment_extras_losses"] = @(gRM->raw->stats.segmentExtrasLosses.load());
     d[@"state_segment_copies"] = @(gRM->raw->stats.segmentCopies.load());
+#if SWITCH_METAL_PROF
     {
         const gm20b::EncodeTotals &encode = gRM->raw->stats.encode;
         const double perUs = gm20b::encodeTicksPerUs();
@@ -94,9 +112,7 @@
         d[@"exec_us"] = @(uint64_t(double(encode.ticks[size_t(gm20b::EncodePart::Exec)].load()) / perUs));
         d[@"exec_pushes"] = @(encode.execPushes.load());
     }
-    d[@"replay_same"] = @(gRM->raw->stats.replay.same.load());
-    d[@"replay_recent"] = @(gRM->raw->stats.replay.recent.load());
-    d[@"replay_new"] = @(gRM->raw->stats.replay.fresh.load());
+#endif
     d[@"stencil_bit_draws"] = @(gRM->raw->stats.stencilBitDraws.load());
     d[@"zeta_colour_draws"] = @(gRM->raw->stats.zetaColourDraws.load());
     d[@"mip_twod_levels"] = @(gRM->raw->stats.mipTwodLevels.load());
@@ -189,7 +205,11 @@
         @"parked_heap_count" : @(d.stats.parkedHeaps.load()),
         @"heap_parks" : @(d.stats.heapParks.load()),
         @"heap_unparks_resident" : @(d.stats.heapUnparksResident.load()),
-        @"heap_unparks_reclaimed" : @(d.stats.heapUnparksReclaimed.load())
+        @"heap_unparks_reclaimed" : @(d.stats.heapUnparksReclaimed.load()),
+        @"scrubbed_bytes" : @(d.stats.scrubbedBytes.load()),
+        @"scrubbed_runs" : @(d.stats.scrubbedRuns.load()),
+        @"compressed_moves" : @(d.stats.compressedMoves.load()),
+        @"compressed_move_bytes" : @(d.stats.compressedMoveBytes.load())
     };
 }
 
@@ -264,6 +284,8 @@
 - (id<MTLCommandQueue>)newCommandQueue
 {
     SwitchMetalQueue *q = [SwitchMetalQueue new];
+    if (!q)
+        return nil;
     q->_device = self;
     return (id<MTLCommandQueue>)q;
 }
@@ -280,29 +302,47 @@
     return [self newCommandQueue];
 }
 
-- (id<MTLBuffer>)newBufferWithLength:(NSUInteger)n options:(MTLResourceOptions)o
+- (id<MTLBuffer>)allocBufferWithLength:(NSUInteger)n options:(MTLResourceOptions)o zero:(BOOL)zero
 {
-    SWITCH_API(ApiObject);
+    const uint64_t maxBo = gRM->raw->kernelInfo().max_bo_bytes;
+    if (maxBo && uint64_t(n) > maxBo)
+        return nil;
     SwitchMetalBuffer *b = [SwitchMetalBuffer new];
     b->_device = self;
     b->_options = o;
     // a shared buffer: write-combined (gm20b::Buffer::wc), as every one Core Animation makes is written by the CPU and read by the
     // GPU (its buffer pool, its gamma and weight tables: QuartzCore MetalBufferPool::allocate_buffer, options 0): nothing to clean
-    // before a draw reads it, nothing to scan for the vertices an indexed draw reads (r16: 600-1300 KB cleaned a command buffer)
+    // before a draw reads it, nothing to scan for the vertices an indexed draw reads (r16: 600-1300 KB cleaned a command buffer).
+    // An app's is L2-cached: each job that uses it drops the L2's lines first (TegraGM20BSurfaceHostWritten) and one that
+    // writes it flushes them before its fence (External). Bound L2-bypassing (VOL=1), every GPU access was a DRAM round trip:
+    // a fragment's atomic took 414 ns, metal.compute went from 1.6 ms to 440 ms. The render server's stay VOL=1 until a
+    // measurement says which binding its frames want: its hot states moved both ways across that change.
     const bool wc = (o & MTLResourceStorageModeMask) == MTLResourceStorageModeShared;
     const bool hostVisible = (o & MTLResourceStorageModeMask) != MTLResourceStorageModePrivate;
-    if (!gRM->raw->createBuffer(n ? n : 16, b->_raw, wc, hostVisible, wc)) {
+    bool bypassL2 = wc && gRM->raw->role() == gm20b::Device::Role::RenderServer;
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    bypassL2 |= wc && gRM->raw->probeSharedBypassesL2.load(std::memory_order_relaxed);
+#endif
+    if (!gRM->raw->createBuffer(n ? n : 16, b->_raw, wc, hostVisible, bypassL2, zero)) {
         os_log_error(gm20bLog(), "SwitchMetal: %{public}s: no memory for a %lu-byte buffer: none made", getprogname(),
                      (unsigned long)n);
         return nil;
     }
+    if (b->_raw.freshFill)
+        establishFreshBuffer(b);
     return (id<MTLBuffer>)b;
+}
+
+- (id<MTLBuffer>)newBufferWithLength:(NSUInteger)n options:(MTLResourceOptions)o
+{
+    SWITCH_API(ApiObject);
+    return [self allocBufferWithLength:n options:o zero:YES];
 }
 
 - (id<MTLBuffer>)newBufferWithBytes:(const void *)p length:(NSUInteger)n options:(MTLResourceOptions)o
 {
     SWITCH_API(ApiObject);
-    id<MTLBuffer> b = [self newBufferWithLength:n options:o];
+    id<MTLBuffer> b = [self allocBufferWithLength:n options:o zero:(p == nullptr || n == 0)];
     if (!b || !p || !n)
         return b;
     SwitchMetalBuffer *buffer = (SwitchMetalBuffer *)b;
@@ -310,6 +350,7 @@
     if (!buffer->_raw.hostVisible && !gRM->raw->hostAccess(buffer->_raw, true, access))
         return nil;
     memcpy(buffer->_raw.cpu, p, n);
+    buffer->_raw.markCpuDirty();
     if (!access.finish())
         return nil;
     return b;
@@ -380,28 +421,12 @@
     return (id<MTLBuffer>)b;
 }
 
-#if SWITCH_FRAME_TIMELINE
-static void noteCompositorTarget(MTLTextureDescriptor *d, const void *frame)
-{
-    constexpr NSUInteger kPanel = 1280 * 720;
-    if (!(d.usage & MTLTextureUsageRenderTarget) || d.width * d.height <= kPanel || !gRM || !gRM->raw ||
-        gRM->raw->role() != gm20b::Device::Role::RenderServer || !gm20b::noteAllowed())
-        return;
-    gm20b::postTargetNote({uint32_t(d.width), uint32_t(d.height), uint32_t(d.pixelFormat), uint32_t(d.usage),
-                           uint32_t(d.storageMode), uint32_t(d.sampleCount), uint32_t(d.textureType),
-                           switch_frame::callers(frame)});
-}
-#endif
-
 // A private or shared texture of its own memory is block-linear (TegraGM20BLayout.h), as NVK lays out an optimal image and
 // m2v's view of it is (texture_tiled_in_place). The CPU reaches a shared one only through replaceRegion and getBytes,
 // which go through the copy engine (transferTexture) or swizzle (cpuTiled); textures over buffers, IOSurfaces and
 // caller pages stay pitch, as another binding names those bytes.
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d
 {
-#if SWITCH_FRAME_TIMELINE
-    noteCompositorTarget(d, __builtin_frame_address(0));
-#endif
     id<MTLTexture> made =
         swizzled([self gm20bNewTexture:d
                                  tiled:d.storageMode == MTLStorageModePrivate || d.storageMode == MTLStorageModeShared],
@@ -438,38 +463,6 @@ static bool refusedTexture(const gm20b::shapes::TextureShape &s)
         return true;
     }
     return false;
-}
-
-// The first texture of a kind the driver holds in memory of its own, once per process
-static void announceTexture(gm20b::shapes::Route route, const gm20b::shapes::TextureShape &s, const gm20b::Texture &t)
-{
-    using Route = gm20b::shapes::Route;
-    if (route == Route::Chain) {
-        static std::atomic<bool> said{false};
-        if (!said.exchange(true))
-            os_log(gm20bLog(), "SwitchMetal: mip chain on (%llu levels of %llux%llu, %llu bytes)",
-                   (unsigned long long)s.levels, (unsigned long long)s.width, (unsigned long long)s.height,
-                   (unsigned long long)t.chain->layout.bytes);
-    } else if (route == Route::StoredSamples) {
-        const bool zeta = gm20b::shapes::storedSamples(s) == gm20b::shapes::StoredSamples::Zeta;
-        static std::atomic<bool> said[2];
-        if (!said[zeta].exchange(true))
-            os_log(gm20bLog(),
-                   "SwitchMetal: stored %llux multisampled %{public}s on (first %llux%llu format %u: %llu bytes of "
-                   "%{public}s)",
-                   (unsigned long long)s.samples, zeta ? "depth/stencil" : "colour", (unsigned long long)s.width,
-                   (unsigned long long)s.height, s.format, (unsigned long long)(zeta ? t.storage.bytes : t.span.bytes),
-                   zeta ? "zeta memory" : "block-linear memory");
-    } else if (route == Route::StoredZeta) {
-        static std::atomic<bool> said{false};
-        if (!said.exchange(true))
-            os_log(
-                gm20bLog(),
-                "SwitchMetal: stored one-sample depth/stencil on (first %llux%llu format %u, %u layers: %llu bytes of "
-                "%{public}s zeta memory)",
-                (unsigned long long)s.width, (unsigned long long)s.height, s.format, unsigned(t.layers),
-                (unsigned long long)t.storage.bytes, t.comptags ? "compressed" : "plain");
-    }
 }
 
 - (id<MTLTexture>)gm20bNewTexture:(MTLTextureDescriptor *)d tiled:(bool)tiled
@@ -513,9 +506,7 @@ static void announceTexture(gm20b::shapes::Route route, const gm20b::shapes::Tex
     t->_kind = route == Route::Memoryless ? SwitchMetalTextureMemoryless : SwitchMetalTexturePool;
     const uint32_t kind = tiled || route != Route::Plain ? privateCompressedKind(d) : 0;
     t->_gm20bOk = gm20b::shapes::create(*gRM->raw, s, route, tiled, kind, t->_raw);
-    if (t->_gm20bOk)
-        announceTexture(route, s, t->_raw);
-    else if (route == Route::StoredZeta)
+    if (!t->_gm20bOk && route == Route::StoredZeta)
         SWITCH_REFUSE_DETAIL("gm20b", "zeta.owned", d.pixelFormat,
                              "a stored %lux%lu depth/stencil texture of format %lu: no zeta memory or texture header "
                              "for it",

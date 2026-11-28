@@ -2,7 +2,7 @@
 // The development probe's parts (UsbDmaProbe.h): completed buffer reads and the table of mappings still held.
 #pragma once
 
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
 #include <IOKit/IOMemoryDescriptor.h>
 #include <kern/cpu_number.h>
 #include <stdint.h>

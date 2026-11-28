@@ -729,6 +729,19 @@ impl<'a> ShaderFromNir<'a> {
                         }
                     }
 
+                    // ios-on-switch-lmao: the bytes above a 16-bit value
+                    // in its register are undefined (this PRMT fills them
+                    // with copies of byte 0), so a half already in the low
+                    // bytes is its register: SEL and MOV keep the PRMT,
+                    // where half ops fold it into their swizzle
+                    let in_place = bit_size == 16
+                        && prmt_srcs[1..].iter().all(Src::is_zero)
+                        && (0..num_bytes).all(|i| usize::from(prmt[i]) == i);
+                    if in_place {
+                        srcs_vec.push(Some(prmt_srcs[0].clone()));
+                        continue;
+                    }
+
                     srcs_vec.push(Some(b.prmt4(prmt_srcs, prmt).into()));
                 }
                 32 => match comps {
@@ -1236,6 +1249,44 @@ impl<'a> ShaderFromNir<'a> {
                         min: (alu.op == nir_op_fmin).into(),
                         ftz: self.float_ctl.fp32.ftz,
                     });
+                } else if alu.def.bit_size() == 16
+                    && (53..70).contains(&self.sm.sm())
+                {
+                    // ios-on-switch-lmao: SM53 has no HMNMX2. A compare and a
+                    // select of halves, as Apple's GPUs answer Metal's fmax
+                    // and fmin (an M1, host gpu_test SignedZeroTests): x
+                    // where x > y (x < y for fmin) or y is a NaN, y
+                    // otherwise, so a NaN loses and a tie of +0 and -0 gives
+                    // y. A half kept as a half where it was widened for
+                    // FMNMX: three quarter-rate F2F gone a scalar (nak_nir.c
+                    // keeps these scalar).
+                    assert!(alu.def.num_components == 1);
+                    let (x, y) = (srcs(0), srcs(1));
+                    let y_nan = b.alloc_ssa(RegFile::Pred);
+                    b.push_op(OpHSetP2 {
+                        dsts: [y_nan.into(), Dst::None],
+                        set_op: PredSetOp::And,
+                        cmp_op: FloatCmpOp::IsNan,
+                        srcs: [y.clone(), y.clone()],
+                        accum: SrcRef::True.into(),
+                        ftz: false,
+                        horizontal: false,
+                    });
+                    let keep_x = b.alloc_ssa(RegFile::Pred);
+                    b.push_op(OpHSetP2 {
+                        dsts: [keep_x.into(), Dst::None],
+                        set_op: PredSetOp::Or,
+                        cmp_op: if alu.op == nir_op_fmax {
+                            FloatCmpOp::OrdGt
+                        } else {
+                            FloatCmpOp::OrdLt
+                        },
+                        srcs: [x.clone(), y.clone()],
+                        accum: y_nan.into(),
+                        ftz: self.float_ctl.fp16.ftz,
+                        horizontal: false,
+                    });
+                    dst = b.sel(keep_x.into(), x, y).into();
                 } else if alu.def.bit_size() == 16 {
                     dst = b.alloc_ssa_vec(RegFile::GPR, 1);
                     b.push_op(OpHMnMx2 {
@@ -3628,7 +3679,7 @@ impl<'a> ShaderFromNir<'a> {
                 );
                 let comps = intrin.def.bit_size / 32;
                 let dst = b.alloc_ssa_vec(RegFile::GPR, comps);
-                if self.sm.sm() >= 50
+                if (self.sm.sm() >= 70 || (self.sm.sm() >= 50 && comps == 2))
                     && (idx == NAK_SV_CLOCK || idx == NAK_SV_CLOCK + 1)
                 {
                     debug_assert!(idx + comps <= NAK_SV_CLOCK + 2);
@@ -3798,7 +3849,10 @@ impl<'a> ShaderFromNir<'a> {
                         SCOPE_QUEUE_FAMILY | SCOPE_DEVICE => MemScope::GPU,
                         _ => panic!("Unhandled memory scope"),
                     };
-                    b.push_op(OpMemBar { scope: mem_scope });
+                    b.push_op(OpMemBar {
+                        scope: mem_scope,
+                        vc: false,
+                    });
                 }
                 if (modes & nir_var_mem_global) != 0
                     && (semantics & NIR_MEMORY_ACQUIRE) != 0
@@ -3958,6 +4012,13 @@ impl<'a> ShaderFromNir<'a> {
                     mem_eviction_priority: MemEvictionPriority::Normal,
                 });
                 self.set_dst(&intrin.def, dst);
+            }
+            nir_intrinsic_membar_vc_nv => {
+                assert!(self.sm.sm() >= 50 && self.sm.sm() < 70);
+                b.push_op(OpMemBar {
+                    scope: MemScope::GPU,
+                    vc: true,
+                });
             }
             nir_intrinsic_ssa_bar_nv => {
                 let src = self.get_src(&srcs[0]);

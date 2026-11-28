@@ -26,6 +26,7 @@
 #include "bazel/testing/fresh_process.h"
 #include "../SwitchBattery.h"
 #include "../SwitchBatteryPack.h"
+#include "../SwitchBatteryStore.h"
 #include "../SwitchChargePolicy.h"
 #include "../../SwitchDisplayPort/SwitchDisplayPort.h"
 #include "../../SwitchSuspend/SwitchWakeSources.h"
@@ -302,7 +303,7 @@ static unsigned gRailRaises = 0;
 
 struct PdChip {
     uint16_t alert = 0, status1 = 0, status2 = 0, config1 = 0xc0e0, vendor = 0;
-    uint16_t config2 = 0;                         // DR_SWAP field 3:2 reject in both roles
+    uint16_t config2 = 0;  // DR_SWAP field 3:2 reject in both roles
     uint16_t dpAlertEnable = 0;
     uint8_t alertEnable[4] = {0xff, 0xfb, 0, 0};  // every ALERT but bit 10 (DR_SWAP)
     uint32_t idHeader = 0;                        // the ID Header VDO it ACKs Discover Identity with; 0: never answers
@@ -619,11 +620,10 @@ extern "C" int tegra_i2c_write(unsigned bus, uint8_t addr, uint8_t reg, const vo
     auto *b = static_cast<const uint8_t *>(buf);
     if (addr == 0x6b) {
         check(len == 1, "charger write length");
-        if (gCheckPdInputOrder && reg == 0 && (gCharger.reg[0] & charge::bq::kHiZ) &&
-            !(b[0] & charge::bq::kHiZ) && (gPd.status1 & 0x80) && !gPd.pdos.empty()) {
+        if (gCheckPdInputOrder && reg == 0 && (gCharger.reg[0] & charge::bq::kHiZ) && !(b[0] & charge::bq::kHiZ) &&
+            (gPd.status1 & 0x80) && !gPd.pdos.empty()) {
             const unsigned budget = charge::rdoOperatingMilliamps(gPd.curRdo);
-            check(charge::pdoMilliamps(gPd.curPdo) != 0 && budget != 0 &&
-                      charge::bq::decodeInputLimit(b[0]) == budget,
+            check(charge::pdoMilliamps(gPd.curPdo) != 0 && budget != 0 && charge::bq::decodeInputLimit(b[0]) == budget,
                   "Hi-Z released only with the accepted positive input budget");
         }
         return gCharger.write(reg, b[0]);
@@ -631,8 +631,7 @@ extern "C" int tegra_i2c_write(unsigned bus, uint8_t addr, uint8_t reg, const vo
     if (addr == 0x18) {
         if (gCheckPdInputOrder && reg == 0x05 && len == 2 && b[0] == 0x07 && b[1] == 0x07) {
             const unsigned position = charge::rdoPosition(gPd.pendingRdo);
-            if (position != 0 && position <= gPd.pdos.size() &&
-                charge::pdoMilliamps(gPd.pdos[position - 1]) == 0) {
+            if (position != 0 && position <= gPd.pdos.size() && charge::pdoMilliamps(gPd.pdos[position - 1]) == 0) {
                 const auto observe = gBeforeZeroRdo;
                 gBeforeZeroRdo = {};
                 if (observe)
@@ -1320,11 +1319,16 @@ static void dockAltMode()
     gPd.unplug();
     gPd.status1 = 0x1280;
     gPd.status2 = 0x2000;
+    const uint64_t sleptBeforeResume = gSleptMS;
     switch_pd_sleep(false);
-    check(observed.plugged && !observed.settled && observed.contractMillivolts == 0 && gPd.vdmsSent == 2 &&
-              chgConfig() == 2 && gOutputs[TEGRA_GPIO(X, 3)] && gOutputs[TEGRA_GPIO(K, 5)] &&
+    check(gSleptMS == sleptBeforeResume && observed.plugged && !observed.settled && observed.contractMillivolts == 0 &&
+              gPd.vdmsSent == 2 && chgConfig() == 2 && gOutputs[TEGRA_GPIO(X, 3)] && !gOutputs[TEGRA_GPIO(K, 5)] &&
+              (gPd.config1 >> 14) == 3,
+          "resume consumes dock removal and enters WaitSource with boost and PX3 up without sleeping");
+    advance(10);
+    check(gSleptMS == sleptBeforeResume && gOutputs[TEGRA_GPIO(X, 3)] && gOutputs[TEGRA_GPIO(K, 5)] &&
               (gPd.config1 >> 14) == 0,
-          "resume consumes dock removal and enters WaitSource with boost, rails and switches armed");
+          "VCONN and SPDSRC switches come up after the 10 ms non-blocking rail ramp timer");
     gPd.status1 = 0x9680;
     gPd.status2 = 0x2000;
     gPd.alert |= 1u << 13;
@@ -1344,7 +1348,9 @@ static void oledDockSourceStartup()
           "empty port arms connector switches with fixed source rails and BQ boost off");
     SwitchPDState state{};
     check(switch_pd_add_listener(
-              [](void *context, const SwitchPDState *current) { *static_cast<SwitchPDState *>(context) = *current; },
+              [](void *context, const SwitchPDState *current) {
+                  *static_cast<SwitchPDState *>(context) = *current;
+              },
               &state) == 0,
           "power-role listener");
     const auto attachSink = [&state] {
@@ -1352,8 +1358,8 @@ static void oledDockSourceStartup()
         gPd.status2 = 0x2000;
         gPd.alert |= 0x8;
         advance(10);
-        check(!state.settled && state.role != SWITCH_PD_ROLE_SOURCE && chgConfig() == 2 &&
-                  gOutputs[TEGRA_GPIO(X, 3)] && gOutputs[TEGRA_GPIO(K, 5)] && (gPd.config1 >> 14) == 0,
+        check(!state.settled && state.role != SWITCH_PD_ROLE_SOURCE && chgConfig() == 2 && gOutputs[TEGRA_GPIO(X, 3)] &&
+                  gOutputs[TEGRA_GPIO(K, 5)] && (gPd.config1 >> 14) == 0,
               "Rd attach enters WaitSource with boost, rails and armed switches (Rp undisturbed)");
     };
     attachSink();
@@ -1390,12 +1396,11 @@ static void oledDockSourceStartup()
     attachSink();
     switch_pd_sleep(true);
     advance(900);
-    check(state.settled && state.role == SWITCH_PD_ROLE_NONE && chgConfig() == 1 &&
-              !gOutputs[TEGRA_GPIO(X, 3)] && !gOutputs[TEGRA_GPIO(K, 5)] && (gPd.config1 >> 14) == 3,
+    check(state.settled && state.role == SWITCH_PD_ROLE_NONE && chgConfig() == 1 && !gOutputs[TEGRA_GPIO(X, 3)] &&
+              !gOutputs[TEGRA_GPIO(K, 5)] && (gPd.config1 >> 14) == 3,
           "sleep cancels the powered WaitSource window without rearming it");
     switch_pd_sleep(false);
-    check(chgConfig() == 1 && !gOutputs[TEGRA_GPIO(X, 3)] && !gOutputs[TEGRA_GPIO(K, 5)] &&
-              (gPd.config1 >> 14) == 0,
+    check(chgConfig() == 1 && !gOutputs[TEGRA_GPIO(X, 3)] && !gOutputs[TEGRA_GPIO(K, 5)] && (gPd.config1 >> 14) == 0,
           "resume rearms empty-port switches without restarting boost or source rails");
 }
 
@@ -1410,8 +1415,8 @@ static void sourceSupplyLifecycle()
     check(switch_pd_allow_source(true) == 0 && !gOutputs[TEGRA_GPIO(X, 3)] && !gOutputs[TEGRA_GPIO(K, 5)] &&
               gRailRaises == 0 && gCharger.boostEnables == 0 && chgConfig() != 2 && (gPd.config1 >> 14) == 3,
           "host capability arriving after a cold sink attach keeps source rails, boost and switches off");
-    check(switch_pd_allow_source(false) == 0 && !gOutputs[TEGRA_GPIO(X, 3)] &&
-              !gOutputs[TEGRA_GPIO(K, 5)] && chgConfig() != 2 && (gPd.config1 >> 14) == 3,
+    check(switch_pd_allow_source(false) == 0 && !gOutputs[TEGRA_GPIO(X, 3)] && !gOutputs[TEGRA_GPIO(K, 5)] &&
+              chgConfig() != 2 && (gPd.config1 >> 14) == 3,
           "host capability removal in Sink keeps source rails, switches and boost off");
     gPd.unplug();
     advance(10);
@@ -1423,8 +1428,7 @@ static void sourceSupplyLifecycle()
     gPd.alert |= 0x8;
     advance(10);
     check(logHas("with VBUS already up") && chgConfig() == 1 && !gOutputs[TEGRA_GPIO(X, 3)] &&
-              !gOutputs[TEGRA_GPIO(K, 5)] && gRailRaises == 0 && gCharger.boostEnables == 0 &&
-              (gPd.config1 >> 14) == 3,
+              !gOutputs[TEGRA_GPIO(K, 5)] && gRailRaises == 0 && gCharger.boostEnables == 0 && (gPd.config1 >> 14) == 3,
           "VSAFE seen on an empty port is external and enters Sink without powering rails or boost");
     gPd.unplug();
     advance(10);
@@ -1434,8 +1438,8 @@ static void sourceSupplyLifecycle()
     switch_pd_sleep(false);
     check(!gOutputs[TEGRA_GPIO(X, 3)] && !gOutputs[TEGRA_GPIO(K, 5)] && (gPd.config1 >> 14) == 0,
           "resume rearms empty-port connector switches with source rails off");
-    check(switch_pd_allow_source(false) == 0 && !gOutputs[TEGRA_GPIO(X, 3)] &&
-              !gOutputs[TEGRA_GPIO(K, 5)] && (gPd.config1 >> 14) == 3,
+    check(switch_pd_allow_source(false) == 0 && !gOutputs[TEGRA_GPIO(X, 3)] && !gOutputs[TEGRA_GPIO(K, 5)] &&
+              (gPd.config1 >> 14) == 3,
           "host disable opens empty-port switches with rails off");
     check(switch_pd_allow_source(true) == 0 && gPd.unpoweredSourceArms == 0 && !gOutputs[TEGRA_GPIO(X, 3)] &&
               !gOutputs[TEGRA_GPIO(K, 5)] && (gPd.config1 >> 14) == 0,
@@ -1469,7 +1473,9 @@ static void macPort()
     check(switch_pd_allow_source(true) == 0, "host mode available");
     SwitchPDState state{};
     check(switch_pd_add_listener(
-              [](void *context, const SwitchPDState *current) { *static_cast<SwitchPDState *>(context) = *current; },
+              [](void *context, const SwitchPDState *current) {
+                  *static_cast<SwitchPDState *>(context) = *current;
+              },
               &state) == 0,
           "power-role listener");
     gPd.rdoReply = PdChip::AbortOnce;
@@ -1497,11 +1503,16 @@ static void resetAtStart()
 {
     gPd.status1 = 0x0280;  // INSERT, DFP
     gPd.vendor = 0x4;      // OCP off
+    const uint64_t sleptBefore = gSleptMS;
     if (switch_battery_start())
         check(false, "switch_battery_start");
     advance(10);
+    check(gSleptMS == sleptBefore, "startup SYS_RESET uses a timer instead of IOSleep");
     check(!gPd.commands.empty() && gPd.commands.front() == "0d0d", "SYS_RESET first");
     check(logHas("SwitchPD: BM92T36 SYS_RESET: found plugged as DFP"), "one line");
+    check((gPd.vendor & 0x4) == 0x4, "OCP waits for the 100 ms startup reset timer");
+    advance(100);
+    check(gSleptMS == sleptBefore, "startup reset timer completes without IOSleep");
     check((gPd.vendor & 0x4) == 0, "OCP on after the reset");
 }
 
@@ -1520,8 +1531,7 @@ static void faultReset()
     advance(150);
     check((gPd.vendor & 0x4) == 0, "OCP restored after the reset deadline");
     check(((gPd.config1 >> 14) & 3u) == 3u, "a sink session's switches off again");
-    check((gPd.config2 & 0xf) == 0xe,
-          "incoming DR_Swap always accept and PR_Swap as source restored after the reset");
+    check((gPd.config2 & 0xf) == 0xe, "incoming DR_Swap always accept and PR_Swap as source restored after the reset");
 }
 
 // A dual-role source other than the dock (its 5 V PDO has Dual-Role Data and USB Communications) leaves the Switch
@@ -1578,7 +1588,9 @@ static void dataDiscoveryWithoutCharging()
     gPd.status2 = 0;
     SwitchPDState state{};
     check(switch_pd_add_listener(
-              [](void *context, const SwitchPDState *current) { *static_cast<SwitchPDState *>(context) = *current; },
+              [](void *context, const SwitchPDState *current) {
+                  *static_cast<SwitchPDState *>(context) = *current;
+              },
               &state) == 0,
           "power-role listener");
     advance(499);
@@ -1594,8 +1606,7 @@ static void dataDiscoveryWithoutCharging()
               (gPd.status1 & 0x4000) && (gCharger.reg[0] & charge::bq::kHiZ),
           "established zero-current contract leaves charger input isolated");
     advance(2300);
-    check(state.contractMillivolts == 5000 && state.inputLimitMilliamps == 0 &&
-              (gCharger.reg[0] & charge::bq::kHiZ),
+    check(state.contractMillivolts == 5000 && state.inputLimitMilliamps == 0 && (gCharger.reg[0] & charge::bq::kHiZ),
           "published zero budget never becomes a 100 or 500 mA input allowance");
     const auto checkPublishedZeroBudget = [] {
         const IOPMPowerSource *ps = battery();
@@ -1606,8 +1617,8 @@ static void dataDiscoveryWithoutCharging()
         check(raw != ps->ps.end() && raw->second == 1, "raw external attachment remains published");
         const auto data = ps->dicts.find("ChargerData");
         check(data != ps->dicts.end() && data->second.numbers.count("InputCurrentLimit") &&
-                  data->second.numbers.at("InputCurrentLimit") == 0 &&
-                  data->second.numbers.count("ChargingCurrent") && data->second.numbers.at("ChargingCurrent") == 0,
+                  data->second.numbers.at("InputCurrentLimit") == 0 && data->second.numbers.count("ChargingCurrent") &&
+                  data->second.numbers.at("ChargingCurrent") == 0,
               "ChargerData reports zero effective input and charging current");
         const auto &adapter = ps->adapter.numbers;
         check(adapter.count(kIOPMPSAdapterDetailsFamilyKey) &&
@@ -1685,7 +1696,7 @@ static void zeroBudgetRefreshBeforePublication()
     gCheckPdInputOrder = true;
     IOTimerEventSource *refresh = nullptr;
     for (auto *timer : IOTimerEventSource::all)
-        if (dynamic_cast<IOPMPowerSource *>(timer->owner))
+        if (!refresh && dynamic_cast<IOPMPowerSource *>(timer->owner))
             refresh = timer;
     check(refresh != nullptr, "Battery refresh timer");
     if (!refresh)
@@ -1814,7 +1825,7 @@ static void zeroBudgetFailures()
               "a refused or unanswered zero-current handshake retains input isolation");
         check(logHas(reply == PdChip::Refuse   ? "the request was refused"
                      : reply == PdChip::Silent ? "no contract within 1.5 s"
-                                              : "PS_RDY was not completed within 1.5 s",
+                                               : "PS_RDY was not completed within 1.5 s",
                      mark),
               "the intended handshake failure was exercised");
         advance(120001);
@@ -2085,27 +2096,54 @@ static void policy()
     check(chargerSetting(Zone::Cool).reg02 == 0x10 && chargerSetting(Zone::Hot).reg02 == 0x00, "zone ICHG");
 }
 
-// iPadOS 27 reads the battery through an AppleSmartBatteryPack beside the power source (SwitchBatteryPack.h); 21H461
-// reads none, so its kernel publishes none.
+// iPadOS 27 reads the battery as an AppleSmartBattery with an AppleSmartBatteryPack under it and an
+// AppleSmartBatteryBank under that (SwitchBatteryPack.h); 21H461 reads none of it, so its kernel publishes none.
 static void batteryPack()
 {
+    gGauge.reg[0x4d] = static_cast<uint16_t>(-512);  // QH: -256 mAh
     bootWithNintendoCharger();
     advance(2300);
     AppleSmartBatteryPack *pack = nullptr;
-    for (IOService *s : IOService::published())
-        if (auto *p = dynamic_cast<AppleSmartBatteryPack *>(s))
+    AppleSmartBatteryBank *bank = nullptr;
+    size_t packAt = 0, bankAt = 0, batteryAt = 0;
+    const auto &published = IOService::published();
+    for (size_t i = 0; i < published.size(); ++i) {
+        if (auto *p = dynamic_cast<AppleSmartBatteryPack *>(published[i])) {
             pack = p;
+            packAt = i;
+        }
+        if (auto *b = dynamic_cast<AppleSmartBatteryBank *>(published[i])) {
+            bank = b;
+            bankAt = i;
+        }
+        if (published[i] == battery())
+            batteryAt = i;
+    }
 #if SWITCH_IPSW_KIND_24B119
+    check(dynamic_cast<AppleSmartBattery *>(battery()) != nullptr, "the battery is an AppleSmartBattery");
+    check(battery()->ps["BatteryPackCount"] == 1, "BatteryPackCount 1");
     check(pack && pack->provider == battery(), "pack published under the battery");
-    if (!pack)
+    check(bank && pack && bank->provider == pack, "bank published under the pack");
+    check(bank && pack && bankAt < packAt && packAt < batteryAt, "bank, then pack, then the battery registered");
+    if (!pack || !bank)
         return;
-    auto *id = dynamic_cast<OSNumber *>(pack->getProperty("ID"));
-    check(id && id->value == 0, "pack ID 0, the one powerd looks for");
-    auto data = [pack] {
-        auto *d = dynamic_cast<OSDictionary *>(pack->getProperty("BatteryData"));
+    auto number = [](const IOService *s, const char *key) {
+        auto *n = dynamic_cast<OSNumber *>(s->getProperty(key));
+        return n ? static_cast<long long>(static_cast<int32_t>(n->value)) : -1ll;
+    };
+    check(number(pack, "ID") == 0, "pack ID 0, the one powerd looks for");
+    check(number(pack, "BankCount") == 1, "one bank");
+    check(number(bank, "PackID") == 0, "the bank names its pack");
+    check(number(bank, "Voltage") == 3900, "bank top-level Voltage for thermalmonitord");
+    check(number(bank, "InstantAmperage") == 1800, "bank top-level InstantAmperage for thermalmonitord");
+    check(number(bank, "Temperature") == 3000, "bank top-level Temperature for thermalmonitord");
+    check(number(bank, "AppleRawCurrentCapacity") == 2586 && number(bank, "AppleRawMaxCapacity") == 4310,
+          "bank top-level raw capacities for thermalmonitord");
+    auto data = [](const IOService *s) {
+        auto *d = dynamic_cast<OSDictionary *>(s->getProperty("BatteryData"));
         return d ? *d : OSDictionary();
     };
-    OSDictionary d = data();
+    OSDictionary d = data(pack);
     check(d.numbers["VirtualTemperature"] == 3000,
           "VirtualTemperature 30.00 C: " + std::to_string(d.numbers["VirtualTemperature"]));
     check(d.numbers["RemainingCapacity"] == 2586 && d.numbers["MaxCapacity"] == 4310 &&
@@ -2113,18 +2151,202 @@ static void batteryPack()
           "capacities in mAh");
     check(d.numbers["Voltage"] == 3900 && d.numbers["AverageCurrent"] == 1800 && d.numbers["StateOfCharge"] == 60,
           "voltage, average current, state of charge");
+    check(d.numbers.count("InstantAmperage") && d.numbers["InstantAmperage"] == 1800, "InstantAmperage");
+    check(d.numbers.count("ChargeAccum") && d.numbers["ChargeAccum"] == -256,
+          "ChargeAccum from the coulomb counter: " + std::to_string(d.numbers["ChargeAccum"]));
     check(d.numbers.count("FullyCharged") && d.numbers["FullyCharged"] == 0 && !d.booleans.count("FullyCharged"),
           "FullyCharged is a number: powerd reads it as SInt32");
     check(d.strings["Serial"] == battery()->strings[kIOPMPSSerialKey] && d.strings["Serial"].size() == 17,
           "the battery's serial");
+    OSDictionary b = data(bank);
+    check(b.numbers == d.numbers && b.strings == d.strings, "the bank's BatteryData is the pack's");
+    const long long updated = battery()->ps["UpdateTime"];
+    check(updated >= 1795564800ll, "UpdateTime in calendar seconds: " + std::to_string(updated));
+    gGauge.reg[0x09] = static_cast<uint16_t>((3750 * 1000 / 625) << 3);
+    gGauge.reg[0x0a] = static_cast<uint16_t>(static_cast<int16_t>(-500 * 100000 / 15625));
+    gGauge.reg[0x05] = 2400 * 2;
     gGauge.setTemp(4600);
     advance(300);
-    check(data().numbers["VirtualTemperature"] == 4600,
-          "VirtualTemperature follows the gauge's alert: " + std::to_string(data().numbers["VirtualTemperature"]));
+    check(data(pack).numbers["VirtualTemperature"] == 4600 && data(bank).numbers["VirtualTemperature"] == 4600,
+          "VirtualTemperature follows the gauge's alert: " + std::to_string(data(pack).numbers["VirtualTemperature"]));
+    check(number(bank, "Voltage") == 3750 && number(bank, "InstantAmperage") == -500 &&
+              number(bank, "Temperature") == 4600 && number(bank, "AppleRawCurrentCapacity") == 2400 &&
+              number(bank, "AppleRawMaxCapacity") == 4310,
+          "bank top-level readings follow the gauge's alert");
+    check(battery()->ps["UpdateTime"] > updated, "UpdateTime moves with every reading");
 #else
-    check(!pack, "no pack on 21H461");
+    check(dynamic_cast<AppleSmartBattery *>(battery()) == nullptr, "no AppleSmartBattery on 21H461");
+    check(!pack && !bank, "no pack or bank on 21H461");
+    check(!battery()->ps.count("BatteryPackCount") && !battery()->ps.count("UpdateTime"),
+          "no BatteryPackCount or UpdateTime on 21H461");
+    (void)packAt;
+    (void)bankAt;
+    (void)batteryAt;
 #endif
 }
+
+// SwitchBatteryStore.h's NVRAM: what IODTNVRAM holds, by variable.
+static std::map<std::string, std::vector<uint8_t>> gNvram;
+
+bool switch_battery_nvram_read(const char *key, uint8_t *bytes, size_t *length)
+{
+    auto it = gNvram.find(key);
+    if (it == gNvram.end() || it->second.size() > *length)
+        return false;
+    *length = it->second.size();
+    std::copy(it->second.begin(), it->second.end(), bytes);
+    return true;
+}
+
+static bool gNvramFull;  // every write refused, as a full NVRAM bank refuses it
+
+bool switch_battery_nvram_write(const char *key, const uint8_t *bytes, size_t length)
+{
+    if (gNvramFull)
+        return false;
+    gNvram[key] = std::vector<uint8_t>(bytes, bytes + length);
+    return true;
+}
+
+extern "C" void switch_battery_data_mounted(void);
+
+#if SWITCH_IPSW_KIND_24B119
+static AppleSmartBatteryPack *publishedPack()
+{
+    for (IOService *s : IOService::published()) {
+        if (auto *p = dynamic_cast<AppleSmartBatteryPack *>(s))
+            return p;
+    }
+    return nullptr;
+}
+
+static OSDictionary packData()
+{
+    AppleSmartBatteryPack *pack = publishedPack();
+    auto *d = pack ? dynamic_cast<OSDictionary *>(pack->getProperty("BatteryData")) : nullptr;
+    return d ? *d : OSDictionary();
+}
+#endif
+
+// What powerd writes into the battery on 24B119 (SwitchBatteryStore.h): kept in NVRAM, never in the gauge, and shown
+// where powerd reads it back: DateOfFirstUse on the pack's BatteryData and the battery, ShipChargeLimitData on the
+// battery. 21H461's powerd writes neither, and its kernel refuses both as before.
+static void batteryStore()
+{
+    bootWithNintendoCharger();
+    advance(2300);
+    const auto gaugeBefore = gGauge.reg;
+    OSDictionary limit;
+    limit.setObject("ShipChargeLimitEnabled", kOSBooleanFalse);
+    OSNumber *date = OSNumber::withNumber(1795564800, 64);
+    OSDictionary dict;
+    dict.setObject("DateOfFirstUse", date);
+    dict.setObject("ShipChargeLimitData", &limit);
+    const IOReturn r = battery()->setProperties(&dict);
+#if SWITCH_IPSW_KIND_24B119
+    check(r == kIOReturnSuccess, "powerd's writes taken: " + std::to_string(r));
+    check(gNvram.empty(), "not saved on powerd's thread");
+    check(gGauge.reg == gaugeBefore, "the gauge is not written");
+    advance(10);
+    check(gNvram.count(SWITCH_BATTERY_NVRAM_DATE_OF_FIRST_USE) && gNvram.count(SWITCH_BATTERY_NVRAM_SHIP_CHARGE_LIMIT),
+          "both kept in NVRAM, from the work loop's timer");
+    check(packData().numbers["DateOfFirstUse"] == 1795564800, "DateOfFirstUse on the pack, where powerd looks first");
+    check(battery()->ps["DateOfFirstUse"] == 1795564800, "DateOfFirstUse on the battery");
+    check(battery()->dicts.count("ShipChargeLimitData") &&
+              battery()->dicts["ShipChargeLimitData"].booleans.count("ShipChargeLimitEnabled") &&
+              !battery()->dicts["ShipChargeLimitData"].booleans["ShipChargeLimitEnabled"],
+          "ShipChargeLimitData on the battery as powerd wrote it");
+    advance(5000);
+    check(packData().numbers["DateOfFirstUse"] == 1795564800, "DateOfFirstUse kept across readings");
+    gNvram.clear();
+    const unsigned updates = battery()->updates;
+    check(battery()->setProperties(&dict) == kIOReturnSuccess, "an unchanged write is taken");
+    advance(10);
+    check(gNvram.empty() && battery()->updates == updates, "and changes nothing: no save, no status update for powerd");
+    OSDictionary changed;
+    changed.setObject("ShipChargeLimitData", &limit);
+    changed.setObject("DateOfFirstUse", date);
+    limit.setObject("ShipChargeLimitEnabled", kOSBooleanTrue);
+    gNvramFull = true;
+    check(battery()->setProperties(&changed) == kIOReturnSuccess, "a changed write is taken while NVRAM refuses it");
+    advance(10);
+    check(gNvram.empty(), "nothing saved yet");
+    gNvramFull = false;
+    const unsigned beforeRetry = battery()->updates;
+    check(battery()->setProperties(&changed) == kIOReturnSuccess, "powerd writes the same again");
+    advance(10);
+    check(gNvram.count(SWITCH_BATTERY_NVRAM_SHIP_CHARGE_LIMIT) && battery()->updates == beforeRetry,
+          "the unchanged write saves what failed, without a status update");
+#else
+    check(r == kIOReturnUnsupported, "21H461 refuses them as before");
+    check(gNvram.empty(), "nothing in NVRAM on 21H461");
+    (void)gaugeBefore;
+#endif
+    date->release();
+}
+
+#if SWITCH_IPSW_KIND_24B119
+// A later boot: NVRAM holds what powerd wrote, so the pack has DateOfFirstUse and powerd, finding every pack dated,
+// writes no new one (24B119 powerd 0x10004cc4c-0x10004cc80).
+static void batteryStoreRestored()
+{
+    OSDictionary limit;
+    limit.setObject("ShipChargeLimitEnabled", kOSBooleanTrue);
+    OSString *note = OSString::withCString("from an earlier boot");
+    limit.setObject("Note", note);
+    uint8_t bytes[SWITCH_BATTERY_SHIP_LIMIT_MAX];
+    const size_t length = switch_battery_store_encode(&limit, bytes, sizeof(bytes));
+    check(length > 0, "the dictionary encodes");
+    gNvram[SWITCH_BATTERY_NVRAM_SHIP_CHARGE_LIMIT] = std::vector<uint8_t>(bytes, bytes + length);
+    gNvram[SWITCH_BATTERY_NVRAM_DATE_OF_FIRST_USE] = {0x00, 0xe1, 0x06, 0x6b, 0, 0, 0, 0};  // 0x6b06e100
+    bootWithNintendoCharger();
+    advance(2300);
+    switch_battery_data_mounted();
+    check(packData().numbers["DateOfFirstUse"] == 0x6b06e100,
+          "restored to the pack before powerd: " + std::to_string(packData().numbers["DateOfFirstUse"]));
+    check(battery()->dicts.count("ShipChargeLimitData") &&
+              battery()->dicts["ShipChargeLimitData"].booleans["ShipChargeLimitEnabled"] &&
+              battery()->dicts["ShipChargeLimitData"].strings["Note"] == "from an earlier boot",
+          "ShipChargeLimitData restored to the battery");
+    note->release();
+}
+
+// The store's encoding: what it holds comes back as it went in; what it cannot hold is refused, never cut.
+static void batteryStoreEncoding()
+{
+    OSDictionary d;
+    OSNumber *n = OSNumber::withNumber(0x123456789abcull, 64);
+    OSString *t = OSString::withCString("eighty");
+    d.setObject("Supported", kOSBooleanTrue);
+    d.setObject("Level", n);
+    d.setObject("Name", t);
+    uint8_t bytes[SWITCH_BATTERY_SHIP_LIMIT_MAX];
+    const size_t length = switch_battery_store_encode(&d, bytes, sizeof(bytes));
+    OSDictionary *back = switch_battery_store_decode(bytes, length);
+    check(back && back->booleans["Supported"] && back->strings["Name"] == "eighty", "booleans and strings round trip");
+    auto *level = back ? dynamic_cast<OSNumber *>(back->getObject("Level")) : nullptr;
+    check(level && level->unsigned64BitValue() == 0x123456789abcull, "64-bit numbers round trip");
+    check(switch_battery_store_encode(&d, bytes, 10) == 0, "a dictionary that does not fit is refused");
+    check(switch_battery_store_decode(bytes, length - 1) == nullptr, "a cut encoding does not parse");
+    OSSafeReleaseNULL(back);
+    n->release();
+    t->release();
+    // ShipChargeLimitData's two booleans in either order, as two dictionaries may iterate them.
+    const uint8_t enabledFirst[] = {2,   7,   'E', 'n', 'a', 'b', 'l', 'e', 'd', 1, 0, 9,
+                                    'S', 'u', 'p', 'p', 'o', 'r', 't', 'e', 'd', 1, 1};
+    const uint8_t supportedFirst[] = {2, 9, 'S', 'u', 'p', 'p', 'o', 'r', 't', 'e', 'd', 1,
+                                      1, 7, 'E', 'n', 'a', 'b', 'l', 'e', 'd', 1,   0};
+    uint8_t enabledOn[sizeof(enabledFirst)];
+    std::copy(std::begin(enabledFirst), std::end(enabledFirst), enabledOn);
+    enabledOn[10] = 1;
+    check(switch_battery_store_same(enabledFirst, sizeof(enabledFirst), supportedFirst, sizeof(supportedFirst)),
+          "the same entries in another order are the same");
+    check(!switch_battery_store_same(enabledOn, sizeof(enabledOn), supportedFirst, sizeof(supportedFirst)),
+          "a changed value is not");
+    check(!switch_battery_store_same(enabledFirst, 13, supportedFirst, sizeof(supportedFirst)),
+          "nor is a different count or a cut encoding");
+}
+#endif
 
 // One process per scenario: the drivers keep globals.
 static void run(void (*scenario)())
@@ -2189,6 +2411,23 @@ TEST(SwitchCharging, BatteryPack)
 {
     run(batteryPack);
 }
+
+TEST(SwitchCharging, BatteryStore)
+{
+    run(batteryStore);
+}
+
+#if SWITCH_IPSW_KIND_24B119
+TEST(SwitchCharging, BatteryStoreRestored)
+{
+    run(batteryStoreRestored);
+}
+
+TEST(SwitchCharging, BatteryStoreEncoding)
+{
+    run(batteryStoreEncoding);
+}
+#endif
 
 TEST(SwitchCharging, SettingsLost)
 {
@@ -2331,7 +2570,9 @@ static void lgTrySnkMonitor()
     check(switch_pd_allow_source(true) == 0, "host mode available");
     SwitchPDState state{};
     check(switch_pd_add_listener(
-              [](void *context, const SwitchPDState *current) { *static_cast<SwitchPDState *>(context) = *current; },
+              [](void *context, const SwitchPDState *current) {
+                  *static_cast<SwitchPDState *>(context) = *current;
+              },
               &state) == 0,
           "listener");
     // LG Try.SNK monitor with an e-marked cable: initially presents Rd (no VBUS), raises unsolicited 0x800 VDM while in
@@ -2362,8 +2603,8 @@ static void lgTrySnkMonitor()
     advance(10);
     // PR_SWAP_CMD (0x0303) sent and accepted: now SINK + DFP, PX3=0, PK5=1 (VCONN_ON), CONFIG2_VSRC_SWAP=1.
     check(std::count(gPd.commands.begin(), gPd.commands.end(), std::string("0303")) == 1, "PR_Swap probe sent");
-    check(state.role == SWITCH_PD_ROLE_SINK && state.dataHost && chgConfig() != 2 &&
-              !gOutputs[TEGRA_GPIO(X, 3)] && gOutputs[TEGRA_GPIO(K, 5)] && (gPd.config2 & 0x10) != 0,
+    check(state.role == SWITCH_PD_ROLE_SINK && state.dataHost && chgConfig() != 2 && !gOutputs[TEGRA_GPIO(X, 3)] &&
+              gOutputs[TEGRA_GPIO(K, 5)] && (gPd.config2 & 0x10) != 0,
           "PR_Swap leaves SINK + DFP with PX3 off and PK5 + CONFIG2_VSRC_SWAP preserved for VCONN_ON");
     // Monitor advertises 15 V PDOs after PR_Swap: SwitchPD negotiates charging, drains stale VDM before Discover
     // Identity, and configures DisplayPort Alt Mode.
@@ -2401,7 +2642,9 @@ static void macCaughtInRd()
     check(switch_pd_allow_source(true) == 0, "host mode available");
     SwitchPDState state{};
     check(switch_pd_add_listener(
-              [](void *context, const SwitchPDState *current) { *static_cast<SwitchPDState *>(context) = *current; },
+              [](void *context, const SwitchPDState *current) {
+                  *static_cast<SwitchPDState *>(context) = *current;
+              },
               &state) == 0,
           "listener");
     // MacBook caught in its Rd DRP phase: accepts PR_SWAP_CMD (0x0303), then Discover Identity sees Apple host header
@@ -2437,7 +2680,9 @@ static void stubbornMacDropsToClassify()
     check(switch_pd_allow_source(true) == 0, "host mode available");
     SwitchPDState state{};
     check(switch_pd_add_listener(
-              [](void *context, const SwitchPDState *current) { *static_cast<SwitchPDState *>(context) = *current; },
+              [](void *context, const SwitchPDState *current) {
+                  *static_cast<SwitchPDState *>(context) = *current;
+              },
               &state) == 0,
           "listener");
     // MacBook refuses PR_Swap while in Source: Discover Identity sees kMacHeader, SwitchPD drops to Classify (1 s).

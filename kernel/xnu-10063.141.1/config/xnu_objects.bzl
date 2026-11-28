@@ -25,7 +25,7 @@ load("@xcode//:defs.bzl", "DEVELOPER_DIR", "XCODE_TOOLCHAIN")
 load("//bazel/platforms:transitions.bzl", "kernel_transition", "outer_transition")
 load("//ipsw:ipsw.bzl", "kernel_virt_base")
 load("//kernel/rules:layout.bzl", "MOVED_ROOTS", "OLD_TREE", "PATH_ROOT", "tree_path")
-load("//kernel/switch:objects.bzl", "SWITCH_ROOT", "switch_copts", "switch_objects", "with_kprof", "with_recorder")
+load("//kernel/switch:objects.bzl", "SWITCH_ROOT", "switch_copts", "switch_objects", "switch_stats_copts", "with_kprof", "with_recorder")
 load(":recipes_development.bzl", "DEVELOPMENT_RECIPES")
 load(":recipes_release.bzl", "RELEASE_RECIPES")
 
@@ -257,6 +257,15 @@ def _xnu_objects_impl(ctx):
         else:
             by_path["switch://" + f.short_path] = f
 
+    stats_extra = {}
+    if config == "DEVELOPMENT" and ctx.attr._diagnostics[BuildSettingInfo].value:
+        stats_extra = switch_stats_copts(
+            comp,
+            ctx.attr._stats_sched[BuildSettingInfo].value,
+            ctx.attr._stats_frame[BuildSettingInfo].value,
+            ctx.attr._stats_io[BuildSettingInfo].value,
+        )
+
     # One compile per set of identical flags (most of a component shares its recipe's).
     groups, order = {}, []
     sources = []
@@ -277,6 +286,7 @@ def _xnu_objects_impl(ctx):
         flags = (
             _expand(recipe.flags, places) +
             _expand(ctx.attr.copts.get(entry, []), places) +
+            stats_extra.get(entry, []) +
             includes +
             _expand(ctx.attr.includes.get(entry, []), places) +
             ["-I", tree_path(SWITCH_ROOT + "/include")] +
@@ -366,8 +376,12 @@ xnu_objects_rule = rule(
         "tree_headers": attr.label_list(allow_files = True, doc = "the kernel tree's headers XNU includes"),
         "xnu_headers": attr.label_list(allow_files = True, doc = "XNU's source headers (every component's :headers)"),
         "_allowlist_function_transition": attr.label(default = "@bazel_tools//tools/allowlists/function_transition_allowlist"),
+        "_diagnostics": attr.label(default = "//bazel:diagnostics"),
         "_kind": attr.label(default = "//ipsw:kind"),
         "_setsegname": attr.label(default = "//kernel/xnu-10063.141.1:setsegname", executable = True, cfg = "exec"),
+        "_stats_frame": attr.label(default = "//bazel:stats_frame"),
+        "_stats_io": attr.label(default = "//bazel:stats_io"),
+        "_stats_sched": attr.label(default = "//bazel:stats_sched"),
     },
     toolchains = use_cc_toolchain(),
     fragments = ["cpp"],

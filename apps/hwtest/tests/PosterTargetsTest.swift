@@ -1,6 +1,9 @@
 import Darwin
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import UIKit
 
 /// Lock screen posters and their snapshots render no target larger than the panel: the GM20B kernel's largest
@@ -23,19 +26,31 @@ struct PosterTargetsTest: HWTest {
         metrics.set("panel", "\(width)x\(height)")
         guard let connection = GPUConnection() else { return .skip("no TegraGM20B connection", metrics) }
         let (kr, reply) = connection.call(
-            GPUPaths.method, GPUConnection.words([Self.targetPeaksOp, 0]), outputSize: 512
+            GPUPaths.method, GPUConnection.words([Self.targetPeaksOp, 0]), outputSize: GPUPaths.replySize
         )
         guard kr == KERN_SUCCESS else {
             let why =
                 kr == GPUConnection.kIOReturnUnsupported
-                    ? "a release kernel keeps no target peaks" : "target peaks unreadable (\(GPUConnection.hex(kr)))"
+                    ? (KernelSysctl.isReleaseKernel()
+                        ? "a release kernel keeps no target peaks"
+                        : "no target peaks (build with --//bazel:prof_gpu)")
+                    : "target peaks unreadable (\(GPUConnection.hex(kr)))"
             return .skip(why, metrics)
         }
         let peaks = TargetPeak.parse(String(decoding: reply.prefix { $0 != 0 }, as: UTF8.self))
         if let largest = peaks.first { metrics.set("largest", largest.text) }
+        metrics.set("owners", peaks.count)
+        metrics.set("peaks", peaks.isEmpty ? "-" : peaks.map(\.text).joined(separator: ","))
         let posters = peaks.filter(\.isPoster)
-        metrics.set("posters", posters.map(\.text).joined(separator: ","))
-        guard !posters.isEmpty else { return .skip("no poster has drawn since boot", metrics) }
+        metrics.set("posters", posters.isEmpty ? "-" : posters.map(\.text).joined(separator: ","))
+        guard !posters.isEmpty else {
+            return .skip(
+                "no poster process among the kernel's \(peaks.count) target peaks; its push scan reads one submission "
+                    +
+                    "in four per connection (TegraGM20BPushScanRun.cpp), so a poster that drew with few may be missing",
+                metrics
+            )
+        }
         return .judged(
             posters.map {
                 (

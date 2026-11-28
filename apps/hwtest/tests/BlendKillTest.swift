@@ -1,16 +1,18 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// The ROP's zero-source pixel kill (drivers/TegraGM20BMetal/blend_kill.h): a source-over state draws
 /// a zero colour over RGBA16F holding -0, NaN, infinities and denormals and over BGRA8, and no bit changes; the same
 /// state still blends a non-zero colour as source-over says; the facade counts the state made with the kill and its
-/// binds; and the same draws with the kill forced off through the probe channel give the GPU time it saves. The zeta
+/// binds, the kill being what the state's pack segment pushes (kill_pack_disagreements= states whose segment and the
+/// runtime's rule differ: a card's pack older than its driver); and the same draws with the kill forced off through the probe channel give the GPU time it saves. The zeta
 /// arms draw zero-source pixels of a source-over state that writes depth (always, 0.5) or stencil (replace with 0x5a,
 /// always) over a zeta cleared to 1.0 or 0: Metal writes the zeta at every pixel and keeps the colour, kill or not
 /// (zeta_<depth|stencil>_wrong= texels other than Metal's, zeta_<...>_colour_changed_bytes=, zeta_<...>_kill_binds= the
-/// binds the facade made with the kill on).
+/// binds the facade made with the kill on). BlendKillReachArms.swift: the late-depth, visibility and zero-clear arms.
 struct BlendKillTest: HWTest {
     let id = "gpu.gm20b.blend_kill"
     let name = "Zero-source pixels are dropped by the ROP, bits kept, blending unchanged"
@@ -113,9 +115,13 @@ struct BlendKillTest: HWTest {
         let counters = GM20BFacade.counters(of: gpu.device)
         let states = (counters["blend_kill_states"] ?? 0) - (before["blend_kill_states"] ?? 0)
         let binds = (counters["blend_kill_binds"] ?? 0) - (before["blend_kill_binds"] ?? 0)
+        let disagreements =
+            (counters["blend_kill_pack_disagreements"] ?? 0) - (before["blend_kill_pack_disagreements"] ?? 0)
         metrics.set("kill_states", states)
         metrics.set("kill_binds", binds)
+        metrics.set("kill_pack_disagreements", disagreements)
         if binds == 0 { wrong.append("kill_binds") }
+        if disagreements != 0 { wrong.append("kill_pack_disagreements") }
         metrics.set("on_gpu_ms", onMs, digits: 3)
         metrics.set("off_gpu_ms", offMs, digits: 3)
         metrics.set("off_emitted", emitted)
@@ -130,6 +136,7 @@ struct BlendKillTest: HWTest {
             if arm.wrong != 0 { wrong.append("\(label)_wrong") }
             if arm.colourChanged != 0 { wrong.append("\(label)_colour_changed_bytes") }
         }
+        await Self.reachArms(gpu, &metrics, &wrong, &paths)
         metrics.set("paths", paths.filter { $0 != "gm20b" }.isEmpty ? "gm20b" : paths.joined(separator: ","))
         if paths.contains(where: { $0 != "gm20b" }) { wrong.append("paths") }
         return wrong.isEmpty ? .pass(metrics) : .fail(wrong.joined(separator: ","), metrics)

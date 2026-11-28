@@ -4,39 +4,16 @@
 #include <kern/clock.h>
 #include <kern/thread_call.h>
 #include <kern/thread.h>
-#include "SwitchGpuBridge.h"
+#include "SwitchGpuBridgeQueue.h"
+#include "SwitchGpuBridgeProducer.h"
 #include "SwitchGpuTimeline.h"
 #include "TegraGM20BGpu.h"
 #include "TegraGM20BSyncpt.h"
-#include "SwitchGpuKqueue.h"
-#include "SwitchGpuSubmitTurn.h"
 #include "../TegraHost1x/TegraHost1x.h"
 
-struct switch_gpu_bridge {
-	switch_gpu_backing_token tokens[SWITCH_GPU_BRIDGE_MAX_TOKENS];
-	uint32_t count, refs, syncpoint, threshold, sequence, waiters;
-	bool active, notified;
-	int result;
-	void (*completed)(void *, int);
-	void *context;
-};
-
-namespace
+namespace switch_gpu_bridge_queue
 {
-constexpr uint32_t kSlots = 8, kHangCheckNs = 1000000000;
-constexpr uint64_t kPage = 4096, kPushVa = 1ULL << 20;
-constexpr SwitchGpuKqueueShape kShape = {
-	"host1x-bridge", TGM_FENCE_KERNEL_BRIDGE, kSlots, kPushVa, 1, 0};
-
-struct BridgeQueue {
-	IOLock *lock;
-	thread_call_t retirement, hangCheck;
-	uint64_t checkAt;
-	SwitchGpuKqueue space;
-	SwitchGpuSubmitTurn turn;
-	uint32_t waitingSources;
-	switch_gpu_bridge jobs[kSlots];
-} queue;
+BridgeQueue queue;
 
 void releaseLocked(switch_gpu_bridge &job)
 {
@@ -52,127 +29,38 @@ int producers(const switch_gpu_bridge &job)
 {
 	bool pending = false;
 	for (uint32_t i = 0; i < job.count; ++i) {
-		const int result = switch_gpu_backing_token_status(&job.tokens[i]);
+		const auto &token = job.tokens[i];
+		const int result = switch_gpu_backing_token_status(&token);
 		if (result < 0)
 			return result;
-		pending |= result == 0;
+		if (!result) {
+			// VIC and NVDEC publish physical cancellation before retirement sets status.
+			if (token.engine == SWITCH_GPU_ENGINE_VIC ||
+			    token.engine == SWITCH_GPU_ENGINE_NVDEC) {
+				const int physical =
+					switch_gpu_backing_token_physical_status(&token, 0);
+				if (physical < 0)
+					return physical;
+			}
+			pending = true;
+		}
 	}
 	return pending ? 0 : 1;
 }
 
-switch_gpu_bridge *oldestWaited()
+// Read after the caller's read of `cover`, so a covering job seen dead is judged by the increments it made before it
+// died (settleJobless has why they decide it)
+bool coveringDrained(const switch_gpu_bridge &job, int source, int cover)
 {
-	switch_gpu_bridge *oldest = nullptr;
-	for (auto &job : queue.jobs)
-		if (job.active && job.waiters &&
-		    (!oldest || int32_t(job.sequence - oldest->sequence) < 0))
-			oldest = &job;
-	return oldest;
+	return cover == 1 || (source == 1 &&
+			      int32_t(tegra_host1x_syncpt_read(job.producer) - job.threshold) >= 0);
 }
+}  // namespace switch_gpu_bridge_queue
 
-void armHangCheck(uint64_t ns)
+using namespace switch_gpu_bridge_queue;
+
+namespace
 {
-	clock_interval_to_deadline(uint32_t(ns / 1000), 1000, &queue.checkAt);
-	thread_call_enter_delayed(queue.hangCheck, queue.checkAt);
-}
-
-// The GPU's hang recovery runs only when something waits on a channel, and a wait on a bridge is that waiter for the
-// bridge channel: it has recovery look at what a stalled bridge is stuck on, whose kill releases the bridge's acquire.
-// One timer does it, armed when a wait begins, cancelled when no waited bridge is left (retire), and re-armed only for
-// the next step of tgm_chan_check_progress's rule. The reference keeps the channel across the unlocked check.
-void checkHang(thread_call_param_t, thread_call_param_t)
-{
-	IOLockLock(queue.lock);
-	queue.checkAt = 0;
-	switch_gpu_bridge *late = queue.space.channel ? oldestWaited() : nullptr;
-	if (!late) {
-		IOLockUnlock(queue.lock);
-		return;
-	}
-	++late->refs;
-	tgm_chan *channel = queue.space.channel;
-	const uint32_t sequence = late->sequence;
-	IOLockUnlock(queue.lock);
-	const uint64_t next = tgm_chan_check_progress(channel, "host1x bridge", sequence);
-	IOLockLock(queue.lock);
-	if (next && !queue.checkAt && oldestWaited())
-		armHangCheck(next);
-	releaseLocked(*late);
-	IOLockUnlock(queue.lock);
-}
-
-void retire(thread_call_param_t, thread_call_param_t)
-{
-	struct Completion {
-		switch_gpu_bridge *job;
-		void (*fn)(void *, int);
-		void *context;
-		int result;
-	};
-
-	Completion callbacks[kSlots];
-	uint32_t count = 0;
-	IOLockLock(queue.lock);
-	__atomic_store_n(&queue.waitingSources, 1u, __ATOMIC_RELEASE);
-	bool pendingSources = false;
-	int failed = 0;
-	const uint32_t completed =
-		queue.space.channel ? tgm_chan_settled(queue.space.channel, &failed) : 0;
-	for (auto &job : queue.jobs) {
-		if (!job.active || (!failed && int32_t(completed - job.sequence) < 0))
-			continue;
-		const int source = producers(job);
-		if (!failed && !source) {
-			pendingSources = true;
-			continue;
-		}
-		job.result = failed ? -5 : source == 1 ? 1 : source < 0 ? source : -5;
-		if (failed) {
-			const int released = tegra_host1x_syncpt_release_failed(
-				job.syncpoint, job.threshold, TGM_SYNCPT_INCRS);
-			// Whatever waits on the old syncpoint fails or times out on its own engine; this slot no longer shares it.
-			if (released) {
-				IOLog("SwitchGpuBridge: syncpoint %u of a failed job stays short "
-				      "of %u "
-				      "(%d); its slot takes "
-				      "another\n",
-				      job.syncpoint, job.threshold, released);
-				job.syncpoint = 0;
-			}
-		}
-		if (job.result == 1)
-			for (uint32_t i = 0; i < job.count; ++i)
-				if (job.tokens[i].engine == SWITCH_GPU_ENGINE_GM20B)
-					(void)switch_gpu_timeline_promote(&job.tokens[i]);
-		job.active = false;
-		if (job.notified) {
-			job.notified = false;
-			--job.waiters;
-		}
-		IOLockWakeup(queue.lock, &job, false);
-		releaseLocked(job);
-	}
-	for (auto &job : queue.jobs) {
-		if (!job.active && job.completed) {
-			callbacks[count++] = {&job, job.completed, job.context, job.result};
-			job.completed = nullptr;
-		}
-	}
-	if (queue.checkAt && !oldestWaited()) {
-		thread_call_cancel(queue.hangCheck);
-		queue.checkAt = 0;
-	}
-	__atomic_store_n(&queue.waitingSources, pendingSources, __ATOMIC_RELEASE);
-	IOLockUnlock(queue.lock);
-	for (uint32_t i = 0; i < count; ++i) {
-		const auto &callback = callbacks[i];
-		callback.fn(callback.context, callback.result == 1 ? 0 : callback.result);
-		IOLockLock(queue.lock);
-		releaseLocked(*callback.job);
-		IOLockUnlock(queue.lock);
-	}
-}
-
 void completed(void *)
 {
 	thread_call_enter(queue.retirement);
@@ -210,32 +98,46 @@ bool initialize()
 }
 
 // A syncpoint stays with its slot across a failed open, as host1x hands none back.
-bool openSpace()
-{
-	for (auto &job : queue.jobs)
-		if (!job.syncpoint && tegra_host1x_syncpt_alloc(&job.syncpoint))
-			return false;
-	return queue.space.openSpace(kShape, &queue);
-}
-
+// Releases queue.lock via queue.turn across tgm_chan_del / openSpace / openChannel (each enters tgm_sc7_gate) so
+// gatePass and retirement can still acquire queue.lock during sleep or rail-down drain.
 int channel()
 {
-	if (queue.space.channel && tgm_chan_error(queue.space.channel)) {
+	if (queue.space.channel && !tgm_chan_error(queue.space.channel))
+		return 0;
+	if (queue.space.channel) {
 		for (const auto &job : queue.jobs)
-			if (job.refs)
+			if (job.refs && !job.producer)
 				return -16;
-		tgm_chan_del(&queue.space.channel);
 	}
-	if (!queue.space.vm && !openSpace()) {
-		queue.space.discardSpace(kShape);
-		return -12;
+	if (!queue.space.vm) {
+		for (auto &job : queue.jobs)
+			if (!job.syncpoint && tegra_host1x_syncpt_alloc(&job.syncpoint))
+				return -12;
 	}
-	return queue.space.openChannel(kShape, &queue, completed);
+	tgm_chan *oldChannel = queue.space.channel;
+	queue.space.channel = nullptr;
+	tgm_chan *newChannel = nullptr;
+	const int error = queue.turn.waitForRoom(queue.lock, [&] {
+		if (oldChannel)
+			tgm_chan_del(&oldChannel);
+		if (!queue.space.vm &&
+		    (!queue.space.openSpace(kShape, &queue) || !gateOpen(queue.space.vm))) {
+			queue.space.discardSpace(kShape);
+			return -12;
+		}
+		return queue.space.openChannel(kShape, &queue, completed, &newChannel);
+	});
+	if (!error)
+		queue.space.channel = newChannel;
+	return error;
 }
-}
+}  // namespace
 
-extern "C" int switch_gpu_bridge_submit(const switch_gpu_backing_token *tokens, uint32_t count,
-					switch_gpu_bridge **out)
+// `assigns`: a host1x consumer's submit, which gives a channel without a syncpoint one for its next jobs; a CPU wait
+// or the display's fence never waits on a syncpoint, so it takes none from them
+// `watched`: switch_gpu_bridge_submit_watched's, taken under this lock
+static int submitBridge(const switch_gpu_backing_token *tokens, uint32_t count,
+			switch_gpu_bridge **out, bool assigns, bool watched = false)
 {
 	if (!out || !tokens || !count || count > SWITCH_GPU_BRIDGE_MAX_TOKENS)
 		return -22;
@@ -254,13 +156,20 @@ extern "C" int switch_gpu_bridge_submit(const switch_gpu_backing_token *tokens, 
 	}
 	if (!initialize())
 		return -12;
+	SwitchGpuProducerWait wait;
+	const bool jobless = switch_gpu_producer_wait(tokens, count, wait);
+	if (jobless)
+		tgm_chan_need_tokens(&wait.covering, 1);
 	IOLockLock(queue.lock);
-	queue.turn.enter(queue.lock);
-	int error = channel();
+	if (assigns)
+		switch_gpu_producer_assign(wait);
+	if (!jobless)
+		queue.turn.enter(queue.lock);
+	int error = jobless ? 0 : channel();
 	uint32_t slot = 0;
 	while (slot < kSlots && queue.jobs[slot].refs)
 		++slot;
-	if (!error && slot < kSlots && !queue.jobs[slot].syncpoint &&
+	if (!error && !jobless && slot < kSlots && !queue.jobs[slot].syncpoint &&
 	    tegra_host1x_syncpt_alloc(&queue.jobs[slot].syncpoint))
 		error = -12;
 	if (error || slot == kSlots) {
@@ -269,7 +178,9 @@ extern "C" int switch_gpu_bridge_submit(const switch_gpu_backing_token *tokens, 
 	}
 	auto &job = queue.jobs[slot];
 	job.refs = 1;
-	job.result = 0;
+	__atomic_store_n(&job.result, 0, __ATOMIC_RELAXED);
+	job.producer = jobless ? wait.syncpoint : 0;
+	bool producerDone = false;
 	for (uint32_t i = 0; i < count; ++i) {
 		error = switch_gpu_backing_token_retain(&tokens[i]);
 		if (error)
@@ -277,62 +188,128 @@ extern "C" int switch_gpu_bridge_submit(const switch_gpu_backing_token *tokens, 
 		job.tokens[job.count++] = tokens[i];
 	}
 	if (!error) {
+		// Ahead of the check: a producer that completes after it finds the flag and has retirement look
+		if (jobless)
+			__atomic_store_n(&queue.waitingSources, 1u, __ATOMIC_SEQ_CST);
 		const int source = producers(job);
 		if (source < 0)
 			error = source;
 	}
-	if (!error) {
-		job.threshold = tegra_host1x_syncpt_read(job.syncpoint) + TGM_SYNCPT_INCRS;
-		const tgm_push push = {
-			kPushVa + slot * kPage,
-			tgm_syncpt_incr(queue.space.words + slot * (kPage / 4), job.syncpoint),
-			0,
-			0,
-			0,
-			0};
+	bool abandoned = false;
+	if (!error && jobless) {
+		job.threshold = wait.threshold;
+		job.covering = wait.covering;
+		int stopped = 0;
+		producerDone = switch_gpu_producer_covered(job.covering, &stopped) != 0;
+	} else if (!error) {
 		tgm_chan *const chan = queue.space.channel;
-		switch_gpu_chan_submit_enter(chan);
-		for (;;) {
-			// No L2 invalidate ahead of it: the job reads no memory, its push slots are volatile, and the push's own
-			// flush (tgm_syncpt_incr) puts the producers' writes in DRAM before host1x sees the increment.
-			error = switch_gpu_chan_exec_visibility(
-				chan, &push, 1, job.tokens, job.count, &job.sequence, nullptr,
-				SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT |
-					SWITCH_GPU_SUBMIT_EXTERNAL_VISIBILITY);
-			if (error != -11)
-				break;
-			error = queue.turn.waitForRoom(queue.lock, [&] {
-#if TGM_STATS
-				tgm_stats_unlocked(TGM_UNLOCKED_BRIDGE_ROOM, 0);
-#endif
-				return switch_gpu_chan_wait_submission_room(chan, &push, 1,
-									    job.count, nullptr);
-			});
-			if (error)
-				break;
+		queue.turn.waitForRoom(queue.lock, [&] {
+			switch_gpu_chan_submit_enter(chan);
+			return 0;
+		});
+		const int entered = producers(job);
+		if (entered < 0) {
+			error = entered;
+		} else {
+			job.threshold = tegra_host1x_syncpt_read(job.syncpoint) + TGM_SYNCPT_INCRS;
+			const tgm_push push = {
+				kPushVa + slot * kPage, slotPush(job, slot), 0, 0, 0, 0};
+			for (;;) {
+				// No L2 invalidate ahead of it: the job reads no memory, its push slots are volatile, and the push's own
+				// flush (tgm_syncpt_incr) puts the producers' writes in DRAM before host1x sees the increment.
+				error = switch_gpu_chan_exec_visibility(
+					chan, &push, 1, job.tokens, job.count, &job.sequence,
+					nullptr,
+					SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT |
+						SWITCH_GPU_SUBMIT_EXTERNAL_VISIBILITY);
+				if (error != -11)
+					break;
+				error = queue.turn.waitForRoom(queue.lock, [&] {
+					return switch_gpu_chan_wait_submission_room(
+						chan, &push, 1, job.count, nullptr);
+				});
+				if (error)
+					break;
+				// waitForRoom dropped queue.lock; gatePass may have already reopened the gate for a producer
+				// that failed meanwhile.
+				const int source = producers(job);
+				if (source < 0) {
+					error = source;
+					break;
+				}
+			}
 		}
 		switch_gpu_chan_submit_leave();
+		// If a producer failed while exec_visibility ran, backing_unsettled may have skipped its acquire before
+		// gate_close closed the gate. Keep the slot until the kicked GPU job retires, and hand no bridge out.
+		if (!error) {
+			const int source = producers(job);
+			if (source < 0) {
+				error = source;
+				abandoned = true;
+			}
+		}
 	}
-	if (error) {
+#if TGM_DEBUG_PROBES
+	const bool consumerJobless = !error && jobless && assigns;
+#endif
+	if (abandoned) {
+		__atomic_store_n(&job.result, error, __ATOMIC_RELEASE);
+		job.active = true;
+		thread_call_enter(queue.retirement);
+	} else if (error) {
 		releaseLocked(job);
 	} else {
 		job.active = true;
 		++job.refs;
+		if (watched) {
+			job.watched = true;
+			++job.waiters;
+		}
 		*out = &job;
 		// A check that found the channel idle left the timer down, and a waiter may still be on a bridge whose GPU
 		// work is done: this job is new work on the channel that waiter's checks cover.
-		if (!queue.checkAt && oldestWaited())
+		if (!queue.checkAt && anyWaited())
 			armHangCheck(kHangCheckNs);
+		if (jobless && producerDone)
+			thread_call_enter(queue.retirement);
 	}
 	IOLockUnlock(queue.lock);
+#if TGM_DEBUG_PROBES
+	if (consumerJobless)
+		tgm_chan_note_jobless(wait.covering.queue);
+#endif
 	return error;
+}
+
+extern "C" int switch_gpu_bridge_submit(const switch_gpu_backing_token *tokens, uint32_t count,
+					switch_gpu_bridge **out)
+{
+	return submitBridge(tokens, count, out, true);
+}
+
+extern "C" int switch_gpu_bridge_submit_watched(const switch_gpu_backing_token *tokens,
+						uint32_t count, switch_gpu_bridge **out)
+{
+	return submitBridge(tokens, count, out, true, true);
 }
 
 extern "C" void switch_gpu_bridge_syncpoint(const switch_gpu_bridge *bridge, uint32_t *syncpoint,
 					    uint32_t *threshold)
 {
-	*syncpoint = bridge->syncpoint;
+	*syncpoint = bridge->producer ? bridge->producer : bridge->syncpoint;
 	*threshold = bridge->threshold;
+}
+
+extern "C" int switch_gpu_bridge_jobless(const switch_gpu_bridge *bridge)
+{
+	return bridge && bridge->producer;
+}
+
+extern "C" int switch_gpu_bridge_failed(const switch_gpu_bridge *bridge)
+{
+	const int result = bridge ? __atomic_load_n(&bridge->result, __ATOMIC_ACQUIRE) : -22;
+	return result < 0 ? result : 0;
 }
 
 extern "C" int switch_gpu_bridge_covers(const switch_gpu_bridge *bridge,
@@ -378,7 +355,12 @@ extern "C" int switch_gpu_bridge_source_failure(const switch_gpu_bridge *bridge)
 
 extern "C" int switch_gpu_bridge_why(const switch_gpu_bridge *bridge)
 {
-	return switch_gpu_backing_tokens_failure(bridge->tokens, bridge->count);
+	const int why = switch_gpu_backing_tokens_failure(bridge->tokens, bridge->count);
+	// A jobless bridge also fails when every token completed and its covering job died before its drain
+	const bool coveringFailed =
+		bridge->producer && __atomic_load_n(&bridge->result, __ATOMIC_ACQUIRE) < 0;
+	return why || !coveringFailed ? why
+				      : switch_gpu_backing_tokens_failure(&bridge->covering, 1);
 }
 
 extern "C" int switch_gpu_bridge_status(const switch_gpu_bridge *bridge)
@@ -389,8 +371,17 @@ extern "C" int switch_gpu_bridge_status(const switch_gpu_bridge *bridge)
 	int result = bridge->result;
 	if (!result) {
 		result = producers(*bridge);
+		if (bridge->producer && result >= 0) {
+			int stopped = 0;
+			const int cover = switch_gpu_producer_covered(bridge->covering, &stopped);
+			if (cover == 0)
+				result = 0;
+			else if (!coveringDrained(*bridge, result, cover))
+				result = cover;
+		}
+		const uint32_t syncpoint = bridge->producer ? bridge->producer : bridge->syncpoint;
 		if (result == 1 &&
-		    int32_t(tegra_host1x_syncpt_read(bridge->syncpoint) - bridge->threshold) < 0)
+		    int32_t(tegra_host1x_syncpt_read(syncpoint) - bridge->threshold) < 0)
 			result = 0;
 	}
 	IOLockUnlock(queue.lock);
@@ -442,6 +433,22 @@ extern "C" int switch_gpu_bridge_notify(const switch_gpu_bridge *bridge,
 	return 0;
 }
 
+extern "C" int switch_gpu_bridge_watch(const switch_gpu_bridge *bridge)
+{
+	if (!bridge)
+		return -22;
+	auto *job = const_cast<switch_gpu_bridge *>(bridge);
+	IOLockLock(queue.lock);
+	if (job->active && !job->watched) {
+		++job->waiters;
+		job->watched = true;
+		if (!queue.checkAt)
+			armHangCheck(kHangCheckNs);
+	}
+	IOLockUnlock(queue.lock);
+	return 0;
+}
+
 extern "C" void switch_gpu_bridge_release(switch_gpu_bridge **bridge)
 {
 	if (!bridge || !*bridge)
@@ -459,10 +466,13 @@ extern "C" int switch_gpu_bridge_wait_room(void)
 	IOLockLock(queue.lock);
 	for (;;) {
 		uint32_t held = 0;
-		for (const auto &job : queue.jobs)
+		uint32_t heldJobs = 0;
+		for (const auto &job : queue.jobs) {
 			held += job.refs != 0;
+			heldJobs += job.refs != 0 && !job.producer;
+		}
 		const bool failed = queue.space.channel && tgm_chan_error(queue.space.channel);
-		if (failed ? held == 0 : held < kSlots)
+		if (failed ? heldJobs == 0 : held < kSlots)
 			break;
 		IOLockSleep(queue.lock, &queue.jobs, THREAD_UNINT);
 	}
@@ -476,7 +486,7 @@ extern "C" int switch_gpu_bridge_fence(const switch_gpu_backing_token *tokens, u
 	if (!callback)
 		return -22;
 	switch_gpu_bridge *bridge = nullptr;
-	const int error = switch_gpu_bridge_submit(tokens, count, &bridge);
+	const int error = submitBridge(tokens, count, &bridge, false);
 	if (error)
 		return error;
 	IOLockLock(queue.lock);
@@ -494,7 +504,7 @@ extern "C" int switch_gpu_bridge_wait_external(const switch_gpu_backing_token *t
 	switch_gpu_bridge *bridge = nullptr;
 	int result;
 	for (;;) {
-		result = switch_gpu_bridge_submit(token, 1, &bridge);
+		result = submitBridge(token, 1, &bridge, false);
 		if (result != -16)
 			break;
 		result = switch_gpu_bridge_wait_room();

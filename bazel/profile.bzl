@@ -16,8 +16,30 @@ PROFILE_ATTR = {
     "_diagnostics": attr.label(default = "//bazel:diagnostics"),
 }
 
+METAL_STATS_ATTR = {
+    "_stats_gpu": attr.label(default = "//bazel:stats_gpu"),
+    "_prof_gpu": attr.label(default = "//bazel:prof_gpu"),
+    "_stats_frame": attr.label(default = "//bazel:stats_frame"),
+}
+
 def switch_debug_define(ctx):
     """The -D flag for the profile and diagnostics settings ctx.attr._profile and ._diagnostics (PROFILE_ATTR) name."""
     if not ctx.attr._diagnostics[BuildSettingInfo].value:
         return SWITCH_DEBUG_DEFINES["release"]
     return SWITCH_DEBUG_DEFINES[ctx.attr._profile[BuildSettingInfo].value]
+
+def metal_stats_defines(ctx):
+    """Per-category opt-in -D flags for the Metal plugin (0 unless debug + diagnostics + category flag)."""
+    debug_on = (
+        ctx.attr._profile[BuildSettingInfo].value == "debug" and
+        ctx.attr._diagnostics[BuildSettingInfo].value
+    )
+    flags = [
+        ("_stats_gpu", "SWITCH_STATS_GPU"),
+        ("_prof_gpu", "SWITCH_PROF_GPU"),
+        ("_stats_frame", "SWITCH_STATS_FRAME"),
+    ]
+    return [
+        "-D{}={}".format(macro, 1 if (debug_on and getattr(ctx.attr, attr_name)[BuildSettingInfo].value) else 0)
+        for attr_name, macro in flags
+    ]

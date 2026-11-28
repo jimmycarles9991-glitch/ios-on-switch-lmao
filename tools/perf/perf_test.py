@@ -1,14 +1,16 @@
 """tools/perf over lines as boot 2 of 22 Nov logged them (iOS 27, a debug kernel), cut to what each test needs."""
 
+import gzip
 import json
 import os
 import struct
 import tempfile
 import unittest
+import zlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from tools.perf import ips, pacing, perf, report, session, source, symbols, vm, windows, work
+from tools.perf import cpu, dumps, gpu, ips, pacing, perf, recfile, report, session, source, symbols, vm, windows, work
 from tools.perf.source import TICK_HZ, Rec
 
 T0 = datetime(2026, 11, 23, 0, 13, 20, tzinfo=UTC)
@@ -89,6 +91,28 @@ def frame(template: str, at: float, origin_ticks: int, **kw: int) -> Rec:
     return rec(template.format(latch=origin_ticks + 2 * PERIOD_TICKS, origin=origin_ticks, **kw), at)
 
 
+class GpuTest(unittest.TestCase):
+    def test_the_smmu_line_gives_each_windows_hit_rates_and_retirement_invalidates(self):
+        recs = [
+            rec(
+                'tegra-gm20b: smmu counters on from here (TLB_CONFIG 0xb0000030 PTC_CONFIG 0xa8000f3f); retirement L2 '
+                'invalidates 0 for 0 objects, 0 us CPU',
+                1.0,
+            ),
+            rec(
+                'tegra-gm20b: smmu tlb 900 hits 100 misses (90.0% hit), ptc 95 hits 5 misses (95.0% hit); '
+                'retirement L2 invalidates 12 for 30 objects, 2400 us CPU',
+                6.0,
+            ),
+        ]
+        g = gpu.read(recs)
+        self.assertEqual(g.smmu, [(900, 100, 95, 5)])
+        self.assertEqual(g.retire, [(0, 0), (12, 2400)])
+        text = '\n'.join(gpu.lines(g))
+        self.assertIn('SMMU TLB hits per stats window: p50 90.0%, worst 90.0%; 100 misses over 1 windows', text)
+        self.assertIn('retirement L2 invalidates per stats window: p50 12, max 12; 2.4 ms of CPU over 2 windows', text)
+
+
 class PacingTest(unittest.TestCase):
     def test_the_stage_is_the_first_point_past_the_frame_end(self):
         origins = [MACH0 + 1000 + i * 60 * PERIOD_TICKS for i in range(6)]
@@ -108,6 +132,46 @@ class PacingTest(unittest.TestCase):
         stages = [s.stage for s in pacing.slow_presents(recs)]
         expected = ['render thread waited', 'record, on core', 'record', 'gap before it', 'display queue', 'unanchored']
         self.assertEqual(stages, expected)
+
+    def test_a_first_submit_before_the_vsync_or_none_still_places_the_frame(self):
+        """Lines of boot 2693043C (25 Nov), which the classifier used to call unclassified."""
+        before = (
+            'SwitchFrame: latch {latch} after 3 frames (49999 us), cause ca; origin vsync {origin}; first submit '
+            '-24689, last submit 8756 (2, exec 35 us), swap 8845, offer 8971, gpu done 17602, flip 17604, latch 33332 '
+            'us; other submits 2; swap thread base 54 sched 54 mode 2 qos 0; cpu 1785 MHz at vsync 1785 at swap; imp 2 '
+            '211 us, bind 2 45 us, alloc 0 0 us, free 2, clean 32 KiB 12 us; gpu busy 33.5%'
+        )
+        none = (
+            'SwitchFrame: latch {latch} after 2 frames (33315 us), cause ca; origin vsync {origin}; first submit -1, '
+            'last submit -1 (0, exec 0 us), swap 18375, offer 18437, gpu done -1, flip 18472, latch 33314 us; other '
+            'submits 0; swap thread base 54 sched 54 mode 2 qos 0; cpu 1785 MHz at vsync 1785 at swap; imp 0 0 us, '
+            'bind 0 0 us, alloc 0 0 us, free 0, clean 0 KiB 0 us; gpu busy 0.0%'
+        )
+        slows = pacing.slow_presents([frame(before, 0.04, MACH0 + 1000), frame(none, 1.04, MACH0 + 60 * PERIOD_TICKS)])
+        self.assertEqual([s.stage for s in slows], ['gpu', 'encode'])
+        self.assertEqual([(s.chain_periods, s.frame.frames - 1) for s in slows], [(1, 2), (1, 1)])
+        self.assertIn('lost in: gpu (1 in its chain, 1 before its vsync)', pacing.timeline(slows[0])[0])
+
+    def test_the_render_threads_window_on_the_frame_line_places_its_wake_and_recording(self):
+        origin = MACH0 + 1000
+        window = '; render vsync {vsync} woke {woke} first {first}'
+        late_first = LATE_RECORD.replace('first submit 22523', 'first submit -3000') + window
+        recs = [
+            frame(late_first, 0.04, origin, vsync=origin + 768, woke=150, first=21000),
+            frame(
+                LATE_RECORD + window,
+                1.04,
+                origin + 60 * PERIOD_TICKS,
+                vsync=origin + 60 * PERIOD_TICKS,
+                woke=18000,
+                first=-1,
+            ),
+            frame(LATE_RECORD + window, 2.04, origin + 120 * PERIOD_TICKS, vsync=origin, woke=18000, first=-1),
+        ]
+        slows = pacing.slow_presents(recs)
+        self.assertEqual([s.stage for s in slows], ['record', 'late wake', 'record'])
+        self.assertEqual([s.window for s in slows], [(150, 21000), (18000, -1), None])
+        self.assertIn('render thread window: woke +0.1 ms, first submit +21.0 ms', '\n'.join(pacing.timeline(slows[0])))
 
     def test_the_commits_before_the_swap_join_the_present(self):
         origin = MACH0 + 1000
@@ -135,7 +199,179 @@ class PacingTest(unittest.TestCase):
         self.assertTrue(pacing.distribution(brief, stats)[3])
 
 
+# kernel/tests/xnu_recorder_test.cpp's TheHeaderIsTheLineToolsPerfReads writes this same line.
+REC_HEADER = (
+    'SwitchRecorder 2 boot=2693043C-01C2-4E03-9DA5-FDBCF1DD9490 kernel=724459E3-00EE-E993-E2A1-D165FC9289'
+    '3A seq=3 ask=41 reason=hang tid=514 value=320 at=4340000000 shot_at=4340057600 frozen_at=4340096000 '
+    'done_at=4340672000 shot_us=3000 ring_us=30000 tod=1795548000.250000 shot=19536 ring=23552 deflate=90'
+    '00 ring_lost=0'
+    ' on_ms=20 blocked_ms=145 runnable_ms=98'
+)
+TESTDATA = Path(__file__).resolve().parent / 'testdata'
+
+
+def rec_file(folder: Path, header: str, shot: bytes, ring: bytes, cut: int = 0) -> Path:
+    """Write a dump as store.c does: the stackshot and the ring as one raw deflate stream after its text header."""
+    packer = zlib.compressobj(1, zlib.DEFLATED, -zlib.MAX_WBITS)
+    body = packer.compress(shot + ring) + packer.flush()
+    fields = dict(f.split('=', 1) for f in header.split()[2:])
+    fields.update(shot=str(len(shot)), ring=str(len(ring)), deflate=str(len(body)))
+    text = 'SwitchRecorder 2 ' + ' '.join(f'{k}={v}' for k, v in fields.items())
+    path = folder / 'Switch-recorder-0.rec'
+    path.write_bytes((text.ljust(recfile.HEADER - 1) + '\n').encode() + body[: len(body) - cut])
+    return path
+
+
+class RecFileTest(unittest.TestCase):
+    def test_the_kernels_header_reads_back(self):
+        h = recfile.fields(REC_HEADER)
+        self.assertEqual(
+            (h['boot'][:8], h['seq'], h['reason'], h['tid'], h['ring_lost']), ('2693043C', '3', 'hang', '514', '0')
+        )
+        d = recfile.Dump('x', h)
+        self.assertAlmostEqual(d.after_trigger_ms('shot_at'), 3.0)
+        self.assertAlmostEqual(d.after_trigger_ms('done_at'), 35.0)
+        self.assertIn('stackshot +3.0 ms, ring frozen +5.0 ms, both in memory +35.0 ms', d.describe())
+        self.assertIn('its stretch: on a core 20 ms, blocked 145 ms, waiting for a core 98 ms', d.describe())
+
+    def test_a_dump_file_inflates_to_its_stackshot_and_ring_and_a_partial_one_says_so(self):
+        shot = (TESTDATA / 'Switch-recorder-3.kcdata').read_bytes()
+        ring = (TESTDATA / 'Switch-recorder-3.ktrace').read_bytes()
+        with tempfile.TemporaryDirectory() as d:
+            path = rec_file(Path(d), REC_HEADER, shot, ring)
+            dump = recfile.read(str(path))
+            self.assertEqual((dump.problem, dump.shot, dump.ring), ('', shot, ring))
+            self.assertEqual(dumps.find(d), [(str(path), str(path))])
+            self.assertEqual(
+                recfile.read(str(rec_file(Path(d), REC_HEADER, shot, ring, cut=100))).problem[:12], 'the body is '
+            )
+            path.write_bytes(bytes(recfile.HEADER) + b'x')
+            self.assertTrue(recfile.read(str(path)).problem.startswith('no header'))
+
+    def test_the_recorders_lines_add_up(self):
+        capture = (
+            'SwitchRecorder: capture {seq} ({reason} ask 9, thread 514, value 320) at 4340000000: stackshot 1007 KiB '
+            'in 3000 us (+3000 us), ring 17969 KiB in 30000 us (+5000 us), in memory +{done} us{lost}'
+        )
+        recs = [
+            rec(capture.format(seq=1, reason='hang', done=35000, lost=''), 1.0),
+            rec(capture.format(seq=2, reason='mark', done=41000, lost='; no ring: no memory for it'), 2.0),
+            rec('SwitchRecorder: refused hang ask 12 (thread 606, value 9283) at 4440000000: gap', 3.0),
+            rec(
+                'SwitchRecorder: dump 1 (hang ask 9, thread 514, value 320) in slot 4: stackshot 1007 KiB and ring '
+                '17969 KiB as 3700 KiB, deflate 400000 us, write 90000 us, 2100 ms after its trigger',
+                4.0,
+            ),
+        ]
+        text = '\n'.join(recfile.recorder_lines(recs))
+        self.assertIn('captures: 2 (hang 1, mark 1); in memory p50 +41.0 ms, max +41.0 ms after the trigger', text)
+        self.assertIn('captures without a ring: no memory for it 1', text)
+        self.assertIn('refused (one line a second per reason and thread): hang gap 1', text)
+        self.assertIn('written: 1, 2.1 s after their trigger at the median', text)
+
+
 class WindowsTest(unittest.TestCase):
+    def test_a_recorder_builds_kprof_says_it_sampled_the_boot_window_alone(self):
+        recs = [
+            rec('SwitchKprof: sampling every 4 ms of CPU work, 9000 kernel functions, summary every 10 s', 1.0),
+            rec('SwitchKprof: boot window over: off after 240 s of uptime (a recorder build)', 240.0),
+        ]
+        state, _ = cpu.kprof(recs)
+        self.assertTrue(state.startswith('the boot window only, until'), state)
+
+    def test_a_press_is_springboards_line_with_the_recorders_answer(self):
+        sb = {'subsystem': 'com.apple.SpringBoard', 'category': 'HIDKeyboardEvents'}
+        recs = [
+            rec('Snapshot button pressed down', 10.0, 'SpringBoard', **sb),
+            rec(
+                'SwitchRecorder: capture 4 (mark ask 30, thread 0, value 0) at 1: stackshot 1 KiB in 1 us (+1 us), '
+                'ring 1 KiB in 1 us (+1 us), in memory +1 us',
+                10.4,
+            ),
+            rec('Snapshot button pressed down', 20.0, 'SpringBoard', **sb),
+            rec('SwitchRecorder: refused mark ask 31 (thread 0, value 0) at 2: full', 20.1),
+            rec('Snapshot button pressed down', 30.0, 'SpringBoard', **sb),
+            rec(
+                'SwitchRecorder: capture 5 (mark ask 32, thread 0, value 0) at 3: stackshot 1 KiB in 1 us (+1 us), '
+                'ring 1 KiB in 1 us (+1 us), in memory +1 us',
+                40.0,
+            ),
+            rec(
+                'SwitchMark: ui.title_scroll.back.1 500 ms',
+                41.0,
+                'SwitchHWTest27',
+                subsystem='com.brunostjohn.switch.hwtest',
+            ),
+        ]
+        got = [(w.name, w.note, w.end) for w in windows.presses(recs)]
+        self.assertEqual(
+            got,
+            [
+                ('capture', 'capture 4', recs[0].time),
+                ('capture', 'refused (full)', recs[2].time),
+                ('capture', 'no recorder line', recs[4].time),
+                ('mark', 'capture 5', recs[5].time),
+            ],
+        )
+        self.assertEqual([w.name for w in windows.marks(recs)], ['ui.title_scroll.back.1'])
+
+    def test_label_images_against_the_home_screen_becoming_visible(self):
+        icon = {'subsystem': 'com.apple.SpringBoard', 'category': 'Icon'}
+        metal = {'subsystem': 'com.brunostjohn.switch.TegraGM20BMetal'}
+        recs = [
+            rec(
+                'Changing content visibility of icon manager 0x79cb8b700 from hidden to visible',
+                10.0,
+                'SpringBoard',
+                **icon,
+            ),
+            *[
+                rec(f'SwitchLabels: icon label image {n} set at {n}', 60.0 + n, 'SpringBoard', **metal)
+                for n in range(1, 25)
+            ],
+        ]
+        (row,) = report.labels_row(session.build('B', recs))
+        self.assertIn('first label image +51.0 s, the 20th +70.0 s, 24 logged', row)
+        missing = [
+            rec('SwitchLabels: no -[SBIconPLKLegibilityView setImage:] in this SpringBoard: no label times', 1.0)
+        ]
+        self.assertIn(
+            'no label lines: SwitchLabels: no -[SBIconPLKLegibilityView',
+            report.labels_row(session.build('B', missing))[0],
+        )
+
+    def test_a_hang_after_a_press_names_the_recorder_work_it_overlapped(self):
+        sb = {'subsystem': 'com.apple.SpringBoard', 'category': 'HIDKeyboardEvents'}
+        hang = (
+            '__##__signpost.description#____#begin_time#_##_#{begin}##__##, '
+            '__##__signpost.description#____#end_time#_##_#{end}##__##, '
+            'type=__##__signpost.telemetry#____#string2#_##_#Hang##__##'
+        )
+        recs = [
+            rec('Snapshot button pressed down', 10.0, 'SpringBoard', **sb),
+            rec(
+                'SwitchRecorder: capture 4 (mark ask 30, thread 0, value 0) at 1: stackshot 1 KiB in 1 us (+1 us), '
+                'ring 1 KiB in 1 us (+1 us), in memory +40000 us',
+                10.34,
+            ),
+            rec(
+                hang.format(begin=MACH0 + int(10.31 * TICK_HZ), end=MACH0 + int(10.6 * TICK_HZ)),
+                10.6,
+                'ScreenshotServicesService',
+                name='HangInterval',
+            ),
+            rec(
+                hang.format(begin=MACH0 + int(13.0 * TICK_HZ), end=MACH0 + int(13.4 * TICK_HZ)),
+                13.4,
+                'SpringBoard',
+                name='HangInterval',
+            ),
+        ]
+        s = session.build('B', recs)
+        text = report.hangs_after(s, s.windows['press'][0])
+        self.assertIn('ScreenshotServicesService 0.29 s at +0.3 s (during capture 4)', text)
+        self.assertIn('SpringBoard 0.40 s at +3.0 s (no recorder work)', text)
+
     def test_a_test_window_ends_at_its_line_and_lasts_its_ms(self):
         line = rec('HWTEST display.snapshot PASS frames=12 ms=17210.4', 20.0, 'SwitchHWTest', pid=560)
         (w,) = windows.tests([line])
@@ -281,6 +517,48 @@ class SessionTest(unittest.TestCase):
 
 
 class PullTest(unittest.TestCase):
+    def test_a_crash_folder_alone_reports_its_dumps(self):
+        testdata = Path(__file__).resolve().parent / 'testdata'
+        with tempfile.TemporaryDirectory() as d:
+            for name in ('Switch-recorder-3.kcdata', 'Switch-recorder-3.ktrace'):
+                (Path(d) / name).write_bytes((testdata / name).read_bytes())
+            out = Path(d) / 'report.txt'
+            self.assertEqual(perf.main(['report', '--crashes', d, '--out', str(out)]), 0)
+            text = out.read_text()
+        self.assertIn('Flight recorder dumps in', text)
+        self.assertIn('Switch-recorder-3.ktrace: hang', text)
+        with self.assertRaises(SystemExit):
+            perf.main(['report'])
+
+    def test_a_pull_reaches_back_to_the_last_pull_and_the_report_names_a_hole(self):
+        with tempfile.TemporaryDirectory() as d:
+            now = datetime(2026, 11, 25, 20, 13, 23, tzinfo=UTC)
+            self.assertEqual(perf.pull_age(Path(d), 900, now), 900)
+            (Path(d) / '20261125-194944').mkdir()
+            (Path(d) / '1125-2005-hitches').mkdir()
+            self.assertEqual(perf.pull_age(Path(d), 900, now), 1419 + perf.PULL_OVERLAP_S)
+            self.assertEqual(perf.pull_age(Path(d), 7200, now), 7200)
+        recs = [rec('SwitchSched cores (10000 ms)', 0.0), rec('SwitchSched cores (10000 ms)', 519.0)]
+        self.assertIn('log holes (no record at all', '\n'.join(report.head(session.build('B', recs), report.Pulled())))
+
+    def test_a_pull_judges_every_device_check_with_the_owed_lanes_last(self):
+        with tempfile.TemporaryDirectory() as d:
+            logs = Path(d) / 'logs.ndjson'
+            record = {
+                'eventType': 'logEvent',
+                'timestamp': '2026-11-26 09:00:01.000000+0000',
+                'bootUUID': 'B1',
+                'processImagePath': '/kernel.development',
+                'messageType': 'Default',
+                'eventMessage': 'TegraSPI stats: SPI4 5000 ms: 100 blocks (20/s), 50 packed, 4000 bytes in 1000 FIFO '
+                'words each way, 2 failed',
+            }
+            logs.write_text(json.dumps(record) + '\n')
+            text = perf.write_checks(str(logs), None, Path(d), ndjson=True).read_text()
+        self.assertIn('owed.power.spi4-failed', text)
+        self.assertIn('owed-summary', text)
+        self.assertRegex(text, r'owed\.power\s+big-power\s+FAIL')
+
     def test_a_pull_takes_the_log_archive_and_the_crash_folder(self):
         cmds = perf.pull_commands(perf.Path('/s'), 'abc', 600)
         self.assertEqual(cmds[0], ['idevicesyslog', '-u', 'abc', 'archive', '/s/archive.tar', '--age-limit', '600'])
@@ -332,6 +610,28 @@ class Stage3DecodeAndSymbolTest(unittest.TestCase):
         with open(os.path.join(root, 'SpringBoard.tsv'), 'w') as f:
             f.write('S\t1000\tSBMainLoop\n')
         return symbols.load(symbols_dir=root)
+
+    def test_shared_cache_functions_resolve_through_their_index(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'dsc.tsv').write_text('I\t180404000\t180452000\tlibobjc.A.dylib\n')
+            with gzip.open(root / symbols.FUNCTIONS, 'wt') as f:
+                f.write('I\t180404000\t180452000\tlibobjc.A.dylib\n')
+                f.write('S\t180405264\tlibobjc.A.dylib\t_overflow_retain\n')
+                f.write('S\t180405240\tlibobjc.A.dylib\t_customRR_retain\n')
+            syms = symbols.load(symbols_dir=d)
+            self.assertEqual(syms.dsc_addr(0x180405248), 'libobjc.A.dylib _customRR_retain+0x8')
+            self.assertEqual(syms.dsc_addr(0x180405264), 'libobjc.A.dylib _overflow_retain')
+            self.assertEqual(syms.dsc_addr(0x180404010), 'libobjc.A.dylib+0x10')
+            self.assertTrue((root / symbols.FUNCTION_INDEX).is_file())
+            self.assertEqual(symbols.load(symbols_dir=d).dsc_addr(0x180405244), 'libobjc.A.dylib _customRR_retain+0x4')
+        row = '0x180405240:\t__TEXT.__text\t_customRR_retain\t/usr/lib/libobjc.A.dylib'
+        self.assertEqual(symbols.ipsw_symbol(row), 'S\t180405240\tlibobjc.A.dylib\t_customRR_retain\n')
+        self.assertIsNone(symbols.ipsw_symbol('0x180500000:\t__DATA.__data\t_x\t/usr/lib/libobjc.A.dylib'))
+        self.assertEqual(
+            symbols._parse_ipsw_entry({'load_address': 0x180404000, 'name': '/usr/lib/libobjc.A.dylib'}),
+            (0x180404000, 0, 'libobjc.A.dylib'),
+        )
 
     def test_symbols_resolve_dsc_kernel_and_bundle_with_fallback(self):
         with tempfile.TemporaryDirectory() as d:

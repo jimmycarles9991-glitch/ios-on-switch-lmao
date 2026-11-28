@@ -46,7 +46,6 @@ FOREIGN_DIRS = ["linux/", "nouveau/"]
 # Generated headers a driver's flags name ({build}/<dir>) -> the target in the tree package that brings them.
 GENERATED_HEADERS = {
     "storage-abi": "//{}:gen_storage_abi".format(KERNEL_PACKAGE),
-    "native-ram-block": "//{}:gen_native_data_seed".format(KERNEL_PACKAGE),
     "ipsw-volumes": "//{}:gen_ipsw_volumes".format(KERNEL_PACKAGE),
 }
 
@@ -82,6 +81,21 @@ _RECORDER_FLAGS = {
     "//kernel:recorder_debug": ["-DSWITCH_RECORDER=1"],
     "//conditions:default": [],
 }
+
+_STATS_FLAGS = [
+    ("//bazel:stats_sched_on", "-DSWITCH_STATS_SCHED=1"),
+    ("//bazel:stats_power_on", "-DSWITCH_STATS_POWER=1"),
+    ("//bazel:stats_frame_on", "-DSWITCH_STATS_FRAME=1"),
+    ("//bazel:stats_gpu_on", "-DSWITCH_STATS_GPU=1"),
+    ("//bazel:prof_gpu_on", "-DSWITCH_PROF_GPU=1"),
+    ("//bazel:stats_io_on", "-DSWITCH_STATS_IO=1"),
+]
+
+def _stats_selects():
+    out = []
+    for setting, flag in _STATS_FLAGS:
+        out = out + select({setting: [flag], "//conditions:default": []})
+    return out
 
 def _recipe_name(label, valid):
     name = label.rpartition(":")[2]
@@ -278,12 +292,13 @@ def kernel_driver(
         else:
             lib = name + ("_foreign_cc" if key == "foreign" else ("_cc" if key == "own" else "_" + key.rpartition(".")[0] + "_cc"))
             flags = cxx_flags + c_copts + extra
+            stats_opts = _stats_selects()
             cc_library(
                 name = lib,
                 srcs = group,
                 hdrs = hdrs,
-                cxxopts = _expand(cxx_flags + extra) + select(_DIAGNOSTICS_OFF_FLAGS) + select(_RECORDER_FLAGS),
-                conlyopts = _expand(c_copts + extra) + select(_DIAGNOSTICS_OFF_FLAGS) + select(_RECORDER_FLAGS),
+                cxxopts = _expand(cxx_flags + extra) + select(_DIAGNOSTICS_OFF_FLAGS) + select(_RECORDER_FLAGS) + stats_opts,
+                conlyopts = _expand(c_copts + extra) + select(_DIAGNOSTICS_OFF_FLAGS) + select(_RECORDER_FLAGS) + stats_opts,
                 features = features,
                 deps = header_deps + _generated(flags),
                 toolchains = [KERNEL_SDK],
@@ -526,6 +541,33 @@ kernel_archive = rule(
         "members": attr.label_list(allow_files = [".o"]),
         "_diagnostics": attr.label(default = "//bazel:diagnostics"),
     }),
+)
+
+def _kernel_objects_digest_impl(ctx):
+    out = ctx.actions.declare_file(ctx.attr.name + ".txt")
+    objects = []
+    for m in ctx.attr.members:
+        objects += m[KernelObjectsInfo].objects if KernelObjectsInfo in m else m.files.to_list()
+    args = ctx.actions.args()
+    args.add(out)
+    args.add_all(objects)
+    ctx.actions.run_shell(
+        arguments = [args],
+        command = 'out="$1"; shift; /usr/bin/shasum -a 256 "$@" | /usr/bin/cut -d" " -f1 | /usr/bin/shasum -a 256 | ' +
+                  '/usr/bin/cut -d" " -f1 > "$out"',
+        inputs = objects,
+        outputs = [out],
+        env = {"LC_ALL": "C"},
+        mnemonic = "KernelObjectsDigest",
+        progress_message = "Naming " + str(ctx.label) + "'s objects",
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+kernel_objects_digest = rule(
+    implementation = _kernel_objects_digest_impl,
+    doc = "One sha256 over the objects the kernel links for `members`, in order: a driver's build identity, made on " +
+          "the build host from the same configured objects the kernel archives.",
+    attrs = {"members": attr.label_list(mandatory = True, allow_files = [".o"])},
 )
 
 def _stage_files_impl(ctx):

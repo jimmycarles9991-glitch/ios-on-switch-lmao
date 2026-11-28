@@ -20,6 +20,10 @@ RATES = re.compile(
     r': (?P<proc>\S+) gm20b 5s c=(?P<c>\d+)\(.*? enc=(?P<enc>\d+)us/c .*? ws=(?P<wsn>\d+)/(?P<wsus>\d+)us'
 )
 STATE = re.compile(r'^(?P<name>.+?) (?P<instr>\d+) instr')
+SMMU = re.compile(
+    r'^tegra-gm20b: smmu (?P<caches>.*); retirement L2 invalidates (?P<inv>\d+) for \d+ objects, (?P<us>\d+) us CPU'
+)
+CACHES = re.compile(r'tlb (?P<th>\d+) hits (?P<tm>\d+) misses .*?ptc (?P<ph>\d+) hits (?P<pm>\d+) misses')
 
 
 @dataclass
@@ -32,6 +36,8 @@ class Gpu:
     encode: dict[str, list[int]] = field(
         default_factory=lambda: defaultdict(lambda: [0, 0, 0, 0])
     )  # c, enc us, ws n, us
+    smmu: list[tuple[int, int, int, int]] = field(default_factory=list)  # TLB hits, misses, PTC hits, misses a window
+    retire: list[tuple[int, int]] = field(default_factory=list)  # retirement L2 invalidates and their CPU us a window
 
 
 def span_name(m: re.Match) -> str:
@@ -55,6 +61,10 @@ def read(recs: list[Rec]) -> Gpu:
                 row[2] = max(row[2], int(m['max']))
             elif m := MISSED.search(msg):
                 g.missed[m['why'].strip()] += 1
+            elif m := SMMU.match(msg):
+                g.retire.append((int(m['inv']), int(m['us'])))
+                if c := CACHES.search(m['caches']):
+                    g.smmu.append((int(c['th']), int(c['tm']), int(c['ph']), int(c['pm'])))
         elif m := SPAN.search(msg):
             row = g.spans[span_name(m)]
             row[0] += 1
@@ -82,6 +92,20 @@ def lines(g: Gpu) -> list[str]:
         if g.pmu
         else 'PMU busy: not in this kernel (probes-kernel 3 adds it)'
     )
+    for name, hits, misses in (('TLB', 0, 1), ('PTC', 2, 3)):
+        rates = sorted(w[hits] / (w[hits] + w[misses]) * 100 for w in g.smmu if w[hits] + w[misses])
+        if rates:
+            missed = sum(w[misses] for w in g.smmu)
+            out.append(
+                f'SMMU {name} hits per stats window: p50 {rates[len(rates) // 2]:.1f}%, worst {rates[0]:.1f}%; '
+                f'{missed} misses over {len(rates)} windows'
+            )
+    if g.retire:
+        counts = sorted(n for n, _ in g.retire)
+        out.append(
+            f'retirement L2 invalidates per stats window: p50 {counts[len(counts) // 2]}, max {counts[-1]}; '
+            f'{sum(us for _, us in g.retire) / 1000:.1f} ms of CPU over {len(counts)} windows'
+        )
     for proc, (n, us, worst) in sorted(g.jobs.items(), key=lambda kv: -kv[1][1])[:8]:
         per_job = us / max(n, 1) / 1000
         out.append(f'jobs {proc}: {n} jobs, {us / 1e6:.1f} s of GPU, {per_job:.2f} ms a job, max {worst / 1000:.1f} ms')

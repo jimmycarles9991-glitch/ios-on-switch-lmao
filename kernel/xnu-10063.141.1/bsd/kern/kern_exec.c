@@ -5945,7 +5945,8 @@ switch_bootstrap_environment(struct image_params *imgp, int pointer_size)
 	const char *library = SWITCH_BOOTSTRAP_INJECTOR;
     static const char prefix[] = "DYLD_INSERT_LIBRARIES=";
     const size_t capacity = (size_t)(imgp->ip_strendp - imgp->ip_endargv) + sizeof(prefix) + strlen(library) + 2;
-    char *value = kalloc_data(capacity, Z_WAITOK | Z_NOFAIL);
+    char *value = kalloc_data(capacity, Z_WAITOK);
+    if (!value) return ENOMEM;
     memcpy(value, prefix, sizeof(prefix));
     char *entry = imgp->ip_endargv;
     while (entry < imgp->ip_strendp) {
@@ -5976,9 +5977,34 @@ switch_bootstrap_environment(struct image_params *imgp, int pointer_size)
 }
 
 static const char *const native_switch_bluetoothd_environment[] = {
-	"BT_HCI_TRANSPORT=H4BC:POSIX:com.apple.uart.bluetooth,3000000", NULL
+	"BT_HCI_TRANSPORT=H4BC:POSIX:com.apple.uart.bluetooth,3000000", "CA_DISABLE_GENERIC_SHADERS=1", NULL
 };
-static const char *const native_switch_backboardd_environment[] = {"CA_DISABLE_DETACHED=1", NULL};
+static const char *const native_switch_backboardd_environment[] = {
+	"CA_DISABLE_DETACHED=1", "CA_DISABLE_GENERIC_SHADERS=1", NULL
+};
+/*
+ * Every process that renders Core Animation draws its specialised states, never the catch-all Core Animation draws while
+ * one builds (21H461's CA::OGL::MetalContext::draw reads CA_DISABLE_GENERIC_SHADERS, debug option 85 that init_debug
+ * takes from getenv): each state comes from the pack, which holds the closed set, and one the pack lacks is named
+ * (TegraGM20BMetalStatesMiss.mm).
+ */
+static const char *const native_switch_ca_environment[] = {
+	"CA_DISABLE_GENERIC_SHADERS=1", NULL
+};
+/* Whether the environment strings [env, end) already name `entry`'s variable: a process that passes its own environ on
+ * (a shell) keeps one copy, the first, which getenv reads */
+static bool
+native_switch_environment_holds(const char *env, const char *end, const char *entry)
+{
+	const char *equals = strchr(entry, '=');
+	const size_t name = equals ? (size_t)(equals - entry) + 1 : strlen(entry);
+	for (const char *s = env; s < end; s += strlen(s) + 1) {
+		if (strncmp(s, entry, name) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
 
 /* The extra environment strings for imgp's executable, NULL-terminated, or NULL for none. */
 static const char *const *
@@ -5998,8 +6024,9 @@ native_switch_exec_environment(const struct image_params *imgp)
 		if (!native_legacy_detach_ready()) {
 			return native_switch_backboardd_environment;
 		}
+		return native_switch_backboardd_environment + 1;
 	}
-	return NULL;
+	return native_switch_ca_environment;
 }
 
 /*
@@ -6236,6 +6263,9 @@ exec_extract_strings(struct image_params *imgp)
 	/* Switch: a chosen daemon's extra environment (native_switch_exec_environment). */
 	const char *const *native_environment = native_switch_exec_environment(imgp);
 	for (; native_environment && *native_environment; native_environment++) {
+		if (native_switch_environment_holds(imgp->ip_endargv, imgp->ip_strendp, *native_environment)) {
+			continue;
+		}
 		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(*native_environment), UIO_SYSSPACE, TRUE);
 		if (error) {
 			goto bad;
@@ -7454,7 +7484,6 @@ done:
 #ifndef XNU_OWNER_DATA_VOLUME_UUID
 #error Supply the observed scratch volume UUID for the IOKit backend
 #endif
-extern int native_ram_block_volume_seed(const char *, dev_t *, char *, size_t, uint64_t *, uint64_t *, uint8_t *);
 #if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT
 #include "storage/block_backend.h"
 #include <sys/fcntl.h>
@@ -7589,10 +7618,11 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
 			(void)msleep((void *)&native_owner_data_stage, NULL, PWAIT, "switchData", &interval);
 		}
 		if (!switch_raw && size != UINT64_C(17179869184)) goto done;
-	} else
+	}
+#else
+	error = ENOENT;
+	goto done;
 #endif
-	if (!native_ram_block_volume_seed(XNU_OWNER_DATA_VOLUME_UUID, &device, device_path,
-	    sizeof(device_path), &base, &size, native_owner_data_seed_sha256)) { error = ENOENT; goto done; }
 	/* Logical capacity is independent of the optional RAM seed representation. */
 	if (!size || size > UINT64_C(0x10000000000) || (size & 4095)) goto done;
 #else
@@ -8313,11 +8343,16 @@ native_switch_gamut_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
 	printf("SwitchRawBoot: display gamut %s: MobileGestalt cache dropped (%d)\n", srgb ? "sRGB" : "not sRGB", error);
 }
 
+#if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT && CONFIG_CODE_DECRYPTION
+extern int switch_ui_scale_main_screen_class(void);
+#endif
+
 /* MobileGestalt answers what it reads of /product (GraphicsFeatureSetClass and its fallbacks, the memory class, the
  * artwork traits), of /product/audio (acoustic-id, its AcousticID), of /arm-io (soc-generation, which gates its codec
  * answers) and of the root (platform-name, its HardwarePlatform) from the same build-keyed cache, so an answer made
- * before a package changed one of them outlives the change. A digest of the four nodes' own properties is kept in a
- * marker, and the cache is dropped once whenever it differs. Failures are logged only; the next boot tries again. */
+ * before a package changed one of them outlives the change. A digest of the four nodes' own properties, and of the
+ * main-screen-class its patched cache text answers (vm_unix.c), is kept in a marker, and the cache is dropped once
+ * whenever it differs. Failures are logged only; the next boot tries again. */
 static void
 native_switch_identity_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
 {
@@ -8342,6 +8377,13 @@ native_switch_identity_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
 			}
 		}
 	}
+#if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT && CONFIG_CODE_DECRYPTION
+	/* The class comes from the UI scale site pager's cache text, which only a code-decryption kernel patches. */
+	const int screen_class = switch_ui_scale_main_screen_class();
+	for (size_t i = 0; i < sizeof(screen_class); ++i) {
+		digest = (digest ^ ((const uint8_t *)&screen_class)[i]) * 0x100000001b3ULL;
+	}
+#endif
 	char text[24];
 	const int length = snprintf(text, sizeof(text), "%016llx\n", digest);
 	if (native_switch_file_unchanged(marker, text, length, data_mount, 0, 0, 0644)) return;
@@ -9102,6 +9144,11 @@ load_init_program(proc_t p)
 	/* Owner overlay unions over sealed directories (SwitchRawMount.h), now that Data is mounted. */
 	native_switch_raw_overlay(p, (user_addr_t)scratch_addr);
 	switch_boot_steps_mark(&steps, "overlay");
+	/* pack.bin is reachable from here (drivers/TegraGM20B/SwitchGpuPackImage.cpp) */
+	extern void switch_gpu_pack_volumes_mounted(void) __attribute__((weak));
+	if (switch_gpu_pack_volumes_mounted != NULL) {
+		switch_gpu_pack_volumes_mounted();
+	}
 	switch_bootstrap_capture();
 	switch_boot_steps_mark(&steps, "bootstrap");
 #endif

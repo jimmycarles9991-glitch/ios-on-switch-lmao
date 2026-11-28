@@ -89,6 +89,8 @@ TEST(XnuMotionCaps24B119, ShippedCaseLoadsJ181sWord)
     EXPECT_EQ(run.x20, 0u);
 }
 
+// J181's word without the coprocessor services nothing here provides; bit 4 (6-axis device motion, {0xff0c, 5}) stays,
+// SwitchMotion's own.
 TEST(XnuMotionCaps24B119, PatchedCaseLoadsJ181sWordWithoutItsCoprocessorBits)
 {
     const switch_us_site *site = MotionSite();
@@ -98,11 +100,11 @@ TEST(XnuMotionCaps24B119, PatchedCaseLoadsJ181sWordWithoutItsCoprocessorBits)
     EXPECT_EQ(run.x20, 0u);
     EXPECT_EQ(run.x21 & ~kJ181Word, 0u) << "only clears bits";
     uint64_t cleared = 0;
-    for (const unsigned bit : {1, 4, 5, 6, 7, 9, 11, 15, 16, 22, 26, 33, 36}) {
+    for (const unsigned bit : {1, 5, 6, 7, 9, 11, 15, 16, 22, 26, 33, 36}) {
         cleared |= 1ULL << bit;
     }
     EXPECT_EQ(kJ181Word & ~run.x21, cleared);
-    EXPECT_EQ(run.x21, (1ULL << 8) | (1ULL << 21) | (1ULL << 28) | (1ULL << 32));
+    EXPECT_EQ(run.x21, (1ULL << 4) | (1ULL << 8) | (1ULL << 21) | (1ULL << 28) | (1ULL << 32));
 }
 
 TEST(XnuMotionCaps24B119, AppliedAtEveryScaleInCoreMotionsSubcache)

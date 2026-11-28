@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// A glyph cache the way text renderers keep one: a 512x512 R8 or A8 atlas, small glyphs packed at odd offsets with

@@ -40,8 +40,8 @@ struct TegraSMMUEngine {
     // Every swgroup of the engine to this directory (they stay listed for detach and resume). 0, or -1 with one line.
     int attach(const TegraSMMUSwgroup *engineGroups, uint32_t count, char *line, size_t size);
     void detach();
-    // count hardware pages at the lowest free IOVA; 0 when the window has no room or a page is out of the SMMU's reach.
-    uint64_t map(const uint64_t *pages, uint32_t count, bool writable);
+    // count hardware pages at the lowest free IOVA leaving at least reserveBytes free; 0 on no room or bad page.
+    uint64_t map(const uint64_t *pages, uint32_t count, bool writable, uint64_t reserveBytes = 0);
     // A range map() returned; only once the engine can no longer touch it.
     void unmap(uint64_t iova, uint32_t count);
     void usage(uint64_t *total, uint64_t *free) const;

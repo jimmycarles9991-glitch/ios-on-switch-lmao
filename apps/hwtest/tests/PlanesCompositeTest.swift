@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestKit
 
 /// L959: window B's composite (drivers/NativeMobileDisplay/SwitchPlaneCompositeDisplay.h) on what Core Animation
 /// detaches. The overlay sets VIC composes are the ones DC A's memory admission refuses, which takes two 4K videos; here

@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A render pass into a view's slice: a 64x64 BGRA8Unorm 2D array of four slices and seven levels, every level of every

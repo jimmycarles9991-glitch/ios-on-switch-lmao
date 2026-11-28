@@ -28,7 +28,7 @@
 // log (backtraces, kexts). With hekate_on, PMC_SCRATCH37 would be set at panic entry to hekate's L4T panic magic
 // 'TPAN' (off: hekate would add SD:/L4T_panic.* files and wait for a button). TMR5/WDT0 is armed to reset through the PMC (Linux tegra_wdt.c: 1 MHz timer at 250 ms, reset on the 4th WDT
 // expiry) in case the rest of the panic path hangs. After the panic log, reboot_s seconds after the panic
-// (0: never, the panic screen stays up for a photo) the PMC main reset (PMC_CNTRL bit 4, L4T pmc.c tegra_pmc_restart_notify) warm-resets the SoC:
+// the PMC main reset (PMC_CNTRL bit 4, L4T pmc.c tegra_pmc_restart_notify) warm-resets the SoC:
 // the PMIC keeps DRAM powered, hekate comes back with RAM as it was, saves the text to SD:/L4T_panic.txt (and the 2 MiB to
 // SD:/L4T_panic.bin) and waits for a button. The next iPadOS boot writes /private/var/Switch/panic-<UTC>.log on Data
 // (kern_exec.c, before launchd) and clears the record. A record whose panic log was never appended (reset by the
@@ -44,6 +44,8 @@
 // like a Switch that would not wake, and was forced off, record and all). A panic once the kernel is shutting down
 // (get_system_inshutdown: reboot(2) has begun) warm-resets SHUTDOWN_REBOOT_S after it: the panel is dark or about to
 // be, the console was meant to go off, and POWER held would lose the record within seconds.
+// Any other panic has its screen up: it warm-resets SCREEN_REBOOT_S after the panic, a minute to photograph the
+// screen, and the record then reaches hekate and Data instead of being lost to POWER held.
 #include <stdint.h>
 #include <stddef.h>
 #include <stdarg.h>
@@ -106,6 +108,7 @@ extern unsigned char iso_font[256 * 16];
 #define WATCHDOG_REBOOT_S 60u
 #define DARK_REBOOT_S     15u
 #define SHUTDOWN_REBOOT_S 3u
+#define SCREEN_REBOOT_S   60u
 #define EARLY_REBOOT_S    15u
 #define MSGBUF_TAIL       (64u << 10)
 #define PMC_PA            UINT64_C(0x7000e000) /* the page; APBDEV_PMC at +0x400 (hekate t210.h PMC_BASE) */
@@ -116,12 +119,17 @@ extern unsigned char iso_font[256 * 16];
 #define PMC_MAIN_RST      (1u << 4)
 #define PMC_SCRATCH0_MODES \
     ((1u << 0) | (1u << 1) | (1u << 29) | (1u << 30) | (1u << 31)) /* warmboot, RCM, payload, bootloader, recovery */
-#define TPAN        0x4e415054u                                    /* hekate PMC_SCRATCH37_KERNEL_PANIC_MAGIC */
-#define TMR_PA      UINT64_C(0x60005000)
-#define TMR5_PTV    0x060u
-#define WDT0_CFG    0x100u
-#define WDT0_CMD    0x108u
-#define WDT0_UNLOCK 0x10cu
+#define TPAN                   0x4e415054u                         /* hekate PMC_SCRATCH37_KERNEL_PANIC_MAGIC */
+#define TMR_PA                 UINT64_C(0x60005000)
+#define TMR5_PTV               0x060u
+#define WDT0_CFG               0x100u
+#define WDT0_CMD               0x108u
+#define WDT0_UNLOCK            0x10cu
+#define CAR_PA                 UINT64_C(0x60006000)
+#define CAR_SCLK_BURST_POLICY  0x028u
+#define CAR_SUPER_SCLK_DIVIDER 0x030u
+#define CAR_SCLK_POR           0x10000000u
+#define PSCI_SYSTEM_RESET      UINT64_C(0x84000009)
 
 struct switch_panic_record {
     uint64_t magic;
@@ -146,10 +154,10 @@ struct switch_panic_stackshot {
     uint32_t header_crc;  /* of everything above */
 };
 
-static unsigned save_on, hekate_on, reboot_s; /* 0: the panic screen stays up (10-31: the user photographs it) */
+static unsigned save_on, hekate_on, reboot_s; /* reboot_s: set by switch_panic_begin (or the early panic) */
 static const unsigned reboot_arg = 0;         /* a fixed reboot delay: it would decide for watchdog panics too */
 static volatile uint8_t *region;              /* write-combined */
-static volatile uint32_t *pmc, *tmr, *screen;
+static volatile uint32_t *pmc, *tmr, *car, *screen;
 static const char *save_off_reason = "not armed";
 static uint32_t last_reset = 0xffffffffu, last_reset_status;
 static int pending, pending_damaged;
@@ -446,6 +454,7 @@ static void draw_log_area(const char *title, const char *text, size_t length)
 }
 
 static int watchdog_panic; /* the panic string is a watchdog timeout (switch_panic_begin) */
+static int photo_window;   /* the reset waits SCREEN_REBOOT_S for a photo of the screen (switch_panic_begin) */
 
 static int starts_with(const char *s, const char *prefix)
 {
@@ -464,13 +473,16 @@ static void draw_status(void)
                  "Watchdog panic: saved in RAM. Warm reset %us after the panic; iPadOS then writes "
                  "/private/var/Switch/panic-*.log and .kcdata (the stackshot).",
                  reboot_s);
-    } else if (save_on && region && reboot_s) {
+    } else if (save_on && region && photo_window) {
+        snprintf(line, sizeof(line),
+                 "Saved in RAM; POWER loses it. Photograph now: warm reset %us after the panic, then hekate "
+                 "writes SD:/L4T_panic.txt, iPadOS /private/var/Switch/panic-*.log.",
+                 reboot_s);
+    } else if (save_on && region) {
         snprintf(line, sizeof(line),
                  "Saved in RAM. Warm reset %us after the panic: hekate writes SD:/L4T_panic.txt, iPadOS "
                  "/private/var/Switch/panic-*.log.",
                  reboot_s);
-    } else if (save_on && region) {
-        snprintf(line, sizeof(line), "Saved in RAM (no reset). Holding POWER loses it.");
     } else {
         snprintf(line, sizeof(line), "Not saved (%s). Hold POWER to turn off.", save_off_reason);
     }
@@ -529,13 +541,48 @@ void switch_panic_save_watchdog(unsigned seconds)
     arm_watchdog(seconds);
 }
 
+static uint64_t read_cntvct(void)
+{
+    uint64_t value = 0;
+    __asm__ volatile("isb\nmrs %0, cntvct_el0" : "=r"(value));
+    return value;
+}
+
+/* Architectural counter directly: early panics run before thread_bootstrap() and rtclock_early_init(). */
+static void wait_us(uint64_t us)
+{
+    uint64_t freq = 0;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+    if (!freq)
+        freq = 19200000ULL;
+    const uint64_t ticks = (us / 1000000ULL) * freq + ((us % 1000000ULL) * freq + 999999ULL) / 1000000ULL;
+    const uint64_t start = read_cntvct();
+    while (read_cntvct() - start < ticks)
+        __asm__ volatile("yield" ::: "memory");
+}
+
 static void __attribute__((noreturn)) pmc_reset(void)
 {
     pmc[PMC_SCRATCH0 / 4] = pmc[PMC_SCRATCH0 / 4] & ~PMC_SCRATCH0_MODES; /* no warmboot, RCM or hekate mode request */
     drain();
+    /* Switchroot ATF resets SCLK_BURST_POLICY to POR (CLKM) before PMC_MAIN_RST; resetting while SCLK runs on PLLP
+     * hangs Tegra210/T210B01. Fall back to the same CAR reset + PMC_MAIN_RST if the SMC returns. */
+    register uint64_t x0 __asm__("x0") = PSCI_SYSTEM_RESET;
+    __asm__ volatile("smc #0"
+                     : "+r"(x0)
+                     :
+                     : "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+                       "x16", "x17", "memory");
+    if (car) {
+        car[CAR_SCLK_BURST_POLICY / 4] = CAR_SCLK_POR;
+        car[CAR_SUPER_SCLK_DIVIDER / 4] = 0;
+        drain();
+        wait_us(2);
+    }
     pmc[PMC_CNTRL / 4] = pmc[PMC_CNTRL / 4] | PMC_MAIN_RST;
+    drain();
     for (;;)
-        __asm__ volatile("wfe" ::: "memory");
+        __asm__ volatile("wfi" ::: "memory");
 }
 
 /* A record a panic sealed, at region. */
@@ -567,6 +614,7 @@ void switch_panic_save_init(void)
     }
     /* Always: a watchdog panic resets even with the panic screen held. */
     tmr = (volatile uint32_t *)ml_io_map((vm_offset_t)TMR_PA, 4096);
+    car = (volatile uint32_t *)ml_io_map((vm_offset_t)CAR_PA, 4096);
     region = (volatile uint8_t *)ml_io_map_wcomb((vm_offset_t)REGION_PA, REGION_BYTES);
     if (!pmc || !region || !tmr) {
         region = NULL;
@@ -631,6 +679,9 @@ int switch_panic_begin(const char *format, va_list *args, unsigned long caller, 
         reboot_s = SHUTDOWN_REBOOT_S;
     if (!switch_display_is_on() && !reboot_arg && !reboot_s)
         reboot_s = DARK_REBOOT_S; /* nothing to photograph */
+    photo_window = !reboot_arg && !reboot_s;
+    if (photo_window)
+        reboot_s = SCREEN_REBOOT_S;
     screen_taken = take_screen && screen;
     if (save_on && region) {
         clock_sec_t secs = 0;
@@ -736,6 +787,7 @@ void switch_panic_save_early(const char *line, unsigned long caller, volatile ui
     region = ramoops;
     screen = fb;
     pmc = pmc_page;
+    car = (volatile uint32_t *)(uintptr_t)CAR_PA;
     save_on = 1;
     begun = 1;
     screen_taken = fb != NULL;
@@ -769,11 +821,7 @@ void switch_panic_save_early(const char *line, unsigned long caller, volatile ui
         drawz(ROWS - 1, ROWS, status, SWITCH_GREEN);
         drain();
     }
-    uint64_t deadline = 0;
-    nanoseconds_to_absolutetime((uint64_t)reboot_s * 1000000000ULL, &deadline);
-    deadline += mach_absolute_time();
-    while (mach_absolute_time() < deadline)
-        __asm__ volatile("yield" ::: "memory");
+    wait_us((uint64_t)reboot_s * 1000000ULL);
     pmc_reset();
 }
 
@@ -852,7 +900,8 @@ const char *switch_panic_save_pending(uint32_t *bytes, char *path, size_t path_b
         os_log(OS_LOG_DEFAULT,
                "SwitchPanicSave: armed (%u MiB at %#llx, warm reset %u s after a panic), last reset %s, no saved "
                "panic",
-               REGION_BYTES >> 20, (unsigned long long)REGION_PA, reboot_s, last_reset < 8 ? resets[last_reset] : "?");
+               REGION_BYTES >> 20, (unsigned long long)REGION_PA, reboot_arg ? reboot_arg : SCREEN_REBOOT_S,
+               last_reset < 8 ? resets[last_reset] : "?");
         return NULL;
     }
     char when[32];

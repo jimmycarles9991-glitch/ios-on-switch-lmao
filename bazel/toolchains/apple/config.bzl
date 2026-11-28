@@ -32,8 +32,8 @@ load("@xcode//:defs.bzl", "DEVELOPER_DIR", "IPHONEOS_SDK", "MACOSX_SDK", "XCODE_
 # The triples: iOS 17 (iPadOS 17.7.11) and, for host twins of iOS code, this Xcode's macOS SDK's default deployment
 # target (what Xcode's clang picks with no -target, as meson's native builds ran it).
 PLATFORMS = {
-    "ios": struct(triple = "arm64-apple-ios17.0", sdk = IPHONEOS_SDK),
-    "macos": struct(triple = "arm64-apple-macosx27.2", sdk = MACOSX_SDK),
+    "ios": struct(triple = "arm64-apple-ios17.0", sdk = IPHONEOS_SDK, cpu = ["-mcpu=cortex-a57"]),
+    "macos": struct(triple = "arm64-apple-macosx27.2", sdk = MACOSX_SDK, cpu = []),
 }
 
 _C = [ACTION_NAMES.c_compile]
@@ -65,7 +65,7 @@ def _impl(ctx):
             enabled = True,
             flag_sets = [flag_set(
                 actions = _COMPILE + _LINK,
-                flag_groups = [flag_group(flags = ["-target", platform.triple, "-isysroot", platform.sdk])],
+                flag_groups = [flag_group(flags = ["-target", platform.triple] + platform.cpu + ["-isysroot", platform.sdk])],
             )],
         ),
         feature(

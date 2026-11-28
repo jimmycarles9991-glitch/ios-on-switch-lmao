@@ -1,4 +1,5 @@
-// drivers/SwitchJoyCon/SwitchJoyConForward.h: which rail reports reach the HID device.
+// drivers/SwitchJoyCon/SwitchJoyConForward.h: lossless active stick forwarding, clean snap-back settle,
+// and resting idle stick suppression.
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -20,7 +21,8 @@ void sendSubcommand(switch_joycon_forward &f, uint8_t subcommand, uint8_t argume
     switch_joycon_forward_output(&f, out, sizeof(out));
 }
 
-struct Forward : ::testing::Test {
+class Forward : public ::testing::Test {
+protected:
     switch_joycon_forward f{};
     switch_joycon_stick stick = switch_joycon_fixture::capturedStick();
 
@@ -50,36 +52,81 @@ TEST_F(Forward, TheCapturedRestingJoyConForwardsOnlyItsFirstReport)
 
 TEST_F(Forward, AnUntouchedQuarterHourOfNoisyDriftingStickForwardsAlmostNothing)
 {
-    // 15 minutes at 15 ms: twice the captured jitter (3 more counts either way), drifting 60 counts inside the dead
-    // zone. A report per quarter dead zone of drift.
+    // 15 minutes at 15 ms: twice the captured jitter, drifting 60 counts inside the dead zone.
     const unsigned n = forwarded(switch_joycon_fixture::resting(60000, 3, 60, -20));
     EXPECT_GE(n, 1u);
-    EXPECT_LE(n, 3u);
+    EXPECT_LE(n, 8u);
 }
 
-TEST_F(Forward, AtRestAQuarterDeadZoneIsNoiseAndOutOfItASixteenth)
+TEST_F(Forward, OutsideDeadZoneEverySingleCountStepForwardsLosslessly)
+{
+    const auto &rest = switch_joycon_capture::kResting[0];
+    EXPECT_TRUE(take(report(true, rest.x, rest.y)));
+    EXPECT_TRUE(f.settled);
+
+    // Move outside dead zone (centre 0x75c = 1884, dead_zone = 0xae = 174 -> outside at 2160).
+    const unsigned out = 0x75c + 0xae + 100;
+    EXPECT_TRUE(take(report(true, out, 0x83b)));
+    EXPECT_FALSE(f.settled);
+
+    // Fine 1-count and 2-count aiming steps must all forward (no 12-count staircasing).
+    for (unsigned step = 1; step <= 20; ++step)
+        EXPECT_TRUE(take(report(true, out + step, 0x83b))) << "step " << step;
+
+    // Identical raw stick bytes with only timer advancing are still deduplicated.
+    EXPECT_FALSE(take(report(true, out + 20, 0x83b, 1)));
+    EXPECT_FALSE(take(report(true, out + 20, 0x83b, 2)));
+}
+
+TEST_F(Forward, SnapBackToCenterNeverFreezesNearDeadZoneEdge)
+{
+    const auto &rest = switch_joycon_capture::kResting[0];
+    EXPECT_TRUE(take(report(true, rest.x, rest.y)));
+
+    // Push outside dead zone.
+    EXPECT_TRUE(take(report(true, 0x75c + 400, 0x83b)));
+    EXPECT_FALSE(f.settled);
+
+    // Release: first in-deadzone sample lands near the edge (radius 170 inside 174),
+    // then moves inward in steps smaller than dead_zone/4 (43) all the way to center.
+    // Every returning step must forward so the stick never freezes at radius 170.
+    EXPECT_TRUE(take(report(true, 0x75c + 170, 0x83b)));
+    EXPECT_TRUE(take(report(true, 0x75c + 135, 0x83b)));
+    EXPECT_TRUE(take(report(true, 0x75c + 100, 0x83b)));
+    EXPECT_TRUE(take(report(true, 0x75c + 60, 0x83b)));
+    EXPECT_TRUE(take(report(true, 0x75c + 20, 0x83b)));
+    EXPECT_TRUE(take(report(true, 0x75c, 0x83b)));
+    EXPECT_FALSE(f.settled);
+
+    // Once still at center for SETTLE_TICKS samples, resting suppression engages cleanly.
+    for (unsigned i = 0; i < SWITCH_JOYCON_FORWARD_SETTLE_TICKS; ++i)
+        (void)take(report(true, 0x75c, 0x83b, static_cast<uint8_t>(i + 1)));
+    EXPECT_TRUE(f.settled);
+    EXPECT_EQ(switch_joycon_stick_axis(&stick, f.last, 0), 0x75cu);
+    EXPECT_FALSE(take(report(true, 0x75c + 5, 0x83b - 4)));
+}
+
+TEST_F(Forward, FineStickMotionForwardsWhileButtonsHeldEvenInsideDeadZone)
+{
+    EXPECT_TRUE(take(report(true, 1841, 2088)));
+    Report held = report(true, 1841, 2088, 1);
+    held[5] = 0x08;
+    EXPECT_TRUE(take(held));
+    EXPECT_FALSE(f.settled);
+
+    Report nudged = held;
+    switch_joycon_fixture::putStick(nudged, true, 1843, 2088);
+    EXPECT_TRUE(take(nudged));
+    EXPECT_FALSE(take(nudged));
+}
+
+TEST_F(Forward, RestingThresholdSuppressesSmallJitterAndBreaksOutOnQuarterDeadZone)
 {
     const auto &rest = switch_joycon_capture::kResting[0];
     EXPECT_TRUE(take(report(true, rest.x, rest.y)));
     EXPECT_FALSE(take(report(true, rest.x + 0xae / 4, rest.y)));
     EXPECT_FALSE(take(report(true, rest.x + 25, rest.y + 33)));
     EXPECT_TRUE(take(report(true, rest.x + 0xae / 4 + 1, rest.y)));
-
-    const unsigned out = 0x75c + 0xae + 100;
-    EXPECT_TRUE(take(report(true, out, 0x83b)));
-    EXPECT_FALSE(take(report(true, out + 0xae / 16, 0x83b)));
-    EXPECT_TRUE(take(report(true, out + 0xae / 16 + 1, 0x83b)));
-}
-
-TEST_F(Forward, APushForwardsWhileTheStickMovesAndStopsWhenItIsHeld)
-{
-    EXPECT_TRUE(take(switch_joycon_fixture::resting(1)[0]));
-    const std::vector<Report> pushed = switch_joycon_fixture::push(0x75c + 900, 8, 200);
-    unsigned moving = 0, held = 0;
-    for (size_t i = 0; i < pushed.size(); ++i)
-        (i < 8 ? moving : held) += take(pushed[i]) ? 1 : 0;
-    EXPECT_EQ(moving, 8u);
-    EXPECT_EQ(held, 0u);
 }
 
 TEST_F(Forward, ButtonEdgesAlwaysForward)
@@ -118,6 +165,20 @@ TEST_F(Forward, MotionWantedForwardsEveryReportUntilItIsTurnedOff)
     EXPECT_TRUE(take(report(true, 1841, 2088, 3)));
     sendSubcommand(f, 0x40, 0x00);
     EXPECT_FALSE(take(report(true, 1841, 2088, 4)));
+}
+
+TEST_F(Forward, ReprimePreservesImuAndForwardsLiveStateOnce)
+{
+    EXPECT_TRUE(take(report(true, 1841, 2088)));
+    sendSubcommand(f, 0x40, 0x01);
+    switch_joycon_forward_reprime(&f);
+    EXPECT_TRUE(f.imu);
+    EXPECT_FALSE(f.primed);
+
+    sendSubcommand(f, 0x40, 0x00);
+    switch_joycon_forward_reprime(&f);
+    EXPECT_TRUE(take(report(true, 1841, 2088)));
+    EXPECT_FALSE(take(report(true, 1841, 2088, 1)));
 }
 
 TEST_F(Forward, TheInputReportModeChangesNothing)

@@ -49,11 +49,13 @@ TEST(VicOwnershipSource, NoJobMapsAWindowOrHoldsTheEngine)
 TEST(VicOwnershipSource, EventBearingJobsReserveDestinationWhenReadyAndFailUncommittedSignals)
 {
     const std::string client = SourceText("../TegraVICUserClient.cpp");
-    const auto transform = switch_ios::test::Block(client, "IOReturn transform(");
-    EXPECT_TRUE(transform.before("if (!job->events && !job->mayDeferTurn)", "switch_vic_events_arm(job->events);"));
+    const auto queue = switch_ios::test::Block(client, "bool queueJob(");
+    EXPECT_TRUE(queue.has("const bool reserves = job->eventReady && !job->eventStatus;"));
     const auto ready = switch_ios::test::Block(client, "void eventsReady(");
+    EXPECT_TRUE(ready.before("gRequests.alone(job->dst.memory, job);", "gRequests.ready(job, status);"));
+    EXPECT_TRUE(ready.before("job->reserving = true;", "gRequests.ready(job, status);"));
     EXPECT_TRUE(ready.before("switch_vic_surface_reserve_write(&job->dst, &job->dstReserve);",
-                             "gRequests.ready(job, status);"));
+                             "gRequests.reserved(job);"));
     const auto run = switch_ios::test::Block(client, "bool runJob(");
     EXPECT_TRUE(run.before("const int prepared = job->eventStatus ? job->eventStatus",
                            "WriteReservationGuard dstReserve{job->dstReserve};"));

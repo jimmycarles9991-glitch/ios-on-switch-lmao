@@ -2,6 +2,7 @@ import CoreVideo
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// The device's 2048 sampler header slots (drivers/TegraGM20BMetal gpu.cpp takeHeader). Samplers of one

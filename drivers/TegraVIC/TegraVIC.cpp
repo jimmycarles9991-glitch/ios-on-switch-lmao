@@ -4,7 +4,8 @@
 //   V0  host1x is up, and VIC's kernel buffers are allocated: the firmware image, an arena for the configuration slot
 //       and the filter structure, and the SMMU page directory with its page tables
 //   V1  VIC's SMMU domain (ASID 127 for the "vic" swgroup: the kernel buffers 1:1, two empty surface windows), power
-//       partition 23, clock (PLLP, 408 MHz), reset, the VIC MBIST workaround, falcon firmware loaded and started
+//       partition 23, clock (c2bus: PLLC2 at L4T's 637 mV point, else PLLP 408 MHz), reset, the VIC MBIST
+//       workaround, falcon firmware loaded and started
 //   V2  proof of life through host1x channel 0 in VIC's class: an IMMEDIATE syncpoint increment (the engine's host
 //       interface), then the firmware's FCE microcode size and offset and an OP_DONE increment (the falcon), each
 //       completed by interrupt
@@ -59,6 +60,7 @@
 #include "SwitchVICKernelTest.h"
 #include "SwitchVICMapping.h"
 #include "../../kits/SwitchCAR/SwitchCAR.h"
+#include "../../kits/SwitchCAR/SwitchEngineClock.h"
 #include "../../kits/SwitchCAR/SwitchPMC.h"
 #include "../../kits/SwitchDMA/SwitchDMABuffer.h"
 #include "../../kits/SwitchDMA/SwitchDcache.h"
@@ -92,7 +94,6 @@ enum : uint32_t {  // clock and reset controller
     LVL2_CLK_GATE_OVRE = 0x554,
     CLK_SOURCE_VIC = 0x678,
     OVRE_VIC_MBIST = 1u << 5,
-    SOURCE_PLLP = 2u << 29,  // this mux: pllc 1, pllp 2
     VIC_DIV_1 = 0,
 };
 
@@ -147,6 +148,7 @@ IOLock *gPowerLock;             // the gate's, which the cancellation of a stall
 SwitchFalconInterrupt gErrors;  // VIC General Interrupt: global 72 (TRM ch.3, p.35)
 constexpr uint32_t kErrorIntid = 32 + 72;
 uint32_t gSyncpt;
+uint32_t gClockKHz = SWITCH_ENGINE_PLLP_KHZ;
 bool gUp, gAttached = true;
 TegraVICBuffer gConfig, gFilter;
 
@@ -278,7 +280,8 @@ void mbistWorkaround()
 
 bool powerUp(bool *wasOn)
 {
-    switch_car_write(CLK_SOURCE_VIC, SOURCE_PLLP | VIC_DIV_1);
+    const uint32_t source = switch_engine_clock_source(SWITCH_ENGINE_BUS_C2, &gClockKHz);
+    switch_car_write(CLK_SOURCE_VIC, switch_engine_vic_source(source) | VIC_DIV_1);
     IODelay(2);
     if (!switch_engine_power_up(kPower, wasOn)) {
         snprintf(gLine, sizeof(gLine),
@@ -448,10 +451,10 @@ void bringUp(void *, wait_result_t)
         giveBack();
         return;
     }
-    IOLog("TegraVIC: V1 ok ASID %u (directory %#llx), partition %u %s, 408 MHz, falcon started (OS code %#x+%#x data "
+    IOLog("TegraVIC: V1 ok ASID %u (directory %#llx), partition %u %s, %u kHz, falcon started (OS code %#x+%#x data "
           "%#x+%#x)\n",
-          kAsid, gTables.pa, kPartition, wasOn ? "already on" : "powered here", gImage.code, gImage.code_size,
-          gImage.data, gImage.data_size);
+          kAsid, gTables.pa, kPartition, wasOn ? "already on" : "powered here", gClockKHz, gImage.code,
+          gImage.code_size, gImage.data, gImage.data_size);
     uint32_t id = 0;
     if (tegra_host1x_syncpt_alloc(&id)) {
         IOLog("TegraVIC: V2 FAIL no syncpoint left\n");
@@ -560,7 +563,7 @@ extern "C" uint64_t switch_vic_mapping_create(const uint64_t *pages, uint32_t co
         gMappingSpace.release(address, bytes);
         address = 0;
     }
-    switch_smmu_publish(gDomain, kAsid, SWITCH_DCACHE_CLEAN);
+    switch_smmu_publish_fresh(gDomain, kAsid, SWITCH_DCACHE_CLEAN);
     IOLockUnlock(gMappingLock);
     return address;
 }
@@ -570,7 +573,7 @@ extern "C" void switch_vic_mapping_destroy(uint64_t address, uint32_t count)
     IOLockLock(gMappingLock);
     if (gMappingSpace.release(address, static_cast<uint64_t>(count + kTailPages) * SWITCH_HW_PAGE_SIZE)) {
         gDomain.unmap(address, count + kTailPages);
-        switch_smmu_publish(gDomain, kAsid, SWITCH_DCACHE_CLEAN);
+        switch_smmu_publish_granules(gDomain, kAsid, SWITCH_DCACHE_CLEAN);
     }
     IOLockUnlock(gMappingLock);
 }

@@ -166,16 +166,16 @@ TEST(BarrierForms, TheSwitchRuleRelaxesOnlyTheProbedEngineChanges)
         const SwitchForm into3d = gm20b::switchFormFor(SwitchForm::Rule, before, E::ThreeD),
                          intoCopy = gm20b::switchFormFor(SwitchForm::Rule, before, E::Copy),
                          intoCompute = gm20b::switchFormFor(SwitchForm::Rule, before, E::Compute);
-        EXPECT_EQ(into3d == SwitchForm::NoWfi, before == E::Copy);
-        EXPECT_EQ(intoCopy == SwitchForm::NoWfi, before == E::ThreeD);
+        EXPECT_EQ(into3d == SwitchForm::NoWfi, before == E::Copy || before == E::Compute);
+        EXPECT_EQ(intoCopy == SwitchForm::NoWfi, before == E::ThreeD || before == E::Compute);
         EXPECT_EQ(intoCompute == SwitchForm::NoWfi, before == E::ThreeD);
         Opened o;
         const auto pass = passWords(PassForm::Today, into3d, EntryForm::Rule, before, &o);
-        EXPECT_EQ(idles(pass), before != E::Copy) << int(before);
-        EXPECT_EQ(o == Opened::Switch, before == E::Copy);
+        EXPECT_EQ(idles(pass), before != E::Copy && before != E::Compute) << int(before);
+        EXPECT_EQ(o == Opened::Switch, before == E::Copy || before == E::Compute);
         const auto blit = blitWords(intoCopy, EntryForm::Rule, before, &o);
-        EXPECT_EQ(blit.empty(), before == E::ThreeD);
-        EXPECT_EQ(o == Opened::Switch, before == E::ThreeD);
+        EXPECT_EQ(blit.empty(), before == E::ThreeD || before == E::Compute);
+        EXPECT_EQ(o == Opened::Switch, before == E::ThreeD || before == E::Compute);
         const auto compute = computeWords(intoCompute, EntryForm::Rule, before, &o);
         EXPECT_EQ(idles(compute), before != E::ThreeD);
         EXPECT_EQ(o == Opened::Switch, before == E::ThreeD);

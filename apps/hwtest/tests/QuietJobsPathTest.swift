@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Quiet job ends (drivers/TegraGM20B/SwitchGpuQuiet.h, completion_source.h): a frame of three command

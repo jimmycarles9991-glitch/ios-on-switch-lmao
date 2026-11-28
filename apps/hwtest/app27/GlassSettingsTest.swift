@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestKit
+import HWTestShared
 import UIKit
 
 /// Settings' Liquid Glass over its right column going partly black as it appears or the column scrolls, judged on what
@@ -10,8 +11,8 @@ import UIKit
 /// appear (the pane shows and hides every SidebarDriver.appearEvery display frames over the still detail), both (it
 /// shows and hides while the detail scrolls), sidebar (it shows and hides while the sidebar's list scrolls).
 ///
-/// The result line is ui.glass_sidebar's, judged on the pane: frames=, black=, partial=, probe=, per phase
-/// frames/black/partial, its first black frame's sequence and its glass-mem counts' rise, then under= (the detail is
+/// The result line is ui.glass_sidebar's, judged on the pane: frames=, black=, partial=, per phase
+/// frames/black/partial and its first black frame's sequence, then under= (the detail is
 /// behind the pane), region= (the pane in points, x,y,w,h) and means= (the pane's mean level both ways the buffer may
 /// turn). Each black frame logs one line with its sequence and mach ticks; every frame is in
 /// Documents/ui/ui.glass_settings/frames.json, with PNGs of each phase's first wrong frame and its neighbours.
@@ -44,7 +45,6 @@ struct UIGlassSettingsTest: HWTest {
         defer { session.close() }
         let directory = context.documents.appendingPathComponent("ui").appendingPathComponent(id)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        GlassProbe.arm(lines: false)
         let presented = await MainActor.run { () -> (SidebarScene, UIView)? in
             guard let scene = SidebarScene.present(pane: true), let pane = scene.pane else { return nil }
             return (scene, pane)
@@ -83,7 +83,7 @@ struct UIGlassSettingsTest: HWTest {
         )
         metrics.set("means", run.means)
         return GlassSidebarVerdict.outcome(
-            run.phases, reads: run.reads, scene: metrics, pngs: run.pngs, stopped: run.stopped, subject: "glass pane"
+            run.phases, scene: metrics, pngs: run.pngs, stopped: run.stopped, subject: "glass pane"
         )
     }
 }

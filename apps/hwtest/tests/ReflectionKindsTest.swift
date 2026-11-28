@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
+import HWTestKit
 import Metal
 
 /// Pipeline reflection per binding kind (drivers/TegraGM20BMetal/TegraGM20BMetalReflectionObjects.mm), two arms

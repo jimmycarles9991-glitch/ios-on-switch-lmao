@@ -54,59 +54,6 @@ bool regionElements(const gm20b::fx::MipChain &c, const gm20b::FormatInfo *f, NS
     return e[2] && e[3] && e[0] + e[2] <= lv.width && e[1] + e[3] <= lv.height;
 }
 
-#if SWITCH_METAL_DIAGNOSTICS
-// Where a caller's blocks land against its page (HW Test ui.compressed_image's intermittent swizzle of 2-block groups,
-// gpu.astc.layouts): once for each shape and base in a 16 KiB page, so a process's boot-time images do not use up the
-// lines before the one that shows the swizzle, and at most 64 shapes and bases a process
-class OncePerShape {
-public:
-    bool first(uint32_t format, uint32_t width, uint32_t height, const void *memory)
-    {
-        const uint64_t key = uint64_t(format & 0xffff) << 48 | uint64_t(width & 0x3fff) << 34 |
-                             uint64_t(height & 0x3fff) << 20 | (uintptr_t(memory) & 0x3fff);
-        std::lock_guard<gm20b::Mutex> l(lock_);
-        return seen_.size() < 64 && seen_.insert(key).second;
-    }
-
-private:
-    gm20b::Mutex lock_;
-    std::set<uint64_t> seen_;
-};
-
-void logBlockWrite(OncePerShape &once, const char *caller, uint32_t format, const gm20b::fx::MipChain &c,
-                   const void *memory, NSUInteger slice, NSUInteger level, const uint32_t e[4], size_t rowStride)
-{
-    if (!once.first(format, c.width, c.height, memory))
-        return;
-    const gm20b::fx::MipLevel &lv = c.level[level];
-    const uint64_t first =
-        slice * c.arrayStride + lv.offset + tgm_layout_offset_of(lv.rowBytes, lv.yLog2, e[0] * c.bpp, e[1]);
-    os_log(gm20bLog(),
-           "SwitchMetal: block layout write by %{public}s, format %u %ux%u blocks: memory & 0x3fff 0x%llx, level %lu "
-           "slice %lu, "
-           "elements %u,%u %ux%u, rows %zu bytes apart, first element at +0x%llx (%u-GOB blocks, %u GOBs across)",
-           caller, format, c.width, c.height, (unsigned long long)(uintptr_t(memory) & 0x3fff), (unsigned long)level,
-           (unsigned long)slice, e[0], e[1], e[2], e[3], rowStride, (unsigned long long)first, 1u << lv.yLog2,
-           lv.rowBytes / 64);
-}
-
-void logImport(const void *bytes, NSUInteger length, MTLTextureDescriptor *d, const gm20b::fx::MipChain &c,
-               const gm20b::Texture &t)
-{
-    static OncePerShape once;
-    if (!once.first(uint32_t(d.pixelFormat), uint32_t(d.width), uint32_t(d.height), bytes))
-        return;
-    os_log(
-        gm20bLog(),
-        "SwitchMetal: no-copy texture %lux%lu format %lu over %lu bytes: cpu & 0x3fff 0x%llx, gpu va 0x%llx (& 0x3fff "
-        "0x%llx), %u-GOB blocks, %u GOBs across, %llu aligned, %{public}s",
-        (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.pixelFormat, (unsigned long)length,
-        (unsigned long long)(uintptr_t(bytes) & 0x3fff), (unsigned long long)t.va, (unsigned long long)(t.va & 0x3fff),
-        1u << c.yLog2, c.level[0].rowBytes / 64, (unsigned long long)c.align,
-        t.callerPages ? "copied into a pool image" : "in place, kind 0xfe");
-}
-#endif
-
 }  // namespace
 
 // A selector it lacks is answered zero (SwitchMetalObject's forwardInvocation:)
@@ -166,11 +113,6 @@ void logImport(const void *bytes, NSUInteger length, MTLTextureDescriptor *d, co
         SWITCH_REFUSE("gm20b", "layout.copy", "a block layout copy outside the image: refused");
         return;
     }
-#if SWITCH_METAL_DIAGNOSTICS
-    static OncePerShape once;
-    logBlockWrite(once, "copyFromLinearBytes", _format->mtl, _layout, memory, slice, level, e,
-                  rowStride ? rowStride : size_t(e[2]) * _layout.bpp);
-#endif
     gm20b::fx::writeElements(_layout, static_cast<uint8_t *>(memory), uint32_t(slice), uint32_t(level), e[0], e[1],
                              e[2], e[3], static_cast<const uint8_t *>(bytes) + offset,
                              rowStride ? rowStride : size_t(e[2]) * _layout.bpp);
@@ -218,14 +160,14 @@ class WrappedMemory {
 public:
     void add(const void *memory, SwitchMetalNoCopyTexture *t)
     {
-        std::lock_guard<gm20b::Mutex> l(lock_);
+        std::lock_guard<gm20b::UnfairMutex> l(lock_);
         textures_.emplace(memory, t);
     }
 
     // The entries over `memory` whose texture is gone, a deallocating one included
     void prune(const void *memory)
     {
-        std::lock_guard<gm20b::Mutex> l(lock_);
+        std::lock_guard<gm20b::UnfairMutex> l(lock_);
         auto [from, to] = textures_.equal_range(memory);
         while (from != to)
             from = from->second ? std::next(from) : textures_.erase(from);
@@ -234,7 +176,7 @@ public:
     std::vector<SwitchMetalNoCopyTexture *> over(const void *memory)
     {
         std::vector<SwitchMetalNoCopyTexture *> found;
-        std::lock_guard<gm20b::Mutex> l(lock_);
+        std::lock_guard<gm20b::UnfairMutex> l(lock_);
         auto [from, to] = textures_.equal_range(memory);
         for (; from != to; ++from)
             if (SwitchMetalNoCopyTexture *t = from->second)
@@ -243,7 +185,7 @@ public:
     }
 
 private:
-    gm20b::Mutex lock_;
+    gm20b::UnfairMutex lock_;
     std::unordered_multimap<const void *, __weak SwitchMetalNoCopyTexture *> textures_;
 };
 
@@ -306,10 +248,6 @@ static void wroteThroughLayout(const void *memory)
     uint32_t e[4];
     if (slice >= _layout.layers || !regionElements(_layout, _format, level, r, e))
         return;
-#if SWITCH_METAL_DIAGNOSTICS
-    static OncePerShape once;
-    logBlockWrite(once, "replaceRegion", _format->mtl, _layout, _bytes, slice, level, e, row);
-#endif
     gm20b::fx::writeElements(_layout, static_cast<uint8_t *>(_bytes), uint32_t(slice), uint32_t(level), e[0], e[1],
                              e[2], e[3], static_cast<const uint8_t *>(bytes), row);
     wrote(self, "replaceRegion");
@@ -384,9 +322,6 @@ static void wroteThroughLayout(const void *memory)
                              (unsigned long long)uintptr_t(bytes));
         return nil;
     }
-#if SWITCH_METAL_DIAGNOSTICS
-    logImport(bytes, length, d, layout, t->_raw);
-#endif
     t->_gm20bOk = true;
     t->_bytes = bytes;
     t->_length = length;

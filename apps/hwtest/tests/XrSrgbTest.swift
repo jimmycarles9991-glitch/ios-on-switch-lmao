@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// The extended-range sRGB formats on the driver, which holds each in an RGBA16Float stand-in (BGR10_XR_sRGB 555 for

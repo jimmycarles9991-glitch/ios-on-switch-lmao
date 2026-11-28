@@ -1,23 +1,52 @@
 // SPDX-License-Identifier: MIT
 // IOGPU's device connection on AGXAccelerator: IOGPUDeviceCreate (IOGPU.framework) opens type 1 (API in the high half)
 // and QuartzCore's IOMFBDisplay::hint_agx_timing then gives the GPU each vsync's deadline through it
-// (IOGPUDeviceSetDisplayParams: scalar method 0x21 on iOS 17, IOConnectTrap2 index 8 on iOS 27). It holds no GPU
-// resources: IOGPUDeviceCreate's queries are answered empty (no shared stamps, no trace ids, as a device with none) and
-// the deadline is kept for the scheduler (tegra_gm20b_display_deadline). XNU answers a trap index with no trap behind it
-// kIOReturnSuccess, so every other index is refused here, by name.
+// (IOGPUDeviceSetDisplayParams: scalar method 0x21 on iOS 17, IOConnectTrap2 index 8 on iOS 27). On iOS 27, scalar
+// methods 0x21 and 0x22 are IOGPUDeviceSetAppGPURole and IOGPUDeviceGetAppGPURole (used by runningboardd with the
+// com.apple.agx.gpurole entitlement). It holds no GPU resources: IOGPUDeviceCreate's queries are answered empty (no
+// shared stamps, no trace ids, as a device with none) and the deadline is kept for the scheduler
+// (tegra_gm20b_display_deadline). XNU answers a trap index with no trap behind it kIOReturnSuccess, so every other
+// index is refused here, by name.
+#ifndef SWITCH_IPSW_BUILD
+#error "TegraGM20B compiles with the IPSW kind's header (IPSW_KIND_FLAGS)"
+#endif
 #include <IOKit/IOUserClient.h>
+#include <libkern/c++/OSBoolean.h>
 #include "../../kits/SwitchRefusal/SwitchRefusal.h"
+
+#if SWITCH_IPSW_KIND_24B119
+extern "C" bool tegra_gm20b_set_app_gpu_role(int pid, uint32_t role);
+extern "C" bool tegra_gm20b_get_app_gpu_role(int pid, uint32_t *role);
+#endif
 
 namespace
 {
-// IOGPUDeviceCreateWithAPIProperty's struct selectors (input, output) and IOGPUDeviceSetDisplayParams' scalar one.
+// IOGPUDeviceCreateWithAPIProperty's struct selectors (input, output) and scalar methods.
 enum : uint32_t {
 	kDeviceInfo = 0,        // 0x40 bytes out
 	kSharedMemoryInfo = 2,  // 0x218 bytes out: base, offsets and their count (0: none)
 	kTraceInfo = 4,         // 0x20 bytes out
 	kClientName = 6,        // 16 bytes in: the process's name
+#if SWITCH_IPSW_KIND_24B119
+	kSetAppGPURole = 0x21,  // 2 scalar in: (pid, role)
+	kGetAppGPURole = 0x22,  // 1 scalar in (pid), 1 scalar out (role)
+#else
 	kSetDisplayParams = 0x21,
+#endif
 };
+
+#if SWITCH_IPSW_KIND_24B119
+constexpr char kGpuRoleEntitlement[] = "com.apple.agx.gpurole";
+constexpr uint32_t kMaxAppGpuRole = 2;
+
+bool hasGpuRoleEntitlement(task_t task)
+{
+	OSObject *value = IOUserClient::copyClientEntitlement(task, kGpuRoleEntitlement);
+	const bool yes = value == kOSBooleanTrue;
+	OSSafeReleaseNULL(value);
+	return yes;
+}
+#endif
 
 // IOGPUDeviceSetDisplayParams' trap: p1 the next vblank, p2 the frame interval
 constexpr UInt32 kSetDisplayParamsTrap = 8;
@@ -68,6 +97,10 @@ class TegraGM20BDeviceUserClient : public IOUserClient
 	OSDeclareDefaultStructors(TegraGM20BDeviceUserClient);
 
 public:
+#if SWITCH_IPSW_KIND_24B119
+	bool initWithTask(task_t owningTask, void *securityID, UInt32 type,
+			  OSDictionary *properties) APPLE_KEXT_OVERRIDE;
+#endif
 	IOReturn clientClose() APPLE_KEXT_OVERRIDE;
 	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *arguments,
 				IOExternalMethodDispatch *dispatch, OSObject *target,
@@ -76,13 +109,27 @@ public:
 						 UInt32 index) APPLE_KEXT_OVERRIDE;
 
 private:
+#if SWITCH_IPSW_KIND_24B119
+	task_t task_ = TASK_NULL;
+#endif
 	IOReturn setDisplayParams(void *nextVblank, void *interval, void *, void *, void *, void *);
 	IOReturn refuseTrap(void *, void *, void *, void *, void *, void *);
 };
 
 OSDefineMetaClassAndStructors(TegraGM20BDeviceUserClient, IOUserClient)
 
-	IOReturn TegraGM20BDeviceUserClient::clientClose()
+#if SWITCH_IPSW_KIND_24B119
+	bool TegraGM20BDeviceUserClient::initWithTask(task_t owningTask, void *securityID,
+						      UInt32 type, OSDictionary *properties)
+{
+	if (!IOUserClient::initWithTask(owningTask, securityID, type, properties))
+		return false;
+	task_ = owningTask;
+	return true;
+}
+#endif
+
+IOReturn TegraGM20BDeviceUserClient::clientClose()
 {
 	terminate();
 	return kIOReturnSuccess;
@@ -110,11 +157,37 @@ IOReturn TegraGM20BDeviceUserClient::externalMethod(uint32_t selector,
 	case kClientName:
 		return arguments->structureInputSize <= 16 ? kIOReturnSuccess
 							   : kIOReturnBadArgument;
+#if SWITCH_IPSW_KIND_24B119
+	case kSetAppGPURole:
+		if (arguments->scalarInputCount != 2 || arguments->scalarInput[1] > kMaxAppGpuRole)
+			return kIOReturnBadArgument;
+		if (!hasGpuRoleEntitlement(task_))
+			return kIOReturnNotPrivileged;
+		return tegra_gm20b_set_app_gpu_role(
+			       static_cast<int>(arguments->scalarInput[0]),
+			       static_cast<uint32_t>(arguments->scalarInput[1]))
+			       ? kIOReturnSuccess
+			       : kIOReturnNoDevice;
+	case kGetAppGPURole: {
+		if (arguments->scalarInputCount != 1 || arguments->scalarOutputCount < 1)
+			return kIOReturnBadArgument;
+		if (!hasGpuRoleEntitlement(task_))
+			return kIOReturnNotPrivileged;
+		uint32_t role = 0;
+		if (!tegra_gm20b_get_app_gpu_role(static_cast<int>(arguments->scalarInput[0]),
+						  &role))
+			return kIOReturnNoDevice;
+		arguments->scalarOutput[0] = role;
+		arguments->scalarOutputCount = 1;
+		return kIOReturnSuccess;
+	}
+#else
 	case kSetDisplayParams:
 		if (arguments->scalarInputCount != 2)
 			return kIOReturnBadArgument;
 		storeDeadline(arguments->scalarInput[0], arguments->scalarInput[1]);
 		return kIOReturnSuccess;
+#endif
 	default:
 		switch_refusal_k(switch_refusal_key_with(
 					 switch_refusal_key("iogpu", "device-selector"), selector),

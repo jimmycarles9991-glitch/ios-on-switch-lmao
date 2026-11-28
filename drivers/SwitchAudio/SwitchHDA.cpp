@@ -86,9 +86,12 @@ void SwitchHDA::field(uint32_t offset, uint32_t mask, uint32_t value)
     coreWrite(aligned, (word & ~(mask << shift)) | ((value & mask) << shift));
 }
 
-bool SwitchHDA::initialize(IOCommandGate *commandGate, SwitchAudioControl *page, uint64_t hz)
+bool SwitchHDA::initialize(IOWorkLoop *loop, IOCommandGate *commandGate, IOTimerEventSource *offTimer,
+                           SwitchAudioControl *page, uint64_t hz)
 {
+    workLoop = loop;
     gate = commandGate;
+    powerOffTimer = offTimer;
     control = page;
     hostHz = hz;
     control->magic = SWITCH_AUDIO_MAGIC;
@@ -152,20 +155,103 @@ bool SwitchHDA::prepareHardware()
     return true;
 }
 
-void SwitchHDA::power(bool on)
+bool SwitchHDA::waitCoreBit(uint32_t offset, uint32_t mask, uint32_t value, uint32_t timeoutUs, uint32_t gen)
 {
-    if (powered == on)
+    constexpr uint32_t kFastSpinUs = 50u;
+    constexpr uint32_t kSleepSliceUs = 200u;
+    const uint32_t aligned = offset & ~3u;
+    const uint32_t shift = 8u * (offset & 3u);
+    const uint32_t shiftedMask = mask << shift;
+    const uint32_t shiftedVal = (value & mask) << shift;
+    const uint32_t fastUs = timeoutUs < kFastSpinUs ? timeoutUs : kFastSpinUs;
+    if (switch_mmio_wait32(registers, kBar + aligned, shiftedMask, shiftedVal, fastUs))
+        return true;
+    if (timeoutUs <= kFastSpinUs)
+        return false;
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(timeoutUs - kFastSpinUs, NSEC_PER_USEC, &deadline);
+    while (mach_absolute_time() < deadline) {
+        if (!powered || stateGen != gen)
+            return false;
+        uint64_t next = 0;
+        clock_interval_to_deadline(kSleepSliceUs, NSEC_PER_USEC, &next);
+        if (next > deadline)
+            next = deadline;
+        if (gate && (!workLoop || !workLoop->onThread()))
+            gate->commandSleep(&waitToken, next, THREAD_UNINT);
+        else
+            delay_for_interval(kSleepSliceUs, NSEC_PER_USEC);
+        if (!powered || stateGen != gen)
+            return false;
+        if ((core(offset) & mask) == (value & mask))
+            return true;
+    }
+    return powered && stateGen == gen && (core(offset) & mask) == (value & mask);
+}
+
+bool SwitchHDA::sleepOnGateUs(uint32_t us, uint32_t gen)
+{
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(us, NSEC_PER_USEC, &deadline);
+    while (mach_absolute_time() < deadline) {
+        if (!powered || stateGen != gen)
+            return false;
+        if (gate && (!workLoop || !workLoop->onThread()))
+            gate->commandSleep(&waitToken, deadline, THREAD_UNINT);
+        else
+            delay_for_interval(us, NSEC_PER_USEC);
+    }
+    return powered && stateGen == gen;
+}
+
+void SwitchHDA::finishPowerOff()
+{
+    if (powerOffTimer)
+        powerOffTimer->cancelTimeout();
+    powerOffPending = false;
+    if (!powered)
         return;
     constexpr unsigned clocks[] = {kClockHda, kClockHda2Codec2x, kClockHda2Hdmi};
+    switch_car_clock_disable(kClockMaud);
+    for (const unsigned id : clocks)
+        switch_car_clock_disable(id);
+    powered = false;
+}
+
+void SwitchHDA::powerOffTimerFired()
+{
+    if (powerOffPending)
+        finishPowerOff();
+}
+
+void SwitchHDA::power(bool on)
+{
+    constexpr unsigned clocks[] = {kClockHda, kClockHda2Codec2x, kClockHda2Hdmi};
     if (!on) {
-        coreWrite(GCTL, 0);
-        IOSleep(1);
-        switch_car_clock_disable(kClockMaud);
-        for (const unsigned id : clocks)
-            switch_car_clock_disable(id);
-        powered = false;
+        if (!powered)
+            return;
+        if (!powerOffPending)
+            coreWrite(GCTL, 0);
+        if (switch_mmio_wait32(registers, kBar + GCTL, kGctlCrst, 0, 50)) {
+            finishPowerOff();
+            return;
+        }
+        if (workLoop && workLoop->onThread() && powerOffTimer) {
+            powerOffPending = true;
+            powerOffTimer->setTimeoutMS(1);
+            return;
+        }
+        const uint32_t gen = stateGen;
+        (void)waitCoreBit(GCTL, kGctlCrst, 0, 1000, gen);
+        if (stateGen == gen)
+            finishPowerOff();
         return;
     }
+    if (powerOffTimer)
+        powerOffTimer->cancelTimeout();
+    if (powered && !powerOffPending)
+        return;
+    powerOffPending = false;
     // SOR1 derives DP's Maud from a 102 MHz MAUD that tracks the 48 MHz HDA2CODEC_2X from the same PLL (TRM 27.6.5).
     // MAUD's divisor is 7.1 like the others: TRM 5.2.277 calls it integer, but L4T's working DP audio sets 102 MHz
     // from PLLP as 6 (clk-tegra-periph.c MUX8), where 3 gives 163.2 MHz and a Maud 1.6x off.
@@ -190,16 +276,17 @@ bool SwitchHDA::reset()
 {
     if (!stop() || !stopCommands())
         return false;
+    const uint32_t gen = stateGen;
     coreWrite(GCTL, 0);
     // CRST and stream reset have no completion interrupt (Intel HD Audio 1.0a 4.2.2, 4.5.1.2).
-    IOSleep(1);
-    if (core(GCTL) & kGctlCrst)
+    if (!waitCoreBit(GCTL, kGctlCrst, 0, 1000, gen))
         return false;
     coreWrite(GCTL, kGctlCrst);
-    IOSleep(1);
-    if (!(core(GCTL) & kGctlCrst))
+    if (!waitCoreBit(GCTL, kGctlCrst, kGctlCrst, 1000, gen))
         return false;
-    IOSleep(1);  // Codecs have 521 us after CRST to register (Intel 4.3).
+    // Codecs have 521 us after CRST to register (Intel 4.3).
+    if (!sleepOnGateUs(600, gen))
+        return false;
     const uint32_t capabilities = core(GCAP) & 0xffff;
     if (!((capabilities >> 12) & 15))
         return false;
@@ -220,8 +307,8 @@ bool SwitchHDA::reset()
     coreWrite(CORBUBASE, 0);
     field(CORBWP, 0xffff, 0);
     field(CORBRP, 0xffff, kCorbRpReset);
-    IOSleep(1);  // Tegra's CORBRP reset is self-clearing (Linux AZX_DCAPS_CORBRP_SELF_CLEAR).
-    if (core(CORBRP) & 0xffff)
+    // Tegra's CORBRP reset is self-clearing (Linux AZX_DCAPS_CORBRP_SELF_CLEAR).
+    if (!waitCoreBit(CORBRP, 0xffff, 0, 1000, gen))
         return false;
     coreWrite(RIRBLBASE, static_cast<uint32_t>(commands.pa + kRirbOffset));
     coreWrite(RIRBUBASE, 0);
@@ -265,7 +352,7 @@ bool SwitchHDA::verb(uint32_t node, uint32_t operation, uint32_t payload, uint32
 
 void SwitchHDA::interrupt()
 {
-    if (!powered)
+    if (!powered || powerOffPending)
         return;
     const uint32_t status = core(INTSTS);  // Flushes preceding HDA DMA writes (T210 TRM 27.7.8.5).
     if (status & kIntCie) {
@@ -367,7 +454,10 @@ bool SwitchHDA::stopCommands()
 
 void SwitchHDA::disconnect()
 {
+    ++stateGen;
     attached = ready = false;
+    if (gate)
+        gate->commandWakeup(&waitToken, false);
     stop();
     stopCommands();
     if (control)
@@ -404,12 +494,16 @@ bool SwitchHDA::connect(uint32_t formats)
 
 IOReturn SwitchHDA::start()
 {
+    while (starting)
+        gate->commandSleep(&starting, THREAD_UNINT);
     if (!ready || !attached)
         return kIOReturnNotReady;
     if (control->state)
         return kIOReturnSuccess;
     if (!stop())
         return kIOReturnTimeout;
+    starting = true;
+    const uint32_t gen = stateGen;
     const uint16_t format = switch_hda_stream_format(control->sample_bits, control->rate);
     const uint32_t frameBytes = control->sample_bits == 16 ? 4 : 8;
     const uint32_t bytes = SWITCH_AUDIO_RING_FRAMES * frameBytes;
@@ -419,13 +513,22 @@ IOReturn SwitchHDA::start()
         switch_dcache_clean(output->getBytesNoCopy(), bytes);
     }
     coreWrite(stream, kStreamReset);
-    IOSleep(1);
-    if (!(core(stream) & kStreamReset))
-        return kIOReturnTimeout;
+    if (!waitCoreBit(stream, kStreamReset, kStreamReset, 1000, gen)) {
+        starting = false;
+        gate->commandWakeup(&starting, false);
+        return stateGen != gen ? kIOReturnAborted : kIOReturnTimeout;
+    }
     coreWrite(stream, 0);
-    IOSleep(1);
-    if (core(stream) & kStreamReset)
-        return kIOReturnTimeout;
+    if (!waitCoreBit(stream, kStreamReset, 0, 1000, gen)) {
+        starting = false;
+        gate->commandWakeup(&starting, false);
+        return stateGen != gen ? kIOReturnAborted : kIOReturnTimeout;
+    }
+    if (!ready || !attached || !powered || stateGen != gen) {
+        starting = false;
+        gate->commandWakeup(&starting, false);
+        return kIOReturnAborted;
+    }
     auto *bdl = reinterpret_cast<volatile uint32_t *>(commands.va + kBdlOffset);
     const uint64_t outputPA = output->getPhysicalSegment(0, nullptr);
     for (uint32_t i = 0; i < kPeriods; ++i) {
@@ -451,6 +554,8 @@ IOReturn SwitchHDA::start()
     periodsRun = 0;
 #endif
     coreWrite(stream, kStreamTag1 | stripe << kStreamStripeShift | kStreamInterrupts | kRun);
+    starting = false;
+    gate->commandWakeup(&starting, false);
     return kIOReturnSuccess;
 }
 
@@ -473,4 +578,7 @@ void SwitchHDA::release()
     switch_dma_free(&tables);
     prepared = false;
     registers = nullptr;
+    powerOffTimer = nullptr;
+    workLoop = nullptr;
+    gate = nullptr;
 }

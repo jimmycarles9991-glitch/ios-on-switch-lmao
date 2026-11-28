@@ -69,6 +69,9 @@ bool SwitchXHCI::start(IOService *provider)
     commandGate = IOCommandGate::commandGate(this);
     if (!commandGate || tegraLoop->addEventSource(commandGate) != kIOReturnSuccess)
         return false;
+    mboxReplyTimer = IOTimerEventSource::timerEventSource(this, &SwitchXHCI::mboxReplyFired);
+    if (!mboxReplyTimer || tegraLoop->addEventSource(mboxReplyTimer) != kIOReturnSuccess)
+        return false;
     mailbox->enable();
 #if !XNU_12377_121_6
     nameUSBCPort(this);
@@ -98,6 +101,18 @@ void SwitchXHCI::stop(IOService *provider)
 {
     if (mailbox)
         mailbox->disable();
+    if (tegraLoop) {
+        tegraLoop->runAction(
+            [](OSObject *owner, void *, void *, void *, void *) {
+                auto *self = static_cast<SwitchXHCI *>(owner);
+                if (self->mboxReplyTimer)
+                    self->mboxReplyTimer->cancelTimeout();
+                if (xusb_mbox_deferred_cancel(&self->deferredReply) && self->commandGate)
+                    self->commandGate->commandWakeup(&self->deferredReply, false);
+                return kIOReturnSuccess;
+            },
+            this);
+    }
     getPMRootDomain()->deRegisterInterestedDriver(this);
     AppleUSBXHCI::stop(provider);
 }
@@ -106,9 +121,12 @@ void SwitchXHCI::free()
 {
     if (tegraLoop && mailbox)
         tegraLoop->removeEventSource(mailbox);
+    if (tegraLoop && mboxReplyTimer)
+        tegraLoop->removeEventSource(mboxReplyTimer);
     if (tegraLoop && commandGate)
         tegraLoop->removeEventSource(commandGate);
     OSSafeReleaseNULL(mailbox);
+    OSSafeReleaseNULL(mboxReplyTimer);
     OSSafeReleaseNULL(commandGate);
     OSSafeReleaseNULL(tegraLoop);
     AppleUSBXHCI::free();

@@ -15,6 +15,9 @@ use_repo(
     bootstrap,
     "bootstrap_ellekit",
     "bootstrap_launchctl",
+    "bootstrap_openssh_client",
+    "bootstrap_openssh_server",
+    "bootstrap_openssh_sftp_server",
     "bootstrap_procursus_bootstrap",
     "bootstrap_sileo",
     "bootstrap_sileo_alderis",
@@ -31,6 +34,7 @@ use_repo(
     "bootstrap_sileo_swipecellkit",
     "bootstrap_sileo_zippyjson",
     "bootstrap_sileo_zippyjsoncfamily",
+    "bootstrap_top",
     "bootstrap_zstd",
 )
 

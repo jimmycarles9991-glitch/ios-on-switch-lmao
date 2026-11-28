@@ -20,7 +20,7 @@ One action per step (gpu/seed/tools.bzl seed_tools builds, gpu/seed/defs.bzl see
         with its tag for its name; one naming none fails the step. A state of two-plane YCbCr attachments is taken as
         the one the runtime makes for it (stand_in)
     make_pack.py split --generator <make_pack.py> --qc default.metallib --corpus <file> [--ca-names <file>]
-                     [--ca-preferences <stage-tegra-gm20b-metal.py>]
+                     [--ca-preferences <tools/gpu/stage_format.py>]
                      --out <bucket corpus>...
         the states of each of the generator's buckets, with the Core Animation states a device's logs named
         (precompile/ca-names/<build>.txt)

@@ -188,6 +188,40 @@ host_test(
     ],
 )
 
+genrule(
+    name = "hash_development",
+    srcs = ["core_manifest_dev.json"],
+    outs = ["development/payload_hash.h"],
+    cmd = "$(execpath //drivers/SwitchBootstrap:configuration) --manifest $(execpath :core_manifest_dev.json) --out $@",
+    tools = ["//drivers/SwitchBootstrap:configuration"],
+)
+
+host_test(
+    name = "core_update_development_test",
+    srcs = [
+        ":core_update_source",
+        ":hash_development",
+        "//drivers/SwitchBootstrap:core_update.h",
+        "//drivers/SwitchBootstrap:payload.h",
+        "//drivers/SwitchBootstrap:state.h",
+    ],
+    additional_compiler_inputs = ["//drivers/SwitchBootstrap:core_update.mm"],
+    copts = [
+        "-x",
+        "objective-c++",
+        "-fobjc-arc",
+        "-UNDEBUG",
+        "-I.",
+        "-I$(GENDIR)/drivers/SwitchBootstrap/test/development",
+        "-Wno-deprecated-declarations",
+    ],
+    gtest_main = False,
+    linkopts = [
+        "-framework",
+        "Foundation",
+    ],
+)
+
 write_file(
     name = "configuration",
     out = "build_configuration.h",

@@ -33,10 +33,12 @@ kernel_driver(
     name = "TegraSE",
     hdr_deps = [
         "drivers/ArmGIC",
+        "drivers/TegraSMMU",
         "kits/SwitchCAR",
         "kits/SwitchDMA",
         "kits/SwitchMMIO",
         "kits/SwitchRefusal",
+        "kits/SwitchSysctl",
         "kits/SwitchTime",
     ],
 )

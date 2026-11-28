@@ -34,10 +34,10 @@ static bool surface_client(IOUserClient *client)
 {
     static const OSMetaClass *surfaceClass;
     const OSMetaClass *meta = client->getMetaClass();
+    const OSMetaClass *cached = os_atomic_load(&surfaceClass, relaxed);
 
-    if (meta != os_atomic_load(&surfaceClass, relaxed)) {
-        if (os_atomic_load(&surfaceClass, relaxed) || !meta ||
-            strcmp(meta->getClassName(), "IOSurfaceRootUserClient") != 0) {
+    if (meta != cached) {
+        if (cached || !meta || strcmp(meta->getClassName(), "IOSurfaceRootUserClient") != 0) {
             return false;
         }
         os_atomic_store(&surfaceClass, meta, relaxed);
@@ -47,17 +47,20 @@ static bool surface_client(IOUserClient *client)
 
 void switch_iokit_iosurface_trap(IOUserClient *client, uint32_t index, void *p1, void *p2)
 {
-    if (surface_client(client)) {
-        if (index == kSwitchIOSurfaceTrapLock && switch_gpu_surface_lock_did)
-            switch_gpu_surface_lock_did(client, (uint32_t)(uintptr_t)p1, (uint32_t)(uintptr_t)p2);
-        if (index == kSwitchIOSurfaceTrapUnlock && switch_gpu_surface_unlock_will)
-            switch_gpu_surface_unlock_will(client, (uint32_t)(uintptr_t)p1, (uint32_t)(uintptr_t)p2);
+    if (!surface_client(client))
+        return;
+    const uint32_t surface_id = (uint32_t)(uintptr_t)p1;
+    const uint32_t options = (uint32_t)(uintptr_t)p2;
+    if (index == kSwitchIOSurfaceTrapLock && switch_gpu_surface_lock_did)
+        switch_gpu_surface_lock_did(client, surface_id, options);
+    if (index == kSwitchIOSurfaceTrapUnlock) {
+        if (switch_gpu_surface_unlock_will)
+            switch_gpu_surface_unlock_will(client, surface_id, options);
+        if (tegra_gm20b_iosurface_view)
+            tegra_gm20b_iosurface_view(client, index, surface_id, options);
     }
-    if (index == kSwitchIOSurfaceTrapUnlock && tegra_gm20b_iosurface_view && surface_client(client)) {
-        tegra_gm20b_iosurface_view(client, index, (uint32_t)(uintptr_t)p1, (uint32_t)(uintptr_t)p2);
-    }
-    if (tegra_gm20b_iosurface_trap && surface_client(client)) {
-        tegra_gm20b_iosurface_trap(index, (uint32_t)(uintptr_t)p1, (uint32_t)(uintptr_t)p2);
+    if (tegra_gm20b_iosurface_trap) {
+        tegra_gm20b_iosurface_trap(index, surface_id, options);
     }
 }
 
@@ -87,16 +90,19 @@ void switch_iokit_iosurface_lock_failed(IOUserClient *client, void *p1, void *p2
  * with kIOReturnCannotLock instead of waiting. */
 kern_return_t switch_iokit_iosurface_lock_will(IOUserClient *client, void *p1, void *p2)
 {
-    if (switch_gpu_surface_lock_will && surface_client(client) &&
-        switch_gpu_surface_lock_will(client, (uint32_t)(uintptr_t)p1, (uint32_t)(uintptr_t)p2))
+    if (!switch_gpu_surface_lock_will && !tegra_gm20b_iosurface_view && !tegra_gm20b_iosurface_lock_will)
+        return KERN_SUCCESS;
+    if (!surface_client(client))
+        return KERN_SUCCESS;
+    const uint32_t surface_id = (uint32_t)(uintptr_t)p1;
+    const uint32_t options = (uint32_t)(uintptr_t)p2;
+    if (switch_gpu_surface_lock_will && switch_gpu_surface_lock_will(client, surface_id, options))
         return kIOReturnCannotLock;
-    if (tegra_gm20b_iosurface_view && surface_client(client) &&
-        tegra_gm20b_iosurface_view(client, kSwitchIOSurfaceTrapLock, (uint32_t)(uintptr_t)p1,
-                                   (uint32_t)(uintptr_t)p2)) {
+    if (tegra_gm20b_iosurface_view &&
+        tegra_gm20b_iosurface_view(client, kSwitchIOSurfaceTrapLock, surface_id, options)) {
         return kIOReturnCannotLock;
     }
-    if (tegra_gm20b_iosurface_lock_will && surface_client(client) &&
-        tegra_gm20b_iosurface_lock_will((uint32_t)(uintptr_t)p1, (uint32_t)(uintptr_t)p2)) {
+    if (tegra_gm20b_iosurface_lock_will && tegra_gm20b_iosurface_lock_will(surface_id, options)) {
         return kIOReturnCannotLock;
     }
     return KERN_SUCCESS;

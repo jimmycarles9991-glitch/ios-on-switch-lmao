@@ -33,6 +33,10 @@
 #include <sys/errno.h>
 #include <vm/pmap.h>
 #include <vm/vm_map_xnu.h>
+#if CONFIG_A64X
+#include <vm/vm_map_internal.h>
+#include <vm/vm_map_lock_internal.h>
+#endif
 #include <vm/vm_memtag.h>
 #include <san/kasan.h>
 #include <arm/pmap.h>
@@ -475,6 +479,36 @@ a64x_copyio_casp(user_addr_t user_addr, uint64_t e0, uint64_t e1, uint64_t d0, u
 		*o1 = o[1];
 	}
 	return result;
+}
+
+bool a64x_pc_is_jit(user_addr_t pc);
+bool a64x_user_neon_d(uint32_t regno, uint64_t *out);
+
+bool
+a64x_pc_is_jit(user_addr_t pc)
+{
+	vm_map_t map = current_thread()->map;
+	if (map == VM_MAP_NULL || map->pmap == PMAP_NULL || !map->pmap->user_cache_maintenance_trap ||
+	    vm_map_is_sealed(map)) {
+		return false;
+	}
+	vm_map_ilk_lock_shared(map);
+	vm_map_entry_t entry = vm_map_store_lookup_entry(map, pc, false);
+	bool jit = entry != VM_MAP_ENTRY_NULL && entry != vm_map_to_entry(map) &&
+	    entry->vme_start <= pc && pc < entry->vme_end && entry->used_for_jit;
+	vm_map_ilk_unlock_shared(map);
+	return jit;
+}
+
+bool
+a64x_user_neon_d(uint32_t regno, uint64_t *out)
+{
+	arm_neon_saved_state_t *u_neon = current_thread()->machine.uNeon;
+	if (regno >= 32 || !u_neon || !is_neon_saved_state64(u_neon)) {
+		return false;
+	}
+	*out = (uint64_t)neon_state64(u_neon)->v.q[regno];
+	return true;
 }
 #endif /* CONFIG_A64X */
 

@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// An app dispatch longer than a band (TegraGM20BSchedPolicy.h TGM_APP_BAND_NS) launched in pieces of its threadgroup

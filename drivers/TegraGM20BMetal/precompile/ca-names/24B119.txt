@@ -9,6 +9,7 @@ PBGRABaddXm_TcimA2Xhf_Ired
 PBGRABaddXm_TkfhA2Xhf_Irsd
 PBGRABaddXm_TkfhA2Xhf_Iscd
 PBGRABaddXmw_A3Xhf
+PBGRABaddXmw_TcimA3Xhf_Ialp
 PBGRABaddXmw_TcimA3Xhf_Isrc
 PBGRABaddXmw_TcimA3Xhf_IsrcM1
 PBGRABaddXmw_TcimA3Xhf_Isup

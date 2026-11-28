@@ -50,9 +50,9 @@ public enum Snapshots {
 /// (anti-aliasing the two renderers do differently averages out; noise, a stray triangle or a streak does not),
 /// and no whole column or row may go wrong at full resolution.
 public struct CompositeCheck {
-    let label: String
-    let composited: Raster
-    let cpu: Raster
+    public let label: String
+    public let composited: Raster
+    public let cpu: Raster
 
     public init(label: String, composited: Raster, cpu: Raster) {
         self.label = label

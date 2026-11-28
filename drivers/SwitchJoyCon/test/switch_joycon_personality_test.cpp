@@ -67,6 +67,10 @@ TEST(SwitchJoyConPersonalities, Ios27PublishesItsIdentityThroughTheGetters)
         EXPECT_THAT(ios27, HasSubstr(getter));
         EXPECT_THAT(ios17, Not(HasSubstr(getter))) << "iOS 17's plugin reads the device's own properties";
     }
+    EXPECT_EQ(Count(ios27, "OSString *newManufacturerString() const override"), 2u);
+    EXPECT_EQ(Count(ios27, "OSNumber *newVendorIDNumber() const override"), 2u);
+    EXPECT_EQ(Count(ios27, "OSNumber *newProductIDNumber() const override"), 2u);
+    EXPECT_EQ(Count(ios27, "OSString *newSerialNumberString() const override"), 1u);
 }
 
 }  // namespace

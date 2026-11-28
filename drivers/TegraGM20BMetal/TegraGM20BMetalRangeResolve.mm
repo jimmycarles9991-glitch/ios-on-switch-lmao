@@ -28,12 +28,22 @@ enum class ResolveEnd : uint8_t {
     DrawRefused,
 };
 
-// A pass of the pack's resolve state `state` sampling `from` into `into` over the render area (an 8-bit sRGB one as its
-// UNORM twin, whose codes the state writes); the resolve pass's prologue barrier orders its reads after the pass's writes
-static ResolveEnd resolveByState([[maybe_unused]] gm20b::Device &d, gm20b::CommandBuffer &rc, gm20b::Pipeline *state,
+// A pass of the pack's resolve state `state` sampling `from` into `into` over the render area (an 8-bit sRGB one's samples
+// read and its target written as its UNORM twin: the state takes the codes, with no sRGB decode for it to undo); the resolve
+// pass's prologue barrier orders its reads after the pass's writes
+static ResolveEnd resolveByState(gm20b::Device &d, gm20b::CommandBuffer &rc, gm20b::Pipeline *state,
                                  const gm20b::Texture &from, const gm20b::Texture &into, uint32_t width,
                                  uint32_t height, std::deque<gm20b::Texture> &targets, const char **why)
 {
+    gm20b::Texture samples = from;
+    if (const uint32_t twin = gm20b::resolveTargetFormat(from.format); twin != from.format) {
+        const gm20b::FormatInfo *f = gm20b::formatInfo(twin);
+        if (!f || !(samples.tic = d.viewTic(from, f->tic0))) {
+            *why = "no texture header for an sRGB resolve's samples as their codes";
+            return ResolveEnd::NoMemory;
+        }
+        samples.format = twin;
+    }
     targets.push_back(into);
     targets.back().format = gm20b::resolveTargetFormat(into.format);
     gm20b::PassDesc p;
@@ -46,14 +56,14 @@ static ResolveEnd resolveByState([[maybe_unused]] gm20b::Device &d, gm20b::Comma
     gm20b::RenderEncoder *e = rc.render(p, why);
     if (!e)
         return ResolveEnd::NoMemory;
-    const uint32_t samples = from.samples;
+    const uint32_t count = from.samples;
     e->setPipeline(state);
-    e->setTexture(0, &from);
-    e->setBytes(2, 0, &samples, sizeof samples);
+    e->setTexture(0, &samples);
+    e->setBytes(2, 0, &count, sizeof count);
     if (!e->draw(4 /* MTLPrimitiveTypeTriangleStrip */, 0, 4, 1, 0, why))
         return ResolveEnd::DrawRefused;
     e->end();
-    SWITCH_METAL_DIAGNOSTIC(d.stats.resolveRoute[gm20b::ResolveByPass][gm20b::resolveSampleSlot(samples)]++);
+    SWITCH_METAL_DIAGNOSTIC(d.stats.resolveRoute[gm20b::ResolveByPass][gm20b::resolveSampleSlot(count)]++);
     return ResolveEnd::Done;
 }
 
@@ -232,8 +242,15 @@ bool SwitchMetalRangeEncode::resolvePasses()
             done = rc->resolveTwod(source, *target, route == gm20b::ResolveByComplement, r.keepSamples);
         }
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-        if (!done && !turned && rc->probeForms().resolveTwoD)
+        if (!done && !turned && rc->probeForms().resolveTwoD) {
             done = rc->probeResolve(source, *target);
+            // T11 reads the engine's resolve of 4x sRGB through this probe, which has taken none since 14 Nov
+            if (!done)
+                os_log(gm20bLog(),
+                       "SwitchMetal: resolve probe declined: format %u into %u, %ux%u x%u samples into %ux%u",
+                       source.format, target->format, source.width, source.height, source.samples, target->width,
+                       target->height);
+        }
 #endif
         if (!done) {
             gm20b::Pipeline *state = d.resolvePipeline(source.format, source.samples);

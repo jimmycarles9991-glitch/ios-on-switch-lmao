@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A layered pass (renderTargetArrayLength 2) of a Depth32Float array beside a Stencil8 array, cleared to 0.25 and 0x33 and

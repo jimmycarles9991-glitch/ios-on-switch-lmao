@@ -25,3 +25,13 @@ host_test(
     ],
     cxx_std = "c++17",
 )
+
+# Not a check: the host's cost a byte of the hashes the store, log, entries and replies no longer compute (run by hand).
+host_test(
+    name = "hash_cost_bench_test",
+    srcs = ["hash_cost_bench_test.cpp"],
+    copts = ["-O2"],
+    cxx_std = "c++17",
+    sanitize = False,
+    tags = ["manual"],
+)

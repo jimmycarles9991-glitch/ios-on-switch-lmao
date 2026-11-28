@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A 4x multisampled Depth16Unorm texture and Stencil8 texture as one pass's attachments (pass.ds took any multisampled

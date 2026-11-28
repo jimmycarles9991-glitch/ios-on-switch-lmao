@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// The CPU a frame shaped as the home screen's costs the driver, on the thread that records it and on the submit

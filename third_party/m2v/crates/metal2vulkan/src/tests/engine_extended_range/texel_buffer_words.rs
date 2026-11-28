@@ -281,3 +281,128 @@ fn texture_buffer_reads_are_apples_colors_with_alpha_zero() {
         assert_eq!(texels[i as usize][0], r[0] & 0x3fff_ffff, "{r:x?}: written back");
     }
 }
+
+const READ_ONLY: &str = r#"define void @k(ptr addrspace(1) %t, ptr addrspace(1) %out, i32 %i) {
+  %x = zext i32 %i to i64
+  %rs = call ptr addrspace(2) @air.get_read_sampler()
+  %r = call { <4 x float>, i8 } @air.read_texture_buffer_1d.v4f32(ptr addrspace(1) %t, ptr addrspace(2) %rs, i32 %i, i32 3)
+  %v = extractvalue { <4 x float>, i8 } %r, 0
+  %q = getelementptr inbounds <4 x float>, ptr addrspace(1) %out, i64 %x
+  store <4 x float> %v, ptr addrspace(1) %q, align 16
+  ret void
+}
+
+declare ptr addrspace(2) @air.get_read_sampler()
+declare { <4 x float>, i8 } @air.read_texture_buffer_1d.v4f32(ptr addrspace(1), ptr addrspace(2), i32, i32)
+
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5}
+!3 = !{i32 0, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.read", !"air.arg_type_name", !"texture_buffer<float, read>", !"air.arg_name", !"t"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 16, !"air.arg_type_align_size", i32 16, !"air.arg_type_name", !"float4", !"air.arg_name", !"out"}
+!5 = !{i32 2, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint", !"air.arg_name", !"i"}
+"#;
+
+#[test]
+fn single_plane_xr_texture_buffers_bind_and_store_apples_words() {
+    use crate::vk::Format as F;
+    let cases = [
+        (
+            PixelFormat::BGRA10XR,
+            ExtendedRange::Bgra10 { srgb: false },
+            F::R16G16B16A16_UINT,
+            [0x4000u32, 0x8000, 0x9fc0, 0xbf80],
+        ),
+        (
+            PixelFormat::BGRA10XRSRGB,
+            ExtendedRange::Bgra10 { srgb: true },
+            F::R16G16B16A16_UINT,
+            [0x1b80u32, 0xa480, 0xbdc0, 0xbf80],
+        ),
+        (
+            PixelFormat::BGR10XR,
+            ExtendedRange::Bgr10 { srgb: false },
+            F::R32_UINT,
+            [0xe7f8_0100u32, 0, 0, 0],
+        ),
+        (
+            PixelFormat::BGR10XRSRGB,
+            ExtendedRange::Bgr10 { srgb: true },
+            F::R32_UINT,
+            [0xef7a_486eu32, 0, 0, 0],
+        ),
+    ];
+    let dev = super::kernel_planes::raw_device();
+    for (what, module) in [("store", STORE), ("read back", READ_BACK), ("read only", READ_ONLY)] {
+        let Some(bc) = assemble(&format!("xr_tb {what}"), module) else {
+            return;
+        };
+        let plain = pipeline(&dev, &bc, &LowerInputs::new()).expect("plain");
+        for &(pf, form, raw_fmt, want_lanes) in &cases {
+            let shape = buffer_state(pf).shape();
+            let plan = plain
+                .plan(&dev, &shape)
+                .unwrap_or_else(|e| panic!("{what} {pf:?}: {e}"));
+            assert_eq!(plan.variant.extended_range, [(SOURCE, form)].into(), "{what} {pf:?}");
+            let inputs = plan.variant.lowering_inputs(Stage::Kernel);
+            let variant = pipeline(&dev, &bc, &inputs).expect("variant");
+            let again = variant.plan(&dev, &shape).expect("variant plan");
+            assert_eq!(again.variant, plan.variant, "{what} {pf:?}");
+            let views: Vec<_> = again
+                .descriptors
+                .iter()
+                .filter_map(|d| match &d.source {
+                    WriteSource::TexelBuffer { slot, format, .. } => Some((slot.index, *format)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(views, [(0, raw_fmt)], "{what} {pf:?}");
+            validate_entry(&bc, "k", &inputs, dev.profile(), &format!("{what} {pf:?}"));
+            if what == "store" {
+                let (plan, m) = typed_module_with(&bc, "k", dev.profile(), &inputs)
+                    .unwrap_or_else(|e| panic!("module {pf:?}: {e}"));
+                let bytes: Vec<u8> = [0.5f32, 0.25, -0.25, 0.75]
+                    .iter()
+                    .flat_map(|v| v.to_bits().to_le_bytes())
+                    .collect();
+                let junk = buffer_image(1, |_| [0x5a5a_5a5a; 4]);
+                let (_, texels) = run_buffer(&m, &buffer_resources(&plan, bytes), junk, 1, "store");
+                if raw_fmt == F::R32_UINT {
+                    assert_eq!(texels[0][0], want_lanes[0], "{pf:?}: {:#x}", texels[0][0]);
+                } else {
+                    assert_eq!(texels[0], want_lanes, "{pf:?}: {:x?}", texels[0]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn ycbcr_texture_buffers_bind_converted_uniform_texel_views() {
+    use crate::vk::Format as F;
+    let Some(bc) = assemble("ycbcr_tb", READ_ONLY) else {
+        return;
+    };
+    let dev = super::kernel_planes::raw_device();
+    let plain = pipeline(&dev, &bc, &LowerInputs::new()).expect("plain");
+    for (pf, expected) in [
+        (PixelFormat::YCBCR84202P, F::R16G16B16A16_SFLOAT),
+        (PixelFormat::YCBCR84442P, F::R16G16B16A16_SFLOAT),
+        (PixelFormat::RGB84202P, F::R8G8B8A8_UNORM),
+    ] {
+        let shape = buffer_state(pf).shape();
+        let plan = plain
+            .plan(&dev, &shape)
+            .unwrap_or_else(|e| panic!("{pf:?}: {e}"));
+        let views: Vec<_> = plan
+            .descriptors
+            .iter()
+            .filter_map(|d| match &d.source {
+                WriteSource::TexelBuffer { slot, format, .. } => Some((slot.index, *format)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(views, [(0, expected)], "{pf:?}");
+    }
+}

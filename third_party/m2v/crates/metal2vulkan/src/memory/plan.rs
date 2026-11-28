@@ -928,7 +928,9 @@ impl Planner<'_> {
                         _ => None,
                     })
                     .and_then(|&t| self.e.module.types().ptr_space(t));
-                if space == Some(AddrSpace::Thread) || arg.location.count != AbiInt::Const(1) {
+                if matches!(space, Some(AddrSpace::Thread | AddrSpace::ArrayRef))
+                    || arg.location.count != AbiInt::Const(1)
+                {
                     return Err(not_lowered());
                 }
             }
@@ -1810,7 +1812,9 @@ impl Planner<'_> {
                 (Class::Byte | Class::Unknown, _) if array.is_some() => Repr::HandleArray {
                     class: array.ok_or_else(|| invariant("a handle array without a class"))?,
                 },
-                (Class::Byte | Class::Unknown, AddrSpace::Thread) if table.is_some() => {
+                (Class::Byte | Class::Unknown, AddrSpace::Thread | AddrSpace::ArrayRef)
+                    if table.is_some() =>
+                {
                     Repr::BufferTable {
                         param: table.ok_or_else(|| invariant("a buffer table without a param"))?,
                     }
@@ -1854,7 +1858,7 @@ impl Planner<'_> {
                         Unsupported::not_implemented(Feature::AddressSpace(space.raw())).into(),
                     )
                 }
-                (_, AddrSpace::Thread) => match roots {
+                (_, AddrSpace::Thread | AddrSpace::ArrayRef) => match roots {
                     [Root::Alloca(a)] => match typed.get(a) {
                         Some(&i) => Repr::PrivPtr(PrivForm::Typed(i)),
                         None => Repr::PrivPtr(PrivForm::Arena),

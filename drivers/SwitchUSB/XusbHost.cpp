@@ -271,9 +271,10 @@ uint32_t Controller::mailboxOwner() const
 // tegra_xusb_mbox_thread + tegra_xusb_mbox_handle for T210B01: SET_BW, ACK and NAK need no answer and release the
 // mailbox (an ACK or NAK answers our last command: `answer` gets it), the SuperSpeed messages (SS port 0's LFPS
 // detection, the DFE/CTLE context T210 cannot save) are XusbLanes.h's and the others XusbMailbox.h's.
-bool Controller::serviceMailbox(uint32_t &answer, uint32_t &answerData)
+bool Controller::serviceMailbox(uint32_t &answer, uint32_t &answerData, xusb_mbox_deferred &deferred)
 {
     answer = 0;
+    deferred.pending = false;
     if (mailboxHang)
         return false;
     const uint32_t message = switch_mmio_read32(fpci, XUSB_CFG_ARU_MBOX_DATA_OUT);
@@ -292,10 +293,11 @@ bool Controller::serviceMailbox(uint32_t &answer, uint32_t &answerData)
     if (ss.handled) {
         if (ss.lfps)
             switch_usb_ss_lfps(ss.lfps_enable);
-        if (ss.lfps_settle)
-            IOSleep(1);
-        if (!sendMailbox(ss.reply, ss.data))
-            IOLog("SwitchUSB: falcon mailbox reply %u to %u failed\n", ss.reply, cmd);
+        if (ss.lfps_settle) {
+            xusb_mbox_deferred_set(&deferred, cmd, ss.reply, ss.data, XUSB_MBOX_LFPS_SETTLE_MS);
+            return true;
+        }
+        finishMailboxReply(cmd, ss.reply, ss.data);
         return true;
     }
     const xusb_mbox_reply reply = xusb_mbox_answer(cmd, data, falconKHz);
@@ -303,9 +305,14 @@ bool Controller::serviceMailbox(uint32_t &answer, uint32_t &answerData)
         IOLog("SwitchUSB: unknown XUSB falcon mailbox message %#x\n", message);
         return true;
     }
-    if (!sendMailbox(reply.cmd, reply.data))
-        IOLog("SwitchUSB: falcon mailbox reply %u to %u failed\n", reply.cmd, cmd);
+    finishMailboxReply(cmd, reply.cmd, reply.data);
     return true;
+}
+
+void Controller::finishMailboxReply(uint32_t requestCmd, uint32_t replyCmd, uint32_t data)
+{
+    if (!sendMailbox(replyCmd, data))
+        IOLog("SwitchUSB: falcon mailbox reply %u to %u failed\n", replyCmd, requestCmd);
 }
 
 // The interrupt path from the xHCI to the GIC, as tegra_xusb_config programs it: the interrupter (IMAN0 IP/IE), the

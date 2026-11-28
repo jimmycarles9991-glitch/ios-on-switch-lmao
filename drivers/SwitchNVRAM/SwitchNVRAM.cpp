@@ -50,13 +50,33 @@ extern "C" void lockdown_mode_nvram_restored(void);
 
 namespace {
 const char kPath[] = "/private/var/Switch/nvram.bin";
-constexpr uint32_t kWriteDelayMs = 2000;
+constexpr uint32_t kWriteDelayMs = 10000;
 // The apple_nvram_header (CHRP header, adler32, generation): what changes on every IODTNVRAM sync even when no
 // variable did. The variables follow it.
 constexpr uint32_t kBankHeader = 32;
 // Variables iBoot acts on for one boot and then deletes. No iBoot deletes them here, so restored they would apply to
 // every later boot (darkboot: the next boot with the display dark).
 const char *const kNotRestored[] = {"darkboot", nullptr};
+
+struct PayloadDigest {
+    uint32_t crc = 0;
+    uint64_t fnv = 0;
+
+    bool operator==(const PayloadDigest &other) const
+    {
+        return crc == other.crc && fnv == other.fnv;
+    }
+};
+
+PayloadDigest digestPayload(const uint8_t *image, uint32_t bankSize)
+{
+    const uint8_t *body = image + kBankHeader;
+    const size_t length = bankSize - kBankHeader;
+    uint64_t fnv = UINT64_C(14695981039346656037);
+    for (size_t i = 0; i < length; ++i)
+        fnv = (fnv ^ body[i]) * UINT64_C(1099511628211);
+    return {switch_crc32(0, body, length), fnv};
+}
 
 uint32_t chosenU32(const IORegistryEntry *chosen, const char *key, uint32_t fallback)
 {
@@ -71,21 +91,23 @@ static SwitchNVRAM *gSwitchNVRAM;
 class SwitchNVRAM : public IONVRAMController {
     // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(SwitchNVRAM) uint32_t bankSize = 0, bankCount = 0, current = 0, stride = 0;
-    // banks: what IODTNVRAM wrote (its controller lock). staged: the last bank sync() committed; saved: the bank the
-    // file's current slot holds; pending, slot: the writer's copy and its slot.
-    uint8_t *banks = nullptr, *staged = nullptr, *saved = nullptr, *pending = nullptr, *slot = nullptr;
-    IOLock *lock = nullptr;       // staged and the flags below; never held across I/O
-    IOLock *writeLock = nullptr;  // one writer at a time, across the file I/O; taken before lock
+    // banks: live bank(s) IODTNVRAM reads/writes. slot: flush buffer (32-byte header + bank snapshot + padding).
+    uint8_t *banks = nullptr, *slot = nullptr;
+    IOLock *lock = nullptr;       // banks, current, and state flags below; never held across I/O
+    IOLock *writeLock = nullptr;  // one writer at a time, across file I/O and slot; taken before lock
     thread_call_t writeCall = nullptr;
     IODTNVRAM *nvram = nullptr;
     IONotifier *power = nullptr;
-    uint64_t sequence = 0;     // the current slot's (writeLock)
-    unsigned currentSlot = 1;  // so that the first write goes to slot 0 (writeLock)
-    bool dirty = false;        // staged is newer than the file
-    bool armed = false;        // writeCall is pending
-    bool mounted = false;      // Data is mounted: writes can start
-    bool stopped = false;      // shutting down: syncs stay in RAM
-    bool writeFailed = false;  // a failed write is logged once until one succeeds (writeLock)
+    PayloadDigest savedDigest;  // variables payload of the file's current slot (writeLock)
+    uint64_t sequence = 0;      // the current slot's (writeLock)
+    unsigned currentSlot = 1;   // so that the first write goes to slot 0 (writeLock)
+    bool hasSaved = false;      // savedDigest matches a persisted slot (writeLock)
+    bool bankComplete = true;   // false between eraseBank() and sync()
+    bool dirty = false;         // live bank is newer than the file
+    bool armed = false;         // writeCall is pending
+    bool mounted = false;       // Data is mounted: writes can start
+    bool stopped = false;       // shutting down: syncs stay in RAM
+    bool writeFailed = false;   // a failed write is logged once until one succeeds (writeLock)
 
     bool loadChosenImage();
     void armLocked();
@@ -140,14 +162,11 @@ bool SwitchNVRAM::start(IOService *provider)
         return false;
     }
     stride = switch_nvram_store_stride(bankSize);
-    staged = IONewZeroData(uint8_t, bankSize);
-    saved = IONewZeroData(uint8_t, bankSize);
-    pending = IONewZeroData(uint8_t, bankSize);
     slot = IONewZeroData(uint8_t, stride);
     lock = IOLockAlloc();
     writeLock = IOLockAlloc();
     writeCall = thread_call_allocate_with_options(writeTimer, this, THREAD_CALL_PRIORITY_LOW, 0);
-    if (!staged || !saved || !pending || !slot || !lock || !writeLock || !writeCall) {
+    if (!slot || !lock || !writeLock || !writeCall) {
         IOLog("SwitchNVRAM: out of memory\n");
         return false;
     }
@@ -156,22 +175,32 @@ bool SwitchNVRAM::start(IOService *provider)
 
 void SwitchNVRAM::free()
 {
-    if (writeCall)
+    if (power) {
+        power->remove();
+        power = nullptr;
+    }
+    if (writeCall) {
+        thread_call_cancel_wait(writeCall);
         thread_call_free(writeCall);
-    if (lock)
+        writeCall = nullptr;
+    }
+    OSSafeReleaseNULL(nvram);
+    if (lock) {
         IOLockFree(lock);
-    if (writeLock)
+        lock = nullptr;
+    }
+    if (writeLock) {
         IOLockFree(writeLock);
-    if (banks)
-        IODeleteData(banks, uint8_t, bankSize *bankCount);
-    if (staged)
-        IODeleteData(staged, uint8_t, bankSize);
-    if (saved)
-        IODeleteData(saved, uint8_t, bankSize);
-    if (pending)
-        IODeleteData(pending, uint8_t, bankSize);
-    if (slot)
+        writeLock = nullptr;
+    }
+    if (banks) {
+        IODeleteData(banks, uint8_t, bankSize * bankCount);
+        banks = nullptr;
+    }
+    if (slot) {
         IODeleteData(slot, uint8_t, stride);
+        slot = nullptr;
+    }
     IONVRAMController::free();
 }
 
@@ -180,13 +209,18 @@ IOReturn SwitchNVRAM::select(uint32_t bank)
 {
     if (bank >= bankCount)
         return kIOReturnBadArgument;
+    IOLockLock(lock);
     current = bank;
+    IOLockUnlock(lock);
     return kIOReturnSuccess;
 }
 
 IOReturn SwitchNVRAM::eraseBank()
 {
+    IOLockLock(lock);
+    bankComplete = false;
     bzero(banks + static_cast<size_t>(current) * bankSize, bankSize);
+    IOLockUnlock(lock);
     return kIOReturnSuccess;
 }
 
@@ -194,7 +228,9 @@ IOReturn SwitchNVRAM::read(IOByteCount offset, UInt8 *buffer, IOByteCount length
 {
     if (!buffer || offset > bankSize || length > bankSize - offset)
         return kIOReturnBadArgument;
+    IOLockLock(lock);
     memcpy(buffer, banks + static_cast<size_t>(current) * bankSize + offset, length);
+    IOLockUnlock(lock);
     return kIOReturnSuccess;
 }
 
@@ -202,7 +238,9 @@ IOReturn SwitchNVRAM::write(IOByteCount offset, UInt8 *buffer, IOByteCount lengt
 {
     if (!buffer || offset > bankSize || length > bankSize - offset)
         return kIOReturnBadArgument;
+    IOLockLock(lock);
     memcpy(banks + static_cast<size_t>(current) * bankSize + offset, buffer, length);
+    IOLockUnlock(lock);
     return kIOReturnSuccess;
 }
 
@@ -211,8 +249,9 @@ IOReturn SwitchNVRAM::write(IOByteCount offset, UInt8 *buffer, IOByteCount lengt
 void SwitchNVRAM::sync()
 {
     IOLockLock(lock);
-    memcpy(staged, banks + static_cast<size_t>(current) * bankSize, bankSize);
+    bankComplete = true;
     dirty = true;
+    IOLockWakeup(lock, &bankComplete, false);
     armLocked();
     IOLockUnlock(lock);
 }
@@ -236,34 +275,40 @@ void SwitchNVRAM::writeTimer(thread_call_param_t self, thread_call_param_t)
     (void)controller->writeOut();
 }
 
-// The staged bank to the slot that does not hold the current one, then fsync. A failure keeps it staged for the next
-// sync or flush (no retry timer).
+// Writes the live bank to the alternating slot, then fsyncs. A failure leaves dirty set for the next sync or flush.
 int SwitchNVRAM::writeOut()
 {
     IOLockLock(writeLock);
     IOLockLock(lock);
+    while (dirty && mounted && !bankComplete)
+        IOLockSleep(lock, &bankComplete, THREAD_UNINT);
     const bool write = dirty && mounted;
     if (write) {
-        memcpy(pending, staged, bankSize);
+        memcpy(slot + SWITCH_NVRAM_STORE_HEADER, banks + static_cast<size_t>(current) * bankSize, bankSize);
         dirty = false;
     }
     IOLockUnlock(lock);
     int error = 0;
-    if (write && memcmp(pending + kBankHeader, saved + kBankHeader, bankSize - kBankHeader)) {
-        switch_nvram_store_fill(slot, pending, bankSize, sequence + 1);
-        error = writeSlot(currentSlot ^ 1);
-        if (!error) {
-            sequence++;
-            currentSlot ^= 1;
-            memcpy(saved, pending, bankSize);
-            writeFailed = false;
-        } else {
-            IOLockLock(lock);
-            dirty = true;  // staged is this bank or a newer one
-            IOLockUnlock(lock);
-            if (!writeFailed)
-                IOLog("SwitchNVRAM: %s not written (%d); kept in RAM for the next sync\n", kPath, error);
-            writeFailed = true;
+    if (write) {
+        const uint8_t *image = slot + SWITCH_NVRAM_STORE_HEADER;
+        const PayloadDigest digest = digestPayload(image, bankSize);
+        if (!hasSaved || !(digest == savedDigest)) {
+            switch_nvram_store_fill(slot, image, bankSize, sequence + 1);
+            error = writeSlot(currentSlot ^ 1);
+            if (!error) {
+                sequence++;
+                currentSlot ^= 1;
+                savedDigest = digest;
+                hasSaved = true;
+                writeFailed = false;
+            } else {
+                IOLockLock(lock);
+                dirty = true;
+                IOLockUnlock(lock);
+                if (!writeFailed)
+                    IOLog("SwitchNVRAM: %s not written (%d); kept in RAM for the next sync\n", kPath, error);
+                writeFailed = true;
+            }
         }
     }
     IOLockUnlock(writeLock);
@@ -331,7 +376,8 @@ uint32_t SwitchNVRAM::dataMounted()
         const IOReturn result = switch_nvram_restore(nvram, image, bankSize, kNotRestored, &added, &refused);
         if (result == kIOReturnSuccess) {
             // The writer's state (no writer runs before mounted is set).
-            memcpy(saved, image, bankSize);
+            savedDigest = digestPayload(image, bankSize);
+            hasSaved = true;
             sequence = found;
             currentSlot = static_cast<unsigned>(picked);
             IOLog("SwitchNVRAM: %u variables restored from %s (write %llu, slot %d)%s\n", added, kPath, found, picked,
@@ -465,10 +511,15 @@ extern "C" __attribute__((weak)) void switch_wlan_data_mounted(void)
 {}
 #endif
 
+// SwitchBattery's on 24B119 (../SwitchBattery/SwitchBatteryStore.h): powerd's battery data, restored with the NVRAM.
+extern "C" __attribute__((weak)) void switch_battery_data_mounted(void)
+{}
+
 extern "C" uint32_t switch_nvram_data_mounted(void)
 {
     const uint32_t added = SwitchNVRAM::restoreFromData();
     switch_bluetooth_data_mounted();
+    switch_battery_data_mounted();
 #if DEVELOPMENT || DEBUG
     switch_wlan_data_mounted();
 #endif

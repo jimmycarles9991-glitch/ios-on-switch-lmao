@@ -292,7 +292,7 @@ int switch_gpu_cached_zero(const uint64_t *pages, uint32_t count, void *cpu,
 			   switch_gpu_cached_mapping **mapping, void (*completed)(void *, int),
 			   void *context)
 {
-	if (!pages || !count || uint64_t(count) * kPage > kWindow || !cpu || !mapping || !completed)
+	if (!pages || !count || uint64_t(count) * kPage > kWindow || !mapping || !completed)
 		return -22;
 	if (!initialize())
 		return -12;
@@ -325,7 +325,8 @@ int switch_gpu_cached_zero(const uint64_t *pages, uint32_t count, void *cpu,
 		result = -16;
 	if (!result) {
 		// No task or producer can access this allocation. Discard old cached CPU bytes before CE overwrites it.
-		switch_dcache_invalidate(cpu, size_t(count) * kPage);
+		if (cpu)
+			switch_dcache_invalidate(cpu, size_t(count) * kPage);
 		uint32_t *words = queue.space.words + slot * 32;
 		const tgm_push push = {
 			kPushVa + slot * 128,

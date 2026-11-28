@@ -24,12 +24,13 @@ std::string unit(const char *name)
 TEST(GM20BMemSource, OnlyTheRefillThreadMakesSparesOfUnits)
 {
 	const std::string pool = unit("TegraGM20BUserClientSpares.cpp");
-	const CodeText make = Block(pool, "Spare *spareMake(SparePool *p, uint64_t bytes)");
-	EXPECT_TRUE(make.before("switch_gpu_cached_buffer_units(bytes, &buffer)",
-				"switch_gpu_cached_buffer_pages(bytes, &buffer)"));
+	const CodeText make = Block(
+		pool, "bool spareBuffer(SparePool *p, switch_gpu_spare_kind kind, uint64_t bytes,");
+	EXPECT_TRUE(make.before("switch_gpu_cached_buffer_units(bytes, buffer)",
+				"switch_gpu_cached_buffer_pages(bytes, buffer)"));
 	EXPECT_EQ(CodeText(pool).count("spareMake("), 2u) << "its definition and spareWork's call";
 	EXPECT_TRUE(Block(pool, "void spareWork(thread_call_param_t param, thread_call_param_t)")
-			    .has("spareMake(p, classBytes(c))"));
+			    .has("spareMake(p, slot)"));
 	const CodeText alloc =
 		Block(unit("TegraGM20BUserClientBo.cpp"), "IOReturn AGXDeviceUserClient::boAlloc(");
 	EXPECT_FALSE(alloc.has("switch_gpu_cached_buffer_units"));
@@ -43,9 +44,50 @@ TEST(GM20BMemSource, AUnitIsOneAlignedContiguousRun)
 	const std::string buffer = unit("SwitchGpuCachedBuffer.cpp");
 	EXPECT_TRUE(Block(buffer, "bool switch_gpu_cached_buffer_units(")
 			    .has("switch_iokit_fresh_memory(SWITCH_GPU_SPARE_UNIT_BYTES, "
-				 "SWITCH_GPU_SPARE_UNIT_BYTES, &cpu)"));
+				 "SWITCH_GPU_SPARE_UNIT_BYTES, SWITCH_IOKIT_FRESH_CACHED, &cpu)"));
 	EXPECT_TRUE(Block(buffer, "bool switch_gpu_cached_buffer_alone(")
 			    .has("getRetainCount() == (buffer.map ? 2 : 1)"));
+}
+
+// K17: a BoImport wire blocked past 50 ms (25 Nov: 658 ms at 0% CPU) names its VM wait through the kernel's stall
+// watch, debug kernels only, armed for the wire alone
+// S5's comment names the order the GPU runs (review-memory3 should-fix 4): a host-written job's acquire writes the L2
+// back and invalidates it with no drain unless the TLB changed, and the external fence drains and writes back again
+TEST(GM20BMemSource, TheRetirementFlushIsDocumentedInTheOrderItIsEmitted)
+{
+	const std::string header = SourceText("../TegraGM20BGpu.h");
+	EXPECT_NE(
+		header.find(
+			"acquire runs L2_FLUSH_DIRTY then L2_SYSMEM_INVALIDATE\n * with no drain"),
+		std::string::npos);
+	EXPECT_EQ(
+		header.find("WFI, FB_FLUSH, L2_FLUSH_DIRTY, FB_FLUSH\n * and L2_SYSMEM_INVALIDATE"),
+		std::string::npos);
+	const std::string exec = SourceText("../gpu_exec.c");
+	const size_t acquire = exec.find("if (l2_inval) {");
+	ASSERT_NE(acquire, std::string::npos);
+	const size_t flush = exec.find("NVB06F_MEM_OP_D_OPERATION_L2_FLUSH_DIRTY", acquire);
+	const size_t invalidate =
+		exec.find("NVB06F_MEM_OP_D_OPERATION_L2_SYSMEM_INVALIDATE", acquire);
+	const size_t drain = exec.find("if (tlb) {", acquire);
+	ASSERT_NE(invalidate, std::string::npos);
+	EXPECT_LT(flush, invalidate);
+	EXPECT_LT(drain, flush)
+		<< "the WFI and FB_FLUSH ahead of the flush are the TLB change's alone";
+	EXPECT_NE(exec.find("PUSH_NVSQ(&chan->chan.push, NV906F, NVB06F_WFI, 0);", drain),
+		  std::string::npos);
+}
+
+TEST(GM20BMemSource, ABlockedImportWireNamesItsWait)
+{
+	const CodeText import = Block(unit("TegraGM20BUserClientImport.cpp"),
+				      "IOReturn AGXDeviceUserClient::boImport(");
+	EXPECT_TRUE(
+		import.before("switch_stall_watch_begin(current_thread(), 50000000ULL,",
+			      "wire[i] = bo->wired ? bo->wired->prepare() : kIOReturnNoMemory;"));
+	EXPECT_TRUE(import.before("wire[i] = bo->wired ? bo->wired->prepare() : kIOReturnNoMemory;",
+				  "switch_stall_watch_end(watch);"));
+	EXPECT_TRUE(import.before("switch_stall_watch_end(watch);", "lap(0);"));
 }
 
 TEST(GM20BMemSource, BoAllocAndBoImportBuildOutsideTheConnectionLock)
@@ -70,7 +112,8 @@ TEST(GM20BMemSource, BoAllocAndBoImportBuildOutsideTheConnectionLock)
 	EXPECT_EQ(alloc.count("IOLockLock(lock_);"), 2u);
 	EXPECT_TRUE(alloc.between("IOLockLock(lock_);", "IOLockUnlock(lock_);")
 			    .has("const BoCharge charge = chargeBo(in);"));
-	EXPECT_TRUE(alloc.before("const BoCharge charge = chargeBo(in);", "spareTake(in->bytes)"));
+	EXPECT_TRUE(alloc.before("const BoCharge charge = chargeBo(in);",
+				 "spareTake(in->bytes, spareKind, charge.critical)"));
 	EXPECT_TRUE(alloc.before("cleanZeros(va, backing);",
 				 "ret = settleBo(in, charge, bo, ret, chunksRefused, system);"));
 	EXPECT_FALSE(alloc.has("beginMutation"));
@@ -122,8 +165,7 @@ TEST(GM20BMemSource, RetirementFreesWhatLeftTheTablesAfterEverySubmitLock)
 	const CodeText left = Block(retirement, "void AGXDeviceUserClient::releaseLeft()");
 	EXPECT_TRUE(left.before("left_ = {};", "IOLockUnlock(lock_);"));
 	EXPECT_TRUE(left.between("left_ = {};", "IOLockUnlock(lock_);")
-			    .has("submitGate_.mutating()) IOLockSleep(lock_, &submitGate_, "
-				 "THREAD_UNINT);"));
+			    .has("submitGate_.waitMutationEnd(lock_);"));
 	EXPECT_TRUE(left.before("passSubmitters(true);", "dropLeft(left);"));
 	EXPECT_FALSE(Block(retirement, "bool AGXDeviceUserClient::passSubmitters(bool wait)")
 			     .has("lock_"));

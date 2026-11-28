@@ -38,15 +38,20 @@ static IOService *gpuHandoffPresenter;
 extern "C" bool native_gop_gpu_offer(IOService *, void *display, IOMemoryDescriptor *, uint64_t stride, uint32_t width,
                                      uint32_t height);
 extern "C" void native_gop_presenter_set_source(IOService *presenter, IOService *nub);
+#if DEVELOPMENT || DEBUG
 extern "C" {
 volatile uint32_t native_legacy_gpu_fallbacks, native_legacy_gpu_last_status;
 }
+#endif
 static IOService *activeLegacyDisplay;
+static bool legacyDisplayProbed;
+#if DEVELOPMENT || DEBUG
 // Keep one diagnostic mapping alive until reboot, even after backend stop.
 // The pulse is permanently closed before any system-frame copy.
 static IOMemoryMap *diagnosticAnchorMapping;
 extern "C" int boot_progress_pulse_anchor(uintptr_t, uint64_t, unsigned, unsigned, unsigned)
     __attribute__((weak_import));
+#endif
 static IORegistryEntry *unitScaleChosen;
 static bool unitScaleAdded, unitRotationAdded;
 
@@ -78,11 +83,13 @@ static bool publishOrMatchWord(IORegistryEntry *entry, const char *key, uint32_t
 }
 
 extern "C" {
+volatile uint64_t native_legacy_object;
+#if DEVELOPMENT || DEBUG
 volatile uint32_t native_legacy_stage;
 volatile int native_legacy_meta_status = -1;
 volatile uint32_t native_legacy_init_result, native_legacy_start_result, native_legacy_probe_match;
 volatile uint32_t native_legacy_parent_match, native_legacy_object_size, native_legacy_released;
-volatile uint64_t native_legacy_object, native_legacy_nub, native_legacy_workloop;
+volatile uint64_t native_legacy_nub, native_legacy_workloop;
 volatile int native_legacy_surface_status = -1;
 volatile uint32_t native_legacy_surface_found;
 volatile uint64_t native_legacy_video_base, native_legacy_video_bytes;
@@ -108,11 +115,13 @@ volatile uint32_t native_legacy_client_calls, native_legacy_client_type;
 volatile int native_legacy_client_pid, native_legacy_client_status = -1;
 volatile uint64_t native_legacy_client_task, native_legacy_client_object;
 char native_legacy_client_class[64];
+#endif
 // NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 extern kern_return_t OSKextLoadKextWithIdentifier(const char *);
 
 extern int boot_progress_prepare_scanout(void) __attribute__((weak_import));
 extern void boot_progress_cancel_scanout(void) __attribute__((weak_import));
+#if DEVELOPMENT || DEBUG
 extern void boot_progress_stage(const char *) __attribute__((weak_import));
 volatile uint32_t native_legacy_prepare_calls, native_legacy_prepare_reason, native_legacy_prepare_attempts;
 volatile uint32_t native_legacy_prepare_failures, native_legacy_prepare_retried, native_legacy_prepare_max_attempts;
@@ -124,46 +133,62 @@ static uint64_t probeNowUs()
     absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
     return ns / 1000;
 }
+#endif
 
 bool native_legacy_prepare_scanout(void)
 {
+#if DEVELOPMENT || DEBUG
     native_legacy_prepare_calls = native_legacy_prepare_calls + 1;
     native_legacy_prepare_reason = 0;
     native_legacy_prepare_attempts = 0;
+#endif
     if (!boot_progress_prepare_scanout)
         return true;
     if (ml_at_interrupt_context()) {
+#if DEVELOPMENT || DEBUG
         native_legacy_prepare_reason = 1;
+#endif
         return false;
     }
     if (!ml_get_interrupts_enabled()) {
+#if DEVELOPMENT || DEBUG
         native_legacy_prepare_reason = 2;
+#endif
         return false;
     }
     // Yield to any in-flight diagnostic writer; never spin on a preempted
     // holder or claim a frame that the console can still overwrite.
+#if DEVELOPMENT || DEBUG
     const uint64_t began = probeNowUs();
+#endif
     for (unsigned attempt = 0; attempt < 100; ++attempt) {
+#if DEVELOPMENT || DEBUG
         native_legacy_prepare_attempts = attempt + 1;
+#endif
         if (boot_progress_prepare_scanout()) {
+#if DEVELOPMENT || DEBUG
             if (attempt) {
                 native_legacy_prepare_retried = native_legacy_prepare_retried + 1;
                 native_legacy_prepare_wait_us = native_legacy_prepare_wait_us + (probeNowUs() - began);
                 if (attempt + 1 > native_legacy_prepare_max_attempts)
                     native_legacy_prepare_max_attempts = attempt + 1;
             }
+#endif
             return true;
         }
         IOSleep(1);
     }
+#if DEVELOPMENT || DEBUG
     native_legacy_prepare_failures = native_legacy_prepare_failures + 1;
     native_legacy_prepare_wait_us = native_legacy_prepare_wait_us + (probeNowUs() - began);
     native_legacy_prepare_reason = 3;
+#endif
     if (boot_progress_cancel_scanout)
         boot_progress_cancel_scanout();
     return false;
 }
 
+#if DEVELOPMENT || DEBUG
 __attribute__((noinline)) void native_legacy_display_checkpoint(void)
 {
     __asm__ volatile("" ::: "memory");
@@ -178,17 +203,23 @@ __attribute__((noinline)) void native_legacy_client_checkpoint(void)
 {
     __asm__ volatile("" ::: "memory");
 }
+#endif
 
 void native_legacy_pm_observed(unsigned stage, IOReturn status, unsigned long ordinal)
 {
+#if DEVELOPMENT || DEBUG
     native_legacy_pm_stage = stage;
     native_legacy_pm_status = status;
     native_legacy_pm_ordinal = (uint32_t)ordinal;
     native_legacy_pm_calls = native_legacy_pm_calls + 1;
     if (stage == 3)
         native_legacy_pm_callbacks = native_legacy_pm_callbacks + 1;
+#else
+    (void)stage, (void)status, (void)ordinal;
+#endif
 }
 
+#if DEVELOPMENT || DEBUG
 __attribute__((noinline)) void native_legacy_swap_validation_checkpoint(bool, unsigned, const void *, const void *)
 {
     __asm__ volatile("" ::: "memory");
@@ -202,10 +233,12 @@ volatile uint32_t native_legacy_rej_state[3], native_legacy_rej_options[3], nati
     native_legacy_rej_rects[2][4];
 char native_legacy_rej_class[32];
 volatile uint64_t native_legacy_rej_surface[7];  // width, height, format, planes, stride, allocation, descriptor bytes
+#endif
 
 void native_legacy_surface_rejected(uint64_t width, uint64_t height, uint32_t format, uint32_t planes, uint64_t stride,
                                     uint64_t allocation, uint64_t bytes)
 {
+#if DEVELOPMENT || DEBUG
     native_legacy_rej_surface[0] = width;
     native_legacy_rej_surface[1] = height;
     native_legacy_rej_surface[2] = format;
@@ -213,8 +246,12 @@ void native_legacy_surface_rejected(uint64_t width, uint64_t height, uint32_t fo
     native_legacy_rej_surface[4] = stride;
     native_legacy_rej_surface[5] = allocation;
     native_legacy_rej_surface[6] = bytes;
+#else
+    (void)width, (void)height, (void)format, (void)planes, (void)stride, (void)allocation, (void)bytes;
+#endif
 }
 
+#if DEVELOPMENT || DEBUG
 static void recordRejectedSwap(unsigned reason, const void *request, const void *surface)
 {
     const unsigned char *bytes = reinterpret_cast<const unsigned char *>(request);
@@ -266,7 +303,6 @@ volatile uint32_t native_legacy_frame_count;
 volatile uint32_t native_legacy_frame_kind[NATIVE_LEGACY_FRAMES];
 volatile uint32_t native_legacy_frame_time[NATIVE_LEGACY_FRAMES];
 volatile uint64_t native_legacy_frame_stats[NATIVE_LEGACY_FRAMES][5];
-#if DEVELOPMENT || DEBUG
 static uint64_t frameEpoch;
 #endif
 
@@ -298,8 +334,10 @@ void native_legacy_frame_observed(unsigned kind, uint64_t count, uint64_t minx, 
 #endif
 }
 
+#if DEVELOPMENT || DEBUG
 volatile uint32_t native_legacy_frame_colors[8][4];
 volatile uint64_t native_legacy_frame_color_counts[8][4], native_legacy_frame_color_other[8];
+#endif
 
 // Called right after the matching native_legacy_frame_observed(); fills slot count-1 (or the blank slot).
 void native_legacy_frame_colors_observed(const uint32_t *colors, const uint64_t *counts, uint64_t other)
@@ -319,6 +357,7 @@ void native_legacy_frame_colors_observed(const uint32_t *colors, const uint64_t 
 #endif
 }
 
+#if DEVELOPMENT || DEBUG
 // The life of every accepted swap, from the kernel's side: validated (the client submitted it), offered to the GPU copy (or started on the CPU),
 // and retired. Times are microseconds since boot; the last 64 are kept.
 struct SwapEvent {
@@ -328,6 +367,7 @@ struct SwapEvent {
 
 static SwapEvent swapEvents[64];
 static uint32_t swapEventCount;
+#endif
 
 extern "C" void native_legacy_swap_stage(unsigned stage)
 {
@@ -359,6 +399,7 @@ extern "C" void native_legacy_swap_stage(unsigned stage)
 #endif
 }
 
+#if DEVELOPMENT || DEBUG
 extern "C" unsigned native_legacy_swap_timeline(char *out, unsigned cap)
 {
     unsigned at = 0;
@@ -386,9 +427,11 @@ extern "C" unsigned native_legacy_prepare_report(char *out, unsigned cap)
 
 // A few one-time lines answer "is the compositor presenting?" without flooding the console.
 static unsigned displayLogAccepted, displayLogRejected, displayLogShown, displayLogFailed, displayLogClients;
+#endif
 
 void native_legacy_swap_validation_observed(bool accepted, unsigned reason, const void *request, const void *surface)
 {
+#if DEVELOPMENT || DEBUG
     if (accepted && !displayLogAccepted++)
         IOLog("SwitchDisplay: first frame accepted\n");
     if (!accepted && displayLogRejected++ < 4)
@@ -405,11 +448,16 @@ void native_legacy_swap_validation_observed(bool accepted, unsigned reason, cons
     native_legacy_swap_request = (uintptr_t)request;
     native_legacy_swap_surface = (uintptr_t)surface;
     native_legacy_swap_validation_checkpoint(accepted, reason, request, surface);
+#else
+    (void)accepted, (void)reason, (void)request, (void)surface;
+#endif
 }
 
+#if DEVELOPMENT || DEBUG
 // Time of the pixel copy into the scanout buffer (counter ticks): swaps completed, last/maximum/sum, for the banner.
 volatile uint64_t native_legacy_copy_n, native_legacy_copy_last, native_legacy_copy_max, native_legacy_copy_sum,
     native_legacy_copy_bytes_last, native_legacy_copy_bytes_sum;
+#endif
 
 void native_legacy_copy_timing_observed(uint64_t ticks, uint64_t bytes)
 {
@@ -428,6 +476,7 @@ void native_legacy_copy_timing_observed(uint64_t ticks, uint64_t bytes)
 
 __attribute__((noinline)) void native_legacy_transfer_observed(IOReturn status, const void *request, uint64_t bytes)
 {
+#if DEVELOPMENT || DEBUG
     native_legacy_transfer_calls = native_legacy_transfer_calls + 1;
     if (status == kIOReturnSuccess)
         native_legacy_swap_stage(2);
@@ -452,6 +501,9 @@ __attribute__((noinline)) void native_legacy_transfer_observed(IOReturn status, 
                  native_legacy_prepare_reason, native_legacy_prepare_attempts);
         boot_progress_stage(message);
     }
+#else
+    (void)status, (void)request, (void)bytes;
+#endif
 }
 
 // Display refresh tick (NativeLegacyDisplay): armed, sent, idle, late, started, refresh reported.
@@ -464,9 +516,11 @@ extern "C" void native_legacy_vsync_observed(unsigned event, unsigned hz)
 #if DEVELOPMENT || DEBUG
     if (event < 6)
         vsyncEvents[event] = vsyncEvents[event] + 1;
-#endif
     if (event == 4)
         IOLog("SwitchDisplay: vsync timer at %u Hz\n", hz);
+#else
+    (void)event, (void)hz;
+#endif
 }
 
 bool native_legacy_gpu_offer(void *display, IOMemoryDescriptor *memory, uint64_t stride, uint32_t width,
@@ -478,8 +532,12 @@ bool native_legacy_gpu_offer(void *display, IOMemoryDescriptor *memory, uint64_t
 
 void native_legacy_gpu_fallback_observed(int status)
 {
+#if DEVELOPMENT || DEBUG
     native_legacy_gpu_last_status = (uint32_t)status;
     native_legacy_gpu_fallbacks = native_legacy_gpu_fallbacks + 1;
+#else
+    (void)status;
+#endif
 }
 
 __attribute__((noinline)) void native_legacy_retirement_observed(const IOService *display)
@@ -504,10 +562,10 @@ __attribute__((noinline)) void native_legacy_retirement_observed(const IOService
     native_legacy_retirement_calls = native_legacy_retirement_calls + 1;
 #else
     (void)display;
-    native_legacy_retirement_calls = native_legacy_retirement_calls + 1;
 #endif
 }
 
+#if DEVELOPMENT || DEBUG
 // The display object's properties as they are now (the registration copy above predates setDisplayRefreshProperties and the rest): for the
 // UFS log. Returns the bytes written (NUL-terminated).
 extern "C" unsigned native_legacy_properties_now(char *out, unsigned cap)
@@ -530,9 +588,11 @@ extern "C" unsigned native_legacy_properties_now(char *out, unsigned cap)
     OSSafeReleaseNULL(xml);
     return size;
 }
+#endif
 
 void native_legacy_registration_observed(const IOService *display)
 {
+#if DEVELOPMENT || DEBUG
     native_legacy_registration_calls = native_legacy_registration_calls + 1;
     OSSerialize *xml = OSSerialize::withCapacity(2048);
     if (xml && display->serializeProperties(xml)) {
@@ -544,232 +604,37 @@ void native_legacy_registration_observed(const IOService *display)
         native_legacy_properties_length = size;
     }
     OSSafeReleaseNULL(xml);
+#else
+    (void)display;
+#endif
 }
 
 void native_legacy_client_enter(task_t task, uint32_t type)
 {
+#if DEVELOPMENT || DEBUG
     native_legacy_client_calls = native_legacy_client_calls + 1;
     native_legacy_client_task = (uintptr_t)task;
     native_legacy_client_type = type;
     native_legacy_client_pid = task ? proc_pid((proc_t)get_bsdtask_info(task)) : 0;
-}
-
-#if DEVELOPMENT || DEBUG
-// Every framebuffer user client seen (object, pid), with what it does: the original client's vtable is copied and two entries (externalMethod, slot 168,
-// and registerNotificationPort(port,type,refCon), slot 175) are pointed at wrappers that count and forward to the original function. The original code
-// is not touched; only this object's vptr names the copy. XNU's ARM64 vptr points at slot 0 (the original code dispatches with ldr x8,[vptr,#slot*8]).
-enum {
-    kSeenClients = 8,
-    kSelectors = 96,
-    kRegEvents = 8,
-    kVtableSlots = 256
-};
-
-struct ClientStat {
-    uintptr_t object;
-    int pid;
-    uint32_t calls, fails;
-    uint32_t selector_calls[kSelectors], selector_fails[kSelectors], selector_status[kSelectors];
-    unsigned regs;
-
-    struct {
-        uint32_t type;
-        uint64_t port;
-        uint32_t ref, status;
-    } reg[kRegEvents];
-
-    uint64_t sel6_first[3], sel6_last[3];
-    uint32_t sel6_distinct;
-    uint64_t sel6_seen[8][3];
-    uint32_t sel6_calls[8], sel6_fails[8], sel6_status[8];
-    uint32_t seq_count;
-
-    struct {
-        uint32_t a, b, c, status, done, presented;
-    } seq[24];
-
-    uintptr_t original_external, original_register;
-};
-
-static ClientStat seenClients[kSeenClients];
-static unsigned seenClientCount;
-typedef IOReturn (*ExternalFn)(IOUserClient *, uint32_t, IOExternalMethodArguments *, IOExternalMethodDispatch *,
-                               OSObject *, void *);
-typedef IOReturn (*RegisterFn)(IOUserClient *, mach_port_t, UInt32, UInt32);
-
-static ClientStat *statFor(const IOUserClient *client)
-{
-    for (unsigned i = 0; i < seenClientCount; ++i) {
-        if (seenClients[i].object == (uintptr_t)client)
-            return &seenClients[i];
-    }
-    return nullptr;
-}
-
-// NOLINTBEGIN(misc-const-correctness): the externalMethod slot's signature
-static IOReturn wrappedExternal(IOUserClient *client, uint32_t selector, IOExternalMethodArguments *args,
-                                IOExternalMethodDispatch *dispatch, OSObject *target, void *ref)
-// NOLINTEND(misc-const-correctness)
-{
-    ClientStat *stat = statFor(client);
-    const IOReturn status =
-        stat ? reinterpret_cast<ExternalFn>(stat->original_external)(client, selector, args, dispatch, target, ref)
-             : kIOReturnNotAttached;
-    if (stat) {
-        if (selector == 6 && args && args->scalarInput && args->scalarInputCount >= 3) {
-            const uint64_t *in = args->scalarInput;
-            if (!stat->sel6_distinct && !stat->sel6_first[0] && !stat->sel6_first[1])
-                memcpy(stat->sel6_first, in, sizeof stat->sel6_first);
-            memcpy(stat->sel6_last, in, sizeof stat->sel6_last);
-            int at = -1;
-            for (unsigned k = 0; k < stat->sel6_distinct && k < 8; ++k) {
-                if (!memcmp(stat->sel6_seen[k], in, 24))
-                    at = (int)k;
-            }
-            if (at < 0 && stat->sel6_distinct < 8) {
-                at = (int)stat->sel6_distinct++;
-                memcpy(stat->sel6_seen[at], in, 24);
-            }
-            if (stat->seq_count < 24) {
-                auto &e = stat->seq[stat->seq_count++];
-                e.a = (uint32_t)in[0];
-                e.b = (uint32_t)in[1];
-                e.c = (uint32_t)in[2];
-                e.status = (uint32_t)status;
-                const unsigned char *object = reinterpret_cast<const unsigned char *>(native_legacy_object);
-                e.done = e.presented = 0;
-                if (object) {
-                    memcpy(&e.done, object + Legacy::swapsCompleted, 4);
-                    memcpy(&e.presented, object + Legacy::swapsPresented, 4);
-                }
-            }
-            if (at >= 0) {
-                ++stat->sel6_calls[at];
-                if (status)
-                    ++stat->sel6_fails[at];
-                stat->sel6_status[at] = (uint32_t)status;
-            }
-        }
-        ++stat->calls;
-        if (status)
-            ++stat->fails;
-        if (selector < kSelectors) {
-            ++stat->selector_calls[selector];
-            if (status)
-                ++stat->selector_fails[selector];
-            stat->selector_status[selector] = (uint32_t)status;
-        }
-    }
-    return status;
-}
-
-// NOLINTNEXTLINE(misc-const-correctness): the registerNotificationPort slot's signature
-static IOReturn wrappedRegister(IOUserClient *client, mach_port_t port, UInt32 type, UInt32 refCon)
-{
-    ClientStat *stat = statFor(client);
-    const IOReturn status =
-        stat ? reinterpret_cast<RegisterFn>(stat->original_register)(client, port, type, refCon) : kIOReturnNotAttached;
-    if (stat && stat->regs < kRegEvents) {
-        auto &e = stat->reg[stat->regs++];
-        e.type = type;
-        e.port = (uint64_t)(uintptr_t)port;
-        e.ref = refCon;
-        e.status = (uint32_t)status;
-    }
-    return status;
-}
-
-static void interpose(IOUserClient *client, int pid)
-{
-    if (seenClientCount >= kSeenClients)
-        return;
-    ClientStat &stat = seenClients[seenClientCount];
-    memset(&stat, 0, sizeof stat);
-    const uintptr_t *vtable = *reinterpret_cast<uintptr_t **>(client);
-    uintptr_t *copy = static_cast<uintptr_t *>(IOMalloc(kVtableSlots * sizeof(uintptr_t)));
-    if (!copy)
-        return;
-    memcpy(copy, vtable, kVtableSlots * sizeof(uintptr_t));
-    stat.object = (uintptr_t)client;
-    stat.pid = pid;
-    stat.original_external = copy[168];
-    stat.original_register = copy[175];
-    copy[168] = (uintptr_t)&wrappedExternal;
-    copy[175] = (uintptr_t)&wrappedRegister;
-    ++seenClientCount;
-    *reinterpret_cast<uintptr_t **>(client) = copy;
-}
-
-// The display object's state words the original wait selector tests (offsets 5832..5864, as dwords), for the log.
-extern "C" unsigned native_legacy_state_words(char *out, unsigned cap)
-{
-    out[0] = 0;
-    const unsigned char *object = reinterpret_cast<const unsigned char *>(native_legacy_object);
-    if (!object)
-        return 0;
-    unsigned at = snprintf(out, cap, "d+5808:");
-    for (unsigned o = 5808; o < 5872 && at + 16 < cap; o += 4) {
-        uint32_t v = 0;
-        memcpy(&v, object + o, 4);
-        at += snprintf(out + at, cap - at, " %x", v);
-    }
-    return at;
-}
-
-extern "C" unsigned native_legacy_clients_dump(char *out, unsigned cap)
-{
-    unsigned at = 0;
-    out[0] = 0;
-    for (unsigned c = 0; c < seenClientCount && at + 120 < cap; ++c) {
-        const ClientStat &s = seenClients[c];
-        at += snprintf(out + at, cap - at, "C%u pid=%d calls=%u fails=%u regs=%u", c, s.pid, s.calls, s.fails, s.regs);
-        for (unsigned r = 0; r < s.regs && r < kRegEvents && at + 60 < cap; ++r) {
-            at += snprintf(out + at, cap - at, " reg(t%u,p%llx,r%x)=%x", s.reg[r].type,
-                           (unsigned long long)s.reg[r].port, s.reg[r].ref, s.reg[r].status);
-        }
-        at += snprintf(out + at, cap - at, "\n");
-        for (unsigned k = 0; k < s.sel6_distinct && k < 8 && at + 100 < cap; ++k) {
-            at += snprintf(out + at, cap - at, "  sel6 args %llx %llx %llx: %u calls %u fails last %x\n",
-                           (unsigned long long)s.sel6_seen[k][0], (unsigned long long)s.sel6_seen[k][1],
-                           (unsigned long long)s.sel6_seen[k][2], s.sel6_calls[k], s.sel6_fails[k], s.sel6_status[k]);
-        }
-        for (unsigned k = 0; k < s.seq_count && at + 90 < cap; ++k) {
-            at += snprintf(out + at, cap - at, "  s6#%u %x %x %x -> %x [5820]=%x [5824]=%x\n", k, s.seq[k].a,
-                           s.seq[k].b, s.seq[k].c, s.seq[k].status, s.seq[k].done, s.seq[k].presented);
-        }
-        unsigned n = 0;
-        for (unsigned sel = 0; sel < kSelectors && at + 40 < cap; ++sel) {
-            if (!s.selector_calls[sel])
-                continue;
-            if (!n)
-                at += snprintf(out + at, cap - at, "  sel");
-            at += snprintf(out + at, cap - at, " %u:%u/%u/%x", sel, s.selector_calls[sel], s.selector_fails[sel],
-                           s.selector_status[sel]);
-            if (++n % 6 == 0)
-                at += snprintf(out + at, cap - at, "\n  sel");
-        }
-        if (n)
-            at += snprintf(out + at, cap - at, "\n");
-    }
-    return at;
-}
-
+#else
+    (void)task, (void)type;
 #endif
+}
 
 void native_legacy_client_observed(IOReturn status, IOUserClient *client)
 {
+#if DEVELOPMENT || DEBUG
     if (displayLogClients++ < 4) {
         IOLog("SwitchDisplay: client pid %d opened the display: %08x\n", native_legacy_client_pid, (unsigned)status);
     }
-#if DEVELOPMENT || DEBUG
-    if (client && !status)
-        interpose(client, native_legacy_client_pid);
-#endif
     native_legacy_client_status = status;
     native_legacy_client_object = (uintptr_t)client;
     if (client)
         strlcpy(native_legacy_client_class, client->getMetaClass()->getClassName(), sizeof(native_legacy_client_class));
     native_legacy_client_checkpoint();
+#else
+    (void)status, (void)client;
+#endif
 }
 
 __attribute__((noinline)) bool native_legacy_gop_mapping_observed(const IOService *object, IOMemoryMap *mapping,
@@ -777,6 +642,7 @@ __attribute__((noinline)) bool native_legacy_gop_mapping_observed(const IOServic
 {
     if ((uintptr_t)object != native_legacy_object)
         panic("NativeLegacyDisplay: wrong mapping owner");
+#if DEVELOPMENT || DEBUG
     native_legacy_gop_map = (uintptr_t)mapping;
     native_legacy_gop_virtual = mapping->getVirtualAddress();
     native_legacy_gop_physical = mapping->getPhysicalAddress();
@@ -798,11 +664,14 @@ __attribute__((noinline)) bool native_legacy_gop_mapping_observed(const IOServic
         }
     }
     native_legacy_gop_mapping_checkpoint();
+#endif
     // The published display-scale: logical points = actual scanout pixels / scale. The UI's own scale comes from
     // FrontBoardServices' override; the scanout copy still moves one actual pixel per pixel.
     constexpr uint32_t enabled = 1;
+#if DEVELOPMENT || DEBUG
     native_legacy_unit_scale_calls = native_legacy_unit_scale_calls + 1;
     native_legacy_unit_scale_status = 1;
+#endif
     PE_Video video = {};
     if (unitScaleChosen || PE_current_console(&video) || !native_legacy_video_mode(video) ||
         native_legacy_video_width(video) != width || native_legacy_video_height(video) != height ||
@@ -824,10 +693,13 @@ __attribute__((noinline)) bool native_legacy_gop_mapping_observed(const IOServic
         finishUnitScalePolicy(false);
         return false;
     }
+    const bool ok = actualScale == enabled && actualRotation == 0;
+#if DEVELOPMENT || DEBUG
     native_legacy_chosen_scale = actualScale;
     native_legacy_chosen_rotation = actualRotation;
-    native_legacy_unit_scale_status = actualScale == enabled && actualRotation == 0 ? 0 : 2;
-    if (native_legacy_unit_scale_status) {
+    native_legacy_unit_scale_status = ok ? 0 : 2;
+#endif
+    if (!ok) {
         finishUnitScalePolicy(false);
         return false;
     }
@@ -841,43 +713,66 @@ void native_legacy_display_probe(void)
     // The registration path and optional original-userclient inspection both
     // reach this boot-thread entry. Run class constructors only once; a second
     // postModLoad would attempt to register the same metaclasses again.
-    if (native_legacy_stage)
+    if (legacyDisplayProbed)
         return;
+    legacyDisplayProbed = true;
+#if DEVELOPMENT || DEBUG
     native_legacy_stage = 1;
-    native_legacy_meta_status = switch_kernel_classes(native_legacy_static_init);
-    if (native_legacy_meta_status) {
+#endif
+    const OSReturn metaStatus = switch_kernel_classes(native_legacy_static_init);
+#if DEVELOPMENT || DEBUG
+    native_legacy_meta_status = metaStatus;
+#endif
+    if (metaStatus) {
+#if DEVELOPMENT || DEBUG
         native_legacy_display_checkpoint();
+#endif
         return;
     }
     PE_Video video = {};
+#if DEVELOPMENT || DEBUG
     native_legacy_stage = 2;
+#endif
     if (PE_current_console(&video) || !native_legacy_video_mode(video)) {
+#if DEVELOPMENT || DEBUG
         native_legacy_display_checkpoint();
+#endif
         return;
     }
     IOService *display = native_legacy_display_allocate();
     native_legacy_object = (uintptr_t)display;
     if (!display) {
+#if DEVELOPMENT || DEBUG
         native_legacy_display_checkpoint();
+#endif
         return;
     }
+#if DEVELOPMENT || DEBUG
     native_legacy_object_size = display->getMetaClass()->getClassSize();
     native_legacy_parent_match = static_cast<uint32_t>((display->metaCast("IOMobileFramebufferLegacy") != nullptr) &&
                                                        (display->metaCast("IOMobileFramebuffer") != nullptr) &&
                                                        (display->metaCast("IOService") != nullptr));
     native_legacy_stage = 3;
-    native_legacy_init_result = static_cast<uint32_t>(display->init());
-    if (native_legacy_init_result) {
+#endif
+    const bool inited = display->init();
+#if DEVELOPMENT || DEBUG
+    native_legacy_init_result = static_cast<uint32_t>(inited);
+#endif
+    if (inited) {
         // IOSurface matches the real IOBSD resource, published by bsd_autoconf.
         // Retain this actual object until that normal lifecycle boundary.
         pendingLegacyDisplay = display;
         return;
     }
+#if DEVELOPMENT || DEBUG
     native_legacy_stage = 7;
+#endif
     display->release();
+#if DEVELOPMENT || DEBUG
     native_legacy_released = 1;
     native_legacy_stage = 8;
     native_legacy_display_checkpoint();
+#endif
 }
 
 void native_legacy_display_late_probe(void);
@@ -894,23 +789,27 @@ void native_legacy_display_late_probe(void)
     if (!display)
         return;
     pendingLegacyDisplay = nullptr;
-    native_legacy_surface_status = OSKextLoadKextWithIdentifier("com.apple.iokit.IOSurface");
+    const kern_return_t surfaceStatus = OSKextLoadKextWithIdentifier("com.apple.iokit.IOSurface");
     OSDictionary *matching = IOService::nameMatching("IOCoreSurfaceRoot");
     const IOService *surface = matching ? IOService::waitForMatchingService(matching, 5000000000ULL) : nullptr;
-    native_legacy_surface_found = static_cast<uint32_t>(surface != nullptr);
+    const bool surfaceFound = surface != nullptr;
+#if DEVELOPMENT || DEBUG
+    native_legacy_surface_status = surfaceStatus;
+    native_legacy_surface_found = static_cast<uint32_t>(surfaceFound);
+#endif
     OSSafeReleaseNULL(surface);
     OSSafeReleaseNULL(matching);
     PE_Video video = {};
-    if (!native_legacy_surface_status && native_legacy_surface_found && !PE_current_console(&video) &&
-        native_legacy_video_mode(video)) {
+    if (!surfaceStatus && surfaceFound && !PE_current_console(&video) && native_legacy_video_mode(video)) {
+#if DEVELOPMENT || DEBUG
         native_legacy_video_base = video.v_baseAddr;
         native_legacy_video_bytes = video.v_rowBytes * video.v_height;
-        // A real firmware framebuffer resource, with addresses and extent
-        // obtained from the actual GOP handoff. It has no invented compatible,
-        // display list, panel timing, GPU/fence completion or vendor registers.
         native_legacy_stage = 4;
+#endif
         IOPlatformDevice *nub = new IOPlatformDevice;
+#if DEVELOPMENT || DEBUG
         native_legacy_nub = (uintptr_t)nub;
+#endif
         bool nubAttached = false;
         bool nubStarted = false;
         bool attached = false;
@@ -942,31 +841,44 @@ void native_legacy_display_late_probe(void)
                     dtAttached = nub->attachToParent(displayTreeParent, gIODTPlane);
                 }
                 OSSafeReleaseNULL(data);
-                native_legacy_dt_attached = static_cast<uint32_t>(dtAttached);
                 SInt32 score = 0;
-                native_legacy_probe_match = static_cast<uint32_t>(dtAttached && display->probe(nub, &score) == display);
-                if (native_legacy_probe_match)
+                const bool probeMatch = dtAttached && display->probe(nub, &score) == display;
+#if DEVELOPMENT || DEBUG
+                native_legacy_dt_attached = static_cast<uint32_t>(dtAttached);
+                native_legacy_probe_match = static_cast<uint32_t>(probeMatch);
+#endif
+                if (probeMatch)
                     attached = display->attach(nub);
                 if (attached) {
+#if DEVELOPMENT || DEBUG
                     native_legacy_stage = 5;
+#endif
                     started = display->start(nub);
+#if DEVELOPMENT || DEBUG
                     native_legacy_start_result = static_cast<uint32_t>(started);
+#endif
                 }
                 if (started) {
                     // NOLINTNEXTLINE(clang-analyzer-osx.cocoa.RetainCount): the published nub keeps its ranges for good
                     activeLegacyDisplay = display;
                     activeGOPNub = nub;
+#if DEVELOPMENT || DEBUG
                     native_legacy_stage = 10;
+#endif
                     finishUnitScalePolicy(true);
                     OSSafeReleaseNULL(displayTreeParent);
                     if (switch_backlight_start())
                         IOLog("Switch: SwitchBacklight did not start\n");
+#if DEVELOPMENT || DEBUG
                     native_legacy_display_checkpoint();
+#endif
                     return;
                 }
             }
         }
+#if DEVELOPMENT || DEBUG
         native_legacy_stage = 6;
+#endif
         finishUnitScalePolicy(false);
         if (started)
             display->stop(nub);
@@ -983,10 +895,14 @@ void native_legacy_display_late_probe(void)
         OSSafeReleaseNULL(nub);
         OSSafeReleaseNULL(displayTreeParent);
     }
+#if DEVELOPMENT || DEBUG
     native_legacy_stage = 7;
+#endif
     display->release();
+#if DEVELOPMENT || DEBUG
     native_legacy_released = 1;
     native_legacy_stage = 8;
     native_legacy_display_checkpoint();
+#endif
 }
 }

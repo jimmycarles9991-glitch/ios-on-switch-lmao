@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Judges chip_facts.h AssumeTexsF16, which every raw draw holds: TEXS.F16 against round-to-nearest-even of TEXS's

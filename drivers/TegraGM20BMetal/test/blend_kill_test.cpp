@@ -48,6 +48,7 @@ struct State {
     uint32_t alphaControl = 0;
     uint32_t writes[8] = {0x1111};
     uint8_t storage = 0;
+    std::string moreTargets;  // key fields of targets past 0
 };
 
 uint32_t decide(const State &s)
@@ -56,8 +57,8 @@ uint32_t decide(const State &s)
         0x153c, s.alphaControl, 0x1360, s.blending ? 1u : 0u, 0x1e04, s.rgb.op,    0x1e08, s.rgb.src,
         0x1e0c, s.rgb.dst,      0x1e10, s.alpha.op,           0x1e14, s.alpha.src, 0x1e18, s.alpha.dst,
     };
-    const std::string key =
-        "samples=1 topo=3 ds=" + s.ds + " c0=" + std::to_string(s.format) + ":15:1:1:5:0:1:5:0 | v vs | f fs";
+    const std::string key = "samples=1 topo=3 ds=" + s.ds + " c0=" + std::to_string(s.format) + ":15:1:1:5:0:1:5:0" +
+                            s.moreTargets + " | v vs | f fs";
     return gm20b::iteratedBlendNoop(blob.data(), uint32_t(blob.size()), s.writes, key.c_str(), s.storage);
 }
 
@@ -181,6 +182,22 @@ TEST(BlendKill, OffWhereTheSourceIsWrittenOrOtherOutputsMatter)
     EXPECT_EQ(decide(multiply), gm20b::kNoopNever);
 }
 
+// The 24B119 pack's baseline leaves SET_CT_WRITE of targets 6 and 7 at 0x1111 (blend_kill_pack_test.py): no target of
+// a state whose key names target 0 alone, so it is killed; a second target the key names and the state writes is not
+TEST(BlendKill, OnlyTheKeysTargetsCount)
+{
+    State baseline;
+    baseline.writes[6] = baseline.writes[7] = 0x1111;
+    EXPECT_EQ(decide(baseline), gm20b::kNoopSourceRgba0000);
+    State second = baseline;
+    second.writes[1] = 0x1111;
+    second.moreTargets = " c1=80:15:1:1:5:0:1:5:0";
+    EXPECT_EQ(decide(second), gm20b::kNoopNever);
+    State unwritten = second;
+    unwritten.writes[1] = 0;
+    EXPECT_EQ(decide(unwritten), gm20b::kNoopSourceRgba0000);
+}
+
 TEST(BlendKill, DestinationFactorsOnlyOnNormalizedTargets)
 {
     State under;
@@ -224,6 +241,7 @@ TEST(BlendKill, OffForEveryOtherShapeOfState)
     EXPECT_EQ(decide(toOne), gm20b::kNoopNever);
     State two;
     two.writes[1] = 0x1111;
+    two.moreTargets = " c1=80:15:1:1:5:0:1:5:0";
     EXPECT_EQ(decide(two), gm20b::kNoopNever);
     State unwritten;
     unwritten.writes[0] = 0;

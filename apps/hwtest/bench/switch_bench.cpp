@@ -792,6 +792,13 @@ size_t switch_bench_describe(struct switch_bench *b, char *out, size_t size)
                            (unsigned long long)(b->kernel ? b->kernel->keyHash : 0)));
 }
 
+uint64_t switch_bench_ticket_bytes(struct switch_bench *b)
+{
+    if (!b->device && !b->open())
+        return 0;
+    return b->device->interlockTicketBytes();
+}
+
 void switch_bench_known_data(uint32_t out[4])
 {
     memcpy(out, bench::kKnownData, sizeof bench::kKnownData);

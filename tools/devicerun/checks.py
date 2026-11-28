@@ -27,8 +27,12 @@ from tools.devicerun.lockscreen import LOCKSCREEN
 from tools.devicerun.memory import MEMORY
 from tools.devicerun.morning import MORNING
 from tools.devicerun.motion import MOTION
+from tools.devicerun.owed_all import GROUPS as OWED
+from tools.devicerun.pack_image import PACK_IMAGE
+from tools.devicerun.pretranslated import PRETRANSLATED
 from tools.devicerun.protection import PROTECTION
 from tools.devicerun.rules import REPORT, TIMELINE, Check
+from tools.devicerun.shared_cache import SHARED_CACHE
 from tools.devicerun.springboard import OBSERVATIONS, SPRINGBOARD
 from tools.devicerun.stutter import STUTTER
 from tools.devicerun.textures import TEXTURES
@@ -163,6 +167,48 @@ GROUPS: dict[str, list[Check]] = {
         ),
         Check('mg.corner-radius', 'r32-hwaudit', 'Failed to copyDeviceTreeProperty', regex='display-corner-radius'),
         Check('mg.ssdevice-dt', 'r32-hwaudit', "Couldn't get dt for user agent", REPORT, note='was x57'),
+        Check(
+            'mg.kernel',
+            'big-boot',
+            'Darwin Kernel Version ',
+            REPORT,
+            process=KERNEL,
+            regex=r'Version (?P<darwin>\d+)\.',
+            show=('darwin',),
+            source='xnu (25: iOS 27, 23: iOS 17); the usb group reads its own boot, so this group keeps its own',
+        ),
+        Check(
+            'mg.screen-class',
+            'big-boot',
+            'PUIProgressWindow got screen class',
+            'count >= 1',
+            regex=r'got screen class (?P<screen_class>-?\d+)',
+            where='screen_class == 21',
+            applies='mg.kernel darwin=25',
+            show=('process', 'screen_class'),
+            source='ProgressUI (24B119), boot 2693043C; switch_ui_scale_sites_24B119.h',
+            note="MobileGestalt's main-screen-class at the boot logo, J181's on 27; was -1",
+        ),
+        Check(
+            'mg.screen-class-17',
+            'big-boot',
+            'PUIProgressWindow got screen class',
+            'count >= 1',
+            regex=r'got screen class (?P<screen_class>-?\d+)',
+            where='screen_class == 11',
+            applies='mg.kernel darwin=23',
+            show=('process', 'screen_class'),
+            source='ProgressUI (21H461); switch_ui_scale_sites_21H461.h',
+            note="MobileGestalt's main-screen-class at the boot logo, J120's on 17; was -1",
+        ),
+        Check(
+            'mg.screen-class-unsupported',
+            'big-boot',
+            'Unsupported screen class',
+            show=('process',),
+            source='ProgressUI (24B119), boot 2693043C',
+            note='was once per boot (backboardd) and once per data migration (datamigrator, with a stackshot)',
+        ),
     ],
     'metal': [
         Check('metal.ioacceldevice', 'r32-gpucaps', 'Failed to create an IOAccelDevice', process='backboardd'),
@@ -467,13 +513,37 @@ GROUPS: dict[str, list[Check]] = {
         Check(
             'display.frame-end-idle',
             'r32-color',
-            'SwitchDisplay stats: ',
-            'max(irqs/ms*1000) < 5',
+            'SwitchDisplay locks: ',
+            'max(unexplained/ms*1000) < 5',
             process=KERNEL,
-            regex=r'(?P<ms>\d+) ms: (?P<irqs>\d+) DC A interrupts, (?P<swaps>\d+) swaps',
+            regex=r'; (?P<ms>\d+) ms, (?P<swaps>\d+) swaps, (?P<irqs>\d+) DC A interrupts, (?P<unexplained>\d+) not '
+            r'explained by debug holders',
             where='swaps == 0',
-            source='drivers/NativeMobileDisplay/NativeLegacyDisplay.cpp',
-            note='DC A interrupts/s in windows with no presents; was ~60; debug kernels',
+            source='drivers/NativeMobileDisplay/NativeLegacyDisplay.cpp (noteFrameEndRouted, SwitchFrameEndHolder.h)',
+            note='DC A interrupts/s in windows with no swaps, less the frame ends the debug-only holders (console tape, '
+            'probes, display experiments) kept routed; the line names each holder; was ~60; debug kernels',
+        ),
+        Check(
+            'display.timed-ordinary-17',
+            'big-display',
+            'SwitchDisplay requested: ',
+            REPORT,
+            process=KERNEL,
+            note='on a 21H461 boot (it keeps the ordinary-frame clause, SwitchTimedPresent.h phasedOrdinary): a "-1" bin '
+            'and "shown early" above 0 mean its render server stamps the second frame end ahead as 24B119 does, and the '
+            'clause skips frame ends there too: drop it for 21H461; all in the 0 bin means its stamps name the next frame end',
+        ),
+        Check(
+            'display.transform-refused',
+            'big-display',
+            'SwitchDisplay: swap refused: layer ',
+            REPORT,
+            process=KERNEL,
+            regex=r'has transform (?P<transform>\d+) \(format (?P<format>0x[0-9a-f]+), (?P<size>\d+x\d+)\)',
+            show=('transform', 'format', 'size'),
+            source='drivers/NativeMobileDisplay/NativeLegacyDisplay.cpp (noteTransformRefused)',
+            note='24B119 publishes rotation and shows every transform: no line. 21H461 publishes none and refuses a '
+            'transformed layer as before: each line is a transform word its render server sent anyway, once per word',
         ),
         Check(
             'display.vblank-phase-gone',
@@ -592,6 +662,18 @@ GROUPS: dict[str, list[Check]] = {
             regex=r'TegraVIC: \d+s jobs=(?P<jobs>\d+) ops=\d+ refused=(?P<refused>\d+)',
             show=('refused',),
             source='drivers/TegraVIC/SwitchVICStats.h',
+        ),
+        Check(
+            'media.host1x-channel-counters',
+            'measure',
+            'TegraHost1x: ',
+            'min(vic) > 0',
+            process=KERNEL,
+            regex=r'^TegraHost1x: \d+s NVDEC/VIC/NVENC/NVJPG/DC .*? clocked=\d+/(?P<vic>\d+)/\d+/\d+/\d+us '
+            r'stalled=\d+/(?P<vic_stalled>\d+)/',
+            source='drivers/TegraHost1x/SwitchHost1xGatherStats.h',
+            note="a channel's tick counter counts every host1x clock (TRM 14.4.4); VIC clocked 0 in a window means "
+            'the counters never started, and then its stalled share means nothing',
         ),
         Check(
             'media.idle-power',
@@ -822,13 +904,37 @@ GROUPS: dict[str, list[Check]] = {
             'ca-closure',
             ' cag=',
             'max(cag) == 0',
-            process='backboardd',
+            process='!SwitchHWTest',
             subsystem=GPU_METAL_SUBSYSTEM,
             regex=r'\bgm20b \d+s c=\d+\(.*?\bcag=(?P<cag>\d+)',
-            show=('cag',),
+            show=('process', 'cag'),
             source='drivers/TegraGM20BMetal/TegraGM20BMetalRates.mm (debug builds)',
-            note='backboardd draws zero Core Animation catch-all shaders across the boot on iOS 27 '
-            '(CA_DISABLE_GENERIC_SHADERS=1 in xnu-12377 kern_exec.c; 21H461 keeps the generic)',
+            note='no process draws a Core Animation catch-all shader across the boot: both kernels pass '
+            'CA_DISABLE_GENERIC_SHADERS=1 to every executable (kern_exec.c native_switch_exec_environment). '
+            "SwitchHWTest's are its own: its Core Animation goldens build and draw the generic states from their "
+            'descriptors (apps/hwtest/gpu/CACorpus.swift, goldens/ca_24B119.txt)',
+        ),
+        Check(
+            'boot.ca-pack-covers-all',
+            'ca-closure',
+            (
+                'SwitchMetal: harvest ',
+                'SwitchMetal: in-process state the pack lacks ',
+                ' state the pack lacks ',
+            ),
+            process='!SwitchHWTest',
+            subsystem=GPU_METAL_SUBSYSTEM,
+            regex=(
+                r'^SwitchMetal: (?:harvest [0-9a-f]{16} 1/\d+ label='
+                r'|in-process state the pack lacks [0-9a-f]{16} \((?:record|refusal)\): label='
+                r'|\S+: a render (?:variant )?state the pack lacks [0-9a-f]{16} \()'
+                r'com\.apple\.coreanimation\.(?P<ca>[^\s)]+)'
+            ),
+            show=('process', 'ca'),
+            source='drivers/TegraGM20BMetal/TegraGM20BMetalStatesMiss.mm, TegraGM20BMetalComplete{,Remote}.mm (debug builds)',
+            note='a Core Animation state a process made that the pack lacks: with the catch-all off everywhere, '
+            "each one is made at its first draw; `logharvest` adds them to the corpus. SwitchHWTest's are its own "
+            'descriptors (CACorpus.swift), left out',
         ),
         Check(
             'boot.pack-pieces',
@@ -851,6 +957,23 @@ GROUPS: dict[str, list[Check]] = {
             'drivers/TegraGM20BMetal/gpu.cpp',
             note='backboardd runs tier-0 states from the shared pack window with zero slow read-only pack-piece '
             'imports and no pack-image refusal or per-piece placement',
+        ),
+        Check(
+            'pack.tier1-uses',
+            'pack-hit',
+            'SwitchMetal: tier-1 pack state ',
+            REPORT,
+            process='!SwitchHWTest',
+            subsystem=GPU_METAL_SUBSYSTEM,
+            regex=(
+                r'^SwitchMetal: tier-1 pack state (?P<fast>[0-9a-f]{16}) (?P<name>[0-9a-f]{16}) '
+                r'in (?P<proc>\S+): (?P<pieces>\d+) pieces, card=(?P<card>\d+)'
+            ),
+            show=('process', 'name', 'pieces', 'card'),
+            source='drivers/TegraGM20BMetal/TegraGM20BMetalStatesCost.mm (debug builds)',
+            note='OS states drawn from tier 1 of the pack (first use per process, pieces imported and cold card '
+            'pages before import); run `bazel run //tools/gpu:logharvest` on the pull to promote them into '
+            'corpus.log so the next pack places them in tier 0',
         ),
         Check(
             'compiler.library-time',
@@ -1225,6 +1348,21 @@ GROUPS: dict[str, list[Check]] = {
             note="runnable-to-running p99 per 10 s; boot 15 up to 275359 us. TS DF after startup is backboardd's own",
         ),
         Check(
+            'sched.backboardd-main-longest',
+            'r116-sched',
+            'SwitchSched 1/2',
+            'max(max) < 250000',
+            process=KERNEL,
+            regex=r'backboardd\.main\[\d+\] \d+/\d+ (?P<mode>\S+) (?P<qos>\S+) \S+: (?P<runs>\d+) runs '
+            r'(?P<p50>\d+)/(?P<p99>\d+)/(?P<max>\d+) us',
+            show=('mode', 'qos', 'runs'),
+            source='kernel/switch/sched/stats.c',
+            note=(
+                'the longest runnable-to-running wait of any 10 s window, however few runs it had: on 25 Nov a window '
+                'of 2 runs held 9169075 us and one of 12 runs 32555950 us, which the p99 check skips'
+            ),
+        ),
+        Check(
             'sched.kernel-high-cpu',
             'r116-sched',
             'SwitchSched 1/2',
@@ -1236,6 +1374,42 @@ GROUPS: dict[str, list[Check]] = {
         ),
     ],
     'storage': [
+        Check(
+            'storage.purgeable-supplemental-flags',
+            'big-boot',
+            'supplemental flags',
+            process=KERNEL,
+            regex=r'Requested supplemental flags (?P<flags>[0-9a-f]+) are not supported on this volume',
+            show=('flags',),
+            source='APFS (24B119), boot 2693043C',
+            note="APFS refusing a purgeable mark's supplemental flags on a Data volume made without the iOS features "
+            '(rocompat 0xc, incompat 0x200); a card whose Data the installer rebuilt reads 0 (O16)',
+        ),
+        Check(
+            'storage.purgeable-mark-unsupported',
+            'big-boot',
+            'SwitchFsctl: ',
+            process=KERNEL,
+            regex=r"SwitchFsctl: (?P<who>[^\[]+)\[\d+\] fsctl 0x[0-9a-f]+ \('J' 111\) refused (?P<errno>\d+)",
+            where='errno == 45',
+            show=('who',),
+            source='kernel/switch/vfs/fsctl_diag.c',
+            note="APFS's ENOTSUP for a purgeable mark (SpringBoard's SplashBoard snapshots, nsurlsessiond); boot "
+            '2693043C: SpringBoard and nsurlsessiond. 0 once the Data volume has its features (O16)',
+        ),
+        Check(
+            'storage.purgeable-mark-compressed',
+            'big-boot',
+            'SwitchFsctl: ',
+            REPORT,
+            process=KERNEL,
+            regex=r"SwitchFsctl: (?P<who>[^\[]+)\[\d+\] fsctl 0x[0-9a-f]+ \('J' 111\) refused (?P<errno>\d+)",
+            where='errno == 22',
+            show=('who',),
+            source='kernel/switch/vfs/fsctl_diag.c',
+            note="APFS's EINVAL for a purgeable mark on a decmpfs-compressed file: SplashBoard's snapshots are written "
+            "'lzfse 0' and then compressed, where ImageIO in an app writes 'lzfse 1' (O16's own half, open)",
+        ),
         Check(
             'storage.sd-read-rate',
             'r116-sched',
@@ -1404,6 +1578,7 @@ GROUPS: dict[str, list[Check]] = {
     'audio': AUDIO,
     'battery': BATTERY,
     'motion': MOTION,
+    'pretranslated': PRETRANSLATED,
     'm2v-cut': CUT,
     'textures': TEXTURES,
     'dispatch': DISPATCH,
@@ -1413,10 +1588,13 @@ GROUPS: dict[str, list[Check]] = {
     'protection': PROTECTION,
     'stutter': STUTTER,
     'cpu': CPU,
+    'shared-cache': SHARED_CACHE,
     'commit': COMMIT,
     'launch': LAUNCHES,
     'springboard': SPRINGBOARD,
     'boot-observations': OBSERVATIONS,
+    **OWED,
+    'pack-image': PACK_IMAGE,
 }
 
 # The tools/frames lines, pulled with the checks' own query.

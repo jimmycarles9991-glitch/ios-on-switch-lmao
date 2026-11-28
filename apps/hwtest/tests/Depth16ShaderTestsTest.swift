@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A Depth16Unorm attachment whose draws' depth test runs in their shader on the driver (a fetching state with a

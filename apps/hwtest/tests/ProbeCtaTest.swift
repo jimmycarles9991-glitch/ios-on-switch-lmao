@@ -1,6 +1,9 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 import QuartzCore
 import UIKit
@@ -69,6 +72,14 @@ struct ProbeCtaTest: HWTest {
         var metrics = Metrics()
         var failures: [String] = []
         let connection = GPUConnection()
+        if case .unreadable("release_kernel", ENOENT) = GPUPaths.read(connection) {
+            await MainActor.run { layer.removeFromSuperlayer() }
+            await context.clearStage()
+            let why = KernelSysctl.isReleaseKernel()
+                ? "no preemption counters: a release kernel"
+                : "no preemption counters (build with --//bazel:stats_gpu)"
+            return .skip(why, metrics)
+        }
         for (arm, cta) in [("_wfi", false), ("_cta", true)] {
             let reply = Self.computeCta(gpu.device, cta) ?? "missing"
             let parsed = SpanReading.parse(reply)

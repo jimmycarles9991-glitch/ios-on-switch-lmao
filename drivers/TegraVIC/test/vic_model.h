@@ -107,10 +107,21 @@ static inline uint32_t vic_model_widen(uint32_t v8)
 }
 
 typedef struct {
-    uint32_t format, pitched, lw, lh, cw, matrixOn;
+    uint32_t format, pitched, lw, lh, cw, matrixOn, blockLog2;
     uint64_t luma, chroma, chromaV;
     TegraVICMatrix matrix;
 } VicModelSlot;
+
+// Byte (x, y) of a 16Bx2 block-linear surface `pitch` bytes wide, 2^log2 GOBs a block: 64-byte x 8-row GOBs of
+// 16-byte x 2-row sectors, blocks left to right, a row of blocks every 8 << log2 rows (the GPU's law, which
+// SwitchVICLayoutProbe.h's blockLinearOffset reads VIC's own writes by).
+static inline uint64_t vic_model_block_offset(uint32_t x, uint32_t y, uint32_t pitch, uint32_t log2)
+{
+    const uint32_t blockRows = 8u << log2;
+    const uint64_t gob = ((x % 64) / 32) * 256 + ((y % 8) / 2) * 64 + ((x % 32) / 16) * 32 + (y % 2) * 16 + x % 16;
+    return (uint64_t)(y / blockRows) * pitch * blockRows + (uint64_t)(x / 64) * (512u << log2) +
+           ((y % blockRows) / 8) * 512 + gob;
+}
 
 static inline int vic_model_planar(uint32_t format)
 {
@@ -129,6 +140,7 @@ static inline void vic_model_slot(const uint8_t *cfg, uint64_t luma, uint64_t ch
     const uint32_t sf = TEGRA_VIC_SLOTS + TEGRA_VIC_SLOT_SURFACE;
     s->format = (uint32_t)TEGRA_VIC_GET(cfg, sf, SURF_FORMAT);
     s->pitched = TEGRA_VIC_GET(cfg, sf, SURF_BLK_KIND) == TEGRA_VIC_BLK_PITCH;
+    s->blockLog2 = (uint32_t)TEGRA_VIC_GET(cfg, sf, SURF_BLK_HEIGHT);
     s->lw = (uint32_t)TEGRA_VIC_GET(cfg, sf, SURF_LUMA_WIDTH) + 1;
     s->lh = (uint32_t)TEGRA_VIC_GET(cfg, sf, SURF_LUMA_HEIGHT) + 1;
     s->cw = (uint32_t)TEGRA_VIC_GET(cfg, sf, SURF_CHROMA_WIDTH) + 1;
@@ -140,27 +152,32 @@ static inline void vic_model_slot(const uint8_t *cfg, uint64_t luma, uint64_t ch
 
 static inline int vic_model_read(VicModel *m, const VicModelSlot *s, uint32_t x, uint32_t y, VicModelPixel *p)
 {
-    if (!s->pitched || x >= s->lw || y >= s->lh) {
+    const int rgb = s->format == TEGRA_VIC_T_A8R8G8B8 || s->format == TEGRA_VIC_T_A8B8G8R8;
+    if ((!s->pitched && !rgb) || x >= s->lw || y >= s->lh) {
         m->faults++;
         return 0;
     }
-    if (s->format == TEGRA_VIC_T_A8R8G8B8 || s->format == TEGRA_VIC_T_A8B8G8R8) {
-        const uint8_t *q = vic_model_at(m, s->luma + ((uint64_t)y * s->lw + x) * 4, 4);
+    if (rgb) {
+        const uint64_t at =
+            s->pitched ? ((uint64_t)y * s->lw + x) * 4 : vic_model_block_offset(x * 4, y, s->lw * 4, s->blockLog2);
+        const uint8_t *q = vic_model_at(m, s->luma + at, 4);
         if (!q)
             return 0;
         uint32_t w;
         memcpy(&w, q, 4);
         const uint32_t r = s->format == TEGRA_VIC_T_A8R8G8B8 ? (w >> 16) & 0xff : w & 0xff;
         const uint32_t b = s->format == TEGRA_VIC_T_A8R8G8B8 ? w & 0xff : (w >> 16) & 0xff;
-        p->c[0] = r << 2;
-        p->c[1] = ((w >> 8) & 0xff) << 2;
-        p->c[2] = b << 2;
+        p->c[0] = vic_model_widen(r);
+        p->c[1] = vic_model_widen((w >> 8) & 0xff);
+        p->c[2] = vic_model_widen(b);
         p->a = vic_model_widen(w >> 24);
     } else if (s->format == TEGRA_VIC_T_L8) {
         const uint8_t *q = vic_model_at(m, s->luma + (uint64_t)y * s->lw + x, 1);
         if (!q)
             return 0;
-        p->c[0] = p->c[1] = p->c[2] = (uint32_t)q[0] << 2;
+        p->c[0] = vic_model_widen(q[0]);
+        p->c[1] = 512;
+        p->c[2] = 512;
         p->a = 1023;
     } else if (vic_model_semi_planar(s->format) || vic_model_planar(s->format)) {
         const int full = s->format == TEGRA_VIC_T_Y8___U8V8_N444 || s->format == TEGRA_VIC_T_Y8___U8___V8_N444;

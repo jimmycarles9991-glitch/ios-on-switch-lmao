@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT
 #include "device_harness.h"
+#include "../grow_ahead.h"
 #include <mach/mach.h>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <thread>
 
 namespace {
 
@@ -142,6 +144,58 @@ TEST(ClientChunkMemory, TheHeldSplitNamesAPinnedChunkAndEachHeapApart)
         dev.destroyBuffer(b);
 }
 
+TEST(GrowAhead, AChunkAheadKeepsAProcessBelowEightyPercentOfItsLimit)
+{
+    constexpr uint64_t kMiB = 1ull << 20;
+    EXPECT_TRUE(gm20b::clientGrowAhead(10 * kMiB, 90 * kMiB, 4 * kMiB));
+    EXPECT_TRUE(gm20b::clientGrowAhead(75 * kMiB, 25 * kMiB, 4 * kMiB)) << "79 of 100 MiB";
+    EXPECT_FALSE(gm20b::clientGrowAhead(76 * kMiB, 24 * kMiB, 4 * kMiB)) << "80 of 100 MiB";
+    EXPECT_FALSE(gm20b::clientGrowAhead(9 * kMiB, 6 * kMiB, 4 * kMiB)) << "a daemon's 15 MB: 13 MB";
+    EXPECT_FALSE(gm20b::clientGrowAhead(10 * kMiB, 0, 4 * kMiB)) << "at its limit, or none reported";
+}
+
+// M28: a client's grower starts at its second stall, not its first, and makes a chunk ahead of need only while that
+// chunk keeps the process below 80% of its footprint limit
+TEST(ClientChunkMemory, AClientGrowsAheadFromItsSecondStallOnlyBelowEightyPercentOfItsLimit)
+{
+    for (const bool room : {true, false}) {
+        kernel_model::model = {};
+        gm20b::Device dev;
+        std::string err;
+        ASSERT_TRUE(dev.open(harness::emptyPack().c_str(), 0, err, gm20b::Device::Role::Client)) << err;
+        dev.footprintProbe = [room](uint64_t &footprint, uint64_t &available) {
+            footprint = room ? 10ull << 20 : 80ull << 20;
+            available = room ? 990ull << 20 : 20ull << 20;
+            return true;
+        };
+        constexpr uint64_t kSmall = 64 << 10;
+        std::vector<gm20b::Buffer> buffers;
+        gm20b::Device::Held h;
+        do {
+            buffers.emplace_back();
+            ASSERT_TRUE(dev.createBuffer(kSmall, buffers.back()));
+            ASSERT_TRUE(dev.held(h, true));
+            if (h.chunkCount < 2)
+                EXPECT_FALSE(dev.growerRunning()) << "the first stall leaves the client as it was";
+        } while (h.chunkCount < 2 && buffers.size() < 4096);
+        EXPECT_TRUE(dev.growerRunning()) << "the second stall starts it";
+        // the allocation that stalled the second time, served from the chunk it made, finds less free than the next
+        // chunk: with room the grower makes that one ahead, once
+        buffers.emplace_back();
+        ASSERT_TRUE(dev.createBuffer(kSmall, buffers.back()));
+        for (int waited = 0; waited < 200 && (!room || h.chunkCount < 3); ++waited) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(room ? 10 : 1));
+            ASSERT_TRUE(dev.held(h, true));
+            if (!room && waited == 50)
+                break;
+        }
+        EXPECT_EQ(h.chunkCount, room ? 3u : 2u)
+            << (room ? "one chunk ahead of need" : "no chunk ahead at 80% of its limit");
+        for (gm20b::Buffer &b : buffers)
+            dev.destroyBuffer(b);
+    }
+}
+
 namespace {
 gm20b::Device *gChunkCheckDev = nullptr;
 std::atomic<int> gChunkLockViolations{0};
@@ -232,6 +286,7 @@ TEST(ClientChunkMemory, IdleChunksParkWithGuardOnTrimAndUnparkResidentSameVaOffL
 
     gm20b::Buffer pooled2, dedicated2;
     gm20b::Texture tiled2;
+    const uint32_t generationBefore = model.sets[0].generation;
     ASSERT_TRUE(dev.createBuffer(64 << 10, pooled2, false, false));
     ASSERT_TRUE(dev.createBuffer(4 << 20, dedicated2, false, false));
     ASSERT_TRUE(dev.createTexture(512, 512, kBgra8, tiled2, false, true));
@@ -246,6 +301,13 @@ TEST(ClientChunkMemory, IdleChunksParkWithGuardOnTrimAndUnparkResidentSameVaOffL
     EXPECT_EQ(dedicated2.va, dedicatedVa);
     EXPECT_EQ(dedicated2.cpu, dedicatedCpu);
     EXPECT_EQ(tiled2.va, tiledVa);
+    EXPECT_EQ(model.sets[0].generation, generationBefore) << "an unpark made a ResourceSetCreate on its caller";
+    EXPECT_FALSE(gm20b::DeviceHarness::setHolds(dev, pooled2.va, pooled2.length));
+    EXPECT_FALSE(gm20b::DeviceHarness::setHolds(dev, dedicated2.va, dedicated2.length));
+    EXPECT_FALSE(gm20b::DeviceHarness::setHolds(dev, tiled2.va, 4096));
+    gm20b::CommandBuffer *next = dev.begin();
+    ASSERT_NE(next, nullptr);
+    next->abandon();
     EXPECT_TRUE(gm20b::DeviceHarness::setHolds(dev, pooled2.va, pooled2.length));
     EXPECT_TRUE(gm20b::DeviceHarness::setHolds(dev, dedicated2.va, dedicated2.length));
     EXPECT_TRUE(gm20b::DeviceHarness::setHolds(dev, tiled2.va, 4096));

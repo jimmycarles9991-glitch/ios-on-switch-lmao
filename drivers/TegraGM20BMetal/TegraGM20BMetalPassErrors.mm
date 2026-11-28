@@ -163,11 +163,14 @@ NSUInteger attachmentLayers(MTLRenderPassAttachmentDescriptor *a)
 
 // renderTargetArrayLength past an attachment's layers: an M4 Max draws every layer each attachment has and drops the rest
 // (m2v-pass-forms/probe/bitsprobe.mm layers: colours of 4 and 2 layers and a depth of 2 under 4, the first takes all four),
-// so the pass is of the most layers a stored attachment has, each shorter one rendered through a backing of the pass's
-// (CommandBuffer::render), a memoryless one backed with the pass's. A pass with an attachment the encode moves through
-// work of its own of the pass's layers (a format stand-in, a planar, YCbCr or two-plane target, a 3D plane image) stays
-// of the layers every stored attachment has, the rest dropped: where that leaves layers of an attachment undrawn that
-// the M4 Max draws, a skip (true)
+// so a plain pass keeps the client's length, each shorter attachment rendered through a backing of the pass's
+// (CommandBuffer::render), a memoryless one backed with the pass's. Clamping the length to the attachments' layers is
+// wrong on the GM20B: it draws a render_target_array_index past THIRD_DIMENSION into layer 0 rather than dropping it
+// (HW Test gpu.x1.layer_past_count, a target of two layers: past_count_c1=3/1/k/k; gpu.gm20b.rtal_past_layers read
+// slice 1 holding layer 1's draw under the clamp). A pass with an attachment
+// the encode moves through work of its own of the pass's layers (a format stand-in, a planar, YCbCr or two-plane target,
+// a 3D plane image) stays of the layers every stored attachment has, the rest dropped: where that leaves layers of an
+// attachment undrawn that the M4 Max draws, a skip (true)
 bool layersAsApple(SwitchMetalCommandBuffer *cb, MTLRenderPassDescriptor *pass)
 {
     const NSUInteger layers = pass.renderTargetArrayLength;
@@ -191,7 +194,8 @@ bool layersAsApple(SwitchMetalCommandBuffer *cb, MTLRenderPassDescriptor *pass)
         count(pass.colorAttachments[c]);
     if (!most)
         return false;
-    pass.renderTargetArrayLength = plain ? std::min(layers, most) : least;
+    if (!plain)
+        pass.renderTargetArrayLength = least;
     if (plain || least >= std::min(layers, most))
         return false;
     skip(cb, PredPassAttLevel, std::min(layers, most), least,

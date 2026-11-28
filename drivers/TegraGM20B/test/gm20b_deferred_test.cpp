@@ -266,7 +266,7 @@ TEST_F(Deferred, ALockWhileTheDisplayHoldsTheSurfaceReadsItThroughAView)
 	void *hold = tegra_gm20b_surface_hold(p[0], &tiled);
 	ASSERT_EQ(tiled, 1);
 	void *client = reinterpret_cast<void *>(0x20);
-	gViews.mappings[{client, 307}] = {client, client, 0x40000, kPages * 4096, 0, 0};
+	gViews.mappings[{client, 307}] = {client, client, 0x40000, kPages * 4096, 0, 0, nullptr};
 	EXPECT_EQ(tgm_views_trap(client, kLock, 307, kReadOnly), 0);
 	EXPECT_EQ(movesOf(TGM_RELAYOUT_UNTILE_IN_PLACE), 0);
 	EXPECT_EQ(movesOf(TGM_RELAYOUT_TO_ROWS), 1);
@@ -313,12 +313,62 @@ TEST_F(Deferred, AnAvoidSyncLockBehindRunningWritersIsRefusedAndMovesNothing)
 	tgm_coherency_put(c);
 	ASSERT_EQ(record.deferred, c);
 	void *client = reinterpret_cast<void *>(0x30);
-	gViews.mappings[{client, 309}] = {client, client, 0x50000, kPages * 4096, 0, 0};
+	gViews.mappings[{client, 309}] = {client, client, 0x50000, kPages * 4096, 0, 0, nullptr};
 	EXPECT_NE(tgm_views_trap(client, kLock, 309, kReadOnly | 2), 0);
 	EXPECT_TRUE(gMoves.empty());
 	EXPECT_EQ(record.deferred, c);
 	gGpu.completed[11] = 5;
 	tgm_coherency_record_gone(&record);
 	EXPECT_TRUE(gone(p[0]));
+}
+
+// Reproduces the Maps widget systemLarge/systemMedium deferred path: MapKit.SnapshotService drops its
+// GPU import (leaving the block-linear entry deferred on its record), then GeneralMapsWidget reads
+// [surface baseAddress] without IOSurfaceLock. The fault untiles in place, cleans CPU caches, and undefers.
+TEST_F(Deferred, UnlockedFaultOnDeferred382x176SurfaceUntilesInPlaceAndCleansCache)
+{
+	constexpr uint32_t kMapW = 382, kMapH = 176, kMapBpp = 4, kMapRow = 1536, kMapPages = 68;
+	std::vector<uint64_t> p;
+	for (uint32_t i = 0; i < kMapPages; i++)
+		p.push_back(0xd2000000ULL + i * 0x1000ULL);
+	const tgm_relayout_pages rp = {p.data(), kMapPages};
+	std::vector<uint8_t> want(kMapPages * 4096, 0);
+	for (uint32_t y = 0; y < kMapH; y++)
+		for (uint32_t x = 0; x < kMapW; x++)
+			want[size_t(y) * kMapRow + size_t(x) * kMapBpp] = uint8_t((x + y * 13) & 0xff);
+	scatter(rp, want);
+
+	tgm_record record{nullptr, 310};
+	int covered = 0;
+	tgm_coh *c = tgm_coherency_add(p[0], 310, p.data(), kMapPages, 1, 1, &covered);
+	ASSERT_EQ(tgm_coherency_pin(c, reinterpret_cast<switch_gpu_backing *>(1), &gSurface,
+				    releaseSurface),
+		  0);
+	tgm_coherency_import(c, &record, 0);
+	tgm_coh_hold_asker(c);
+	ASSERT_EQ(tgm_coherency_layout_fitted(c, kMapW, kMapH, kMapBpp, kMapRow,
+					      TGM_LAYOUT_ASK_WRITES),
+		  1);
+	tgm_coh_put_asker(c);
+	tgm_coherency_put(c);
+	ASSERT_EQ(record.deferred, c);
+
+	for (uint64_t pa : p)
+		gCpuLines.insert(pa);
+	void *reader = reinterpret_cast<void *>(0x4000);
+	gMoves.clear();
+	ASSERT_EQ(tegra_gm20b_tiled_cpu_fault(reader, 0x800000 + 3 * 4096, p[3], 1), 1);
+	EXPECT_EQ(movesOf(TGM_RELAYOUT_UNTILE_IN_PLACE), 1);
+	EXPECT_EQ(record.deferred, nullptr);
+	EXPECT_FALSE(tegra_gm20b_surface_tiled(p[0]));
+	EXPECT_TRUE(gone(p[0]));
+	for (uint64_t pa : p)
+		EXPECT_EQ(gCpuLines.count(pa), 0u);
+	const std::vector<uint8_t> got = gather(rp);
+	for (uint32_t y = 0; y < kMapH; y++)
+		ASSERT_EQ(memcmp(&got[size_t(y) * kMapRow], &want[size_t(y) * kMapRow],
+				 kMapW * kMapBpp),
+			  0)
+			<< "row " << y;
 }
 }  // namespace

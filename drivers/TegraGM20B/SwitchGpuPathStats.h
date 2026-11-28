@@ -11,7 +11,7 @@ extern "C" {
 #endif
 
 enum switch_gpu_path {
-	SWITCH_GPU_PATH_INTERNAL_JOB, /* JobVisibility: a job that ended without its L2 flush */
+	SWITCH_GPU_PATH_INTERNAL_JOB, /* JobVisibility: a job that ended without its L2 flush, neither External nor volatile */
 	SWITCH_GPU_PATH_EXTERNAL_JOB, /* JobVisibility: a job the runtime or the kernel made External */
 	SWITCH_GPU_PATH_UNLOCKED_WRITE, /* External because it wrote an IOSurface over its creator's memory */
 	SWITCH_GPU_PATH_VOLATILE_BIND, /* JobVisibility: a control BO bound GPU-volatile */
@@ -39,6 +39,7 @@ enum switch_gpu_path {
 	SWITCH_GPU_PATH_WRITER_PROMISE, /* method 34: a writer promise made (SwitchGpuWriterPromise.h) */
 	SWITCH_GPU_PATH_PROMISE_WAIT, /* a job, present or VIC/NVDEC job that waits on the GPU for another's writer promise */
 	SWITCH_GPU_PATH_PROMISE_CPU_RELEASE, /* a pending writer promise's word written by the CPU (cancel, kill, close, give-up) */
+	SWITCH_GPU_PATH_VOLATILE_JOB, /* JobVisibility: a job whose writes are GPU-volatile (no L2 flush, not External) */
 	SWITCH_GPU_PATH_COUNT
 };
 
@@ -50,7 +51,8 @@ enum {
 	SWITCH_GPU_PATH_DIRECT_GIVEN_UP
 };
 
-#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+#if ((defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)) && \
+	defined(SWITCH_STATS_GPU) && SWITCH_STATS_GPU
 #define SWITCH_GPU_PATH_STATS 1
 void switch_gpu_path_taken(enum switch_gpu_path path, uint32_t count);
 void switch_gpu_path_job(uint32_t visibility, int unlocked_writes, int lean_copy,
@@ -73,9 +75,6 @@ void switch_gpu_compositor_import(uint64_t ns);
 void switch_gpu_compositor_alloc(uint64_t ns, int cold);
 void switch_gpu_compositor_scanned(uint64_t passes, uint64_t draws, uint64_t interlocks,
 				   uint64_t twins);
-/* SwitchGpuCompositorSync.h: a profiled compositor submission's sync pushes (the interrupt pass), and the window's line */
-void switch_gpu_compositor_sync(uint32_t syncs, uint64_t ns, int behind);
-void switch_gpu_compositor_sync_window(char *line, size_t size);
 #else
 #define SWITCH_GPU_PATH_STATS 0
 
@@ -129,14 +128,29 @@ static inline void switch_gpu_compositor_scanned(uint64_t passes, uint64_t draws
 	(void)twins;
 }
 
-static inline void switch_gpu_compositor_sync(uint32_t syncs, uint64_t ns, int behind)
+static inline void switch_gpu_path_window(char *line, size_t size)
 {
-	(void)syncs;
-	(void)ns;
-	(void)behind;
+	if (size)
+		line[0] = 0;
 }
 
-static inline void switch_gpu_path_window(char *line, size_t size)
+static inline void switch_gpu_path_register(void)
+{
+}
+
+static inline void switch_gpu_path_line(char *line, size_t size)
+{
+	if (size)
+		line[0] = 0;
+}
+
+static inline void switch_gpu_span_note(const char *owner, const char *text)
+{
+	(void)owner;
+	(void)text;
+}
+
+static inline void switch_gpu_span_line(char *line, size_t size)
 {
 	if (size)
 		line[0] = 0;

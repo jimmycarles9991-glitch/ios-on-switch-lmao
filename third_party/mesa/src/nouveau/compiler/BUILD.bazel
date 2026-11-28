@@ -385,6 +385,19 @@ py_test(
     main = "run_host_test.py",
 )
 
+# ios-on-switch-lmao: NAK's SM50/SM75 interlock backoff and Op::SrcBar lowering (nak/sm50/interlock_tests.rs)
+py_test(
+    name = "sm50_interlock_test",
+    size = "small",
+    srcs = ["run_host_test.py"],
+    args = [
+        "$(rootpath :nak_sm53_half_test_bin)",
+        "sm50::interlock_tests",
+    ],
+    data = [":nak_sm53_half_test_bin"],
+    main = "run_host_test.py",
+)
+
 # ios-on-switch-lmao: NAK's SM50 code layout (nak/sm50/layout_tests.rs): blocks run on across scheduling groups and no
 # NOP follows a branch, from the same binary
 py_test(
@@ -394,6 +407,20 @@ py_test(
     args = [
         "$(rootpath :nak_sm53_half_test_bin)",
         "sm50::layout_tests",
+    ],
+    data = [":nak_sm53_half_test_bin"],
+    main = "run_host_test.py",
+)
+
+# ios-on-switch-lmao: a half output to an 8- or 10-bit unorm target widened on the half ALU (nak/opt_unorm_outputs.rs),
+# from the same binary
+py_test(
+    name = "unorm_outputs_test",
+    size = "small",
+    srcs = ["run_host_test.py"],
+    args = [
+        "$(rootpath :nak_sm53_half_test_bin)",
+        "opt_unorm_outputs::tests",
     ],
     data = [":nak_sm53_half_test_bin"],
     main = "run_host_test.py",
@@ -640,7 +667,6 @@ mesa_cc_library(
     ),
     sources = [
         "nak_interlock_test.c",
-        "nak_nir_lower_fs_interlock.c",
     ],
 )
 
@@ -649,6 +675,13 @@ fs_depth_test_binary(
     testonly = True,
     archives = [
         ":nak_interlock_test_objects",
+        ":nak",
+        ":nak_rs",
+        "//third_party/mesa/src/compiler/rust:compiler_bindings",
+        "//third_party/mesa/src/compiler/rust:compiler_c_helpers",
+        "//third_party/mesa/src/nouveau/headers:nvidia_headers_c",
+        "//third_party/mesa/src/nouveau/nil:nil",
+        "//third_party/mesa/src/nouveau/nil:libnil_format_table",
         "//third_party/mesa/src/compiler/nir:nir",
         "//third_party/mesa/src/compiler:compiler",
         "//third_party/mesa/src/util:mesa_util",
@@ -674,5 +707,59 @@ py_test(
         "interlock",
     ],
     data = [":nak_interlock_test_host"],
+    main = "run_host_test.py",
+)
+
+mesa_cc_library(
+    name = "nak_fp_inval_test_objects",
+    testonly = True,
+    c_args = mesa_args(
+        "c",
+        include_dirs = [
+            "include",
+            "gen:include",
+            "src",
+            "gen:src",
+            "src/compiler",
+            "gen:src/compiler",
+            "src/compiler/nir",
+            "gen:src/compiler/nir",
+            "gen:src/util",
+            "gen:src/util/format",
+        ],
+    ),
+    sources = ["nak_fp_inval_test.c"],
+)
+
+fs_depth_test_binary(
+    name = "nak_fp_inval_test_bin",
+    testonly = True,
+    archives = [
+        ":nak_fp_inval_test_objects",
+        "//third_party/mesa/src/compiler/nir:nir",
+        "//third_party/mesa/src/compiler:compiler",
+        "//third_party/mesa/src/util:mesa_util",
+        "//third_party/mesa/src/util:mesa_util_simd",
+        "//third_party/mesa/src/c11/impl:mesa_util_c11",
+        "//third_party/mesa/src/util/blake3",
+    ],
+)
+
+mesa_files(
+    name = "nak_fp_inval_test_host",
+    testonly = True,
+    srcs = [":nak_fp_inval_test_bin"],
+    platform = "macos",
+)
+
+py_test(
+    name = "fp_inval_test",
+    size = "small",
+    srcs = ["run_host_test.py"],
+    args = [
+        "$(rootpath :nak_fp_inval_test_host)",
+        "fp-inval",
+    ],
+    data = [":nak_fp_inval_test_host"],
     main = "run_host_test.py",
 )

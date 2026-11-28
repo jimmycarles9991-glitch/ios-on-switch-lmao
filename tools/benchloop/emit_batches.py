@@ -10,7 +10,16 @@ import sys
 from tools.benchloop import doctor, protocol
 from tools.benchloop.generators import GENERATORS
 
-COMMANDS = ('twod', 'resolveties', 'store16', 'compressed', 'cstall', 'iterated', 'interlock_section')
+COMMANDS = (
+    'twod',
+    'resolveties',
+    'store16',
+    'compressed',
+    'cstall',
+    'iterated',
+    'interlock_section',
+    'interlock_clock',
+)
 
 
 def batches() -> list[dict]:

@@ -17,7 +17,7 @@
 
 @interface SwitchMetalBinaryArchive : SwitchMetalObject <MTLBinaryArchive> {
 @public
-    gm20b::Mutex _lock;
+    gm20b::UnfairMutex _lock;
     gm20b::ArchiveKeys _keys;
     const gm20b::PackArchive *_declared;  // the pack's list for the Apple file it was opened from
 }
@@ -65,13 +65,13 @@ static SwitchMetalFunction *own(id<MTLFunction> function)
 
 - (bool)holds:(uint64_t)key
 {
-    std::lock_guard<gm20b::Mutex> l(_lock);
+    std::lock_guard<gm20b::UnfairMutex> l(_lock);
     return _keys.holds(key) || (_declared && gRM->raw->pack().declares(*_declared, key));
 }
 
 - (BOOL)add:(uint64_t)key
 {
-    std::lock_guard<gm20b::Mutex> l(_lock);
+    std::lock_guard<gm20b::UnfairMutex> l(_lock);
     _keys.add(key);
     return YES;
 }
@@ -127,7 +127,7 @@ static SwitchMetalFunction *own(id<MTLFunction> function)
 {
     std::vector<uint8_t> bytes;
     {
-        std::lock_guard<gm20b::Mutex> l(_lock);
+        std::lock_guard<gm20b::UnfairMutex> l(_lock);
         bytes = _keys.serialized();
     }
     NSData *data = [NSData dataWithBytes:bytes.data() length:bytes.size()];

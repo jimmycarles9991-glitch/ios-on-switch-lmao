@@ -146,6 +146,8 @@ filegroup(
         "owned.h",
         "program_pages.h",
         "program_stores.h",
+        "program_facts.h",
+        "viewports.h",
         "sample_shading.h",
         "pack.cpp",
         "pack.h",
@@ -314,17 +316,18 @@ ios_binary(
         "device_stamps.cpp",
         "draw.cpp",
         "draw_prepare.cpp",
-        "draw_probes.cpp",
         "draw_times.cpp",
         "draw_inputs.cpp",
         "draw_shader_tests.cpp",
         "memory.cpp",
+        "scrubs.cpp",
         "parked_arena.cpp",
         "parked_chunks.cpp",
         "pass_backings.cpp",
         "pass_begin.cpp",
         "pass_clears.cpp",
         "pass_end.cpp",
+        "nvn_probes.cpp",
         "pipelines.cpp",
         "samplers.cpp",
         "sparse_window.cpp",
@@ -365,6 +368,7 @@ ios_binary(
         "//drivers/TegraGM20B:TegraGM20BHost.h",
         "//drivers/TegraGM20B:TegraGM20BJobABI.h",
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraGM20B:TegraGM20BSchedABI.h",
         "//drivers/TegraGM20B:TegraGM20BSchedPolicy.h",
         "//drivers/TegraGM20B:TegraGM20BVolatileABI.h",
         "//drivers/TegraGM20B:TegraGM20BZcullABI.h",
@@ -419,7 +423,9 @@ py_library(
         ],
     ),
     data = [
+        "pack/ca/context-21H461.json",
         "pack/ca/context-24B119.json",
+        "pack/ca/demand-21H461.json",
         "pack/ca/demand-24B119.json",
         "pack/ca/qc-21H461.json",
         "pack/ca/qc-24B119.json",
@@ -427,6 +433,7 @@ py_library(
         "pack/rb/rb-24B119.json",
         "srgb_table.h",  # pack/layouts.py reads it at import
         "own_states.h",  # pack/packfile.py reads it at import
+        "owned.h",  # pack/mkpack.py and pack/segments.py read it
     ],
 )
 
@@ -480,6 +487,7 @@ py_test(
     data = [
         "precompile/ca-names/24B119.txt",
         "precompile/corpus.log",
+        "pack/ca/qc-21H461.json",
         "pack/ca/qc-24B119.json",
     ],
     main = "pack/ca/tiers_test.py",
@@ -507,7 +515,7 @@ py_test(
     data = [
         "pack/ca/qc-21H461.json",
         "pack/ca/qc-24B119.json",
-        "stage-tegra-gm20b-metal.py",
+        "//tools/gpu:stage_format.py",
     ],
     main = "pack/ca/deepcolour_test.py",
     deps = [":pack"],

@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A sampler descriptor the device has no form of is nil, as Metal answers a sampler it cannot make (it was an m2v twin

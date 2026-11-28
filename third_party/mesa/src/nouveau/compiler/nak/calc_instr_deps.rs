@@ -1029,6 +1029,10 @@ fn calc_delays(f: &mut Function, sm: &ShaderModelInfo) -> u64 {
 
     let max_instr_delay = sm.max_instr_delay();
     f.map_instrs(|mut instr, _| {
+        if matches!(instr.op, Op::SrcBar(_)) {
+            instr.op = Op::Nop(OpNop { label: None });
+        }
+
         if instr.deps.delay > max_instr_delay {
             let mut delay = instr.deps.delay - max_instr_delay;
             instr.deps.set_delay(max_instr_delay);
@@ -1040,9 +1044,6 @@ fn calc_delays(f: &mut Function, sm: &ShaderModelInfo) -> u64 {
                 instrs.push(nop);
             }
             instrs
-        } else if matches!(instr.op, Op::SrcBar(_)) {
-            instr.op = Op::Nop(OpNop { label: None });
-            [instr].into()
         } else if sm.exec_latency(&instr.op) > 1 && !sm.is_maxwell() {
             // It's unclear exactly why but the blob inserts a Nop with a delay
             // of 2 after every instruction which has an exec latency.  Perhaps
@@ -1078,6 +1079,9 @@ impl Shader<'_> {
                         instr.deps.set_yield(true);
                     } else if instr.is_branch() {
                         instr.deps.add_wt_bar_mask(0x3f);
+                    } else if matches!(&instr.op, Op::SrcBar(_)) {
+                        instr.deps.add_wt_bar_mask(wt);
+                        instr.op = Op::Nop(OpNop { label: None });
                     } else {
                         instr.deps.add_wt_bar_mask(wt);
                         if instr.dsts().len() > 0 {

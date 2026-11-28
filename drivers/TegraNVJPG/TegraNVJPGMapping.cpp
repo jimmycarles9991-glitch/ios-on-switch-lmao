@@ -75,7 +75,7 @@ SwitchNVJPGMapping *switch_nvjpg_mapping(const SwitchNVJPGBacking &target, uint3
         mapping->next = target.head->next;
         target.head->next = mapping;
     }
-#if TEGRA_NVJPG_STATS
+#if TEGRA_NVJPG_PROBES
     if (pid)
         switch_nvjpg_count_mapping(pid);
 #else

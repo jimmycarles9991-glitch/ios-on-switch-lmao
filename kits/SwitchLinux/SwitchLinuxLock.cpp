@@ -71,13 +71,16 @@ extern "C" void switch_linux_write_contended(switch_linux_rwlock *lock)
 {
     Patience patience;
     for (;;) {
-        uint32_t idle = 0;
-        if (__atomic_compare_exchange_n(&lock->state, &idle, SWITCH_LINUX_RW_WRITER, true, __ATOMIC_ACQUIRE,
-                                        __ATOMIC_RELAXED))
-            return;
+        uint32_t seen = __atomic_load_n(&lock->state, __ATOMIC_RELAXED);
+        if (!seen) {
+            if (__atomic_compare_exchange_n(&lock->state, &seen, SWITCH_LINUX_RW_WRITER, true, __ATOMIC_ACQUIRE,
+                                            __ATOMIC_RELAXED))
+                return;
+            continue;
+        }
         if (!patience.wait()) {
             panic("SwitchLinux: rwlock %p busy for over %llu ms (state %#x)", lock,
-                  SWITCH_LINUX_SPIN_TIMEOUT_NS / 1000000ULL, idle);
+                  SWITCH_LINUX_SPIN_TIMEOUT_NS / 1000000ULL, seen);
         }
     }
 }

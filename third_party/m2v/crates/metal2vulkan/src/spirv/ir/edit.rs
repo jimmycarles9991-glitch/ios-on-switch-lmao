@@ -110,7 +110,7 @@ impl TypedModule {
             i += n;
         }
         // Loads become copies in place (indices do not move); stores are removed afterwards,
-        // highest index first within each block.
+        // one pass per block over sorted indices.
         let mut removals = Vec::with_capacity(promotions.len());
         for (p, value) in promotions.iter().zip(&stored) {
             for at in &p.loads {
@@ -122,15 +122,18 @@ impl TypedModule {
             removals.push(p.store);
         }
         removals.sort_unstable();
-        for at in removals.iter().rev() {
+        for group in removals.chunk_by(|a, b| a.block == b.block) {
+            let Some(first) = group.first() else {
+                continue;
+            };
             let block = self
                 .blocks
-                .get_mut(at.block.index())
-                .ok_or(BuildError::Dangling(Dangling::Block(at.block)))?;
-            if at.index >= block.insts.len() {
-                return Err(BuildError::Dangling(Dangling::Block(at.block)));
+                .get_mut(first.block.index())
+                .ok_or(BuildError::Dangling(Dangling::Block(first.block)))?;
+            if group.last().is_some_and(|at| at.index >= block.insts.len()) {
+                return Err(BuildError::Dangling(Dangling::Block(first.block)));
             }
-            block.insts.remove(at.index);
+            remove_at(&mut block.insts, group.iter().map(|at| at.index));
         }
         for (fi, f) in self.functions.iter_mut().enumerate() {
             let func = FuncId::new(u32::try_from(fi).unwrap_or(u32::MAX));
@@ -297,15 +300,20 @@ impl TypedModule {
                 a: *to,
             };
         }
-        // Highest index first within each block, so the lower indices do not move.
-        for at in insts.iter().rev() {
-            if let Some(b) = self.blocks.get_mut(at.block.index()) {
-                b.insts.remove(at.index);
+        for group in insts.chunk_by(|a, b| a.block == b.block) {
+            if let Some(b) = group
+                .first()
+                .and_then(|at| self.blocks.get_mut(at.block.index()))
+            {
+                remove_at(&mut b.insts, group.iter().map(|at| at.index));
             }
         }
-        for (block, index) in phis.iter().rev() {
-            if let Some(b) = self.blocks.get_mut(block.index()) {
-                b.phis.remove(*index);
+        for group in phis.chunk_by(|a, b| a.0 == b.0) {
+            if let Some(b) = group
+                .first()
+                .and_then(|(block, _)| self.blocks.get_mut(block.index()))
+            {
+                remove_at(&mut b.phis, group.iter().map(|(_, index)| *index));
             }
         }
         if !consts.is_empty() {
@@ -655,9 +663,313 @@ impl TypedModule {
     }
 }
 
+fn remove_at<T>(v: &mut Vec<T>, gone: impl IntoIterator<Item = usize>) {
+    let mut gone = gone.into_iter().peekable();
+    let mut index = 0usize;
+    v.retain(|_| {
+        let drop = gone.next_if_eq(&index).is_some();
+        while gone.next_if_eq(&index).is_some() {}
+        index = index.wrapping_add(1);
+        !drop
+    });
+}
+
 fn operand(op: crate::spv::Op) -> BuildError {
     BuildError::Operand {
         op,
         rule: OperandRule::Category(0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::profile::DeviceProfile;
+    use crate::pipeline::sym::{ResourceKind, ResourceSlot, Stage};
+    use crate::spirv::builder::constructs::ArmEnd;
+    use crate::spirv::builder::{FunctionBuilder, ModuleBuilder};
+    use crate::spirv::ids::GlobalId;
+    use crate::spirv::interp::{run, Buffer, Config, Resources};
+    use crate::spirv::ir::{
+        natural_layout, BinOp, ExecMode, ExecModel, LayoutRule, MemAccess, StorageClass,
+    };
+    use crate::spirv::testing::{assert_valid, committed_profiles};
+
+    fn slot(index: u32) -> ResourceSlot {
+        ResourceSlot {
+            stage: Stage::Kernel,
+            kind: ResourceKind::Buffer,
+            index,
+        }
+    }
+
+    fn buffer(b: &mut ModuleBuilder) -> BResult<GlobalId> {
+        let u32_ = b.ty(Type::Int {
+            width: 32,
+            signed: false,
+        })?;
+        let rta = b.ty(Type::RuntimeArray {
+            elem: u32_,
+            stride: Some(4),
+        })?;
+        let layout = natural_layout(b.types(), LayoutRule::Std430, true, &[rta])?;
+        let block = b.ty(Type::Struct {
+            members: [rta].into(),
+            layout: Some(layout),
+        })?;
+        b.resource(slot(0), StorageClass::StorageBuffer, block)
+    }
+
+    fn k(fb: &mut FunctionBuilder<'_>, v: u32) -> BResult<Value> {
+        let c = fb.u32_const(v)?;
+        fb.module().const_value(c)
+    }
+
+    fn word(fb: &mut FunctionBuilder<'_>, buf: GlobalId, i: u32) -> BResult<Value> {
+        let base = fb.module().global_value(buf)?;
+        let (zero, i) = (k(fb, 0)?, k(fb, i)?);
+        fb.access_chain(base, &[zero, i])
+    }
+
+    fn moltenvk() -> DeviceProfile {
+        committed_profiles()
+            .expect("profiles")
+            .into_iter()
+            .find(|(s, _)| s == "moltenvk-m3")
+            .expect("moltenvk-m3")
+            .1
+    }
+
+    fn run_words(m: &TypedModule, input: &[u32]) -> Vec<u32> {
+        let res = Resources {
+            buffers: vec![Buffer {
+                slot: Some(slot(0)),
+                address: None,
+                bytes: input.iter().flat_map(|w| w.to_le_bytes()).collect(),
+            }],
+            push: Vec::new(),
+            spec: Default::default(),
+        };
+        let out = run(m, &Config::default(), res).expect("run");
+        out.buffers[0]
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    #[test]
+    fn remove_at_drops_sorted_indices_in_order() {
+        let mut v = vec![10, 20, 30, 40, 50, 60];
+        remove_at(&mut v, []);
+        assert_eq!(v, [10, 20, 30, 40, 50, 60]);
+
+        remove_at(&mut v, [0, 2, 2, 5]);
+        assert_eq!(v, [20, 40, 50]);
+
+        remove_at(&mut v, [0, 1, 2]);
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn apply_promotions_removes_multiple_stores_across_blocks_in_order() {
+        let mut b = ModuleBuilder::new();
+        let buf = buffer(&mut b).expect("buffer");
+        let void = b.ty(Type::Void).expect("void");
+        let u32_ = b
+            .ty(Type::Int {
+                width: 32,
+                signed: false,
+            })
+            .expect("u32");
+        let mut fb = b.function(void).expect("func");
+        let body = |fb: &mut FunctionBuilder<'_>| -> BResult<()> {
+            let p0 = word(fb, buf, 0)?;
+            let w0 = fb.load(p0, MemAccess::default())?;
+            let v0 = fb.local_var(u32_, None)?;
+            let v1 = fb.local_var(u32_, None)?;
+            let v2 = fb.local_var(u32_, None)?;
+            let vp0 = fb.var_ptr(v0)?;
+            let vp1 = fb.var_ptr(v1)?;
+            let vp2 = fb.var_ptr(v2)?;
+            let c1 = k(fb, 1)?;
+            let c2 = k(fb, 2)?;
+            let c3 = k(fb, 3)?;
+            let a = fb.binary(BinOp::IAdd, w0, c1)?;
+            fb.store(vp0, a, MemAccess::default())?;
+            let b_val = fb.binary(BinOp::IMul, a, c2)?;
+            fb.store(vp1, b_val, MemAccess::default())?;
+            let zero = k(fb, 0)?;
+            let cond = fb.binary(BinOp::INotEqual, w0, zero)?;
+            let picked = fb.if_(
+                &mut (),
+                cond,
+                Box::new(move |fb, _| {
+                    let s = fb.binary(BinOp::IAdd, b_val, c3)?;
+                    fb.store(vp2, s, MemAccess::default())?;
+                    let l2 = fb.load(vp2, MemAccess::default())?;
+                    Ok(ArmEnd::FallThrough(vec![l2]))
+                }),
+                Some(Box::new(move |fb, _| {
+                    let l0 = fb.load(vp0, MemAccess::default())?;
+                    Ok(ArmEnd::FallThrough(vec![l0]))
+                })),
+            )?;
+            let l0 = fb.load(vp0, MemAccess::default())?;
+            let l1 = fb.load(vp1, MemAccess::default())?;
+            let sum = fb.binary(BinOp::IAdd, l0, l1)?;
+            let total = fb.binary(BinOp::IAdd, sum, picked.0[0])?;
+            let p1 = word(fb, buf, 1)?;
+            fb.store(p1, total, MemAccess::default())?;
+            fb.ret(None)
+        };
+        body(&mut fb).expect("body");
+        let func = fb.finish().expect("finish");
+        b.entry(
+            ExecModel::GLCompute,
+            func,
+            vec![ExecMode::LocalSize { x: 1, y: 1, z: 1 }],
+        )
+        .expect("entry");
+        let orig = b.finalize().expect("finalize");
+        let mut m = orig.clone();
+
+        let promotions: Vec<Promotion> = m
+            .functions()[func.index()]
+            .vars
+            .iter()
+            .map(|&var| {
+                let ptr = m.vars[var.index()].value;
+                let mut store = None;
+                let mut loads = Vec::new();
+                for &bid in &m.functions()[func.index()].blocks {
+                    for (index, node) in m.blocks()[bid.index()].insts.iter().enumerate() {
+                        match node.inst {
+                            Inst::Store { ptr: p, .. } if p == ptr => {
+                                store = Some(InstAt { block: bid, index });
+                            }
+                            Inst::Load { ptr: p, .. } if p == ptr => {
+                                loads.push(InstAt { block: bid, index });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Promotion {
+                    func,
+                    var,
+                    store: store.expect("store"),
+                    loads,
+                }
+            })
+            .collect();
+        assert_eq!(promotions.len(), 3);
+        let before_insts: usize = m.blocks().iter().map(|blk| blk.insts.len()).sum();
+        m.apply_promotions(&promotions).expect("promote");
+        let after_insts: usize = m.blocks().iter().map(|blk| blk.insts.len()).sum();
+        assert_eq!(after_insts, before_insts - 3);
+        assert!(m.functions()[func.index()].vars.is_empty());
+        let copies = m
+            .blocks()
+            .iter()
+            .flat_map(|blk| &blk.insts)
+            .filter(|n| matches!(n.inst, Inst::Unary { op: UnOp::CopyObject, .. }))
+            .count();
+        assert_eq!(copies, 4);
+        assert_valid(m.clone(), &moltenvk());
+        for x in [0u32, 5, 19] {
+            assert_eq!(run_words(&m, &[x, 0]), run_words(&orig, &[x, 0]));
+        }
+    }
+
+    #[test]
+    fn remove_dead_drops_multiple_insts_and_phis_per_block_preserving_order() {
+        let mut b = ModuleBuilder::new();
+        let buf = buffer(&mut b).expect("buffer");
+        let void = b.ty(Type::Void).expect("void");
+        let mut fb = b.function(void).expect("func");
+        let mut dead_values = Vec::new();
+        let mut live_phis = Vec::new();
+        let mut body = |fb: &mut FunctionBuilder<'_>| -> BResult<()> {
+            let p0 = word(fb, buf, 0)?;
+            let w0 = fb.load(p0, MemAccess::default())?;
+            let c1 = k(fb, 1)?;
+            let c2 = k(fb, 2)?;
+            let c3 = k(fb, 3)?;
+            let c4 = k(fb, 4)?;
+            dead_values.push(fb.binary(BinOp::IAdd, w0, c1)?);
+            let live_a = fb.binary(BinOp::IAdd, w0, c2)?;
+            dead_values.push(fb.binary(BinOp::IMul, w0, c3)?);
+            dead_values.push(fb.binary(BinOp::BitwiseXor, w0, c4)?);
+            let zero = k(fb, 0)?;
+            let cond = fb.binary(BinOp::INotEqual, w0, zero)?;
+            let merged = fb.if_(
+                &mut (),
+                cond,
+                Box::new(move |fb, _| {
+                    let t0 = fb.binary(BinOp::IAdd, live_a, c1)?;
+                    let t1 = fb.binary(BinOp::IAdd, live_a, c2)?;
+                    let t2 = fb.binary(BinOp::IAdd, live_a, c3)?;
+                    let t3 = fb.binary(BinOp::IAdd, live_a, c4)?;
+                    Ok(ArmEnd::FallThrough(vec![t0, t1, t2, t3]))
+                }),
+                Some(Box::new(move |fb, _| {
+                    let e0 = fb.binary(BinOp::IMul, live_a, c1)?;
+                    let e1 = fb.binary(BinOp::IMul, live_a, c2)?;
+                    let e2 = fb.binary(BinOp::IMul, live_a, c3)?;
+                    let e3 = fb.binary(BinOp::IMul, live_a, c4)?;
+                    Ok(ArmEnd::FallThrough(vec![e0, e1, e2, e3]))
+                })),
+            )?;
+            live_phis.push(merged.0[1]);
+            live_phis.push(merged.0[3]);
+            dead_values.push(fb.binary(BinOp::ISub, merged.0[1], c1)?);
+            let out = fb.binary(BinOp::IAdd, merged.0[1], merged.0[3])?;
+            dead_values.push(fb.binary(BinOp::IMul, out, c2)?);
+            let p1 = word(fb, buf, 1)?;
+            fb.store(p1, out, MemAccess::default())?;
+            fb.ret(None)
+        };
+        body(&mut fb).expect("body");
+        let func = fb.finish().expect("finish");
+        b.entry(
+            ExecModel::GLCompute,
+            func,
+            vec![ExecMode::LocalSize { x: 1, y: 1, z: 1 }],
+        )
+        .expect("entry");
+        let orig = b.finalize().expect("finalize");
+        let mut m = orig.clone();
+
+        let mut dead_insts = Vec::new();
+        let mut merge_block = None;
+        for (bi, blk) in m.blocks().iter().enumerate() {
+            let block = BlockId::new(bi as u32);
+            if blk.phis.len() == 4 {
+                merge_block = Some(block);
+            }
+            for (index, node) in blk.insts.iter().enumerate() {
+                if node.result.is_some_and(|r| dead_values.contains(&r)) {
+                    dead_insts.push(InstAt { block, index });
+                }
+            }
+        }
+        let merge_block = merge_block.expect("merge block");
+        assert_eq!(dead_insts.len(), 5);
+        let dead_phis = [(merge_block, 0), (merge_block, 2)];
+        let before_insts: usize = m.blocks().iter().map(|blk| blk.insts.len()).sum();
+        m.remove_dead(&dead_insts, &dead_phis, &[], &[], &[], &[])
+            .expect("remove_dead");
+        let after_insts: usize = m.blocks().iter().map(|blk| blk.insts.len()).sum();
+        assert_eq!(after_insts, before_insts - 5);
+        let kept_phis: Vec<Value> = m.blocks()[merge_block.index()]
+            .phis
+            .iter()
+            .map(|p| p.result)
+            .collect();
+        assert_eq!(kept_phis, live_phis);
+        assert_valid(m.clone(), &moltenvk());
+        for x in [0u32, 7, 13] {
+            assert_eq!(run_words(&m, &[x, 0]), run_words(&orig, &[x, 0]));
+        }
     }
 }

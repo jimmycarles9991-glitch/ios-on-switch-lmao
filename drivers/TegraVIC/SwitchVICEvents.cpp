@@ -5,8 +5,7 @@
 #include "SwitchVICEvents.h"
 
 struct SwitchVICEvents {
-    IOLock *lock;
-    uint32_t refs, waiting, tokenCount;
+    uint32_t refs, state, tokenCount;
     switch_gpu_event *events[2];
     switch_gpu_event_watch *watches[2];
     switch_gpu_event_signal *signals[2];
@@ -17,10 +16,35 @@ struct SwitchVICEvents {
     void (*ready)(void *, int);
     void *context;
     int status;
-    bool arming, notified, notifying, prepared, committed;
+    bool prepared, committed;
 };
 
 namespace {
+constexpr uint32_t kArming = 1u << 0;
+constexpr uint32_t kWait0 = 1u << 1;
+constexpr uint32_t kWait1 = 1u << 2;
+constexpr uint32_t kWaitMask = kWait0 | kWait1;
+constexpr uint32_t kNotified = 1u << 3;
+constexpr uint32_t kNotifying = 1u << 4;
+constexpr uint32_t kDetachWaiting = 1u << 5;
+
+IOLock *gDetachLock;
+
+// Shared sleep lock used only when detach() races with an in-progress ready() callback.
+IOLock *detachLock()
+{
+    IOLock *lock = __atomic_load_n(&gDetachLock, __ATOMIC_ACQUIRE);
+    if (lock)
+        return lock;
+    IOLock *fresh = IOLockAlloc();
+    IOLock *expected = nullptr;
+    if (!__atomic_compare_exchange_n(&gDetachLock, &expected, fresh, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        IOLockFree(fresh);
+        return expected;
+    }
+    return fresh;
+}
+
 void drop(SwitchVICEvents *work)
 {
     if (__atomic_sub_fetch(&work->refs, 1u, __ATOMIC_ACQ_REL))
@@ -34,39 +58,43 @@ void drop(SwitchVICEvents *work)
         switch_gpu_event_waits_release(&work->batch);
     else
         switch_gpu_event_waits_abort(&work->batch);
-    IOLockFree(work->lock);
     IODelete(work, SwitchVICEvents, 1);
 }
 
-void notice(SwitchVICEvents *work)
+void transitionAndNotify(SwitchVICEvents *work, uint32_t clearBit)
 {
-    IOLockLock(work->lock);
-    const bool notify = !work->arming && !work->waiting && !work->notified;
-    work->notified |= notify;
-    work->notifying |= notify;
-    const int status = work->status;
-    IOLockUnlock(work->lock);
-    if (notify) {
-        work->ready(work->context, status);
-        IOLockLock(work->lock);
-        work->notifying = false;
-        IOLockWakeup(work->lock, &work->notifying, false);
-        IOLockUnlock(work->lock);
+    uint32_t cur = __atomic_load_n(&work->state, __ATOMIC_ACQUIRE);
+    bool notify = false;
+    for (;;) {
+        uint32_t next = cur & ~clearBit;
+        notify = (next & (kArming | kWaitMask | kNotified)) == 0;
+        if (notify)
+            next |= kNotified | kNotifying;
+        if (__atomic_compare_exchange_n(&work->state, &cur, next, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            break;
+    }
+    if (!notify)
+        return;
+    const int status = __atomic_load_n(&work->status, __ATOMIC_ACQUIRE);
+    work->ready(work->context, status);
+    const uint32_t prev = __atomic_fetch_and(&work->state, ~kNotifying, __ATOMIC_ACQ_REL);
+    if (prev & kDetachWaiting) {
+        IOLock *lock = detachLock();
+        IOLockLock(lock);
+        IOLockWakeup(lock, &work->state, false);
+        IOLockUnlock(lock);
     }
 }
 
 void observed(void *context, uint64_t index, int status)
 {
     auto *work = static_cast<SwitchVICEvents *>(context);
-    IOLockLock(work->lock);
-    work->waiting &= ~(1u << index);
     if (status)
-        work->status = status;
-    IOLockUnlock(work->lock);
-    notice(work);
+        __atomic_store_n(&work->status, status, __ATOMIC_RELEASE);
+    transitionAndNotify(work, kWait0 << index);
     drop(work);
 }
-}
+}  // namespace
 
 int switch_vic_events_create(void *task, const TegraVICRequest &request, void (*ready)(void *, int), void *context,
                              SwitchVICEvents **out)
@@ -80,11 +108,6 @@ int switch_vic_events_create(void *task, const TegraVICRequest &request, void (*
     if (!work)
         return -12;
     work->refs = 1;
-    work->lock = IOLockAlloc();
-    if (!work->lock) {
-        IODelete(work, SwitchVICEvents, 1);
-        return -12;
-    }
     work->ready = ready;
     work->context = context;
     work->values[0] = request.src_wait;
@@ -110,9 +133,7 @@ void switch_vic_events_arm(SwitchVICEvents *work)
 {
     if (!work)
         return;
-    IOLockLock(work->lock);
-    work->arming = true;
-    IOLockUnlock(work->lock);
+    __atomic_fetch_or(&work->state, kArming, __ATOMIC_ACQ_REL);
     for (uint32_t i = 0; i < 2; ++i) {
         if (!work->events[i])
             continue;
@@ -121,35 +142,40 @@ void switch_vic_events_arm(SwitchVICEvents *work)
         if (resolved == 2)
             switch_gpu_backing_token_release(&producer);
         if (resolved) {
-            if (resolved < 0) {
-                IOLockLock(work->lock);
-                work->status = resolved;
-                IOLockUnlock(work->lock);
-            }
+            if (resolved < 0)
+                __atomic_store_n(&work->status, resolved, __ATOMIC_RELEASE);
             continue;
         }
-        IOLockLock(work->lock);
-        work->waiting |= 1u << i;
-        IOLockUnlock(work->lock);
+        __atomic_fetch_or(&work->state, kWait0 << i, __ATOMIC_ACQ_REL);
         __atomic_add_fetch(&work->refs, 1u, __ATOMIC_RELAXED);
         const int error =
             switch_gpu_event_observe(work->events[i], work->values[i], i, observed, work, &work->watches[i]);
         if (error)
             observed(work, i, error);
     }
-    IOLockLock(work->lock);
-    work->arming = false;
-    IOLockUnlock(work->lock);
-    notice(work);
+    transitionAndNotify(work, kArming);
 }
 
 static void detach(SwitchVICEvents *work)
 {
-    IOLockLock(work->lock);
-    work->notified = true;
-    while (work->notifying)
-        IOLockSleep(work->lock, &work->notifying, THREAD_UNINT);
-    IOLockUnlock(work->lock);
+    uint32_t cur = __atomic_load_n(&work->state, __ATOMIC_ACQUIRE);
+    for (;;) {
+        if ((cur & kNotified) && !(cur & kNotifying))
+            break;
+        uint32_t next = cur | kNotified;
+        if (cur & kNotifying)
+            next |= kDetachWaiting;
+        if (__atomic_compare_exchange_n(&work->state, &cur, next, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            if (cur & kNotifying) {
+                IOLock *lock = detachLock();
+                IOLockLock(lock);
+                while (__atomic_load_n(&work->state, __ATOMIC_ACQUIRE) & kNotifying)
+                    IOLockSleep(lock, &work->state, THREAD_UNINT);
+                IOLockUnlock(lock);
+            }
+            break;
+        }
+    }
     for (auto &watch : work->watches)
         switch_gpu_event_observe_cancel(&watch);
 }
@@ -262,11 +288,6 @@ int switch_vic_events_stage(SwitchVICEvents *source, SwitchVICEvents **out)
     if (!work)
         return -12;
     work->refs = 1;
-    work->lock = IOLockAlloc();
-    if (!work->lock) {
-        IODelete(work, SwitchVICEvents, 1);
-        return -12;
-    }
     const int error = switch_gpu_event_waits_prepare(source->uses, source->tokenCount, &work->batch);
     if (error) {
         drop(work);

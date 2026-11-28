@@ -558,7 +558,7 @@ cpu_signal_cancel(cpu_data_t *target_proc)
 	}
 }
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
 /*
  * Switch: the IPIs each CPU took, by what they asked for, for kprof's ipis line. Only the receiving CPU writes its
  * row, with interrupts masked. Kinds: AST check, cross-call, timer, a wake with nothing pending (an idle CPU's SIGPnop),
@@ -623,7 +623,7 @@ cpu_signal_handler_internal(boolean_t disable_signal)
 	 * handlers.
 	 */
 	cpu_signal = os_atomic_or(&cpu_data_ptr->cpu_signal, 0, acquire);
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
 	switch_ipi_count_received((unsigned int)cpu_data_ptr->cpu_number, cpu_signal);
 #endif
 

@@ -8,6 +8,9 @@
 using IOReturn = int32_t;
 using task_t = void *;
 constexpr IOReturn kIOReturnSuccess = 0;
+#ifndef PAGE_SIZE
+constexpr uint64_t PAGE_SIZE = 16384;
+#endif
 using IOLock = std::mutex;
 
 inline IOLock *IOLockAlloc()
@@ -52,6 +55,12 @@ public:
 class IOMemoryDescriptor : public OSObject {
 public:
     uint64_t address = 0x100000;
+    uint64_t length = 0;
+
+    uint64_t getLength() const
+    {
+        return length;
+    }
 };
 
 struct switch_gpu_backing {

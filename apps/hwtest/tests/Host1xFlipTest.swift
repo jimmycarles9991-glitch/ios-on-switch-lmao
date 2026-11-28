@@ -1,5 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
+import HWTestKit
+import HWTestShared
 
 /// Window A flipped by host1x instead of the CPU (drivers/NativeMobileDisplay/SwitchHost1xFlipDisplay.h, debug
 /// kernels): each flip is a class 0x70 stream on the display's own host1x channel, held behind its producer's syncpoint
@@ -8,21 +11,39 @@ import HWTestCore
 /// flip's producer: the channel is torn down before that stream can write, the display's work loop writes the flip,
 /// and the restarted channel carries the rest. d_host1x_flips is kern.switch_flips_host1x across the run. Runs after
 /// the other display tests: it holds the swaps for about a second.
+///
+/// Two probes (host1x items 2 and 4) are judged on the run alone; what they measure is reported. window_syncpt: each
+/// stream also raises window A's REG_WR_SAFE and LINE_FLIPPED syncpoints, counted before/at/later/never against the
+/// frame end that saw the flip latched. vblank: each stream waits two vblanks on syncpoint 9, and the vblank count at
+/// the latch less the one waited for is counted below/0/1/2+.
 struct Host1xFlipTest: HWTest {
     let id: String
     let name: String
     let flips: Int
     let forced: Bool
+    var modes: Int32 = 0
     let subsystem = Subsystem.display
     var timeout: TimeInterval { 30 }
 
     static let sysctl = "debug.switch_display_host1x_flip"
     static let counter = "kern.switch_flips_host1x"
     static let forcedFailure: Int32 = 1 << 16
+    static let windowIncrements: Int32 = 1 << 17
+    static let vblankWait: Int32 = 1 << 18
 
     static let trial = Host1xFlipTest(
         id: "display.x1.host1x_flip", name: "Window A flipped by host1x behind its producer's syncpoint", flips: 60,
         forced: false
+    )
+    static let windowSyncpoints = Host1xFlipTest(
+        id: "display.x1.host1x_flip_window_syncpt",
+        name: "Window A's REG_WR_SAFE and LINE_FLIPPED syncpoints against each host1x flip's latch", flips: 60,
+        forced: false, modes: windowIncrements
+    )
+    static let vblank = Host1xFlipTest(
+        id: "display.x1.host1x_flip_vblank",
+        name: "Host1x flips held for vblank syncpoint 9: the vblank each latches in",
+        flips: 30, forced: false, modes: vblankWait
     )
     static let teardown = Host1xFlipTest(
         id: "display.x1.host1x_flip_teardown",
@@ -36,7 +57,7 @@ struct Host1xFlipTest: HWTest {
             metrics.set("sysctl", KernelSysctl.code(error))
             return .skip(KernelSysctl.unreadable(Self.counter, error), metrics)
         }
-        var request = Int32(flips) | (forced ? Self.forcedFailure : 0)
+        var request = Int32(flips) | (forced ? Self.forcedFailure : 0) | modes
         let started = sysctlbyname(Self.sysctl, nil, nil, &request, MemoryLayout<Int32>.size) == 0 ? 0 : errno
         var line = ""
         for _ in 0 ..< 150 {
@@ -52,7 +73,8 @@ struct Host1xFlipTest: HWTest {
         metrics.set("start", started == 0 ? "ok" : KernelSysctl.code(started))
         for key in [
             "host1x_flip", "reason", "flips", "host1x", "gate", "latched", "not_as_written", "unwritten", "teardowns",
-            "after_teardown", "written", "display_delta", "underflows", "waited", "stop",
+            "after_teardown", "written", "display_delta", "underflows", "waited", "stop", "modes", "reg_wr_safe",
+            "line_flipped", "vblank",
         ] {
             if let field = fields[key] { metrics.set(key, field) }
         }
@@ -77,6 +99,23 @@ struct Host1xFlipTest: HWTest {
             ("no stream left unwritten (unwritten = 0)", value("unwritten") == 0),
             ("no underflow (underflows = 0)", value("underflows") == 0),
         ]
+        let counts = { (key: String) in (fields[key] ?? "").split(separator: "/").map { Int($0) ?? -1 } }
+        if modes & Self.windowIncrements != 0 {
+            checks.append(
+                (
+                    "both window conditions are counted once per host1x flip (reg_wr_safe and line_flipped sum to host1x)",
+                    counts("reg_wr_safe").reduce(0, +) == host1x && counts("line_flipped").reduce(0, +) == host1x
+                )
+            )
+        }
+        if modes & Self.vblankWait != 0 {
+            checks.append(
+                (
+                    "every host1x flip's latch is counted against its vblank (vblank sums to host1x)",
+                    counts("vblank").reduce(0, +) == host1x
+                )
+            )
+        }
         if forced {
             checks += [
                 (

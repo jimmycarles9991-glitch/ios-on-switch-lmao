@@ -13,8 +13,8 @@ label_flag(
     build_setting_default = "//:boot",
 )
 
-# The Metal bundle deploy stages: //gpu:bundle's manifest over the bundle, the seed and the raw pack, or a directory
-# laid out as //gpu:base.
+# The Metal bundle deploy stages: //gpu:bundle's manifest over the bundle, the seed and the raw pack, or a stage tree
+# like //gpu:base or //gpu:stage_tree.
 label_flag(
     name = "gpu_bundle",
     build_setting_default = "//gpu:bundle",
@@ -54,7 +54,17 @@ py_binary(
         "--kcdata=$(rlocationpath @xnu_base//:tools/lldbmacros/kcdata.py)",
         # The checkout's harvest.py (run there, so it merges into the checkout's corpus.log).
         "--harvest-script=$(rootpath //drivers/TegraGM20BMetal:precompile/harvest.py)",
-    ] + _OPT_IN,
+    ] + _OPT_IN + select({
+        "//ipsw:ios27": [
+            "--pretranslated-trust=$(rlocationpath //ipsw:pretranslated_os_trust)",
+            "--pretranslated-updates=$(rlocationpath //install:pretranslated_updates)",
+            "--pretranslated-pins=$(rlocationpath //install:pretranslated_pins)",
+            "--system-image=$(rlocationpath //install:translated_system_cryptex)",
+            "--system-trusted=$(rlocationpath :system_cryptex_trusted/system_cryptex.trustcache)",
+            "--system-trusted=$(rlocationpath :system_cryptex_trusted/a64x-cache-pretranslated.bin)",
+        ],
+        "//conditions:default": [],
+    }),
     data = [
         ":boot_package",
         ":gpu_bundle",
@@ -63,11 +73,21 @@ py_binary(
         "//drivers/TegraGM20BMetal:stage-tegra-gm20b-metal.py",
         "//drivers/TegraGM20BMetal:precompile/harvest.py",
         "@xnu_base//:tools/lldbmacros/kcdata.py",
-    ],
+    ] + select({
+        "//ipsw:ios27": [
+            ":system_cryptex_trusted/a64x-cache-pretranslated.bin",
+            ":system_cryptex_trusted/system_cryptex.trustcache",
+            "//install:pretranslated_pins",
+            "//install:pretranslated_updates",
+            "//install:translated_system_cryptex",
+            "//ipsw:pretranslated_os_trust",
+        ],
+        "//conditions:default": [],
+    }),
     main = "//tools/deploy:deploy.py",
     tags = ["manual"],
     deps = [
-        "//tools/deploy:lib",
+        "//tools/deploy",
         "@rules_python//python/runfiles",
     ],
 )
@@ -142,7 +162,7 @@ py_binary(
     main = "//tools/deploy:system_update.py",
     tags = ["manual"],
     deps = [
-        "//tools/deploy:system_update",
+        "//tools/deploy",
         "@rules_python//python/runfiles",
     ],
 )

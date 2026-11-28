@@ -1,6 +1,6 @@
-// Both kernels' boot setup runs kernel/switch/boot/icon_cache.c once, before launchd, on the record the deploy writes
-// (tools/deploy/icon_cache.py), with one error line in release; only xnu-12377 renames 24B119's salt folders aside
-// and sweeps them on System Boot Complete with zero timers.
+// Both kernels' boot setup runs kernel/switch/boot/icon_cache.c once, before launchd, on the record the GPU stager
+// writes (drivers/TegraGM20BMetal/stage-tegra-gm20b-metal.py), with one error line in release; only xnu-12377 renames
+// 24B119's salt folders aside and sweeps them on System Boot Complete with zero timers.
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -28,11 +28,12 @@ constexpr const char *kSetup = "native_switch_setup_state(proc_t p, user_addr_t 
 constexpr const char *kError = "printf(\"SwitchRawBoot: icon cache for GPU build %s NOT dropped: %d\\n\"";
 }  // namespace
 
-TEST(XnuIconCacheSource, TheKernelReadsTheRecordTheDeployWrites)
+TEST(XnuIconCacheSource, TheKernelReadsTheRecordTheStagerWrites)
 {
-    const std::string record = Between(SourceText("../../tools/deploy/icon_cache.py"), "\nRECORD = '", "'");
+    const std::string stager = SourceText("../../drivers/TegraGM20BMetal/stage-tegra-gm20b-metal.py");
+    const std::string record = Between(stager, "\nICON_CACHE_RECORD = '", "'");
     ASSERT_FALSE(record.empty());
-    EXPECT_THAT(SourceText(kCore), HasSubstr("switch_icon_cache_request[] = \"Switch/" + record + "\";"));
+    EXPECT_THAT(SourceText(kCore), HasSubstr("switch_icon_cache_request[] = \"" + record + "\";"));
 }
 
 TEST(XnuIconCacheSource, EachTreeRunsItOnceBeforeLaunchdWithOneReleaseLine)

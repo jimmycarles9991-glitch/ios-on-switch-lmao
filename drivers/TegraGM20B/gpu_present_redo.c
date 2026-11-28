@@ -40,7 +40,7 @@ void tgm_present_redo_work(void *unused)
 	if (!__atomic_load_n(&tgm_present.redoing, __ATOMIC_ACQUIRE))
 		return;
 	mutex_lock(&tgm_present.lock);
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 	again = (u32)tgm_copy_reset_again_take();
 #endif
 	push = &chan->chan.push;
@@ -60,7 +60,7 @@ void tgm_present_redo_work(void *unused)
 		return;
 	}
 	tgm_present_push_copy(push);
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 	if (again) {
 		PUSH_MTHD(push, NV906F, NON_STALL_INTERRUPT, 0);
 		for (u32 i = 1; i < TegraGM20BCopyResetCopies; i++)
@@ -73,7 +73,7 @@ void tgm_present_redo_work(void *unused)
 	tgm_present.recheck = TGM_PRESENT_NS;
 	nvxnu_work_schedule_after(tgm_present.deadline_work, TGM_PRESENT_NS);
 	chan_fence_volatile(chan);
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 	tgm_copy_reset_redone();
 #endif
 	mutex_unlock(&tgm_present.lock);

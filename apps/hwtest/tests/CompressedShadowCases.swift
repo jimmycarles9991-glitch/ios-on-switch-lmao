@@ -29,13 +29,12 @@ enum CompressedShadowCases {
 
     static let quad = SIMD4<Float>(1, 0, 0, 1)
 
-    /// The boot ZBC table's opaque black, and a colour the format holds exactly
+    /// The boot ZBC table's opaque black, and a colour the format holds exactly that the cases already put in the
+    /// table: compressed_targets has no colour entry to spare
     static func clears(_ f: Format) -> [MTLClearColor] {
         [
             MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1),
-            f.bytes == 4
-                ? MTLClearColor(red: 51.0 / 255, green: 102.0 / 255, blue: 204.0 / 255, alpha: 1)
-                : MTLClearColor(red: 0.25, green: 0.5, blue: 0.75, alpha: 1),
+            f.bytes == 4 ? CompressedTargetsTest.exactCodes : CompressedTargetsTest.halfClear,
         ]
     }
 

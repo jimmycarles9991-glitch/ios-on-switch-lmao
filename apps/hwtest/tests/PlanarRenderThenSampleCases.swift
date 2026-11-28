@@ -1,5 +1,6 @@
 import CoreVideo
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
 import IOSurface
@@ -132,6 +133,7 @@ enum PlanarRenderThenSampleCases {
         var off = 0
         var fresh: [Int] = []
         var spotOff: Int?
+        var first = "-"
 
         var unseen: Bool { fresh.contains(0) }
     }
@@ -263,6 +265,16 @@ enum PlanarRenderThenSampleCases {
         let before = try await sampled(gpu, states, f, untouched, split: false)[0]
         var result = ArmResult()
         result.off = zip(one, split).map { channelsOff($0, $1) }.reduce(0, +)
+        for (sample, pair) in zip(one, split).enumerated() where result.first == "-" {
+            if let i = stride(from: 0, to: pair.0.count, by: 16)
+                .first(where: { pair.0[$0 ..< $0 + 16] != pair.1[$0 ..< $0 + 16] }) {
+                let a = pair.0.loaded(as: SIMD4<Float>.self, at: i / 16), b = pair.1.loaded(
+                    as: SIMD4<Float>.self,
+                    at: i / 16
+                )
+                result.first = "s\(sample) (\(i / 16 % side),\(i / 16 / side)) one \(a) split \(b)"
+            }
+        }
         result.fresh = arm.fresh.map { channelsOff(one[$0], before) }
         if arm.spotted && !f.spots.isEmpty { result.spotOff = spotOff(one[0], f.spots) }
         return result

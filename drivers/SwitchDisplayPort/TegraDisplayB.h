@@ -47,14 +47,19 @@ private:
         uint32_t expectStart;
     };
 
+    struct FrameMemory {
+        switch_display_memory_window windows[switch_external::kWindows];
+        uint64_t peakBytes;
+    };
+
     volatile uint8_t *base = nullptr;
     switch_display_memory_head memory = {};  // the timing, and the windows' plan as last asked of the EMC
-    Frame latched = {}, requestedFrame = {};
+    FrameMemory latchedMemory = {}, requestedMemory = {};
     WindowCache windows[switch_external::kWindows] = {};
     int csc[switch_external::kWindows][2] = {{-1, -1}, {-1, -1}, {-1, -1}};
     uint32_t requested = 0;
-    bool frameInterruptEnabled = false, emcRefusedLogged = false;
-    void reserve(const switch_display_memory_head &next);
+    bool frameInterruptEnabled = false, emcRefusedLogged = false, memoryPending = false;
+    void reserveMemory(const FrameMemory &next);
     void releaseBandwidth();
     void forgetWindows();
     void select(unsigned window);

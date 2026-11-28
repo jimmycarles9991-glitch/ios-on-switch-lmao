@@ -1,4 +1,5 @@
 import Foundation
+import HWTestGPU
 import Metal
 
 /// A chain format of the mip HW Tests and how its texels' bits hold their channels

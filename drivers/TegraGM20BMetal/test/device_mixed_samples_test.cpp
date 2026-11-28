@@ -46,7 +46,7 @@ TEST_F(DevicePassForms, AOneSampleColourBesideAFourSampleDepthRasterisesAtTheDep
     }
     EXPECT_TRUE(on);
     EXPECT_EQ(lastOf(ms, NVB197_SET_TIR), uint32_t(NVB197_SET_TIR_MODE_DISABLED));
-    EXPECT_EQ(lastOf(ms, NVB197_SET_ANTI_ALIAS_RASTER), uint32_t(NVB197_SET_ANTI_ALIAS_RASTER_SAMPLES_MODE_1X1));
+    EXPECT_EQ(lastOf(ms, NVB197_SET_ANTI_ALIAS_RASTER), uint32_t(NVB197_SET_ANTI_ALIAS_RASTER_SAMPLES_MODE_2X2));
     EXPECT_EQ(lastOf(ms, NVB197_SET_ANTI_ALIAS), uint32_t(NVB197_SET_ANTI_ALIAS_SAMPLES_MODE_1X1));
 }
 
@@ -90,40 +90,6 @@ TEST_F(DevicePassForms, AMixedPassClearsItsColourBeforeTheModeWithTheZetaDeselec
         EXPECT_TRUE(colourCleared);
         EXPECT_TRUE(on);
     }
-}
-
-// Each state's colour rule in a mixed pass (mixed_samples.h): a state of one sample merges the pixel's raster samples, a
-// state of four keeps sample 0's; the depth is written at every covered sample under both (SET_SAMPLE_MASK all)
-TEST_F(DevicePassForms, AMixedPassSetsEachStatesCoverageRule)
-{
-    gm20b::Pipeline *one = state(0xb1, "samples=1 c0=70 ds=252/0 "), *four = state(0xb4, "samples=4 c0=70 ds=252/0 ");
-    ASSERT_NE(one, nullptr);
-    ASSERT_NE(four, nullptr);
-    gm20b::Texture colour, zeta;
-    ASSERT_TRUE(dev.createTexture(32, 32, kRGBA8, colour, false, true));
-    ASSERT_TRUE(dev.createOwnedZeta(32, 32, kDepth32Float, 4, true, zeta));
-    gm20b::PassDesc p;
-    p.color[0] = kept(colour, gm20b::ColorAttachment::Clear);
-    p.count = 1;
-    p.depthStencil = {&zeta, true, false, 1.0f, 0};
-    std::string why;
-    const auto ms = pass(
-        p,
-        [&](gm20b::RenderEncoder &e, const char **refused) {
-            e.setPipeline(four);
-            if (!e.draw(kTriangleStrip, 0, 4, 1, 0, refused))
-                return false;
-            e.setPipeline(one);
-            return e.draw(kTriangleStrip, 0, 4, 1, 0, refused);
-        },
-        &why);
-    ASSERT_FALSE(ms.empty()) << why;
-    const std::vector<uint32_t> controls = values(ms, NVB197_SET_TIR_CONTROL);
-    ASSERT_GE(controls.size(), 3u);
-    EXPECT_EQ(controls[controls.size() - 2], gm20b::tirControl(4));
-    EXPECT_EQ(controls.back(), gm20b::tirControl(1));
-    for (const uint32_t m : values(ms, NVB197_SET_SAMPLE_MASK_X0_Y0))
-        EXPECT_EQ(m, 0xffffu);
 }
 
 constexpr uint32_t kSetActiveZcullRegion = 0x1590;  // 0: the pass's region; 0x3f: none (zcull.h)
@@ -192,11 +158,11 @@ TEST_F(DevicePassForms, AMixedPassEndsInEachProbeRowsOrder)
         return 1u | uint32_t(end) << 8 | raster << 12;
     };
     const std::vector<std::pair<uint32_t, Tail>> rows = {
-        {row(gm20b::TirEnd::Mode), {{kTir, 0}, {kRaster, 0}}},
+        {row(gm20b::TirEnd::Mode), {{kTir, 0}}},
         {row(gm20b::TirEnd::RasterFirst), {{kRaster, 0}, {kTir, 0}}},
-        {row(gm20b::TirEnd::ZetaOff), {{kZt, 0}, {kTir, 0}, {kRaster, 0}}},
+        {row(gm20b::TirEnd::ZetaOff), {{kZt, 0}, {kTir, 0}}},
         {row(gm20b::TirEnd::ModeOnly), {{kTir, 0}}},
-        {row(gm20b::TirEnd::RasterDisabled), {{kEnable, 0}, {kTir, 0}, {kRaster, 0}, {kEnable, 1}}},
+        {row(gm20b::TirEnd::RasterDisabled), {{kEnable, 0}, {kTir, 0}, {kEnable, 1}}},
         {row(gm20b::TirEnd::Value, 6), {{kTir, 0}, {kRaster, 6}, {kZt, 0}, {kRaster, 0}}},
     };
     for (const auto &[probe, want] : rows) {

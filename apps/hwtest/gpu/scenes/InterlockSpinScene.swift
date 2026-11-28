@@ -1,7 +1,12 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
+/// Full-screen layers of one blend at 1, 4 and 16 layers, each arm's texels exact: the ROP's (plain), a fetching
+/// state's inside the pixel interlock (interlock: fetch rung 4 forced), whose overlapped layers may cost no more than
+/// lone ones, and the same state on the route the driver picks (default): rule fetch.twin (twin_rule.h) takes the
+/// barrier twin for every layer's two-triangle quad over this 1280x720 pass, so none is interlocked.
 struct InterlockSpinScene: GPUScene {
     let id = "gpu.gm20b.interlock_spin"
     let name = "Interlock ticket waits: exact overlapping blends and GPU time"
@@ -9,7 +14,11 @@ struct InterlockSpinScene: GPUScene {
     static let width = 1280, height = 720
     static let layers = [1, 4, 16]
     static let runs = 5
-    static let arms = [("plain", "solid_fragment"), ("default", "fetch_blend_fragment")]
+    static let arms = [
+        (name: "plain", fragment: "solid_fragment", interlocked: false),
+        (name: "interlock", fragment: "fetch_blend_fragment", interlocked: true),
+        (name: "default", fragment: "fetch_blend_fragment", interlocked: false),
+    ]
 
     func run(_ gpu: GPU) async throws -> SceneResult {
         var result = SceneResult()
@@ -27,14 +36,14 @@ struct InterlockSpinScene: GPUScene {
         var values = [FetchBlendState.clear]
         for tag in tags { values.append(FetchBlendState.step(values.last!, UInt32(tag.z))) }
         let pipelines = try Self.arms.map {
-            try FetchBlendPipeline.make(gpu, fragment: $0.1, format: format.metal)
+            try FetchBlendPipeline.make(gpu, fragment: $0.fragment, format: format.metal)
         }
         var lone: [Double] = []
         for layers in Self.layers {
             let texel = FetchBlendState.bytes([values[layers]], format)
             let expected = Array(repeating: texel, count: Self.width * Self.height).flatMap { $0 }
             for (arm, pipeline) in zip(Self.arms, pipelines) {
-                let label = "\(arm.0)_\(layers)"
+                let label = "\(arm.name)_\(layers)"
                 let draw = { (commands: MTLCommandBuffer) in
                     let pass = MTLRenderPassDescriptor()
                     pass.colorAttachments[0].texture = target
@@ -50,7 +59,7 @@ struct InterlockSpinScene: GPUScene {
                     FetchBlendPipeline.bind(encoder, points: points, instances: instances, scale: scale)
                     for layer in 0 ..< layers {
                         encoder.setVertexBuffer(instances, offset: layer * MemoryLayout<SIMD4<Float>>.stride, index: 1)
-                        if arm.0 == "plain" {
+                        if arm.name == "plain" {
                             let delta = values[layer + 1] &- values[layer]
                             var color = SIMD4<Float>((0 ..< 4).map { Float(delta[$0]) / scale })
                             encoder.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
@@ -59,7 +68,15 @@ struct InterlockSpinScene: GPUScene {
                     }
                     encoder.endEncoding()
                 }
-                let warm = try await gpu.run(tolerateError: true, draw)
+                let runArm: (Bool) async throws -> GPU.Timing = { tolerate in
+                    if arm.interlocked, let forced = try await GM20BFacade.forcingFetchRung(4, on: gpu.device, {
+                        try await gpu.run(tolerateError: tolerate, draw)
+                    }) {
+                        return forced
+                    }
+                    return try await gpu.run(tolerateError: tolerate, draw)
+                }
+                let warm = try await runArm(true)
                 guard !warm.path.hasPrefix("error:"), kind != "gm20b" || warm.path == "gm20b" else {
                     result.expect(false, "\(label): \(warm.path)")
                     continue
@@ -67,7 +84,7 @@ struct InterlockSpinScene: GPUScene {
                 let before = GM20BFacade.counters(of: gpu.device)
                 var times: [Double] = []
                 for _ in 0 ..< Self.runs {
-                    let timing = try await gpu.run(draw)
+                    let timing = try await runArm(false)
                     result.expect(kind != "gm20b" || timing.path == "gm20b", "\(label): \(timing.path)")
                     result.expect(timing.gpuTimed && timing.gpuClock != "host", "\(label): no GPU timestamp")
                     times.append(timing.gpuTimed && timing.gpuClock != "host" ? timing.gpuMilliseconds : 0)
@@ -79,17 +96,26 @@ struct InterlockSpinScene: GPUScene {
                 }
                 result.metrics.set("gpu_ms_" + label, Stats.percentile(times, 0.5), digits: 3)
                 if kind == "gm20b" {
-                    let after = GM20BFacade.counters(of: gpu.device)
-                    let interlocked = (after["interlock_draws"] ?? 0) - (before["interlock_draws"] ?? 0)
+                    let moved = GM20BFacade.counters(of: gpu.device).merging(before) { $0 - $1 }
+                    let interlocked = moved["interlock_draws"] ?? 0
                     result.metrics.set("ilk_" + label, interlocked)
-                    result.expect(
-                        arm.0 == "plain" ? interlocked == 0 : interlocked >= layers * Self.runs,
-                        "\(label): unexpected interlock count \(interlocked)"
-                    )
+                    if arm.name == "default" {
+                        result.metrics.set("twin_" + label, moved["fetch_twin_rule"] ?? 0)
+                        for (why, held) in FetchRoute.ruleChecks(
+                            label, twins: layers * Self.runs, interlocked: 0, moved: moved
+                        ) {
+                            result.expect(held, why)
+                        }
+                    } else {
+                        result.expect(
+                            arm.interlocked ? interlocked >= layers * Self.runs : interlocked == 0,
+                            "\(label): unexpected interlock count \(interlocked)"
+                        )
+                    }
                 }
-                if arm.0 == "default", layers == 1 {
+                if arm.interlocked, layers == 1 {
                     lone = times
-                } else if arm.0 == "default" {
+                } else if arm.interlocked {
                     result.expect(
                         InterlockSpinBound.accepts(times, layers: layers, lone: lone),
                         "\(label): an overlapped interlocked layer cost more than a lone one, or lacked a timestamp"

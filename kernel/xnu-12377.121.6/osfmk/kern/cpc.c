@@ -40,6 +40,9 @@
 
 #if __arm64__
 #include <arm/machine_routines.h>
+#if defined(SWITCH_ARMV8_PMUV3)
+#include <switch/pmuv3.h>
+#endif // defined(SWITCH_ARMV8_PMUV3)
 #endif // __arm64__
 
 LCK_GRP_DECLARE(cpc_lock_grp, "cpc");
@@ -58,6 +61,11 @@ static void
 _cpc_counter_set_deadline(cpc_counter_t counter, cpc_slot_t slot,
     uint64_t deadline)
 {
+#if defined(SWITCH_ARMV8_PMUV3)
+	uint64_t gap = deadline > counter->cctr_sum ? (deadline - counter->cctr_sum) : 1;
+	uint64_t value = switch_pmuv3_reload_value((unsigned int)slot, gap);
+	cpc_counter_set_value(counter, slot, value);
+#else // defined(SWITCH_ARMV8_PMUV3)
 	assert3u(deadline, >, counter->cctr_sum);
 	uint64_t gap = deadline - counter->cctr_sum;
 	uint64_t value = 0;
@@ -68,6 +76,7 @@ _cpc_counter_set_deadline(cpc_counter_t counter, cpc_slot_t slot,
 			slot, deadline, counter->cctr_sum, gap, CPC_CPMU_MAX_COUNT);
 	}
 	cpc_counter_set_value(counter, slot, value);
+#endif // !defined(SWITCH_ARMV8_PMUV3)
 }
 
 void
@@ -117,7 +126,11 @@ cpc_deadlines_sync(
 		}
 	}
 	if (earliest_deadline == UINT64_MAX) {
+#if defined(SWITCH_ARMV8_PMUV3)
+		cpc_counter_set_value(counter, slot, switch_pmuv3_idle_reload((unsigned int)slot));
+#else // defined(SWITCH_ARMV8_PMUV3)
 		cpc_counter_set_value(counter, slot, 0);
+#endif // !defined(SWITCH_ARMV8_PMUV3)
 	} else {
 		_cpc_counter_set_deadline(counter, slot, earliest_deadline);
 	}
@@ -692,11 +705,21 @@ cpc_hw_configure(cpc_hw_t hw,
 		cpc_set_t set = os_atomic_load(_cpc_active_sets + hw, acquire);
 		const union cpc_machine_regs *regs = set ? &set->cst_regs :
 		    &cpc_machine_regs_init;
+#if defined(SWITCH_ARMV8_PMUV3)
+		cpc_counters_resync(hw, unit_id, counters);
+		if (check_for_cyclics) {
+			_cpc_cyclic_sync_calls(hw, unit_id, deadlines);
+		}
+		for (unsigned int i = 0; i < CPMU_PMC_COUNT; i++) {
+			cpc_deadlines_sync(&deadlines[i], &counters[i], (cpc_slot_t)i);
+		}
+#else // defined(SWITCH_ARMV8_PMUV3)
 		if (check_for_cyclics) {
 			_cpc_cyclic_sync_calls(hw, unit_id, deadlines);
 		}
 		// Resynchronize the counters and ensure any cyclic deadlines are applied.
 		cpc_counters_resync(hw, unit_id, counters);
+#endif // !defined(SWITCH_ARMV8_PMUV3)
 
 		if (set) {
 			cpc_machine_regs_apply(regs, hw);

@@ -2,6 +2,7 @@ import CoreVideo
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import IOSurface
 import Metal
 
@@ -36,10 +37,12 @@ struct CoherenceRewriteTest: HWTest {
             colour.destinationAlphaBlendFactor = .one
         }
         var tallies: [CoherenceTally] = []
+        var cpu = [UInt8](repeating: 0, count: Self.side * Self.side * 4)
+        var readBuf = [UInt8](repeating: 0, count: Self.side * Self.side * 4)
         for arm in try Self.arms(gpu) {
             var tally = CoherenceTally(arm: arm.name)
             for round in 0 ..< Self.rounds {
-                try await Self.round(gpu, blend, arm, round, &tally)
+                try await Self.round(gpu, blend, arm, round, cpu: &cpu, readBuf: &readBuf, &tally)
             }
             tallies.append(tally)
         }
@@ -62,7 +65,7 @@ struct CoherenceRewriteTest: HWTest {
     /// draw adds `added` to what it finds
     static func round(
         _ gpu: GPU, _ blend: MTLRenderPipelineState, _ arm: CoherenceArm, _ round: Int,
-        _ tally: inout CoherenceTally
+        cpu: inout [UInt8], readBuf: inout [UInt8], _ tally: inout CoherenceTally
     ) async throws {
         let texture = try arm.texture()
         let written = gpuBytes(round)
@@ -77,8 +80,9 @@ struct CoherenceRewriteTest: HWTest {
             )
             commands.makeRenderCommandEncoder(descriptor: pass)!.endEncoding()
         }
-        tally.cpuStale += CoherenceTally.differing(try arm.read(texture), from: written)
-        let cpu = cpuBytes(round)
+        try arm.read(texture, &readBuf)
+        tally.cpuStale += CoherenceTally.differing(readBuf, from: written)
+        fillCpuBytes(&cpu, round: round)
         try arm.write(texture, cpu)
         try await gpu.run { commands in
             let pass = MTLRenderPassDescriptor()
@@ -90,10 +94,13 @@ struct CoherenceRewriteTest: HWTest {
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             encoder.endEncoding()
         }
-        let older = written.enumerated().map { min(255, Int($0.element) + Int(added[$0.offset])) }
-        tally.count(
-            try arm.read(texture), cpu: cpu, added: { _, c in Int(added[c]) }, older: [{ _, c in older[c] }]
+        try arm.read(texture, &readBuf)
+        let addedVec = SIMD4<Int>(Int(added[0]), Int(added[1]), Int(added[2]), Int(added[3]))
+        let olderVec = SIMD4<Int>(
+            min(255, Int(written[0]) + Int(added[0])), min(255, Int(written[1]) + Int(added[1])),
+            min(255, Int(written[2]) + Int(added[2])), min(255, Int(written[3]) + Int(added[3]))
         )
+        tally.countConstantOlder(readBuf, cpu: cpu, added: addedVec, older: olderVec)
     }
 
     /// Far from every CPU byte (0...199), so a read of the GPU's own clear never passes for the CPU's
@@ -101,8 +108,18 @@ struct CoherenceRewriteTest: HWTest {
         [UInt8(210 + round % 40), UInt8(215 + round % 35), UInt8(220 + round % 30), 240]
     }
 
+    static func fillCpuBytes(_ bytes: inout [UInt8], round: Int) {
+        let roundMix = round &* 13
+        bytes.withUnsafeMutableBufferPointer { buf in
+            let p = buf.baseAddress!
+            for i in 0 ..< buf.count { p[i] = UInt8((i &* 7 &+ roundMix) % 200) }
+        }
+    }
+
     static func cpuBytes(_ round: Int) -> [UInt8] {
-        (0 ..< (side * side * 4)).map { UInt8(($0 &* 7 &+ round &* 13) % 200) }
+        var bytes = [UInt8](repeating: 0, count: side * side * 4)
+        fillCpuBytes(&bytes, round: round)
+        return bytes
     }
 
     static func arms(_ gpu: GPU) throws -> [CoherenceArm] {
@@ -120,10 +137,8 @@ struct CoherenceRewriteTest: HWTest {
             write: { texture, bytes in
                 texture.replace(region: region, mipmapLevel: 0, withBytes: bytes, bytesPerRow: rowBytes)
             },
-            read: { texture in
-                var out = [UInt8](repeating: 0, count: side * side * 4)
+            read: { texture, out in
                 texture.getBytes(&out, bytesPerRow: rowBytes, from: region, mipmapLevel: 0)
-                return out
             }
         )
 
@@ -139,7 +154,11 @@ struct CoherenceRewriteTest: HWTest {
         let viaBuffer = CoherenceArm(
             name: "buffer", texture: { bufferTexture },
             write: { _, bytes in buffer.contents().copyMemory(from: bytes, byteCount: bytes.count) },
-            read: { _ in [UInt8](UnsafeRawBufferPointer(start: buffer.contents(), count: side * rowBytes)) }
+            read: { _, out in
+                out.withUnsafeMutableBytes {
+                    $0.baseAddress!.copyMemory(from: buffer.contents(), byteCount: side * rowBytes)
+                }
+            }
         )
 
         let properties: [IOSurfacePropertyKey: Any] = [
@@ -155,19 +174,23 @@ struct CoherenceRewriteTest: HWTest {
             write: { _, bytes in
                 surface.lock(options: [], seed: nil)
                 defer { surface.unlock(options: [], seed: nil) }
-                for y in 0 ..< side {
-                    (surface.baseAddress + y * surface.bytesPerRow).copyMemory(
-                        from: Array(bytes[(y * rowBytes) ..< ((y + 1) * rowBytes)]), byteCount: rowBytes
-                    )
+                let dst = surface.baseAddress, stride = surface.bytesPerRow
+                bytes.withUnsafeBytes { raw in
+                    let src = raw.baseAddress!
+                    for y in 0 ..< side {
+                        (dst + y * stride).copyMemory(from: src + y * rowBytes, byteCount: rowBytes)
+                    }
                 }
             },
-            read: { _ in
+            read: { _, out in
                 surface.lock(options: .readOnly, seed: nil)
                 defer { surface.unlock(options: .readOnly, seed: nil) }
-                return (0 ..< side).flatMap {
-                    [UInt8](
-                        UnsafeRawBufferPointer(start: surface.baseAddress + $0 * surface.bytesPerRow, count: rowBytes)
-                    )
+                let src = surface.baseAddress, stride = surface.bytesPerRow
+                out.withUnsafeMutableBytes { raw in
+                    let dst = raw.baseAddress!
+                    for y in 0 ..< side {
+                        (dst + y * rowBytes).copyMemory(from: src + y * stride, byteCount: rowBytes)
+                    }
                 }
             }
         )
@@ -179,5 +202,5 @@ struct CoherenceArm {
     let name: String
     let texture: () throws -> MTLTexture
     let write: (MTLTexture, [UInt8]) throws -> Void
-    let read: (MTLTexture) throws -> [UInt8]
+    let read: (MTLTexture, inout [UInt8]) throws -> Void
 }

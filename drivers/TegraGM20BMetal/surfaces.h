@@ -23,7 +23,10 @@ public:
         uses_.clear();
         ranges_.clear();
         extents_.clear();
-        index_.fill(0);
+        if (++gen_ == 0) {
+            index_.fill({});
+            gen_ = 1;
+        }
         overflow_ = false;
         last_ = 0;
     }
@@ -42,8 +45,8 @@ public:
         const uint32_t access =
             TegraGM20BSurfaceGpuAddress | (write ? TegraGM20BSurfaceWrite : TegraGM20BSurfaceRead) | metadata;
         const size_t slot = findSlot(va, TegraGM20BSurfaceGpuAddress);
-        if (index_[slot]) {
-            last_ = index_[slot] - 1;
+        if (index_[slot].gen == gen_) {
+            last_ = index_[slot].index;
             const uint64_t previous = extents_[last_];
             mergeAddress(last_, access, bytes);
             if (bytes <= previous)
@@ -83,8 +86,8 @@ public:
             return;
         }
         const size_t slot = findSlot(handle, kind);
-        if (index_[slot]) {
-            last_ = index_[slot] - 1;
+        if (index_[slot].gen == gen_) {
+            last_ = index_[slot].index;
             if ((access & TegraGM20BSurfaceWrite) && !(access & TegraGM20BSurfaceRange)) {
                 uses_[last_].access &= ~uint32_t(TegraGM20BSurfaceRange);
                 uses_[last_].reserved = 0;
@@ -99,7 +102,7 @@ public:
         last_ = uses_.size();
         uses_.push_back({handle, access, 0});
         extents_.push_back(0);
-        index_[slot] = uint16_t(last_ + 1);
+        index_[slot] = {gen_, uint16_t(last_)};
     }
 
     bool valid() const
@@ -167,8 +170,8 @@ private:
         hash *= 0xc4ceb9fe1a85ec53ULL;
         hash ^= hash >> 33;
         size_t slot = hash & (kIndexSize - 1);
-        while (index_[slot]) {
-            const auto &use = uses_[index_[slot] - 1];
+        while (index_[slot].gen == gen_) {
+            const auto &use = uses_[index_[slot].index];
             if (use.handle == handle && (use.access & TegraGM20BSurfaceGpuAddress) == kind)
                 break;
             slot = (slot + 1) & (kIndexSize - 1);
@@ -181,7 +184,13 @@ private:
         size_t index;
     };
 
-    std::array<uint16_t, kIndexSize> index_{};
+    struct Slot {
+        uint16_t gen = 0;
+        uint16_t index = 0;
+    };
+
+    std::array<Slot, kIndexSize> index_{};
+    uint16_t gen_ = 1;
     std::vector<uint64_t> extents_;
     std::vector<Range> ranges_;
     std::vector<TegraGM20BAbiSurfaceUse> uses_;

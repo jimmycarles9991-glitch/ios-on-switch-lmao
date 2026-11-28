@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import HWTestGPU
 import HWTestKit
+import HWTestShared
 
 /// The scanout read-back (tests/ScanoutReadback.swift's kernel method) held across presents: armed, it takes the next
 /// frame the display hands the GPU; once a query finds it done, the frame is read in place and the read-back is armed

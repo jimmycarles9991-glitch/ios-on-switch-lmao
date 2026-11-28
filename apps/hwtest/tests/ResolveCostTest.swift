@@ -1,5 +1,6 @@
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// What a 720x1280 multisampled resolve costs the GPU: a cleared pass stored with and without its resolve, the

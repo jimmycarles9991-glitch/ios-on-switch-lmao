@@ -247,14 +247,8 @@ SwitchMetalTexture *cpuOwner(SwitchMetalTexture *t)
                                bytesPerImage:image];
         return;
     }
-#if SWITCH_METAL_DIAGNOSTICS
-    _replaceCount.fetch_add(1, std::memory_order_relaxed);
-#endif
     if (gm20bDecodedReplace(self, r, level, slice, bytes, row, image))
         return;
-#if SWITCH_METAL_DIAGNOSTICS
-    _raw.probeWritten = true;
-#endif
     if (_surfaceWrites)
         noteSurfaceWrite(_surfaceWrites);
     freshBeforeTransfer(self);
@@ -310,6 +304,8 @@ SwitchMetalTexture *cpuOwner(SwitchMetalTexture *t)
         uint8_t *to = _raw.cpu + (e.origin.y + y) * _raw.pitch + e.origin.x * _raw.bpp;
         memcpy(to, (const uint8_t *)bytes + y * row, line);
     }
+    if (_buffer)
+        _buffer->_raw.markCpuDirty();
 }
 
 - (void)replaceRegion:(MTLRegion)r

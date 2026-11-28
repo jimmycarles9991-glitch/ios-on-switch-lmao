@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// gpu.gm20b.integer_targets: every integer colour format the GM20B renders (NIL's RU*/RS* targets) cleared, then half of it

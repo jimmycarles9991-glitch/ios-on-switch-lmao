@@ -29,3 +29,18 @@ public enum FetchRoute: String, Sendable {
         }
     }
 }
+
+extension FetchRoute {
+    /// A default fetching draw's route as rule fetch.twin names it (drivers/TegraGM20BMetal/twin_rule.h): `twins` draws
+    /// its barrier twin took by the rule (fetch_twin_rule) and `interlocked` draws inside the pixel interlock
+    /// (interlock_draws), one check a counter
+    public static func ruleChecks(
+        _ label: String, twins: Int, interlocked: Int, moved: [String: Int]
+    ) -> [(String, Bool)] {
+        let rule = moved["fetch_twin_rule"] ?? 0, interlocks = moved["interlock_draws"] ?? 0
+        return [
+            ("\(label): fetch_twin_rule rose by \(rule), want \(twins)", rule == twins),
+            ("\(label): interlock_draws rose by \(interlocks), want \(interlocked)", interlocks == interlocked),
+        ]
+    }
+}

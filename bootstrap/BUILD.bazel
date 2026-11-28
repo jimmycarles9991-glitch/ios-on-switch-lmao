@@ -3,13 +3,17 @@ load("@rules_python//python:py_library.bzl", "py_library")
 load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//kernel/rules:inputs.bzl", "tool_output")
-load(":rules.bzl", "bootstrap_payload", "xcode_source_product")
+load(":development_profile_test.bzl", "debug_payload_test", "release_payload_test")
+load(":rules.bzl", "DEVELOPMENT_PACKAGES", "bootstrap_development", "bootstrap_payload", "xcode_source_product")
 
 package(default_visibility = ["//visibility:public"])
 
 lint_files()
 
-exports_files(["sources.json"])
+exports_files([
+    "sources.json",
+    "switch-sshd.sh",
+])
 
 py_library(
     name = "xcode",
@@ -68,10 +72,27 @@ py_binary(
     ],
 )
 
+py_library(
+    name = "development_lib",
+    srcs = ["development.py"],
+    deps = [
+        ":packages_lib",
+        ":signing",
+    ],
+)
+
+py_binary(
+    name = "development_tool",
+    srcs = ["development.py"],
+    main = "development.py",
+    deps = [":development_lib"],
+)
+
 py_binary(
     name = "assemble",
     srcs = ["assemble.py"],
     deps = [
+        ":development_lib",
         ":packages_lib",
         ":signing",
         "//bootstrap/launchctl:package",
@@ -114,10 +135,31 @@ xcode_source_product(
     tool = ":build_sources",
 )
 
+bootstrap_development(
+    name = "development",
+    openssh_client = "@bootstrap_openssh_client//file",
+    openssh_server = "@bootstrap_openssh_server//file",
+    openssh_sftp_server = "@bootstrap_openssh_sftp_server//file",
+    top = "@bootstrap_top//file",
+)
+
+[
+    filegroup(
+        name = "development_" + name.replace("-", "_"),
+        srcs = [":development"],
+        output_group = name.replace("-", "_"),
+    )
+    for name in DEVELOPMENT_PACKAGES
+]
+
 bootstrap_payload(
     name = "payload",
     base = "@bootstrap_procursus_bootstrap//file",
     built = ":ellekit_product",
+    development = select({
+        "//bazel:release": None,
+        "//conditions:default": ":development",
+    }),
     sileo_built = "//apps/sileo:Sileo",
     sileo_deb = "@bootstrap_sileo_release//file",
 )
@@ -216,4 +258,43 @@ py_test(
         "@bootstrap_procursus_bootstrap//file",
     ],
     deps = [":assemble"],
+)
+
+py_test(
+    name = "development_test",
+    size = "small",
+    srcs = ["development_test.py"],
+    data = [
+        ":switch-sshd.sh",
+        ":zstd",
+        "//overlay:manifest.json",
+    ],
+    exec_compatible_with = ["@platforms//os:macos"],
+    deps = [":development_lib"],
+)
+
+release_payload_test(
+    name = "release_payload_test",
+    target_under_test = ":payload",
+)
+
+debug_payload_test(
+    name = "debug_payload_test",
+    target_under_test = ":payload",
+)
+
+py_test(
+    name = "manifest_test",
+    size = "small",
+    srcs = ["manifest_test.py"],
+    data = [
+        ":development_switch_ssh",
+        ":manifest",
+        ":zstd",
+    ],
+    deps = [
+        ":development_lib",
+        ":signing",
+        "//tools/common:macho",
+    ],
 )

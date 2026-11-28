@@ -1,6 +1,9 @@
 import Darwin
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 
 /// Every process's largest colour target since boot as the debug push scan read it (TegraGM20BPathsABI.h's target
 /// peaks, debug kernels) is one the GM20B can draw: no side past 16384. The scan reads most submissions on a thread call;
@@ -17,12 +20,15 @@ struct PushScanTargetsTest: HWTest {
         var metrics = Metrics()
         guard let connection = GPUConnection() else { return .skip("no TegraGM20B connection", metrics) }
         let (kr, reply) = connection.call(
-            GPUPaths.method, GPUConnection.words([PosterTargetsTest.targetPeaksOp, 0]), outputSize: 512
+            GPUPaths.method, GPUConnection.words([PosterTargetsTest.targetPeaksOp, 0]), outputSize: GPUPaths.replySize
         )
         guard kr == KERN_SUCCESS else {
             let why =
                 kr == GPUConnection.kIOReturnUnsupported
-                    ? "a release kernel keeps no target peaks" : "target peaks unreadable (\(GPUConnection.hex(kr)))"
+                    ? (KernelSysctl.isReleaseKernel()
+                        ? "a release kernel keeps no target peaks"
+                        : "no target peaks (build with --//bazel:prof_gpu)")
+                    : "target peaks unreadable (\(GPUConnection.hex(kr)))"
             return .skip(why, metrics)
         }
         let peaks = TargetPeak.parse(String(decoding: reply.prefix { $0 != 0 }, as: UTF8.self))

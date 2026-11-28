@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A compute state the pack holds no answers of (icb_fold at a thread limit of 192, which no corpus line names) gets its

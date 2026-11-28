@@ -1,7 +1,8 @@
 import Foundation
 
 /// A boundary runs from one test's measured end to the next one's start (its log line, the list's update, the
-/// journal's flush); a main wait is how long the main thread took to answer just before the next test started.
+/// journal's flush); a main wait is how long the main thread took to answer just before the next test started, and the
+/// main thread's CPU is what it spent over the boundary (the list's redraw). A test longer than TestBudget is named.
 public struct HarnessTally {
     public static let id = "suite.harness"
     /// Two main-thread hops and one journal line flushed to the card (APFS's transaction flush: 36 ms median, boot 2).
@@ -12,14 +13,23 @@ public struct HarnessTally {
     private var boundaries: [Double] = []
     private var flushes: [Double] = []
     private var mainWaits: [Double] = []
+    private var mainCpu: [Double] = []
     private var cpuSamples: [Double] = []
+    private var overBudget: [String] = []
+    /// The run took the long forms (LongRuns): its numbers are not Run All's
+    public var longRuns = false
 
     public init() {}
 
-    public mutating func add(boundaryMs: Double, flushMs: Double, mainWaitMs: Double) {
+    public mutating func add(boundaryMs: Double, flushMs: Double, mainWaitMs: Double, mainCpuMs: Double? = nil) {
         boundaries.append(boundaryMs)
         flushes.append(flushMs)
         mainWaits.append(mainWaitMs)
+        if let mainCpuMs { mainCpu.append(mainCpuMs) }
+    }
+
+    public mutating func add(overBudget id: String) {
+        overBudget.append(id)
     }
 
     /// The thread sample each test's CPU split comes from, taken at the test's end inside its boundary.
@@ -38,8 +48,13 @@ public struct HarnessTally {
         metrics.set("main_wait_ms_p50", mainWait, digits: 1)
         metrics.set("main_wait_ms_max", mainWaits.max() ?? 0, digits: 1)
         metrics.set("main_late", mainWaits.filter { $0 > Self.mainWaitCeilingMs }.count)
+        metrics.set("main_cpu_ms_p50", Stats.percentile(mainCpu, 0.5), digits: 1)
+        metrics.set("main_cpu_ms_max", mainCpu.max() ?? 0, digits: 1)
         metrics.set("cpu_sample_ms_p50", Stats.percentile(cpuSamples, 0.5), digits: 2)
         metrics.set("cpu_sample_ms_max", cpuSamples.max() ?? 0, digits: 2)
+        metrics.set("over_budget", overBudget.count)
+        metrics.set("over_budget_ids", overBudget.isEmpty ? "-" : overBudget.joined(separator: ","))
+        if longRuns { metrics.set("long_runs", true) }
         var over: [String] = []
         if boundary > Self.boundaryCeilingMs { over.append("median boundary over \(Int(Self.boundaryCeilingMs)) ms") }
         if mainWait > Self.mainWaitCeilingMs { over.append("median main-thread answer over one display period") }

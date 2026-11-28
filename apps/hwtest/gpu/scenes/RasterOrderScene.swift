@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Raster order groups: one instanced draw of full-target quads, each fragment folding its instance into its pixel's

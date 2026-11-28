@@ -156,8 +156,16 @@ int askLayout(struct tgm_coh *c, uint32_t width, uint32_t height, uint32_t bpp,
 					  (writes & TGM_LAYOUT_ASK_COMPRESS) != 0);
 		t->retry = static_cast<int>(d == PitchMoveFailed);
 		__atomic_store_n(&t->tiled, static_cast<int>(d == DecidedTiled), __ATOMIC_RELEASE);
-		if (t->tiled)
+		__atomic_store_n(
+			slot, t,
+			__ATOMIC_RELEASE);  // complete before anyone outside the entry lock reads it
+		if (t->tiled) {
+			const tgm_relayout_pages pages = tgm_coh_pages(c);
 			__atomic_add_fetch(&gTiledLive, 1, __ATOMIC_ACQ_REL);
+			// Mark and publish before disconnecting PTEs so any concurrent fault sees the tiled state.
+			tgm_tiled_mark_pages(pages.pas, pages.npages);
+			tgm_cpu_disconnect_pages(pages.pas, pages.npages);
+		}
 		note(d, tgm_coh_surface_id(c), width, height, bpp, 8u << t->layout.y_log2);
 #if TGM_STATS
 		if (t->tiled) {
@@ -165,9 +173,6 @@ int askLayout(struct tgm_coh *c, uint32_t width, uint32_t height, uint32_t bpp,
 			__atomic_fetch_add(&gLiveBytes, t->layout.bytes, __ATOMIC_RELAXED);
 		}
 #endif
-		__atomic_store_n(
-			slot, t,
-			__ATOMIC_RELEASE);  // complete before anyone outside the entry lock reads it
 		tgm_coh_set_pending_kind(c, 0);
 	}
 	int layout = 0;
@@ -198,6 +203,8 @@ namespace
 // Entry lock held: nonzero leaves the surface block-linear
 int untileLocked(tgm_coh *c, tgm_tiled *t)
 {
+	if (const int prep = tgm_views_untile_prepare(c, t))
+		return prep;
 	const tgm_relayout_pages pages = tgm_coh_pages(c);
 	tgm_relayout_pages rows;
 	tgm_scratch *scratch =
@@ -217,13 +224,17 @@ int untileLocked(tgm_coh *c, tgm_tiled *t)
 		      tgm_coh_surface_id(c), ret);
 		return ret;
 	}
+	tgm_cpu_clean_pages(pages.pas, pages.npages);
+	tgm_coh_clear_gpu_dirty(c);
 	tgm_tiled_count(TGM_RELAYOUT_MOVED);
 #if TGM_STATS
 	__atomic_fetch_sub(&gLive, 1, __ATOMIC_RELAXED);
 	__atomic_fetch_sub(&gLiveBytes, t->layout.bytes, __ATOMIC_RELAXED);
 #endif
 	__atomic_store_n(&t->tiled, 0, __ATOMIC_RELEASE);
+	tgm_tiled_unmark_pages(pages.pas, pages.npages);
 	__atomic_sub_fetch(&gTiledLive, 1, __ATOMIC_ACQ_REL);
+	tgm_views_untile_finish(c, t);
 	return 0;
 }
 }  // namespace

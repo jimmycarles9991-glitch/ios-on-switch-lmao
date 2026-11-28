@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A 4x Depth32Float beside a 4x Stencil8, both memoryless or both private, each sample drawn alone

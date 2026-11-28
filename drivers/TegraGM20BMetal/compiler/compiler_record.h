@@ -26,6 +26,9 @@ bool functions(const gm20b::CompileRequest &r, const Libraries &libraries, std::
 // result
 int32_t makeEntry(const Prepared &p, const Libraries &libraries, gm20b::Direct &direct, uint64_t stack,
                   std::string &entry, std::string &why);
+// A full form's made record `entry` (of `p.content`) headed by the content it adds to (Prepared::primaryContent), which
+// the state's or twin's own lookup reads; empty where `entry` holds no record
+std::string asPrimary(const Prepared &p, const std::string &entry);
 // A Reflection request's entry (reflection_blob.h encodeReflectionEntry): the state's reflection as the pack generator
 // makes it (TegraGM20BMetalOffline.h), of `libraries`' offline functions, with no compile context
 int32_t makeReflectionEntry(const Prepared &p, const Libraries &libraries, uint64_t stack, std::string &entry,

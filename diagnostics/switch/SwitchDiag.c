@@ -9,7 +9,6 @@
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
 #include <pexpert/arm64/boot.h>
-#include "SwitchSD.h"
 #include "SwitchDiag.h"
 #include "SwitchDiagDisplay.h"
 #include "SwitchDiagHud.h"
@@ -128,6 +127,11 @@ void boot_progress_cancel_scanout(void)
         return;
     }
     switch_diag_graphics_release();
+}
+
+static int switch_native_cpu_profile_matches(int cpus)
+{
+    return cpus == 1 || cpus == 4;
 }
 
 void switch_diag_init(const boot_args *args)

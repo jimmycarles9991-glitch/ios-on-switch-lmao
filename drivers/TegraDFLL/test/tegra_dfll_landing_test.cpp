@@ -100,3 +100,16 @@ TEST(TegraDfllLanding, ALoopStillComingDownAtTheFirstLookIsLookedAtAgain)
 		expectLanded(1683 * kMHz, "1683 MHz from 1785, the loop coming down");
 	});
 }
+
+TEST(TegraDfllLanding, CalibrationTimerStopsOnceSettled)
+{
+	switch_ios::test::ExpectPassesInFreshProcess([] {
+		ASSERT_EQ(tegra_dfll_landing_start(1797 * kMHz, kPerLutStep, 1785 * kMHz), 0);
+		tegra_dfll_landing_run_ms(kSettleMs);
+		expectLanded(1785 * kMHz, "1785 MHz settled");
+		const unsigned int settledFires = tegra_dfll_landing_timer_fires();
+		tegra_dfll_landing_run_ms(10000);
+		EXPECT_EQ(tegra_dfll_landing_timer_fires(), settledFires)
+			<< "settled DFLL must not keep firing its calibration timer";
+	});
+}

@@ -2,6 +2,7 @@ import CoreVideo
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import IOSurface
 import Metal
 
@@ -13,30 +14,38 @@ import Metal
 /// (each 16-bit word 384 << 6), whatever is drawn. Tolerance 0. Per format <fmt>_luma_off and <fmt>_chroma_off codes
 /// off, <fmt>_texel0 texel 0's luma/Cb/Cr codes (an M4 Max: 503 76/33/11, 507 305/134/44, 523 128/128/128, 527
 /// 384/384/384); every command buffer raw, failed_cbs=0.
-struct P3YcbcrStoreTest: HWTest {
-    let id = "gpu.gm20b.p3_ycbcr_store"
-    let name = "Draws into 4:4:4 YCbCr targets under the P3_D65 matrix store Metal's codes, on raw"
-    let subsystem = Subsystem.metal
-    var timeout: TimeInterval { 60 }
+public struct P3YcbcrStoreTest: HWTest {
+    public let id = "gpu.gm20b.p3_ycbcr_store"
+    public let name = "Draws into 4:4:4 YCbCr targets under the P3_D65 matrix store Metal's codes, on raw"
+    public let subsystem = Subsystem.metal
+    public var timeout: TimeInterval { 60 }
 
-    struct Case {
-        let format: UInt
-        let fourcc: OSType
+    public init() {}
+
+    public struct Case {
+        public let format: UInt
+        public let fourcc: OSType
         /// Every code's value whatever is drawn; nil: the codes rule
-        let constant: UInt16?
+        public let constant: UInt16?
 
-        var tenBit: Bool { fourcc == kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange }
+        public init(format: UInt, fourcc: OSType, constant: UInt16?) {
+            self.format = format
+            self.fourcc = fourcc
+            self.constant = constant
+        }
+
+        public var tenBit: Bool { fourcc == kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange }
     }
 
-    static let cases = [
+    public static let cases = [
         Case(format: 503, fourcc: kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange, constant: nil),
         Case(format: 507, fourcc: kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange, constant: nil),
         Case(format: 523, fourcc: kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange, constant: 128),
         Case(format: 527, fourcc: kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange, constant: 384),
     ]
-    static let width = 64, height = 16
+    public static let width = 64, height = 16
 
-    func run(_ context: TestContext) async throws -> Outcome {
+    public func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
         let kind = GM20BFacade.kind(of: gpu.device)
         guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
@@ -64,14 +73,14 @@ struct P3YcbcrStoreTest: HWTest {
     }
 
     /// p3storeoracle.mm's floats: std::mt19937(7)'s outputs % 4096 / 4095, four a texel
-    static let values: [SIMD4<Float>] = {
+    public static let values: [SIMD4<Float>] = {
         let words = mt19937(seed: 7, count: 4 * width * height).map { Float($0 % 4096) / 4095 }
         return (0 ..< width * height).map {
             SIMD4(words[4 * $0], words[4 * $0 + 1], words[4 * $0 + 2], words[4 * $0 + 3])
         }
     }()
 
-    static func mt19937(seed: UInt32, count: Int) -> [UInt32] {
+    public static func mt19937(seed: UInt32, count: Int) -> [UInt32] {
         var mt = [UInt32](repeating: seed, count: 624)
         for i in 1 ..< 624 { mt[i] = 1_812_433_253 &* (mt[i - 1] ^ (mt[i - 1] >> 30)) &+ UInt32(i) }
         var out: [UInt32] = []
@@ -91,7 +100,7 @@ struct P3YcbcrStoreTest: HWTest {
     }
 
     /// The planes' words as Metal stores them: luma, then Cb, Cr pairs, a 10-bit code in its word's high bits
-    static func expected(_ c: Case) -> [[UInt16]] {
+    public static func expected(_ c: Case) -> [[UInt16]] {
         let shift: UInt16 = c.tenBit ? 6 : 0
         if let constant = c.constant {
             let n = width * height
@@ -106,7 +115,7 @@ struct P3YcbcrStoreTest: HWTest {
         return [codes.luma.map { $0 << shift }, codes.chroma.map { $0 << shift }]
     }
 
-    static func stored(_ gpu: GPU, _ c: Case) async throws -> CVPixelBuffer {
+    public static func stored(_ gpu: GPU, _ c: Case) async throws -> CVPixelBuffer {
         guard let buffer = YcbcrCornerTest.pixelBuffer(width, height, c.fourcc),
               let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue(),
               let format = MTLPixelFormat(rawValue: c.format)
@@ -140,7 +149,7 @@ struct P3YcbcrStoreTest: HWTest {
         return buffer
     }
 
-    static func texel0(_ buffer: CVPixelBuffer, _ c: Case) -> [Int] {
+    public static func texel0(_ buffer: CVPixelBuffer, _ c: Case) -> [Int] {
         CVPixelBufferLockBaseAddress(buffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
         return [(0, 0), (1, 0), (1, 1)].map { plane, at in

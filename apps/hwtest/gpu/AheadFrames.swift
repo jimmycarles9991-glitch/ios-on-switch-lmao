@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Frames recorded at a render thread's pace, so the facade's submit worker encodes each ended pass ahead of the

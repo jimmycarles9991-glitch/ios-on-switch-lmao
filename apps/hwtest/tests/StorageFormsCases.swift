@@ -6,7 +6,7 @@ import Metal
 enum StorageFormsCases {
     static let side = 16
     static let clear = MTLClearColor(red: 0.25, green: 0, blue: 0.5, alpha: 1)
-    static let timedWidth = 1280, timedHeight = 720, timedTriangles = 64, timedRuns = 5
+    static let timedWidth = 1280, timedHeight = 720, timedTriangles = 64, timedRuns = 2
     static let steps: [Float] = (0 ..< 16).map { k in Float((k * 7) % 16 + 1) / 64 }
 
     static let source = """

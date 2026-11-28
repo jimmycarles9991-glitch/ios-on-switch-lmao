@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
 import Metal
 
 /// gpu.gm20b.mip_twod's chains of one format: made by generateMipmaps, or drawn by 3D passes (mip_step_fragment) one

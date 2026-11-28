@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 
 /// RenderBox's icon and widget quads on the driver (boot 21 iconservicesagent: enc.geometry a=4 b=0x100000004 for

@@ -1,6 +1,9 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUDecode
+import HWTestKit
+import HWTestShared
 import Metal
 
 /// Views of decoded textures across forms (drivers/TegraGM20BMetal/TegraGM20BMetalDecodedFamily.mm). A 166 PVRTC

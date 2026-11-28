@@ -460,9 +460,12 @@ static inline void tegra_nvjpg_setup_image(const TegraNVJPGImage *img, uint32_t 
 // Targets NVJPG writes (output_pixel_format, output_chroma_mode, memory_mode): semi-planar YUV (a luma plane and an
 // interleaved CbCr plane) at 4:2:0 whatever the file's sampling, planar YUV 4:2:0 (three planes), packed 4:2:2 (YUY2:
 // Y0 Cb Y1 Cr, CoreVideo's 'yuvf' order), and 32-bit RGB in its byte orders (planar memory mode, as oss-nvjpg drives
-// RGB surfaces), each optionally downscaled by 2, 4 or 8 (DCT scaling, power2_downscale). Pitch linear, or block linear
-// for a destination GM20B laid out so (TegraGM20BLayout.h): the T210 firmware writes tile_mode and block_linear_height
-// unchanged into PDMA_PIC_INFO1's tiling_mode (bits 15-16) and blklinear_gob (bits 17-19), nvjpg.bin 0x136c-0x1390.
+// RGB surfaces), each optionally downscaled by 2, 4 or 8 (DCT scaling, power2_downscale). Pitch linear only: the T210's
+// NVJPG writes no tiled surface. Its firmware passes tile_mode and block_linear_height unchanged into PDMA_PIC_INFO1's
+// tiling_mode (bits 15-16) and blklinear_gob (bits 17-19), nvjpg.bin 0x136c-0x1390, yet told tile_mode 2 the engine
+// wrote rows (HW Test gpu.iosurface.cross_process nvjpg256 explained=rows, 25 Nov), as averne's nvtegra MJPEG decoder
+// found ("tiled formats are unsupported by the T210"). A destination GM20B laid out block-linear gets NVJPG's rows in a
+// scratch buffer, which the copy engine writes into its blocks (TegraNVJPGRoute.h).
 // Strides are 64-byte multiples and plane addresses 256-byte multiples (the methods take address >> 8).
 //
 // A '422f' or '444f' destination is decoded as planar YUV at the file's own 4:2:2 or 4:4:4 (three planes, memory_mode
@@ -498,16 +501,9 @@ enum {
     TEGRA_NVJPG_MEMORY_PLANAR = 3
 };
 
-// nvjpg_drv.h tile_mode (0 pitch, 1 "gpu block linear", 2 "tegra block linear"). 2 is taken for the arrangement every
-// Tegra X1 client shares, NV_MMU_PTE_KIND_GENERIC_16Bx2 with Tegra sector ordering (TRM chapter 20, Tables 83 and 86:
-// clients sharing surfaces must support it), which NVDEC writes as tileFormat 0 "TBL" and VIC reads as GENERIC_16Bx2.
-// blklinear_gob is the GOBs a block as log2, the encoding "all Tegra X1 clients use" (TRM 20.2, Table 85; NVDEC's
-// falcon setup codes 2 GOBs as 0 for itself, but NVJPG's firmware passes the field to the hardware unchanged). The TRM
-// has no NVJPG chapter: HW Test gpu.iosurface.cross_process nvjpg<size> judges both readings and names the layout a
-// wrong read matches.
+// nvjpg_drv.h tile_mode: pitch linear, the one layout the T210's NVJPG writes
 enum {
-    TEGRA_NVJPG_TILE_PITCH = 0,
-    TEGRA_NVJPG_TILE_TEGRA_BLOCK_LINEAR = 2
+    TEGRA_NVJPG_TILE_PITCH = 0
 };
 
 typedef struct {
@@ -515,7 +511,6 @@ typedef struct {
     uint32_t scale;     // log2 of the downscale: 0..3
     uint32_t pitch[3];  // bytes per row of each plane (one plane for RGB and grey; NV12 two; I420 three)
     uint32_t alpha;     // the A byte of RGB outputs
-    uint32_t blockLinear, blockHeightLog2;  // one plane, Tegra block linear: pitch is a row of GOBs
 } TegraNVJPGTarget;
 
 // What a decode writes: the visible picture, and per plane the rows and bytes per row the engine may touch. `padded`:
@@ -618,13 +613,11 @@ static inline const char *tegra_nvjpg_setup_output(const TegraNVJPGImage *img, c
     }
     if (e->planes == 3 && t->pitch[1] != t->pitch[2])
         return "chroma strides differ";
-    if (t->blockLinear && (e->planes != 1 || t->blockHeightLog2 > 5))
-        return "block-linear output of more than one plane, or blocks over 32 GOBs";
     s->output_stride_luma = (int)t->pitch[0];
     s->output_stride_chroma = e->planes > 1 ? (int)t->pitch[1] : 0;
     s->power2_downscale = (int)t->scale;
-    s->tile_mode = t->blockLinear ? TEGRA_NVJPG_TILE_TEGRA_BLOCK_LINEAR : TEGRA_NVJPG_TILE_PITCH;
-    s->block_linear_height = t->blockLinear ? (int)t->blockHeightLog2 : 0;
+    s->tile_mode = TEGRA_NVJPG_TILE_PITCH;
+    s->block_linear_height = 0;
     s->motion_jpeg_type = 0;
     switch (t->format) {
     case TEGRA_NVJPG_OUT_NV12:

@@ -34,6 +34,10 @@ protected:
 		getCount = mapCount = invalidations = constructors = flushes = 0;
 		gateInside = gateWaiting = 0;
 		gateShut = false;
+		statsOn = 0;
+		mappedSmall = mappedBig = mappedCould = 0;
+		logged = 0;
+		ctorRefuses = 0;
 	}
 
 	void TearDown() override
@@ -85,6 +89,45 @@ TEST_F(VmMap, MissingBigViewFallsBackWithoutConstructorInMap)
 	EXPECT_EQ(mapping->entries[0].shift, 12);
 	EXPECT_EQ(constructors, 0);
 	switch_gpu_vm_unmap(&a, &mapping);
+}
+
+// Debug kernels: a 128 KiB run no big view covers goes to 4 KiB PTEs, and the maps line counts it as could-have-mapped
+// (25 Nov: every line read 0 there, which hid whether a 4 KiB window lacked aligned runs or only views)
+TEST_F(VmMap, ADemotedRunIsCountedAsCouldHaveMapped)
+{
+	statsOn = 1;
+	memory.big_views_ready = true;
+	switch_gpu_mapping *mapping = nullptr;
+	ASSERT_EQ(map(a, &mapping), 0);
+	EXPECT_EQ(mappedBig, 0u);
+	EXPECT_EQ(mappedSmall, memory.bytes);
+	EXPECT_EQ(mappedCould, 32 * PAGE_SIZE) << "the 128 KiB run its pages have";
+	EXPECT_EQ(logged, 1u);
+	switch_gpu_vm_unmap(&a, &mapping);
+	ASSERT_EQ(map(a, &mapping), 0);
+	EXPECT_EQ(logged, 1u) << "once per boot";
+	switch_gpu_vm_unmap(&a, &mapping);
+}
+
+TEST_F(VmMap, ARunWithItsViewIsNotCountedAsDemoted)
+{
+	statsOn = 1;
+	mem_prepare_big_views(&memory);
+	switch_gpu_mapping *mapping = nullptr;
+	ASSERT_EQ(map(a, &mapping), 0);
+	EXPECT_EQ(mappedBig, 32 * PAGE_SIZE);
+	EXPECT_EQ(mappedSmall, 3 * PAGE_SIZE);
+	EXPECT_EQ(mappedCould, 0u) << "the 3 pages past the run have no 128 KiB run";
+	switch_gpu_vm_unmap(&a, &mapping);
+}
+
+TEST_F(VmMap, ARefusedViewConstructorIsKeptForTheDemotionLine)
+{
+	statsOn = 1;
+	ctorRefuses = 12;
+	mem_prepare_big_views(&memory);
+	EXPECT_EQ(memory.big_views, nullptr);
+	EXPECT_EQ(__atomic_load_n(&big_view_refused, __ATOMIC_RELAXED), -12);
 }
 
 TEST_F(VmMap, FailedMapRollsBackEveryReservationOutsideDeferredScope)
@@ -571,4 +614,69 @@ TEST_F(VmMap, SplitPreservesReadOnlyAndPendingLtcFlushState)
 	EXPECT_EQ(flushes, 1u) << "taken holds the installed writable big page";
 	switch_gpu_vm_unmap(&a, &above);
 	EXPECT_EQ(flushes, 2u) << "above has an installed tail entry";
+}
+
+TEST_F(VmMap, HybridSmmuPrefixAndDirectPaTailMapsBigLptPlusSmallSptAndUnmapsCleanly)
+{
+	tgm_gpu.mmu.kind[0x42] = 0xfe;
+	for (const uint32_t npages : {900u, 90u, 135u}) {
+		const uint32_t prefix = npages & ~15u;
+		const uint32_t tail = npages - prefix;
+		while (memory.big_views) {
+			auto *view = memory.big_views;
+			memory.big_views = view->next;
+			free(view);
+		}
+		pages.resize(npages);
+		for (uint32_t i = 0; i < prefix; ++i)
+			pages[i] = (1ULL << 34) | (0x10000000ULL + uint64_t(i) * PAGE_SIZE);
+		for (uint32_t i = prefix; i < npages; ++i)
+			pages[i] = 0x80001000ULL + uint64_t(i - prefix) * 0x2000ULL;
+		memory = {{12, uint64_t(npages) * PAGE_SIZE},
+			  uint64_t(npages) * PAGE_SIZE,
+			  12,
+			  pages.data(),
+			  npages,
+			  nullptr,
+			  false};
+		calls.clear();
+		constructors = 0;
+		mem_prepare_big_views(&memory);
+		ASSERT_EQ(constructors, 1) << npages;
+		ASSERT_NE(memory.big_views, nullptr) << npages;
+		EXPECT_EQ(memory.big_views->offset, 0u);
+		EXPECT_EQ(memory.big_views->bytes, uint64_t(prefix) * PAGE_SIZE);
+
+		switch_gpu_mapping *compressed = nullptr;
+		EXPECT_EQ(switch_gpu_vm_map(&a, 0x40000000, memory.bytes, &memory, 0, 0x42, 0,
+					    &compressed),
+			  -EINVAL)
+			<< "hybrid uncompressed SMMU memory must never bind compressed";
+		EXPECT_EQ(compressed, nullptr);
+
+		switch_gpu_mapping *mapping = nullptr;
+		ASSERT_EQ(switch_gpu_vm_map_volatile(&a, 0x40000000, memory.bytes, &memory, 0, 0xfe,
+						     0, 1, &mapping),
+			  0)
+			<< npages;
+		ASSERT_EQ(mapping->count, 2u) << npages;
+		EXPECT_EQ(mapping->entries[0].shift, 16u);
+		EXPECT_EQ(mapping->entries[0].bytes, uint64_t(prefix) * PAGE_SIZE);
+		EXPECT_EQ(mapping->entries[1].shift, 12u);
+		EXPECT_EQ(mapping->entries[1].bytes, uint64_t(tail) * PAGE_SIZE);
+		ASSERT_EQ(calls.size(), 4u);
+		EXPECT_EQ(calls[1].memory, &memory.big_views->mem);
+		EXPECT_EQ(calls[3].memory, &memory.mem);
+		EXPECT_EQ(calls[3].offset, uint64_t(prefix) * PAGE_SIZE);
+
+		switch_gpu_vm_unmap(&a, &mapping);
+		EXPECT_EQ(mapping, nullptr);
+		ASSERT_EQ(calls.size(), 8u);
+		EXPECT_EQ(calls[4].operation, 'u');
+		EXPECT_EQ(calls[4].shift, 16u);
+		EXPECT_EQ(calls[4].bytes, uint64_t(prefix) * PAGE_SIZE);
+		EXPECT_EQ(calls[6].operation, 'u');
+		EXPECT_EQ(calls[6].shift, 12u);
+		EXPECT_EQ(calls[6].bytes, uint64_t(tail) * PAGE_SIZE);
+	}
 }

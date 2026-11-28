@@ -1,14 +1,17 @@
 import Darwin
 import Foundation
 import HWTestCore
+import HWTestKit
 import UIKit
 
 /// An icon render the way a helper asks for one: IconServices draws Settings' icon at the home screen's size in
 /// iconservicesagent (ISIcon -prepareImageForDescriptor:, which crosses to the agent), timed cold and warm, with the
 /// agent's phys_footprint, resident size and lifetime peak before and after (proc_pid_rusage), and once more when its
 /// GPU's idle memory went back (the device's give-back, a second after its GPU idles), against its jetsam
-/// InactiveHard limit of 15 MB. A settled footprint above the limit fails: the agent would be killed as soon as it goes
-/// inactive. The agent's own log line ("SwitchMetal: idle memory given back: footprint ...") names each term's owner.
+/// InactiveHard limit (15 MB). A settled footprint above the limit fails: the agent would be killed as soon as it goes
+/// inactive. The verdict reads the kernel's own comparison (JetsamExcess: the footprint past the inactive limit), which
+/// the sandbox lets the app ask; the footprints themselves are reported where proc_pid_rusage is allowed. The agent's
+/// own log line ("SwitchMetal: idle memory given back: footprint ...") names each term's owner.
 struct IconRenderTest: HWTest {
     let id = "ui.icon_render"
     let name = "An icon render keeps iconservicesagent within its inactive memory limit"
@@ -39,15 +42,41 @@ struct IconRenderTest: HWTest {
             metrics.set("\(label)_resident_mb", reading.residentMB, digits: 1)
             metrics.set("\(label)_peak_mb", reading.peakMB, digits: 1)
         }
-        guard let settled else { return .skip("\(Self.agent)'s rusage is unreadable from this app", metrics) }
         if !cold.rendered { return .fail("no image for Settings' icon", metrics) }
-        if settled.footprintMB > Double(Self.inactiveHardMB) {
-            return .fail(
-                "\(Self.agent) holds \(Int(settled.footprintMB)) MB once its GPU memory went back after an icon render, "
-                    + "over its \(Self.inactiveHardMB) MB inactive limit", metrics
-            )
+        guard let pid = RunningProcesses.pid(named: Self.agent, in: RunningProcesses.list(sysctl: "kern.proc.all"))
+        else {
+            return .fail("\(Self.agent) is not running after the render", metrics)
         }
-        return .pass(metrics)
+        switch JetsamExcess.read(pid: pid) {
+        case .failure(let error):
+            metrics.set("memorystatus_errno", Int(error.code.rawValue))
+            if let settled, settled.footprintMB > Double(Self.inactiveHardMB) {
+                return .fail(Self.over(Int(settled.footprintMB), limit: Self.inactiveHardMB), metrics)
+            }
+            if settled != nil { return .pass(metrics) }
+            return .skip(
+                "\(Self.agent)'s footprint is unreadable: proc_pid_rusage refused and memorystatus_control "
+                    + "errno \(error.code.rawValue)", metrics
+            )
+        case .success(let reading):
+            metrics.set("inactive_limit_mb", reading.inactiveLimitMB)
+            metrics.set("settled_excess_mb", reading.excessMB, digits: 1)
+            if reading.excessBytes > 0 {
+                return .fail(
+                    Self.over(
+                        reading.inactiveLimitMB + Int(reading.excessMB.rounded(.up)),
+                        limit: reading.inactiveLimitMB
+                    ),
+                    metrics
+                )
+            }
+            return .pass(metrics)
+        }
+    }
+
+    static func over(_ mb: Int, limit: Int) -> String {
+        "\(agent) holds \(mb) MB once its GPU memory went back after an icon render, "
+            + "over its \(limit) MB inactive limit"
     }
 
     struct Reading {

@@ -135,6 +135,11 @@ vnode_pager_forced_unmount(vnode_t vp)
 #endif /* FBDP_DEBUG_OBJECT_NO_PAGER */
 
 #if CONFIG_IOSCHED
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
+/* DKIOCSETTIER calls the device took and refused (kernel/switch/vm/prefetch.c's debug line) */
+uint64_t switch_reprio_delivered, switch_reprio_failed;
+#endif
+
 void
 vnode_pager_issue_reprioritize_io(struct vnode *devvp, uint64_t blkno, uint32_t len, int priority)
 {
@@ -159,6 +164,9 @@ vnode_pager_issue_reprioritize_io(struct vnode *devvp, uint64_t blkno, uint32_t 
 	set_tier.tier = (uint8_t)priority;
 
 	error = VNOP_IOCTL(devvp, DKIOCSETTIER, (caddr_t)&set_tier, 0, vfs_context_kernel());
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
+	os_atomic_inc(error ? &switch_reprio_failed : &switch_reprio_delivered, relaxed);
+#endif
 	return;
 }
 #endif

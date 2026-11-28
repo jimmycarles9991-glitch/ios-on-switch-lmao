@@ -28,6 +28,7 @@
 #include "pipeline.h"
 #include "predication.h"
 #include "probe_forms.h"
+#include "scrub.h"
 #include "push.h"
 #include "reach.h"
 #include "render_encoder.h"
@@ -46,9 +47,6 @@
 #include "use_memo.h"
 #include "zcull_planes.h"
 #include "zeta.h"
-#if SWITCH_METAL_DIAGNOSTICS
-#include "glass_mem.h"
-#endif
 
 namespace gm20b {
 
@@ -80,6 +78,7 @@ public:
     // texels through, a format stand-in's target (format_standin.h); null where none can be had
     Texture *turnScratch(uint32_t format, uint32_t width, uint32_t height, uint32_t tag, uint32_t samples = 1,
                          uint32_t layers = 1);
+    Texture *copyScratch(uint64_t bytes);
     // stencil_bits.h: `src`'s stencil drawn into `e`'s zeta of `format` (its stencil cleared to 0 at the pass's start, or
     // `zeroFirst`: zeroed by a draw where `map`'s source rectangle reaches, the rest kept), each pixel's from `src`'s texel at
     // `map` or its `pick` sample; `view` the stencil header's texture, read until e's end()
@@ -165,6 +164,7 @@ public:
     std::string setRefused;
     std::shared_ptr<ResourceReadyCompletion> resourceReadiness(std::function<void()> ready, int &result);
     const Texture *readTexture(const Texture *texture);
+    const Texture *writeTexture(const Texture *texture);
     void requirePitch(const Import *source, bool writes);
     // An import required pitch after a texture over it was read through its native image
     bool pitchAfterNativeRead() const;
@@ -234,8 +234,12 @@ public:
     // a multisampled attachment's resolve by the 2D engine (probe_ops.h); false: none for its format or grid
     bool probeResolve(const Texture &multisampled, const Texture &into);
 #endif
-    // Nothing of it is on the GPU any more: the rings get back what it took, the root table's shadow what it was.
+    // Nothing of it is on the GPU any more: the rings get back what it took, the root table's shadow what it was. A carry
+    // it resumed is lost (counted in zcull_carries_lost) and ends.
     void abandon();
+    // abandon() of a range that is encoded again (its commit's admission waits for a resource): a carry it resumed stays
+    // parked for that encode, its slots held for it
+    void abandonForRetry();
 
     // A host import the submission reads or writes (a surface's, a no-copy buffer's), for the kernel's order with other
     // processes' GPU work on it (kernel.h exec)
@@ -248,11 +252,15 @@ public:
     // Actual GPU addresses resolve through this connection's binding table in the addressed job ABI.
     void useAddress(uint64_t va, uint64_t bytes, bool write);
 
-    // An MTLHeap an encoder used (useHeap): named once per command buffer, its jobs name what it holds at their commit
-    void useHeap(const HeapMembers &heap)
+    // An MTLHeap an encoder or residency set used (useHeap): named once per command buffer, its jobs name what it holds at their commit
+    void useHeap(const HeapMembers &heap, bool write = false)
     {
-        if (std::find(heaps_.begin(), heaps_.end(), &heap) == heaps_.end())
-            heaps_.push_back(&heap);
+        for (HeapUse &entry : heaps_)
+            if (entry.heap == &heap) {
+                entry.write |= write;
+                return;
+            }
+        heaps_.push_back({&heap, write});
     }
 
     bool useMember(uint64_t va, uint64_t bytes, bool write, bool hostWritten);
@@ -261,6 +269,33 @@ public:
     // memory but no program of the draw does
     void use(const Buffer &buffer, bool write, bool noted = true);
     void use(const Texture &texture, bool write);
+
+    // The range encode naming a range's resources ahead of its commands (the whole range at once, or an encoder as an
+    // encode ahead enters it): no write in command order, so no depth's stored zcull region goes stale by it. The
+    // commands' own uses, a pass's attachments at its begin among them, mark the regions their writes reach.
+    void namingResources(bool on)
+    {
+        namingResources_ = on;
+    }
+
+    // The depths' regions its passes stored so far (zcull_planes.h)
+    const std::vector<ZcullStored> &zcullRegions() const
+    {
+        return zcullPlanes_.regions();
+    }
+
+    // At its commit, the regions bit i of `kept` names (zcullRegions()' order) are stored and parked for the range of the
+    // Metal command buffer `to` that begins at `from` (nullptr: none); the rest are left unstored
+    void carryZcull(const void *to, uint64_t from, uint32_t kept)
+    {
+        zcullTo_ = to;
+        zcullFrom_ = from;
+        zcullKept_ = kept;
+    }
+
+    // After begin(): the regions parked for the range of `cb` that begins at `from`, where no job was submitted since. The
+    // carry stays parked until this job submits or is abandoned, so a retried encode of the range resumes it again.
+    void resumeZcull(const void *cb, uint64_t from);
 
     uint32_t draws = 0, passes = 0, blits = 0, bands = 0;
     uint32_t stamp = 0;               // its GPU time's slot (stamps.h), for Device::gpuNanoseconds once it completed
@@ -283,14 +318,36 @@ private:
     BatchWork batchWork_;
     uint64_t batchLimit() const;
     DirtyRanges dirty_;
-    std::vector<Texture *> backings_;                   // memoryless backings it uses
-    std::vector<const HeapMembers *> heaps_;            // useHeap's, each kept alive by the facade's command buffer
+    std::vector<Texture *> backings_;  // memoryless backings it uses
+
+    struct HeapUse {
+        const HeapMembers *heap;
+        bool write;
+    };
+
+    std::vector<HeapUse> heaps_;                        // useHeap's, each kept alive by the facade's command buffer
     void nameHeaps(std::unique_lock<gm20b::Mutex> &l);  // lock_ held
     SurfaceList surfaces_;
     ZcullPlanes zcullPlanes_;  // the depths' regions this command buffer's passes stored (zcull_planes.h)
+    uint64_t zcullOwner_ = 0;  // the slots' owner (zcull_slots.h): its begin()'s, or the job whose regions it resumed
+    const void *zcullTo_ = nullptr;
+    uint64_t zcullFrom_ = 0;
+    uint32_t zcullKept_ = 0;
+    bool zcullResumed_ = false;  // resumeZcull took the parked carry
+    // A slot for the region of the depth at `zetaVa`, `bytes` long; 0: none
+    uint64_t zcullSlot(uint64_t zetaVa, uint64_t bytes, int &slot);
+    void settleZcull();
+    void parkZcull();
+    void endResumedCarry(bool retried);
+    bool namingResources_ = false;
     std::vector<SetUse> memberUses_;
     uint32_t memberRemovals_ = 0;
     bool memberHostWritten_ = false;
+    struct DirtyBuffer {
+        const Buffer *buffer;
+        uint64_t gen;
+    };
+    std::vector<DirtyBuffer> dirtyBuffers_;
     bool arenaKindInvalidate_ = false;
     bool pendingKindSwitch_ = false;
     uint32_t kindSwitchGen_ = 0;
@@ -299,6 +356,8 @@ private:
     bool inRender_ = false;
     bool passBufferWrites_ = false;
     bool prevBufferWrites_ = false;
+    bool passShaderFlushed_ = false;
+    bool computeReleased_ = false;
     bool tiledCacheDirty_ = false;
     std::map<uint64_t, KindRanges> cbArenaKinds_;
     std::map<uint64_t, uint64_t> cbCrossSeen_;
@@ -312,11 +371,21 @@ private:
         return pending;
     }
 
-    void noteArenaKind(const ArenaStorage *arena);
+    void noteArenaKind(const ArenaStorage *arena)
+    {
+        if (__builtin_expect(!arena || !arena->multiKindGen, 1))
+            return;
+        noteArenaKindSlow(arena);
+    }
+
+    void noteArenaKindSlow(const ArenaStorage *arena);
     UseMemo named_;  // (use_memo.h)
     JobVisibility visibility_ = JobVisibility::Legacy;
     bool externalWrites_ = false;
     bool volatileWrites_ = false;
+    // the Shared spans its front fills (Device::scrubInto); its closing job, the one that ends Volatile or External,
+    // is the one they wait for
+    std::vector<Scrub> scrubs_;
     EventPublication publication_;
     BarrierEngine lastEngine_ = BarrierEngine::None;  // the engine of the work encoded last (barrier_forms.h)
     PassChain chain_;                                 // the passes since the last drain (pass_hazard.h)
@@ -342,7 +411,7 @@ private:
     struct DrawCounts {
         uint64_t uploadBytes = 0, segmentBinds = 0, segmentWords = 0, segmentSkips = 0, segmentCopies = 0,
                  blendKillBinds = 0, interlockDraws = 0, interlocked = 0, interlockedBlends = 0, twinRule = 0,
-                 rasterOrderedDraws = 0;
+                 rasterOrderedDraws = 0, amplifiedDraws = 0, guestHoleWrites = 0;
         uint64_t splitTwins = 0, splitWhole[size_t(SplitWhole::Count)] = {};
     } counts_;
 
@@ -352,15 +421,17 @@ private:
     // passes it opened with PIXEL_SHADER_BARRIER, added to Stats::passPixelOpenings at its commit (an abandoned encode
     // ahead counts none)
     uint64_t pixelOpenings_ = 0;
+
+    // its passes with a zcull region, those that loaded one, and those whose region an earlier job stored, likewise
+    struct ZcullCounts {
+        uint64_t passes = 0, loads = 0, carried = 0;
+    } zcullCounts_;
 #endif
 #if SWITCH_METAL_DIAGNOSTICS
-    Texture glassMemImages_[kGlassMemItems];               // the image each of the probe's rows is read from
-    const Texture *glassMemSources_[kGlassMemItems] = {};  // and the texture a draw bound (alive until completion)
-    int glassMemSlot_ = -1;                                // its ring slot once its reads are encoded
-    void glassMemTail();
     TimedBuffer *drawTimes_ = nullptr;  // its slot in a frame-weights capture (draw_capture.h); null: none
 #endif
     std::map<const Texture *, const Texture *> nativeReads_;
+    std::map<const Texture *, const Texture *> nativeWrites_;
     std::vector<NativeSurface *> nativeSurfaces_;
     std::vector<const Import *> pitchImports_;
     GeometryBudget geometryBudget_;
@@ -374,6 +445,8 @@ private:
     uint32_t rtLayer_ = ~0u;                // and SET_RT_LAYER (~0: not known)
     uint32_t alphaHeld_ = ~0u;              // and SET_ANTI_ALIAS_ALPHA_CONTROL (~0: not known)
     uint32_t sampleMaskHeld_ = ~0u;         // and SET_SAMPLE_MASK_X0_Y0..X1_Y1 (~0: not known)
+    bool clampRangeHeld_ = false;
+    uint32_t clampRange_[2] = {};
     DepthStencilRegs ds_;                   // and its depth/stencil registers
     const Pipeline *extrasLive_ = nullptr;  // and the state whose extras it holds (Pipeline::restore)
     HeldSegment heldSegment_;               // and the state segment its registers hold
@@ -382,6 +455,8 @@ private:
     // the prologue's INVALIDATE_SHADER_CACHES_NO_WFI data word, which commit gives the INSTRUCTION bit when programs were placed
     // in the heap since the last submission that invalidated the instruction cache
     uint32_t *shaderInvalidate_ = nullptr;
+    uint32_t *samplerInvalidate_ = nullptr;
+    uint32_t *headerInvalidate_ = nullptr;
     uint32_t prologueDwords_ = 0;
     // the split draws' prologues (RenderEncoder::launchSplit), launched in one compute segment after the submission prologue
     std::vector<SplitLaunch> splits_;
@@ -390,6 +465,8 @@ private:
     SplitReuse splitReuse_;
     // GPU work encoded before may have written a buffer: a prologue, run ahead of it, reads only what the CPU wrote
     BufferWrites bufferWrites_;
+    BufferWrites
+        textureWrites_;  // the written textures' memory, which a buffer can share (an indirect draw's arguments)
     void segment(uint32_t *from, uint32_t *to);
     // An encoder's words from `start` as segments of the unit's open loops (loop_copies.h), or plain ones
     LoopStream loopStream(Push &p, uint32_t *&start);

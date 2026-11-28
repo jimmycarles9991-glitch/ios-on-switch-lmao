@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestKit
 import SwitchSyncHandoff
 
 /// libdispatch's sync hand-offs in the shapes iOS 27's daemons crash in (dispatch/switch_sync_handoff.h). A

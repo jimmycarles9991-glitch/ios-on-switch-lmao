@@ -7,6 +7,11 @@ int peer_allocated_memory_smmu(switch_gpu_backing *backing, uint32_t count, tgm_
 	return allocatedMemorySmmu(backing, count, out);
 }
 
+int peer_allocated_memory_big(switch_gpu_backing *backing, uint32_t count, tgm_mem **out)
+{
+	return allocatedMemoryBig(backing, count, out);
+}
+
 int peer_allocated_memory_existing(switch_gpu_backing *backing, uint32_t count, tgm_mem **out)
 {
 	return allocatedMemoryExisting(backing, count, out);

@@ -1,7 +1,9 @@
 import Darwin
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 
 /// A GPU job call the kernel refuses writes one error line naming why (drivers/TegraGM20B/SwitchGpuRefusalSites.h).
 /// Boot 21 and 22 refused metal.native.counters' SubmitJob, and iconservicesagent's at 13:34:22.551, with no line at
@@ -55,7 +57,7 @@ struct JobRefusalLinesTest: HWTest {
     /// The paths method's refusals op: "lines=N", or nil when the kernel does not answer it
     static func lines(_ connection: GPUConnection) -> Int? {
         let (kr, reply) = connection.call(
-            GPUPaths.method, GPUConnection.words([pathsOpRefusals, 0]), outputSize: 512
+            GPUPaths.method, GPUConnection.words([pathsOpRefusals, 0]), outputSize: GPUPaths.replySize
         )
         guard kr == KERN_SUCCESS else { return nil }
         let text = String(decoding: reply.prefix { $0 != 0 }, as: UTF8.self)

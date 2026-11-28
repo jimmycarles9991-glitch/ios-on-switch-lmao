@@ -593,6 +593,42 @@ cpu_signal_cancel(cpu_data_t *target_proc, cpu_signal_t signal)
 	}
 }
 
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
+/* Only the receiving CPU writes its row, with interrupts masked: ast, xcall, timer, wake, maint, other. */
+#define SWITCH_IPI_KINDS 6
+uint64_t switch_ipis_received[MAX_CPUS][SWITCH_IPI_KINDS];
+
+static void
+switch_ipi_count_received(unsigned int cpu, cpu_signal_t signal)
+{
+	uint64_t *row;
+
+	if (cpu >= MAX_CPUS) {
+		return;
+	}
+	row = switch_ipis_received[cpu];
+	signal &= ~SIGPdisabled;
+	if (signal & SIGPast) {
+		row[0]++;
+	}
+	if (signal & (SIGPxcall | SIGPxcallImm)) {
+		row[1]++;
+	}
+	if (signal & SIGPTimerLocal) {
+		row[2]++;
+	}
+	if (signal == 0 || (signal & SIGPdeferred)) {
+		row[3]++;
+	}
+	if (signal & SIGPMaintenance) {
+		row[4]++;
+	}
+	if (signal & ~(SIGPast | SIGPxcall | SIGPxcallImm | SIGPTimerLocal | SIGPdeferred | SIGPMaintenance)) {
+		row[5]++;
+	}
+}
+#endif
+
 void
 cpu_signal_handler(void)
 {
@@ -625,6 +661,9 @@ cpu_signal_handler_internal(boolean_t disable_signal)
 	 * handlers.
 	 */
 	cpu_signal_t cpu_signal = os_atomic_or(&cpu_data_ptr->cpu_signal, 0, acquire);
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
+	switch_ipi_count_received((unsigned int)cpu_data_ptr->cpu_number, cpu_signal);
+#endif
 
 	if ((!(cpu_signal & SIGPdisabled)) && (disable_signal == TRUE)) {
 		cpu_signal = os_atomic_or(&cpu_data_ptr->cpu_signal, SIGPdisabled, acq_rel);

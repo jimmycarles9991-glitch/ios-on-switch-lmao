@@ -4,15 +4,17 @@
 //
 // An entry is a state's record or the reason it has none, under <the process's own shader cache directory>/raw-<stack key>/: the
 // directory the plugin chose for m2v's own pipeline binaries, owner-only and kept across reboots. Not a directory other processes
-// share: a record is GPU code the render server uploads and runs. Entries are whole files (written apart, renamed in), checked
-// against their full key and a checksum when read; a directory of another build's stack is removed when the cache opens.
+// share: a record is GPU code the render server uploads and runs. Entries are whole files (written apart, synced, renamed in),
+// checked against their full key when read; a directory of another build's stack is removed when the cache opens.
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <vector>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include "compute_record.h"
 #include "record.h"
 
@@ -50,7 +52,8 @@ public:
     bool open(const std::string &dir, uint64_t stack, uint64_t capBytes);
     // The directory taken for loads and stores at once (a mkdir); tidy() removes another build's entries and a dead writer's
     // temporaries and counts the bytes kept, which stores need for the cap: it may run later, on another thread
-    bool attach(const std::string &dir, uint64_t stack, uint64_t capBytes);
+    // `exclusive`: true when only this process writes to `dir`, allowing empty-cache lookup skipping after tidy().
+    bool attach(const std::string &dir, uint64_t stack, uint64_t capBytes, bool exclusive = false);
     // The installed native records, <dir>/raw-<stack>/ packed (kits/SwitchSeedPack), are mapped here and read in place
     // before the directory's own entries; attach before any compiler worker starts.
     bool attachSeed(const std::string &dir, uint64_t stack);
@@ -82,21 +85,25 @@ public:
 private:
     std::string dir_;
     std::unique_ptr<switch_seed_pack::Seed> seed_;
-    uint64_t stack_ = 0, cap_ = 0, bytes_ = 0;
+    uint64_t seedStack_ = 0, stack_ = 0, cap_ = 0, bytes_ = 0;
+    std::atomic<bool> dirReady_{false};
+    std::atomic<bool> diskMayHaveEntries_{false};
+    bool exclusive_ = false;
+    bool anyStored_ = false;
     mutable std::mutex lock_;
     std::string parent_;
     std::string path(const CacheKey &k) const;
     void evict(uint64_t room);
-    bool loadBytes(bool seed, const CacheKey &k, std::string &bytes) const;
+    bool findSeedBytes(const CacheKey &k, std::string_view &bytes) const;
+    bool loadDiskBytes(const CacheKey &k, std::string &bytes) const;
     bool storeBytes(const CacheKey &k, const std::string &bytes);
 };
 
 // Turns the records' bytes into the entry format and back (gm20b_cache.cpp's own; exposed for the host test)
 std::string encodeEntry(const CacheKey &k, const RuntimeRecord *record, const std::string &refusal);
-RecordCache::Found decodeEntry(const std::string &bytes, const CacheKey &k, RuntimeRecord &record,
-                               std::string &refusal);
+RecordCache::Found decodeEntry(std::string_view bytes, const CacheKey &k, RuntimeRecord &record, std::string &refusal);
 std::string encodeKernelEntry(const CacheKey &k, const ComputeRecord *record, const std::string &refusal);
-RecordCache::Found decodeKernelEntry(const std::string &bytes, const CacheKey &k, ComputeRecord &record,
+RecordCache::Found decodeKernelEntry(std::string_view bytes, const CacheKey &k, ComputeRecord &record,
                                      std::string &refusal);
 
 }  // namespace gm20b

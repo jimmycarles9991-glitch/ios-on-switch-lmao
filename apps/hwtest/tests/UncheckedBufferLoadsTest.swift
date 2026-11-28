@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Shader buffer loads with no bounds checks (compile policy), in the app's own connection. in_range: 256 words read

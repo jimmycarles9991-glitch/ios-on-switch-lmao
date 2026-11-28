@@ -27,8 +27,16 @@ KERNEL_PREFIXES = (
     'tegra-gm20b: jobs ',
     'tegra-gm20b: slow import',
     'tegra-gm20b: compositor frame missed',
+    'TegraHost1x: ',
 )
-METAL_PARTS = ('SwitchFrameUser', 'long span', 'the pack lacks', 'made by the shader compiler', ' gm20b 5s ')
+METAL_PARTS = (
+    'SwitchFrameUser',
+    'long span',
+    'the pack lacks',
+    'made by the shader compiler',
+    ' gm20b 5s ',
+    'SwitchLabels',
+)
 FRONTBOARD_PARTS = (
     'Asked to bootstrap a new process with identity',
     'Bootstrap success',
@@ -55,6 +63,14 @@ LOG_PREDICATE = ' OR '.join(
             'CONTAINS "always-on")'
         ),
         '(subsystem == "com.apple.FrontBoard" AND ' + _any('eventMessage', 'CONTAINS', FRONTBOARD_PARTS) + ')',
+        (
+            '(subsystem == "com.apple.SpringBoard" AND category == "HIDKeyboardEvents" AND eventMessage BEGINSWITH '
+            '"Snapshot button pressed down")'
+        ),
+        (
+            '(subsystem == "com.apple.SpringBoard" AND category == "Icon" AND eventMessage CONTAINS "Changing content '
+            'visibility of icon manager")'
+        ),
         (
             '(subsystem == "com.apple.tailspin" OR eventMessage CONTAINS "TailspinStatus" OR eventMessage '
             'CONTAINS "microstackshot")'

@@ -134,37 +134,6 @@ inline void clock_interval_to_deadline(uint32_t value, uint32_t scale, uint64_t 
     *out = mach_absolute_time() + uint64_t(value) * scale;
 }
 
-using thread_call_param_t = void *;
-using thread_call_func_t = void (*)(thread_call_param_t, thread_call_param_t);
-
-struct thread_call {
-    thread_call_func_t fire;
-    thread_call_param_t param;
-    bool armed;
-};
-
-using thread_call_t = thread_call *;
-constexpr int THREAD_CALL_PRIORITY_KERNEL = 0;
-
-inline std::vector<thread_call_t> &switch_test_calls()
-{
-    static std::vector<thread_call_t> calls;
-    return calls;
-}
-
-inline thread_call_t thread_call_allocate_with_options(thread_call_func_t fire, thread_call_param_t param, int, int)
-{
-    auto *call = new thread_call{fire, param, false};
-    switch_test_calls().push_back(call);
-    return call;
-}
-
-inline bool thread_call_enter_delayed(thread_call_t call, uint64_t)
-{
-    call->armed = true;
-    return true;
-}
-
 #define OS_LOG_DEFAULT                 nullptr
 #define os_log(log, format, ...)       ((void)(log), IOLog(format "\n", ##__VA_ARGS__))
 #define os_log_error(log, format, ...) ((void)(log), IOLog(format "\n", ##__VA_ARGS__))

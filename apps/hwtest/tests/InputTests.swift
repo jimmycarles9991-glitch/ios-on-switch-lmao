@@ -1,6 +1,7 @@
 import Foundation
 import GameController
 import HWTestCore
+import HWTestKit
 import UIKit
 
 struct GameControllerTest: HWTest {

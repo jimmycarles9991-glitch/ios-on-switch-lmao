@@ -2,6 +2,7 @@ import CommonCrypto
 import CryptoKit
 import Foundation
 import HWTestCore
+import HWTestKit
 import LocalAuthentication
 import Security
 

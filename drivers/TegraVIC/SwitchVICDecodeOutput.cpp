@@ -117,6 +117,8 @@ int place(DecodeOutput *work, const TegraVICSurface *destination, const SwitchVI
     __atomic_add_fetch(&work->refs, 1, __ATOMIC_RELAXED);
     uint32_t fence = 0;
     const int error = switch_vic_submit_checked(&work->job, 1, in->after, ownership, completed, work, &fence);
+    if (!error && in->fence)
+        *in->fence = fence;
     switch_vic_surface_unreserve(&work->access);
     if (error) {
         release(work);

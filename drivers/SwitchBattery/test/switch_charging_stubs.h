@@ -35,6 +35,16 @@ inline void absolutetime_to_nanoseconds(uint64_t abs, uint64_t *ns)
     *ns = abs;
 }
 
+// Wall-clock seconds, as clock_get_calendar_microtime gives them: the fake clock from 2026-11-25 00:00 UTC.
+using clock_sec_t = unsigned long;
+using clock_usec_t = unsigned int;
+
+inline void clock_get_calendar_microtime(clock_sec_t *secs, clock_usec_t *microsecs)
+{
+    *secs = 1795564800ul + static_cast<clock_sec_t>(gNow / 1000000000ull);
+    *microsecs = static_cast<clock_usec_t>(gNow / 1000ull % 1000000ull);
+}
+
 inline void IODelay(unsigned us)
 {
     gNow += us * 1000ull;
@@ -177,6 +187,11 @@ public:
     {
         return (uint32_t)value;
     }
+
+    unsigned long long unsigned64BitValue() const
+    {
+        return value;
+    }
 };
 
 class OSString : public OSObject {
@@ -188,6 +203,11 @@ public:
         auto *o = new OSString;
         o->text = s;
         return o;
+    }
+
+    const char *getCStringNoCopy() const
+    {
+        return text.c_str();
     }
 };
 
@@ -222,7 +242,7 @@ class OSDictionary : public OSObject {
 public:
     std::map<std::string, long long> numbers;
     std::map<std::string, std::string> strings;
-    std::map<std::string, OSObject *> objects;  // as given (not retained: the tests keep them alive)
+    std::map<std::string, OSObject *> objects;  // retained, as libkern's: never released (the tests' objects live on)
     std::map<std::string, bool> booleans;       // the keys whose value is an OSBoolean (also in `numbers`)
 
     static OSDictionary *withCapacity(unsigned)
@@ -240,6 +260,7 @@ public:
             numbers[key] = b->value;
             booleans[key] = b->value;
         }
+        value->retain();
         objects[key] = const_cast<OSObject *>(value);
         return true;
     }
@@ -249,7 +270,22 @@ public:
         auto it = objects.find(key);
         return it == objects.end() ? nullptr : it->second;
     }
+
+    bool iterateObjects(void *refcon, bool (*callback)(void *refcon, const OSSymbol *key, OSObject *object));
 };
+
+inline bool OSDictionary::iterateObjects(void *refcon,
+                                         bool (*callback)(void *refcon, const OSSymbol *key, OSObject *object))
+{
+    for (const auto &[name, object] : objects) {
+        const OSSymbol *key = OSSymbol::withCString(name.c_str());
+        const bool done = callback(refcon, key, object);
+        key->release();
+        if (done)
+            break;
+    }
+    return true;
+}
 
 class IOWorkLoop;
 class IOService;

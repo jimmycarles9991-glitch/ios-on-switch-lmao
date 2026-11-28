@@ -125,18 +125,17 @@ inline bool readReflection(const void *bytes, size_t length, uint32_t stages, Re
     return true;
 }
 
-// The store's entry of a reflection (gm20b_cache.h's entry head and tail), or of why it was refused
+// The store's entry of a reflection (gm20b_cache.h's entry head), or of why it was refused
 inline std::string encodeReflectionEntry(const CacheKey &k, const std::string *blob, const std::string &refusal)
 {
     Writer w;
     writeEntryHead(w, k, blob ? kKindReflection : kKindReflectionRefusal);
     w.text(blob ? *blob : refusal);
-    w.value(Pack::fnv(w.out.data(), w.out.size()));
     return w.out;
 }
 
 // False: no entry of `k`; otherwise `made` says whether `text` is its blob or its refusal
-inline bool decodeReflectionEntry(const std::string &bytes, const CacheKey &k, bool &made, std::string &text)
+inline bool decodeReflectionEntry(std::string_view bytes, const CacheKey &k, bool &made, std::string &text)
 {
     Reader r(bytes);
     uint32_t kind = 0;
@@ -144,7 +143,7 @@ inline bool decodeReflectionEntry(const std::string &bytes, const CacheKey &k, b
         return false;
     text = r.text();
     made = kind == kKindReflection;
-    return r.ok() && r.at() == bytes.size() - 8;
+    return r.ok() && r.at() == bytes.size();
 }
 
 }  // namespace gm20b

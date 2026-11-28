@@ -53,6 +53,7 @@ typedef struct {
     void (*discard)(void *ctx, void *item);  // dropped without output (no_output_of_prior_pics)
     int (*recycle)(void *ctx, uint32_t handle, uint64_t bytes, void **va);
     uint32_t inputs;  // input buffers to cycle (NVDECRing.h); 0 as 1
+    TegraNVDECSubmit *submit_buffer;
 } H264Backend;
 
 typedef struct H264Decoder H264Decoder;

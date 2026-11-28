@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Every kind of texture a heap holds lies in the heap's own memory (gm20b::Device::arenaTexture): making 64 of a kind

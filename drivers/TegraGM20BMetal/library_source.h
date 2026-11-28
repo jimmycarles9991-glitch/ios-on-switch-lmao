@@ -5,7 +5,7 @@
 #pragma once
 #include <cstdint>
 #include <memory>
-#include <mutex>
+#include <atomic>
 #include <string>
 #include "compile_request.h"
 
@@ -24,19 +24,18 @@ struct LibrarySource {
     const uint8_t *const bytes;
     const size_t size;
 
-    const LibraryIdentity &identity(const void *from, size_t fromBytes)
-    {
-        std::call_once(once_, [&] {
-            identity_.system = system;
-            identity_.digest = system ? sha256(path.data(), path.size()) : sha256(from, fromBytes);
-        });
-        return identity_;
-    }
+    // Never another source's in this process: what a registered library is cached by (remote.h registerLibrary), where
+    // a freed library's address may hold another
+    const uint64_t id = nextId();
 
 private:
     const std::shared_ptr<const void> keep_;
-    std::once_flag once_;
-    LibraryIdentity identity_;
+
+    static uint64_t nextId()
+    {
+        static std::atomic<uint64_t> next{1};
+        return next.fetch_add(1, std::memory_order_relaxed);
+    }
 };
 
 }  // namespace gm20b

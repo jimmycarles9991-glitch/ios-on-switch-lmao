@@ -82,20 +82,75 @@ bool SetView::named(uint64_t handle) const
     return false;
 }
 
-void ResourceSet::insertLocked(const Bo &bo, uint32_t access, bool always)
+bool SetView::UseCache::matches(uint32_t ch, uint32_t setId, bool isAdmitted, const TegraGM20BAbiSurfaceUse *items,
+                                uint32_t count) const
+{
+    if (!valid || channel != ch || set != setId || admitted != isAdmitted || uses.size() != count)
+        return false;
+    for (uint32_t i = 0; i < count; ++i)
+        if (uses[i].handle != items[i].handle || uses[i].access != items[i].access ||
+            uses[i].reserved != items[i].reserved)
+            return false;
+    return true;
+}
+
+void SetView::UseCache::save(uint32_t ch, uint32_t setId, bool isAdmitted, const TegraGM20BAbiSurfaceUse *items,
+                             uint32_t count)
+{
+    channel = ch;
+    set = setId;
+    admitted = isAdmitted;
+    uses.assign(items, items + count);
+    valid = true;
+}
+
+class ResourceSet::SyncGuard {
+public:
+    explicit SyncGuard(ResourceSet &set) : set_(set)
+    {
+        set_.syncing_ = true;
+    }
+
+    ~SyncGuard()
+    {
+        set_.syncing_ = false;
+        set_.leftDuringSync_.clear();
+        if (set_.syncWaiters_)
+            set_.syncDone_.notify_all();
+    }
+
+    SyncGuard(const SyncGuard &) = delete;
+    SyncGuard &operator=(const SyncGuard &) = delete;
+
+private:
+    ResourceSet &set_;
+};
+
+void ResourceSet::waitSyncLocked(std::unique_lock<gm20b::Mutex> &l)
+{
+    if (!syncing_)
+        return;
+    ++syncWaiters_;
+    syncDone_.wait(l, [&] {
+        return !syncing_;
+    });
+    --syncWaiters_;
+}
+
+void ResourceSet::insertInto(std::vector<SetMember> &list, const Bo &bo, uint32_t access, bool always)
 {
     const uint64_t va = bo.vaBase ? bo.vaBase : bo.va;
-    for (SetMember &m : members_)
+    for (SetMember &m : list)
         if (m.handle == bo.handle && m.va == va) {
             m.access |= access;
             return;
         }
     const SetMember made = {bo.handle, va, bo.bytes, access, always};
-    members_.insert(std::upper_bound(members_.begin(), members_.end(), made,
-                                     [](const SetMember &a, const SetMember &b) {
-                                         return a.va < b.va;
-                                     }),
-                    made);
+    list.insert(std::upper_bound(list.begin(), list.end(), made,
+                                 [](const SetMember &a, const SetMember &b) {
+                                     return a.va < b.va;
+                                 }),
+                made);
 }
 
 bool ResourceSet::eraseLocked(uint64_t handle)
@@ -109,41 +164,10 @@ bool ResourceSet::eraseLocked(uint64_t handle)
     return members_.size() + outside_.size() != before;
 }
 
-// One ResourceSetCreate of every member's BO, once. What the kernel refused comes back with access 0, and every member of
-// that BO leaves members_ for good (always ones for outside_).
-bool ResourceSet::attempt(Kernel &k, std::vector<TegraGM20BAbiSurfaceUse> &uses, int &kr)
-{
-    registration(members_, uses);
-    uint32_t set = set_, generation = 0;
-    const volatile uint32_t *mirror = nullptr;
-    kr = k.resourceSet(uses, set, generation, mirror);
-    if (kr != KERN_SUCCESS)
-        return false;
-    size_t kept = 0;
-    for (size_t i = 0; i < members_.size(); ++i) {
-        if (registered(uses, members_[i].handle))
-            members_[kept++] = members_[i];
-        else if (members_[i].always) {
-            os_log_error(setLog(),
-                         "SwitchMetal: the kernel keeps BO %llu (%llu KiB at 0x%llx), which every job uses, out of "
-                         "resource set %u: a use of every job from now on",
-                         (unsigned long long)members_[i].handle, (unsigned long long)(members_[i].bytes >> 10),
-                         (unsigned long long)members_[i].va, set);
-            outside_.push_back(members_[i]);
-        }
-    }
-    removals_ += uint32_t(members_.size() - kept);
-    members_.resize(kept);
-    set_ = set;
-    generation_ = generation;
-    mirror_ = mirror;
-    version_.fetch_add(1, std::memory_order_release);
-    return true;
-}
-
 // A refused registration: refusal_ and one error line say which member the kernel named and why, and that member leaves
 // the list with every record of its BO (a use of the jobs that touch it from now on). True: it named one.
-bool ResourceSet::refusedLocked(const std::vector<TegraGM20BAbiSurfaceUse> &uses, const char *when, bool again)
+bool ResourceSet::refusedLocked(const std::vector<TegraGM20BAbiSurfaceUse> &uses, std::vector<SetMember> &trial,
+                                const char *when, bool again)
 {
     refusals_.fetch_add(1, std::memory_order_relaxed);
     const auto named = std::find_if(uses.begin(), uses.end(), [](const TegraGM20BAbiSurfaceUse &u) {
@@ -165,42 +189,100 @@ bool ResourceSet::refusedLocked(const std::vector<TegraGM20BAbiSurfaceUse> &uses
     if (named == uses.end())
         return false;
     const uint64_t handle = named->handle;
+    const auto match = [&](const SetMember &m) {
+        return m.handle == handle;
+    };
+    trial.erase(std::remove_if(trial.begin(), trial.end(), match), trial.end());
     const size_t before = members_.size();
-    members_.erase(std::remove_if(members_.begin(), members_.end(),
-                                  [&](const SetMember &m) {
-                                      return m.handle == handle;
-                                  }),
-                   members_.end());
-    removals_ += uint32_t(before - members_.size());
-    version_.fetch_add(1, std::memory_order_release);
+    members_.erase(std::remove_if(members_.begin(), members_.end(), match), members_.end());
+    if (members_.size() != before) {
+        removals_ += uint32_t(before - members_.size());
+        version_.fetch_add(1, std::memory_order_release);
+    }
     return true;
 }
 
 // Every member out, as uses of the jobs that touch them (always ones of every job): a set the kernel holds under no id
 // names nothing.
-void ResourceSet::leaveAllLocked()
+void ResourceSet::leaveAllLocked(const std::vector<SetMember> &trial)
 {
-    for (const SetMember &m : members_)
-        if (m.always)
+    for (const SetMember &m : trial) {
+        if (!m.always)
+            continue;
+        if (std::find(leftDuringSync_.begin(), leftDuringSync_.end(), m.handle) != leftDuringSync_.end())
+            continue;
+        const bool already = std::any_of(outside_.begin(), outside_.end(), [&](const SetMember &o) {
+            return o.handle == m.handle && o.va == m.va;
+        });
+        if (!already)
             outside_.push_back(m);
+    }
     removals_ += uint32_t(members_.size());
     members_.clear();
     version_.fetch_add(1, std::memory_order_release);
 }
 
-// lock_ held: the set made again with every member. One the kernel refuses for a member it names is made once more
-// without it; one it refuses naming none (the set's id) is made once more as a new set. A second refusal takes its
-// member out too and gives up, so no list the kernel refused is sent again. `when`: what made it again, for the error
-// line.
-bool ResourceSet::registerLocked(Kernel &k, const char *when)
+// lock_ held and syncing_ owned: makes the kernel set with `trial` while dropping lock_ across ResourceSetCreate and
+// ResourceSetRelease. Uncommitted candidates stay out of members_ until the kernel accepts them so concurrent view()
+// never omits an unregistered BO from job uses.
+bool ResourceSet::syncLocked(std::unique_lock<gm20b::Mutex> &l, Kernel &k, std::vector<SetMember> &trial,
+                             const char *when)
 {
-    if (members_.empty())
+    const auto pruneLeft = [&](std::vector<SetMember> &list) {
+        if (leftDuringSync_.empty())
+            return;
+        list.erase(std::remove_if(list.begin(), list.end(),
+                                  [&](const SetMember &m) {
+                                      return std::find(leftDuringSync_.begin(), leftDuringSync_.end(), m.handle) !=
+                                             leftDuringSync_.end();
+                                  }),
+                   list.end());
+    };
+    pruneLeft(trial);
+    if (trial.empty())
         return true;
     std::vector<TegraGM20BAbiSurfaceUse> uses;
-    uses.reserve(members_.size());
-    int kr = KERN_SUCCESS;
-    for (const bool again : {false, true}) {
-        if (attempt(k, uses, kr)) {
+    uses.reserve(trial.size());
+    bool again = false;
+    for (;;) {
+        registration(trial, uses);
+        uint32_t set = set_, generation = 0;
+        const volatile uint32_t *mirror = nullptr;
+        leftDuringSync_.clear();
+        l.unlock();
+        const int kr = k.resourceSet(uses, set, generation, mirror);
+        l.lock();
+        if (kr == KERN_SUCCESS) {
+            std::vector<SetMember> kept;
+            kept.reserve(trial.size());
+            uint32_t droppedExisting = 0;
+            for (const SetMember &m : trial) {
+                if (std::find(leftDuringSync_.begin(), leftDuringSync_.end(), m.handle) != leftDuringSync_.end())
+                    continue;
+                if (registered(uses, m.handle)) {
+                    kept.push_back(m);
+                    continue;
+                }
+                const bool existed = std::any_of(members_.begin(), members_.end(), [&](const SetMember &e) {
+                    return e.handle == m.handle && e.va == m.va;
+                });
+                if (existed)
+                    ++droppedExisting;
+                if (m.always) {
+                    os_log_error(setLog(),
+                                 "SwitchMetal: the kernel keeps BO %llu (%llu KiB at 0x%llx), which every job uses, "
+                                 "out of resource set %u: a use of every job from now on",
+                                 (unsigned long long)m.handle, (unsigned long long)(m.bytes >> 10),
+                                 (unsigned long long)m.va, set);
+                    outside_.push_back(m);
+                }
+            }
+            removals_ += droppedExisting;
+            members_.swap(kept);
+            set_ = set;
+            generation_ = generation;
+            mirror_ = mirror;
+            version_.fetch_add(1, std::memory_order_release);
             if (again)
                 rebuilds_.fetch_add(1, std::memory_order_relaxed);
             refusal_.clear();
@@ -211,46 +293,116 @@ bool ResourceSet::registerLocked(Kernel &k, const char *when)
             os_log_error(setLog(), "SwitchMetal: %{public}s", refusal_.c_str());
             break;
         }
-        const bool named = refusedLocked(uses, when, again);
-        if (again || (!named && !set_))
-            break;
-        if (!named) {
-            k.releaseSet(set_);
-            set_ = 0;
+        const auto named = std::find_if(uses.begin(), uses.end(), [](const TegraGM20BAbiSurfaceUse &u) {
+            return u.reserved != 0;
+        });
+        if (named != uses.end() &&
+            std::find(leftDuringSync_.begin(), leftDuringSync_.end(), named->handle) != leftDuringSync_.end()) {
+            pruneLeft(trial);
+            if (trial.empty())
+                return true;
+            continue;
         }
-        if (members_.empty())
+        const bool wasNamed = refusedLocked(uses, trial, when, again);
+        if (again || (!wasNamed && !set_))
+            break;
+        if (!wasNamed) {
+            const uint32_t oldSet = set_;
+            set_ = 0;
+            l.unlock();
+            k.releaseSet(oldSet);
+            l.lock();
+        }
+        pruneLeft(trial);
+        if (trial.empty())
             return true;
+        again = true;
     }
     if (!set_)
-        leaveAllLocked();
+        leaveAllLocked(trial);
     return false;
 }
 
 bool ResourceSet::add(Kernel &k, std::initializer_list<Candidate> candidates, bool always)
 {
+    std::unique_lock<gm20b::Mutex> l(lock_);
+    waitSyncLocked(l);
+    SyncGuard guard(*this);
+    return addSyncLocked(l, k, candidates.begin(), candidates.end(), always, "for a new member");
+}
+
+void ResourceSet::addLater(std::initializer_list<Candidate> candidates)
+{
     std::lock_guard<gm20b::Mutex> l(lock_);
+    for (const Candidate &c : candidates)
+        pending_.push_back({*c.bo, c.access});
+    hasPending_.store(true, std::memory_order_release);
+}
+
+void ResourceSet::addPending(Kernel &k)
+{
+    if (!hasPending_.load(std::memory_order_acquire))
+        return;
+    std::unique_lock<gm20b::Mutex> l(lock_);
+    waitSyncLocked(l);
+    std::vector<std::pair<Bo, uint32_t>> batch;
+    batch.swap(pending_);
+    hasPending_.store(false, std::memory_order_relaxed);
+    if (batch.empty())
+        return;
+    std::vector<Candidate> candidates;
+    candidates.reserve(batch.size());
+    for (const auto &[bo, access] : batch)
+        candidates.push_back({&bo, access});
+    SyncGuard guard(*this);
+    addSyncLocked(l, k, candidates.data(), candidates.data() + candidates.size(), false, "for an unparked member");
+}
+
+// A BO that leaves before the next begin is not added then
+void ResourceSet::dropPendingLocked(uint64_t handle)
+{
+    pending_.erase(std::remove_if(pending_.begin(), pending_.end(),
+                                  [handle](const std::pair<Bo, uint32_t> &p) {
+                                      return p.first.handle == handle;
+                                  }),
+                   pending_.end());
+}
+
+bool ResourceSet::addSyncLocked(std::unique_lock<gm20b::Mutex> &l, Kernel &k, const Candidate *first,
+                                const Candidate *last, bool always, const char *when)
+{
     std::vector<uint64_t> joining;
-    for (const Candidate &c : candidates)
+    for (const Candidate *c = first; c != last; ++c)
         if (std::none_of(members_.begin(), members_.end(), [&](const SetMember &m) {
-                return m.handle == c.bo->handle;
+                return m.handle == c->bo->handle;
             }))
-            joining.push_back(c.bo->handle);
-    for (const Candidate &c : candidates)
-        insertLocked(*c.bo, c.access, always);
-    if (!registerLocked(k, "for a new member")) {
-        // Only the BOs this add brought take their members out. A candidate of a BO that was a member already (an arena's
-        // view alias) stays: the kernel's set still holds that BO, at every VA, until a free or a refusal takes it out.
-        members_.erase(std::remove_if(members_.begin(), members_.end(),
-                                      [&](const SetMember &m) {
-                                          return std::find(joining.begin(), joining.end(), m.handle) != joining.end();
-                                      }),
-                       members_.end());
-        version_.fetch_add(1, std::memory_order_release);
+            joining.push_back(c->bo->handle);
+    std::vector<SetMember> trial = members_;
+    for (const Candidate *c = first; c != last; ++c)
+        insertInto(trial, *c->bo, c->access, always);
+    if (!syncLocked(l, k, trial, when)) {
+        if (set_) {
+            // A candidate of a BO that was a member already (an arena's view alias) stays: the kernel's set still
+            // holds that BO, at every VA, until a free or a refusal takes it out.
+            bool keptAlias = false;
+            for (const Candidate *c = first; c != last; ++c) {
+                if (std::find(joining.begin(), joining.end(), c->bo->handle) != joining.end())
+                    continue;
+                if (std::none_of(members_.begin(), members_.end(), [&](const SetMember &m) {
+                        return m.handle == c->bo->handle;
+                    }))
+                    continue;
+                insertInto(members_, *c->bo, c->access, always);
+                keptAlias = true;
+            }
+            if (keptAlias)
+                version_.fetch_add(1, std::memory_order_release);
+        }
         return false;
     }
-    for (const Candidate &c : candidates)
+    for (const Candidate *c = first; c != last; ++c)
         if (std::none_of(members_.begin(), members_.end(), [&](const SetMember &m) {
-                return m.handle == c.bo->handle;
+                return m.handle == c->bo->handle;
             }))
             return false;
     return true;
@@ -258,24 +410,30 @@ bool ResourceSet::add(Kernel &k, std::initializer_list<Candidate> candidates, bo
 
 void ResourceSet::promote(Kernel &k, uint64_t handle)
 {
-    std::lock_guard<gm20b::Mutex> l(lock_);
+    std::unique_lock<gm20b::Mutex> l(lock_);
+    waitSyncLocked(l);
     bool changed = false;
-    for (SetMember &m : members_)
+    std::vector<SetMember> trial = members_;
+    for (SetMember &m : trial)
         if (m.handle == handle && !(m.access & TegraGM20BSurfaceWrite)) {
             m.access |= TegraGM20BSurfaceWrite;
             changed = true;
         }
-    if (changed)
-        registerLocked(k, "for a written member");
+    if (!changed)
+        return;
+    SyncGuard guard(*this);
+    syncLocked(l, k, trial, "for a written member");
 }
 
 void ResourceSet::remove(Kernel &k, const std::vector<uint64_t> &handles)
 {
     if (handles.empty())
         return;
-    std::lock_guard<gm20b::Mutex> l(lock_);
+    std::unique_lock<gm20b::Mutex> l(lock_);
+    waitSyncLocked(l);
     bool changed = false;
     for (uint64_t handle : handles) {
+        dropPendingLocked(handle);
         if (eraseLocked(handle)) {
             ++removals_;
             changed = true;
@@ -284,21 +442,28 @@ void ResourceSet::remove(Kernel &k, const std::vector<uint64_t> &handles)
     if (!changed)
         return;
     version_.fetch_add(1, std::memory_order_release);
+    SyncGuard guard(*this);
     if (members_.empty()) {
-        if (set_) {
-            k.releaseSet(set_);
+        if (const uint32_t oldSet = set_) {
             set_ = 0;
             generation_ = 0;
             mirror_ = nullptr;
+            l.unlock();
+            k.releaseSet(oldSet);
+            l.lock();
         }
         return;
     }
-    registerLocked(k, "before parking");
+    std::vector<SetMember> trial = members_;
+    syncLocked(l, k, trial, "before parking");
 }
 
 bool ResourceSet::leaving(uint64_t handle)
 {
     std::lock_guard<gm20b::Mutex> l(lock_);
+    if (syncing_)
+        leftDuringSync_.push_back(handle);
+    dropPendingLocked(handle);
     if (!eraseLocked(handle))
         return false;
     ++removals_;
@@ -308,18 +473,26 @@ bool ResourceSet::leaving(uint64_t handle)
 
 void ResourceSet::left(Kernel &k)
 {
-    std::lock_guard<gm20b::Mutex> l(lock_);
-    registerLocked(k, "after a member's free");
+    std::unique_lock<gm20b::Mutex> l(lock_);
+    waitSyncLocked(l);
+    if (members_.empty())
+        return;
+    SyncGuard guard(*this);
+    std::vector<SetMember> trial = members_;
+    syncLocked(l, k, trial, "after a member's free");
 }
 
 ResourceSet::Renewal ResourceSet::renew(Kernel &k, uint32_t generation)
 {
-    std::lock_guard<gm20b::Mutex> l(lock_);
+    std::unique_lock<gm20b::Mutex> l(lock_);
+    waitSyncLocked(l);
     if (generation != generation_)
         return Renewal::renewed;
     if (!mirror_ || __atomic_load_n(mirror_, __ATOMIC_ACQUIRE) == generation_)
         return Renewal::current;
-    return registerLocked(k, "for an ended generation") ? Renewal::renewed : Renewal::refused;
+    SyncGuard guard(*this);
+    std::vector<SetMember> trial = members_;
+    return syncLocked(l, k, trial, "for an ended generation") ? Renewal::renewed : Renewal::refused;
 }
 
 void ResourceSet::view(SetView &v) const
@@ -352,6 +525,9 @@ bool submitInSet(Kernel &k, ResourceSet &set, SetView &view, bool named, KernelJ
 {
     set.view(view);
     view.refused.clear();
+    const bool isCancel = (job.admissionFlags & TegraGM20BJobAdmissionCancel) != 0;
+    const bool admitted = (job.admissionFlags & (TegraGM20BJobAdmissionBegin | TegraGM20BJobAdmissionContinue)) != 0;
+    bool retriedSameUses = false;
     for (;;) {
         if (uses) {
             for (const SetMember &m : view.outside)
@@ -370,12 +546,49 @@ bool submitInSet(Kernel &k, ResourceSet &set, SetView &view, bool named, KernelJ
         }
         job.set = named ? view.set : 0;
         job.generation = job.set ? view.generation : 0;
+        const bool canSameUses = !isCancel && !retriedSameUses && k.supportsSameUses() && job.useCount > 0 &&
+                                 job.uses != nullptr &&
+                                 view.useCache.matches(job.channel, job.set, admitted, job.uses, job.useCount);
+        KernelJob attempt = job;
+        if (canSameUses) {
+            attempt.sameUses = true;
+            attempt.uses = nullptr;
+            attempt.useCount = 0;
+        }
         int kr = KERN_SUCCESS;
-        const bool submitted = k.submitJob(job, seqno, &kr);
+        const bool submitted = k.submitJob(attempt, seqno, &kr);
         if (result)
             *result = kr;
-        if (submitted)
+        if (submitted) {
+            if (!isCancel && !canSameUses) {
+                if (k.supportsSameUses() && job.useCount > 0 && job.uses != nullptr)
+                    view.useCache.save(job.channel, job.set, admitted, job.uses, job.useCount);
+                else
+                    view.useCache.clear();
+            }
             return true;
+        }
+        if (canSameUses && kr == kIOReturnNotReady) {
+            view.useCache.clear();
+            retriedSameUses = true;
+            if (job.set) {
+                switch (set.renew(k, job.generation)) {
+                case ResourceSet::Renewal::renewed:
+                    set.view(view);
+                    break;
+                case ResourceSet::Renewal::current:
+                    break;
+                case ResourceSet::Renewal::refused:
+                    view.refused = set.refusal();
+                    if (result)
+                        *result = kIOReturnBadArgument;
+                    return false;
+                }
+            }
+            continue;
+        }
+        if (!isCancel)
+            view.useCache.clear();
         if (kr != kIOReturnNotReady || !job.set)
             return false;
         switch (set.renew(k, job.generation)) {

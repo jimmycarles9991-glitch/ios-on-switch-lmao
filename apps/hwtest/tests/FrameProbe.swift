@@ -1,4 +1,5 @@
 import Foundation
+import HWTestKit
 import Metal
 import QuartzCore
 import UIKit
@@ -6,13 +7,13 @@ import UIKit
 /// A small CAMetalLayer that presents a cleared drawable at every frame of a display link on a thread of its own, so it
 /// keeps presenting while a test's main thread is busy or blocked, and keeps each drawable's commit and presented time
 /// (CACurrentMediaTime's clock; 0: not shown). Its presented times are the compositor's and the display's frames.
-final class FrameProbe: NSObject, @unchecked Sendable {
-    struct Frame {
-        let committed: Double
-        var presented: Double
+public final class FrameProbe: NSObject, @unchecked Sendable {
+    public struct Frame {
+        public let committed: Double
+        public var presented: Double
     }
 
-    let layer = CAMetalLayer()
+    public let layer = CAMetalLayer()
     private let queue: MTLCommandQueue?
     private let lock = NSLock()
     private var frames: [Frame] = []
@@ -22,7 +23,7 @@ final class FrameProbe: NSObject, @unchecked Sendable {
     private var stopped = Waiter<Bool>()
 
     @MainActor
-    init(frame: CGRect) {
+    public init(frame: CGRect) {
         let device = MTLCreateSystemDefaultDevice()
         queue = device?.makeCommandQueue()
         layer.device = device
@@ -35,7 +36,7 @@ final class FrameProbe: NSObject, @unchecked Sendable {
     /// Starts the probe's thread, which presents from its next display-link frame on; again after `stop`, the frames
     /// kept. QuartzCore finishes the first drawable a layer presents after a second with no presented report at once,
     /// with no presented time (24B119 layer_private_present_impl), so a restart's first frame has none.
-    func start() {
+    public func start() {
         let stopped = Waiter<Bool>()
         self.stopped = stopped
         let thread = Thread { [self] in run(stopped) }
@@ -46,7 +47,7 @@ final class FrameProbe: NSObject, @unchecked Sendable {
     }
 
     /// Ends the probe's display link and waits for its thread to leave its run loop.
-    func stop() async {
+    public func stop() async {
         guard let thread else { return }
         self.thread = nil
         perform(#selector(end), on: thread, with: nil, waitUntilDone: false)
@@ -54,19 +55,19 @@ final class FrameProbe: NSObject, @unchecked Sendable {
     }
 
     /// Every frame since `start`, in commit order.
-    var all: [Frame] {
+    public var all: [Frame] {
         lock.lock()
         defer { lock.unlock() }
         return frames
     }
 
     /// The presented times of the frames committed in [from, to] (0 for a frame not shown).
-    func presented(from: Double, to: Double) -> [Double] {
+    public func presented(from: Double, to: Double) -> [Double] {
         all.filter { $0.committed >= from && $0.committed <= to }.map(\.presented)
     }
 
     /// When the first frame committed at or after `time` was shown (0: not shown, or none committed yet).
-    func shown(after time: Double) -> Double {
+    public func shown(after time: Double) -> Double {
         all.first { $0.committed >= time }?.presented ?? 0
     }
 

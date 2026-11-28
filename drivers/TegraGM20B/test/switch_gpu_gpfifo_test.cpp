@@ -3,7 +3,9 @@
 #include <gtest/gtest.h>
 #include <nvif/chan.h>
 
-unsigned switch_gpu_test_delays, switch_gpu_test_warnings;
+unsigned switch_gpu_test_delays, switch_gpu_test_sleeps, switch_gpu_test_warnings;
+unsigned long switch_gpu_test_sleep_us;
+int switch_gpu_test_can_sleep = 1;
 
 namespace
 {
@@ -13,6 +15,7 @@ struct Model {
 	nvif_chan channel = {};
 	u32 completedPush = 768, completedFifo = 0;
 	unsigned publications = 0, entries = 0;
+	unsigned stallReads = 0;
 };
 
 Model &model(nvif_chan *channel)
@@ -27,7 +30,12 @@ u32 pushGet(nvif_chan *channel)
 
 u32 fifoGet(nvif_chan *channel)
 {
-	return model(channel).completedFifo;
+	auto &state = model(channel);
+	if (state.stallReads) {
+		if (--state.stallReads == 0)
+			state.completedFifo = channel->gpfifo.cur;
+	}
+	return state.completedFifo;
 }
 
 void pushEntry(nvif_chan *channel, bool, u64, u32, bool)
@@ -75,7 +83,9 @@ void runSubmission(Model &state)
 
 void initialize(Model &state, u32 cursor)
 {
-	switch_gpu_test_delays = switch_gpu_test_warnings = 0;
+	switch_gpu_test_delays = switch_gpu_test_sleeps = switch_gpu_test_warnings = 0;
+	switch_gpu_test_sleep_us = 0;
+	switch_gpu_test_can_sleep = 1;
 	nvif_chan_gpfifo_ctor(&operations, &state, state.fifo.data(), sizeof(state.fifo),
 			      state.push.data(), 0x100000, sizeof(state.push), &state.channel);
 	state.channel.push.bgn = state.channel.push.cur = state.channel.push.end =
@@ -92,6 +102,7 @@ TEST(Gpfifo, WrappedKernelPacketsAndUserEntriesPublishTogether)
 	EXPECT_EQ(state.publications, 1u);
 	EXPECT_EQ(state.channel.push.cur, state.push.data() + 12);
 	EXPECT_EQ(switch_gpu_test_delays, 0u);
+	EXPECT_EQ(switch_gpu_test_sleeps, 0u);
 	EXPECT_EQ(switch_gpu_test_warnings, 0u);
 }
 
@@ -104,5 +115,47 @@ TEST(Gpfifo, RepeatedRingWrapKeepsOnePublicationPerSubmission)
 	EXPECT_EQ(state.entries, 8192u);
 	EXPECT_EQ(state.publications, 2048u);
 	EXPECT_EQ(switch_gpu_test_delays, 0u);
+	EXPECT_EQ(switch_gpu_test_sleeps, 0u);
 	EXPECT_EQ(switch_gpu_test_warnings, 0u);
+}
+
+TEST(Gpfifo, WaitSpinsBrieflyThenSleepsInSleepableContext)
+{
+	Model state;
+	initialize(state, 0);
+	state.channel.gpfifo.cur = 10;
+	state.channel.gpfifo.free = 0;
+	state.completedFifo = 11;
+	state.stallReads = 20;
+	EXPECT_EQ(nvif_chan_gpfifo_wait(&state.channel, 4, 0), 0);
+	EXPECT_EQ(switch_gpu_test_delays, 16u);
+	EXPECT_EQ(switch_gpu_test_sleeps, 3u);
+	EXPECT_GT(switch_gpu_test_sleep_us, 0u);
+}
+
+TEST(Gpfifo, WaitTimesOutWithBoundedSleepsInsteadOfBusySpin)
+{
+	Model state;
+	initialize(state, 0);
+	state.channel.gpfifo.cur = 10;
+	state.channel.gpfifo.free = 0;
+	state.completedFifo = 11;
+	EXPECT_EQ(nvif_chan_gpfifo_wait(&state.channel, 4, 0), -ETIMEDOUT);
+	EXPECT_EQ(switch_gpu_test_delays, 16u);
+	EXPECT_GT(switch_gpu_test_sleeps, 100u);
+	EXPECT_LT(switch_gpu_test_sleeps, 2000u);
+	EXPECT_GE(switch_gpu_test_sleep_us, 999000u);
+}
+
+TEST(Gpfifo, WaitNeverSleepsInNonSleepableContext)
+{
+	Model state;
+	initialize(state, 0);
+	switch_gpu_test_can_sleep = 0;
+	state.channel.gpfifo.cur = 10;
+	state.channel.gpfifo.free = 0;
+	state.completedFifo = 11;
+	EXPECT_EQ(nvif_chan_gpfifo_wait(&state.channel, 4, 0), -ETIMEDOUT);
+	EXPECT_EQ(switch_gpu_test_sleeps, 0u);
+	EXPECT_GT(switch_gpu_test_delays, 16u);
 }

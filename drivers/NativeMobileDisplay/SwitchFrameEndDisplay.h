@@ -25,19 +25,19 @@ void noteFrameEndMask(uint32_t mask)
 // Under the gate.
 void writeIntMask(uint32_t clear, uint32_t set)
 {
-    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(intMaskLock);
+    IOLockLock(intMaskLock);
     noteIntMaskLock();
     const uint32_t mask = (dc[kDcIntMask] & ~clear) | set;
     dc[kDcIntMask] = mask;
     noteFrameEndMask(mask);
-    IOSimpleLockUnlockEnableInterrupt(intMaskLock, state);
+    IOLockUnlock(intMaskLock);
 }
 
 // Any context. A stopped or powered-down scanout gives no frame end; setScanout unmasks it at the restart. INT_ENABLE keeps
 // FRAME_END latching while it is masked, so the latched one is stale (a frame end long ago, not now) and goes first.
 void unmaskFrameEnd()
 {
-    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(intMaskLock);
+    IOLockLock(intMaskLock);
     noteIntMaskLock();
     if (intMaskLive && !scanoutStopped && !hwSuspended) {
         if (!(dc[kDcIntMask] & kFrameEndInt)) {
@@ -46,7 +46,7 @@ void unmaskFrameEnd()
         }
         __atomic_store_n(&frameEndUnmasked, true, __ATOMIC_RELAXED);
     }
-    IOSimpleLockUnlockEnableInterrupt(intMaskLock, state);
+    IOLockUnlock(intMaskLock);
 }
 
 // The kick's first step (under the gate): every display job starts there and some wait for a frame end.
@@ -60,22 +60,22 @@ void kickUnmaskFrameEnd()
 // gFrameEndHolds before it takes this lock, so a hold this reads as absent unmasks again after it.
 void maskIdleFrameEnd()
 {
-    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(intMaskLock);
+    IOLockLock(intMaskLock);
     noteIntMaskLock();
     if (!__atomic_load_n(&gFrameEndHolds, __ATOMIC_ACQUIRE)) {
         dc[kDcIntMask] = dc[kDcIntMask] & ~kFrameEndInt;
         __atomic_store_n(&frameEndUnmasked, false, __ATOMIC_RELAXED);
     }
-    IOSimpleLockUnlockEnableInterrupt(intMaskLock, state);
+    IOLockUnlock(intMaskLock);
 }
 
 // Under the gate, with the lock, as the stop or a power-down takes INT_MASK from the display.
 void intMaskDead()
 {
-    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(intMaskLock);
+    IOLockLock(intMaskLock);
     intMaskLive = false;
     __atomic_store_n(&frameEndUnmasked, false, __ATOMIC_RELAXED);
-    IOSimpleLockUnlockEnableInterrupt(intMaskLock, state);
+    IOLockUnlock(intMaskLock);
 }
 
 // Primary interrupt context. The action is scheduled with signalInterrupt() and the filter returns false: returning

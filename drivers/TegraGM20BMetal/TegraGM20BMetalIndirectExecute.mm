@@ -77,7 +77,7 @@ SwitchMetalICBUnmade admit(SwitchMetalKernelExecute *x)
 {
     SwitchMetalIndirectComputeBuffer *b = x->_buffer;
     const auto [from, to] = reach(x);
-    std::lock_guard<gm20b::Mutex> hold(b->_lock);
+    std::lock_guard<gm20b::UnfairMutex> hold(b->_lock);
     const std::vector<SwitchMetalICBUnmade> *unmade = &x->_unmade;
     if (b->_inheritPipeline) {
         const auto made = b->_variants.find(x->_pipeline);
@@ -107,7 +107,7 @@ std::vector<SwitchMetalBuffer *> commandBuffers(SwitchMetalKernelExecute *x)
     SwitchMetalIndirectComputeBuffer *b = x->_buffer;
     const auto [from, to] = reach(x);
     std::vector<SwitchMetalBuffer *> out;
-    std::lock_guard<gm20b::Mutex> hold(b->_lock);
+    std::lock_guard<gm20b::UnfairMutex> hold(b->_lock);
     for (uint32_t i = from; i < to && !b->_inheritBuffers; i++)
         for (SwitchMetalBuffer *buffer : b->_dispatches[i].buffers)
             if (buffer && std::find(out.begin(), out.end(), buffer) == out.end())
@@ -224,7 +224,7 @@ static std::shared_ptr<SwitchMetalICBVariant> pipelineVariant(SwitchMetalKernelE
 {
     SwitchMetalIndirectComputeBuffer *b = x->_buffer;
     const auto [from, to] = reach(x);
-    std::lock_guard<gm20b::Mutex> hold(b->_lock);
+    std::lock_guard<gm20b::UnfairMutex> hold(b->_lock);
     std::shared_ptr<SwitchMetalICBVariant> &v = b->_variants[x->_pipeline];
     if (!v || v->generation != b->_generation) {
         if (x->_kernelsGeneration != b->_generation || x->_kernels.size() != b->_count)
@@ -269,7 +269,7 @@ bool encodeKernelCommands(gm20b::ComputeEncoder &e, gm20b::CommandBuffer &rc, Sw
     }
     gm20b::Buffer slots, binds;  // the buffer's own as they are now: a command encoded later may grow them
     {
-        std::lock_guard<gm20b::Mutex> hold(b->_lock);
+        std::lock_guard<gm20b::UnfairMutex> hold(b->_lock);
         for (const gm20b::Buffer &chunk : b->_chunks)
             rc.use(chunk, false);
         slots = b->_raw;
@@ -319,7 +319,7 @@ void encodeKernelCommandsBlit(gm20b::CommandBuffer *rc, gm20b::BlitEncoder *be, 
     const NSUInteger first = NSUInteger(c.c), count = NSUInteger(c.x), into = copy ? c.a : first;
     std::vector<SwitchMetalICBDispatch> commands(count);
     if (copy) {
-        std::lock_guard<gm20b::Mutex> hold(from->_lock);
+        std::lock_guard<gm20b::UnfairMutex> hold(from->_lock);
         std::copy_n(from->_dispatches.begin() + ptrdiff_t(first), count, commands.begin());
     }
     if (copy && !from->_inheritBuffers)
@@ -333,7 +333,7 @@ void encodeKernelCommandsBlit(gm20b::CommandBuffer *rc, gm20b::BlitEncoder *be, 
     uint32_t toWords, toBindWords;
     bool copied;
     {
-        std::lock_guard<gm20b::Mutex> hold(to->_lock);
+        std::lock_guard<gm20b::UnfairMutex> hold(to->_lock);
         copied = fitCommands(to, commands) && copy;
         toSlots = to->_raw;
         toBinds = to->_binds;
@@ -343,7 +343,7 @@ void encodeKernelCommandsBlit(gm20b::CommandBuffer *rc, gm20b::BlitEncoder *be, 
     gm20b::Buffer fromSlots, fromBinds;
     uint32_t fromWords = 0, fromBindWords = 0;
     if (copied) {
-        std::lock_guard<gm20b::Mutex> hold(from->_lock);
+        std::lock_guard<gm20b::UnfairMutex> hold(from->_lock);
         fromSlots = from->_raw;
         fromBinds = from->_binds;
         fromWords = from->_slotWords;
@@ -379,7 +379,7 @@ void encodeKernelCommandsBlit(gm20b::CommandBuffer *rc, gm20b::BlitEncoder *be, 
             be->fillWords(toBinds.va + into * toBindBytes, count * toBindBytes, gm20b::icb::kNop);
     }
     to->_gpuWritten.store(true, std::memory_order_relaxed);
-    std::lock_guard<gm20b::Mutex> hold(to->_lock);
+    std::lock_guard<gm20b::UnfairMutex> hold(to->_lock);
     to->_bindsChanged = true;
     to->_generation++;
     for (NSUInteger i = 0; i < count; i++)

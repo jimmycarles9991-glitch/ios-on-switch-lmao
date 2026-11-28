@@ -91,9 +91,10 @@ TEST_F(ClientSparse, AnUnmapLeavesASparseRangeFaulting)
 	ASSERT_EQ(sparse(), 0);
 	ASSERT_EQ(client.bind(kVa, kRange, nullptr), 0);
 	EXPECT_EQ(client.nbinds_, 0u);
+	EXPECT_TRUE(unmapped.empty());
+	client.retireBatch();
 	EXPECT_EQ(gpuRead(kVa), -1);
 	EXPECT_EQ(unmapped, (std::vector<unsigned>{9000}));
-	client.retireBatch();
 	EXPECT_EQ(client.retired_, nullptr);
 	EXPECT_EQ(client.releases, 0u);
 }

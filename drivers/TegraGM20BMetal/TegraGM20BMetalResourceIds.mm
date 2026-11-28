@@ -57,6 +57,8 @@ void gm20bHeapForgetSampler(SwitchMetalSampler *s)
 {
     const uint64_t word = gm20b::textureResourceId(_raw.tic);
     if (word && gRM && !_idNamed.exchange(true, std::memory_order_acq_rel)) {
+        if (_levelsOwner && !_ownForm)
+            _levelsOwner->_viewIdNamed.store(true, std::memory_order_release);
         const gm20b::HeapTextureFacts facts = heapFacts(self);
         if (!gRM->raw->nameTexture(_raw, facts, gm20b::heapTextureFlags(facts)))
             heapRefused("texture");

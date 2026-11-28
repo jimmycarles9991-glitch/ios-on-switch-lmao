@@ -1,0 +1,107 @@
+{
+  "build": "21H461",
+  "attachments": [
+    [
+      "m",
+      2
+    ],
+    [
+      "mw",
+      3
+    ]
+  ],
+  "dimensions": {
+    "attachments": {
+      "proof": "manifest",
+      "why": "21H461's offline_compilation_manifest names its 542 non-generic states over m/2 (472) and mw/3 (70) alone, as every 21H461 device-drawn state in corpus.log does (378 m/2, 139 mw/3)",
+      "needs": {
+        "pc0": 3,
+        "pc1": 3,
+        "prc": 3,
+        "psl": 3,
+        "ps0": 3,
+        "ps1": 3,
+        "psm": 3,
+        "psr": 3,
+        "pcr": 3,
+        "pbl": 3,
+        "peo": 3
+      },
+      "needs_why": "the fewest attachments a texture function's fragment writes: caspec._function_targets targets colour attachment 2 for texture functions 0x4f..0x59 (tfi bit 4), so all 11 path coverage/clear/blit functions exist on mw/3 only"
+    },
+    "S": {
+      "values": [
+        0,
+        1
+      ],
+      "proof": "manifest",
+      "why": "every non-generic state in 21H461's manifest and os=21H461 corpus writes attachment 0 or 1; named functions without fragment_shader_type_info byte 8 bit 6 write attachment 0 only"
+    },
+    "u": {
+      "proof": "manifest",
+      "why": "derived from caspec._attachment_format(s, index) in (RGBA16Float, RGBA32Float) for fixed-family states (on 21H461 attachment 1 derives from s.P rather than being RGBA16Float unconditionally, so P=80 S=1 keeps u=0 as every 21H461 manifest and corpus state does); on attachment 0 a seed drawn with u=1 on BGRA8 (4 harvested states with blends llt/sbt/div/cdg) keeps its own beside; never set for named functions"
+    },
+    "n": {
+      "values": [
+        0,
+        1
+      ],
+      "seeds": "demand",
+      "proof": "manifest",
+      "why": "dither noise flag (fc_has_noise_tex / fc_noise_width) on fixed-family states and named functions with fragment_shader_type_info byte 8 bit 5 set"
+    },
+    "s": {
+      "values": [
+        0,
+        1
+      ],
+      "seeds": "demand",
+      "proof": "manifest",
+      "why": "HDR headroom scale flag (fc_has_hdr_scale), fixed family"
+    },
+    "p": {
+      "values": [
+        0,
+        1
+      ],
+      "seeds": "demand",
+      "proof": "manifest",
+      "why": "texture premultiply flag (fc_has_premultiply), fixed-family states with a textured image (image_plane_count > 0 and M < 0)"
+    },
+    "e": {
+      "values": [
+        0,
+        1
+      ],
+      "seeds": "demand",
+      "proof": "manifest",
+      "why": "EDR factor flag (fc_has_edr_factor), fixed-family states with an image"
+    },
+    "F": {
+      "proof": "manifest",
+      "values": [
+        "nr",
+        "bx",
+        "b4",
+        "b8",
+        "mb",
+        "ll",
+        "77",
+        "as",
+        "la"
+      ],
+      "cross_flags": [
+        "nr",
+        "bx"
+      ],
+      "why": "21H461's TextureFilter table and texture_filter_info match the 9 shader filter codes (4..11 plus 0 for <4), applied only to fixed-family textured images (image_plane_count > 0, M < 0); nr and bx cross with the 16-way (n, s, p, e) flag cube, and the remaining 7 filters vary each textured slot over clean and single-flag contexts plus the seed's own flags"
+    },
+    "D": {
+      "proof": "demand",
+      "values": [
+        "id"
+      ],
+      "why": "every known 21H461 state in the manifest and corpus has destination function id"
+    }
+  }
+}

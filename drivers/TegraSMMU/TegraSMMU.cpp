@@ -85,6 +85,30 @@ int programLocked(const tegra_smmu_attachment &a, const tegra_smmu_attachments &
 }  // namespace
 
 namespace {
+// Whether an attachment of b's would translate through another's directory for one of a's ASIDs.
+bool sharesAsid(const tegra_smmu_attachment &a, const tegra_smmu_attachment &b)
+{
+    for (uint32_t i = 0; i < tegra_smmu_attachment_fields(&a); ++i) {
+        for (uint32_t j = 0; j < tegra_smmu_attachment_fields(&b); ++j) {
+            if (tegra_smmu_attachment_asid(&a, i) == tegra_smmu_attachment_asid(&b, j) &&
+                tegra_smmu_attachment_ptb(&a, i) != tegra_smmu_attachment_ptb(&b, j))
+                return true;
+        }
+    }
+    return false;
+}
+
+// Whether the swgroup register's value says another owner translates it. A swgroup that always translates reads
+// enabled at reset, with ASID 0, and after our own detach, on the fault ASID: neither is an owner.
+bool translatedElsewhere(const tegra_smmu_attachment &attachment, uint32_t was)
+{
+    if (attachment.alwaysTranslated) {
+        return was != ASID_ENABLE && was != switch_smmu::parked(attachment, TEGRA_SMMU_ASID_FAULT) &&
+               was != switch_smmu::selection(attachment);
+    }
+    return (was & ASID_ENABLE) && (was & 0x7f) != attachment.asid;
+}
+
 int attach(const tegra_smmu_attachment &attachment, char *line, size_t size)
 {
     if (!ready()) {
@@ -94,17 +118,21 @@ int attach(const tegra_smmu_attachment &attachment, char *line, size_t size)
     IOSimpleLockLock(gLock);
     int ret = -1;
     const uint32_t was = r32(attachment.asidReg);
-    if ((was & ASID_ENABLE) && (was & 0x7f) != attachment.asid) {
+    const bool retained = tegra_smmu_attachments_find(&gAttached, attachment.asidReg) != UINT32_MAX;
+    if (attachment.alwaysTranslated && !(was & ASID_ENABLE)) {
+        // The MC behind these registers is not one whose GPUB always translates (an emulator's): a[34] = 1 accesses
+        // would not go through any directory programmed here.
+        snprintf(line, size, "the swgroup's enable reads 0 (MC %#x = %#x), but Tegra X1 hardwires it to 1",
+                 attachment.asidReg, was);
+    } else if (!retained && translatedElsewhere(attachment, was)) {
         snprintf(line, size, "the swgroup is already translated by ASID %u (MC %#x = %#x)", was & 0x7f,
                  attachment.asidReg, was);
     } else {
         bool conflict = false;
         for (uint32_t i = 0; i < gAttached.count; ++i) {
             const auto &owned = gAttached.entry[i];
-            conflict |=
-                (owned.asid == attachment.asid && owned.ptb != attachment.ptb) ||
-                (owned.asidReg == attachment.asidReg &&
-                 (owned.asid != attachment.asid || owned.ptb != attachment.ptb || owned.wide != attachment.wide));
+            conflict |= sharesAsid(owned, attachment) || (owned.asidReg == attachment.asidReg &&
+                                                          !tegra_smmu_attachment_same_directories(&owned, &attachment));
         }
         tegra_smmu_attachments pending = gAttached;
         if (conflict)
@@ -126,13 +154,31 @@ int attach(const tegra_smmu_attachment &attachment, char *line, size_t size)
 extern "C" int tegra_smmu_attach(uint32_t asid, uint32_t ptb, uint32_t asidReg, uint32_t translationReg,
                                  uint32_t translationBits, char *line, size_t size)
 {
-    return attach({asid, ptb, asidReg, translationReg, translationBits, false}, line, size);
+    return attach(tegra_smmu_attachment_of(asid, ptb, asidReg, translationReg, translationBits, false), line, size);
 }
 
 extern "C" int tegra_smmu_attach_wide(uint32_t asid, uint32_t ptb, uint32_t asidReg, uint32_t translationReg,
                                       uint32_t translationBits, char *line, size_t size)
 {
-    return attach({asid, ptb, asidReg, translationReg, translationBits, true}, line, size);
+    return attach(tegra_smmu_attachment_of(asid, ptb, asidReg, translationReg, translationBits, true), line, size);
+}
+
+extern "C" int tegra_smmu_attach_split(const uint32_t asids[4], const uint32_t ptbs[4], uint32_t asidReg,
+                                       uint32_t translationReg, uint32_t translationBits, bool alwaysTranslated,
+                                       char *line, size_t size)
+{
+    tegra_smmu_attachment split =
+        tegra_smmu_attachment_of(asids[0], ptbs[0], asidReg, translationReg, translationBits, false);
+    split.alwaysTranslated = alwaysTranslated;
+    for (uint32_t field = 1; field < 4; ++field) {
+        if (!asids[field] || !ptbs[field]) {
+            snprintf(line, size, "field %u of swgroup %#x names no ASID or directory", field, asidReg);
+            return -1;
+        }
+        split.upperAsid[field - 1] = asids[field];
+        split.upperPtb[field - 1] = ptbs[field];
+    }
+    return attach(split, line, size);
 }
 
 extern "C" int switch_smmu_restore(uint32_t asid, uint32_t ptb, uint32_t asidReg, char *line, size_t size)
@@ -153,12 +199,21 @@ extern "C" void tegra_smmu_detach(uint32_t asid, uint32_t asidReg)
     if (!ready())
         return;
     IOSimpleLockLock(gLock);
+    const uint32_t at = tegra_smmu_attachments_find(&gAttached, asidReg);
+    tegra_smmu_attachment gone = tegra_smmu_attachment_of(asid, 0, asidReg, 0, 0, false);
+    if (at != UINT32_MAX)
+        gone = gAttached.entry[at];
     tegra_smmu_attachments_forget(&gAttached, asidReg);
-    w32(asidReg, 0);
+    w32(asidReg, switch_smmu::parked(gone, TEGRA_SMMU_ASID_FAULT));
     (void)r32(asidReg);
-    w32(PTB_ASID, asid);
-    w32(PTB_DATA, 0);
-    flushLocked(asid);
+    for (uint32_t field = 0; field < tegra_smmu_attachment_fields(&gone); ++field) {
+        const uint32_t fieldAsid = tegra_smmu_attachment_asid(&gone, field);
+        if (!switch_smmu::firstUse(gone, field) || fieldAsid == TEGRA_SMMU_ASID_FAULT)
+            continue;
+        w32(PTB_ASID, fieldAsid);
+        w32(PTB_DATA, 0);
+        flushLocked(fieldAsid);
+    }
     IOSimpleLockUnlock(gLock);
     switch_mc_errors_detached(asidReg);
 }
@@ -182,6 +237,52 @@ extern "C" void switch_smmu_flush_range(uint32_t asid, uint64_t tablesPa, uint64
     switch_smmu::flushRange(io, asid, tablesPa, tableBytes, iova, iovaBytes);
     IOSimpleLockUnlock(gLock);
 }
+
+extern "C" void switch_smmu_flush_tables(uint32_t asid, const switch_smmu_table_flush *tables, uint32_t count)
+{
+    if (!ready() || !count)
+        return;
+    IOSimpleLockLock(gLock);
+    RegisterAccess io;
+    switch_smmu::flushTables(io, asid, tables, count);
+    IOSimpleLockUnlock(gLock);
+}
+
+#if DEVELOPMENT || DEBUG
+namespace {
+// Tenths of a percent.
+uint32_t share(uint32_t part, uint32_t other)
+{
+    const uint64_t all = uint64_t(part) + other;
+    return all ? static_cast<uint32_t>(uint64_t(part) * 1000 / all) : 0;
+}
+}  // namespace
+
+extern "C" void switch_smmu_stats_window(char *line, size_t size)
+{
+    static switch_smmu::Stats last;  // the GPU's stats tick is the one caller, one window at a time
+    if (!ready()) {
+        snprintf(line, size, "no MC registers");
+        return;
+    }
+    RegisterAccess io;
+    IOSimpleLockLock(gLock);
+    const uint32_t tlbConfig = r32(switch_smmu::kTlbConfig), ptcConfig = r32(switch_smmu::kPtcConfig);
+    const bool counting = switch_smmu::statsOn(io);
+    const switch_smmu::Stats now = switch_smmu::stats(io);
+    IOSimpleLockUnlock(gLock);
+    const switch_smmu::Stats d = {now.tlbHit - last.tlbHit, now.tlbMiss - last.tlbMiss, now.ptcHit - last.ptcHit,
+                                  now.ptcMiss - last.ptcMiss};
+    last = now;
+    if (!counting) {
+        snprintf(line, size, "counters on from here (TLB_CONFIG %#x PTC_CONFIG %#x)", tlbConfig, ptcConfig);
+        return;
+    }
+    const uint32_t tlb = share(d.tlbHit, d.tlbMiss), ptc = share(d.ptcHit, d.ptcMiss);
+    snprintf(line, size, "tlb %u hits %u misses (%u.%u%% hit), ptc %u hits %u misses (%u.%u%% hit)", d.tlbHit,
+             d.tlbMiss, tlb / 10, tlb % 10, d.ptcHit, d.ptcMiss, ptc / 10, ptc % 10);
+}
+#endif
 
 extern "C" uint32_t tegra_smmu_read(uint32_t offset)
 {
@@ -208,7 +309,10 @@ extern "C" int tegra_smmu_resume(void)
 {
     if (!__atomic_load_n(&gLock, __ATOMIC_ACQUIRE) || !ready())
         return 0;
-    char failed[TEGRA_SMMU_ATTACHMENTS][96] = {};
+    // SC7's wake runs this once, on one thread: the lines need not be on its stack.
+    static char failed[TEGRA_SMMU_ATTACHMENTS][96];
+    for (char *line : failed)
+        line[0] = 0;
     IOSimpleLockLock(gLock);
     const uint32_t count = gAttached.count;
     for (uint32_t i = 0; i < count; ++i) {

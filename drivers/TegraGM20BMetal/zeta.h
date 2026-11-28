@@ -61,12 +61,12 @@ inline bool zetaHasStencil(uint32_t metal)
 }
 
 // The depth/stencil format a fetching draw's in-shader tests run against in a pass of attachment format `zeta`: a
-// Depth16Unorm renders through a Depth32Float_Stencil8 whose stencil starts at 0 (TegraGM20BMetalRangeForms.mm
-// depth16Tested), as Apple's tile tests and writes a stencil the pass has no attachment for (an M4 Max, a Depth16Unorm
-// pass: a draw under stencil NotEqual 0 is dropped, and a Replace of 1 makes a later Equal 0 draw drop)
+// Depth16Unorm or stencil-testing Depth32Float renders through a Depth32Float_Stencil8 whose stencil starts at 0
+// (TegraGM20BMetalRangeForms.mm depth16Tested), as Apple's tile tests and writes a stencil the pass has no attachment
+// for (an M4 Max: a draw under stencil NotEqual 0 is dropped, and a Replace of 1 makes a later Equal 0 draw drop)
 inline uint32_t testedZeta(uint32_t zeta)
 {
-    return zeta == 250 ? kZetaFormat : zeta;
+    return zeta == 250 || zeta == 252 ? kZetaFormat : zeta;
 }
 
 // width x height of zeta `format` at `samples`: its layout in t (block-linear, pitch the row stride, blockHeight, layerBytes NIL's
@@ -114,6 +114,8 @@ struct DepthStencilDesc {
 
     // whether a draw under it tests or writes depth or stencil (a pass without the attachment cannot take it as Metal does)
     bool active() const;
+    // whether a draw under it can write depth (`depth`: the pass renders one) or stencil (`stencil`: likewise)
+    bool writes(bool depth, bool stencil) const;
 };
 
 // The depth/stencil registers' values (kDepthStencilMethods order)

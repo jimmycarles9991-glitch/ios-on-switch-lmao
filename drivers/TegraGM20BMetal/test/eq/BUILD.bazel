@@ -52,6 +52,8 @@ CAPTURE_CONLYOPTS = [
 
 CAPTURE_COPTS = [
     "-DSWITCH_METAL_HARNESS_MARKS",
+    "-DSWITCH_STATS_GPU=1",
+    "-DSWITCH_PROF_GPU=1",
     "-DNVDEC_TWOD",
     "-Idrivers/TegraGM20B",
     "-Idrivers/TegraGM20BMetal",

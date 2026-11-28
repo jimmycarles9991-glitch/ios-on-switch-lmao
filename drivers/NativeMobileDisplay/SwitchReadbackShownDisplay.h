@@ -5,7 +5,7 @@
 // would compare a page Core Animation already has back, and count its next frame as a change on screen. Included in
 // the class body; under the gate.
 
-#if SWITCH_FRAME_TIMELINE
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
 static inline bool readbackOffered = false;
 
 // A frame accepted by tegra_gm20b_scanout_copy, taken next.

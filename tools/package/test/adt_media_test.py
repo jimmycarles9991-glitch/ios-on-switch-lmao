@@ -204,6 +204,23 @@ class CdhashLists(unittest.TestCase):
             with self.subTest(modules=modules), self.assertRaises((SystemExit, ValueError)):
                 adt_edit.with_cdhash_lists(adt, modules)
 
+    def test_the_boot_packages_updates_go_in_chosen_in_the_kernels_format(self):
+        adt_edit = load_adt_edit()
+        adt = adt_edit.ipad_adt(switch_tree())
+        updates = {'/usr/sbin/b': h(5).hex(), '/usr/libexec/locationd': h(3).hex()}
+        result = adt_edit.with_pretranslated_updates(adt, updates, h(3) + h(5) + h(9))
+        listed = properties(find(adt_edit.adt_parse(result)[0], 'chosen'))['switch-pretranslated-updates']
+        strings = b'/usr/libexec/locationd\0/usr/sbin/b\0'
+        want = struct.pack('<4sIII', b'SWUP', 1, 2, len(strings))
+        want += struct.pack('<I', 0) + h(3) + struct.pack('<I', 23) + h(5) + strings
+        self.assertEqual(listed, want)
+
+    def test_an_update_the_boot_package_does_not_trust_fails_the_build(self):
+        adt_edit = load_adt_edit()
+        adt = adt_edit.ipad_adt(switch_tree())
+        with self.assertRaisesRegex(SystemExit, '/usr/libexec/locationd'):
+            adt_edit.with_pretranslated_updates(adt, {'/usr/libexec/locationd': h(4).hex()}, h(3) + h(5))
+
 
 if __name__ == '__main__':
     unittest.main()

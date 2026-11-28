@@ -9,8 +9,11 @@ import Metal
 /// source-over of its framebuffer fetch in the pack record's storage form and in its barrier form (probe_forms.h fetch=barrier), each within one code, a surface
 /// whose alpha rows miss a pitch target's 128 bytes, and samples through the texture's header pair
 /// (nvk_switch_xr_planes.h): nearest exact, linear within a half step of Metal's filter, and gathers of alpha and red.
-struct XRTwoPlaneCells {
+final class XRTwoPlaneCells {
     let gpu: GPU
+    private var cachedFetchPipeline: MTLRenderPipelineState?
+
+    init(gpu: GPU) { self.gpu = gpu }
 
     static let blends: [(rect: (Int, Int, Int, Int), color: SIMD4<Float>)] = [
         ((4, 4, 60, 40), SIMD4(0.25, 0.5, -0.125, 0.5)),
@@ -65,31 +68,10 @@ struct XRTwoPlaneCells {
         return (wrong, offByOne, interlocked)
     }
 
-    /// Core Animation's untextured source-over fill into 'b3a8' beside its memoryless 550 and R32Float, verbatim from the
-    /// corpus: the pack's record fetches the 550 colour's stand-in and blends over it in the program (its storage form,
-    /// and its barrier twin)
-    static let fetchLine =
-        "R ok=1 label=com.apple.coreanimation.Pb3a8BsovXmw_A3Xhfx samples=1 topo=0 ds=0/0"
-            + " c0=550:15:1:1:5:0:1:5:0 c1=550:0:0:1:0:0:1:0:0 c2=55:0:0:1:0:0:1:0:0"
-            + " a0=31:0:1:48:1:1 a1=29:16:1:48:1:1 a2=29:24:1:48:1:1 a3=27:32:1:48:1:1"
-            + " | v fixed_vert_lph_spc lib=/System/Library/Frameworks/QuartzCore.framework/default.metallib"
-            + " fc_generic:53:00 fc_texcoord_count0:49:00 fc_texcoord_count1:49:00 fc_vertex_layout:49:00"
-            + " | f fixed_frag_lph_cph lib=/System/Library/Frameworks/QuartzCore.framework/default.metallib"
-            + " fc_attachment_count:49:03 fc_blend_function:49:3a fc_clamp_color:53:00 fc_color_inputs0:49:00"
-            + " fc_color_inputs1:49:00 fc_color_opaque0:53:00 fc_color_opaque1:53:00 fc_color_opcodes0:52:00000000"
-            + " fc_color_opcodes1:52:00000000 fc_coord_function0:49:00 fc_coord_function1:49:00 fc_debug_xr:53:00"
-            + " fc_dest_count:49:00 fc_dest_index:49:00 fc_destination_function:49:00 fc_extended_range:53:01"
-            + " fc_filter0:49:00 fc_filter1:49:00 fc_framebuffer_fetch:53:01 fc_generic:53:00"
-            + " fc_has_asg_77_weights:53:00 fc_has_attachment_0:53:00 fc_has_attachment_1:53:00"
-            + " fc_has_attachment_2:53:00 fc_has_color_cube0:53:00 fc_has_color_cube1:53:00 fc_has_color_params:53:00"
-            + " fc_has_color_trc0:53:00 fc_has_color_trc1:53:00 fc_has_edr_factor:53:00 fc_has_gamma_luts:53:00"
-            + " fc_has_hdr_scale:53:00 fc_has_image_0A:53:00 fc_has_image_0B:53:00 fc_has_image_0C:53:00"
-            + " fc_has_image_1A:53:00 fc_has_image_1B:53:00 fc_has_image_1C:53:00 fc_has_lod_bias:53:00"
-            + " fc_has_lut_tex:53:00 fc_has_noise_scale:53:00 fc_has_noise_tex:53:00 fc_has_premultiply:53:00"
-            + " fc_has_ycbcr_matrix:53:00 fc_image_count:49:00 fc_image_function0:49:00 fc_image_function1:49:00"
-            + " fc_memoryless_index0:49:00 fc_memoryless_index1:49:00 fc_noise_width:49:00 fc_plane_count0:49:00"
-            + " fc_plane_count1:49:00 fc_texcoord_count0:49:00 fc_texcoord_count1:49:00 fc_texture_function:49:00"
-            + " fc_unbounded_range:53:00 fc_vertex_layout:49:00 | "
+    /// Core Animation's untextured source-over fill into 'b3a8' beside its memoryless colours 1 and 2, as this OS's
+    /// QuartzCore makes it (CACorpus): the pack's record fetches the 550 colour's stand-in and blends over it in the
+    /// program (its storage form, and its barrier twin)
+    static let fetchLabel = "Pb3a8BsovXmw_A3Xhfx"
 
     static let fetches: [(x0: Float, y0: Float, x1: Float, y1: Float, color: SIMD4<Float16>)] = [
         (-0.9, -0.8, 0.3, 0.5, SIMD4(0.25, 0.5, -0.125, 0.5)),
@@ -101,15 +83,21 @@ struct XRTwoPlaneCells {
     /// the pack record's barrier form. The device's interlocked draws and its barrier form's fetch draws (drawn whole or
     /// a triangle run at a time).
     func fetchWrong(barrier: Bool) async throws -> (wrong: Int, offByOne: Int, interlocked: Int, fetched: Int) {
-        guard let line = PipelineLine(Self.fetchLine) else {
-            throw TestFailure("the fetch state's line does not parse")
-        }
         let (width, height) = (XRTwoPlaneTest.width, XRTwoPlaneTest.height)
-        let library = try gpu.device.makeLibrary(URL: CAState.library)
-        let pipeline = try CAState.pipeline(line, library: library, device: gpu.device)
+        guard let line = CACorpus.state(Self.fetchLabel) else {
+            throw TestFailure("CACorpus has no \(Self.fetchLabel)")
+        }
+        let pipeline: MTLRenderPipelineState
+        if let cached = cachedFetchPipeline {
+            pipeline = cached
+        } else {
+            let library = try gpu.device.makeLibrary(URL: CAState.library)
+            pipeline = try CAState.pipeline(line, library: library, device: gpu.device)
+            cachedFetchPipeline = pipeline
+        }
         let (buffer, texture) = try XRTwoPlaneTest.surfaceTexture(gpu)
-        let scratch = try [XRTwoPlaneTest.format, .r32Float].map {
-            try gpu.texture($0, width, height, usage: [.renderTarget], storage: .memoryless)
+        let scratch = try [1, 2].map {
+            try gpu.texture(CACorpus.colorFormat(line, $0), width, height, usage: [.renderTarget], storage: .memoryless)
         }
         let before = GM20BFacade.counters(of: gpu.device)
         try await gpu.run { commands in
@@ -181,15 +169,10 @@ struct XRTwoPlaneCells {
         return XRTwoPlaneTest.wrongTexels(XRTwoPlaneTest.planes(buffer, width: width, height: height), want)
     }
 
-    /// The half bits of every texel's sample of `texture` through `fragment` (nearest_fragment, linear_fragment,
-    /// gather_*_fragment) into an RGBA16Float target, the uvs moved on by `shift` of a texel (a third: a linear sample
-    /// mixes neighbours; a half: a gather reads the four about the texel's far corner)
-    static func samples(
-        _ gpu: GPU, _ texture: MTLTexture, _ fragment: String, shift: Float = 1.0 / 3
-    ) async throws -> [UInt16] {
+    static func drawSample(
+        _ gpu: GPU, _ texture: MTLTexture, target: MTLTexture, pipeline: MTLRenderPipelineState, shift: Float
+    ) async throws {
         let (width, height) = (XRTwoPlaneTest.width, XRTwoPlaneTest.height)
-        let target = try gpu.texture(.rgba16Float, width, height)
-        let pipeline = try gpu.render(vertex: "textured_vertex", fragment: fragment, format: .rgba16Float)
         let du = shift / Float(width), dv = shift / Float(height)
         try await gpu.run { commands in
             let pass = MTLRenderPassDescriptor()
@@ -206,33 +189,90 @@ struct XRTwoPlaneCells {
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             encoder.endEncoding()
         }
+    }
+
+    static func readHalves(_ gpu: GPU, _ target: MTLTexture) async throws -> [UInt16] {
         let bytes = try await gpu.read(target, bytesPerPixel: 8)
-        return (0 ..< (width * height * 4)).map { bytes.loaded(as: UInt16.self, at: $0) }
+        let count = bytes.count / 2
+        var halves = [UInt16](repeating: 0, count: count)
+        bytes.withUnsafeBytes { raw in
+            halves.withUnsafeMutableBufferPointer { dst in
+                for i in 0 ..< count { dst[i] = raw.loadUnaligned(fromByteOffset: i * 2, as: UInt16.self) }
+            }
+        }
+        return halves
+    }
+
+    /// Draws each pair-sampled fragment once up front so the facade compiles all four sampled variants in parallel.
+    func warmPairPipelines(_ texture: MTLTexture) async throws -> [String: MTLRenderPipelineState] {
+        let names = ["nearest_fragment", "linear_fragment", "gather_alpha_fragment", "gather_red_fragment"]
+        var pipelines: [String: MTLRenderPipelineState] = [:]
+        for name in names {
+            pipelines[name] = try gpu.render(vertex: "textured_vertex", fragment: name, format: .rgba16Float)
+        }
+        let target = try gpu.texture(.rgba16Float, XRTwoPlaneTest.width, XRTwoPlaneTest.height)
+        try await gpu.run { commands in
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = target
+            pass.colorAttachments[0].loadAction = .dontCare
+            pass.colorAttachments[0].storeAction = .store
+            let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
+            var corners = GPU.fullScreen
+            var uvs: [SIMD2<Float>] = [SIMD2(0, 1), SIMD2(1, 1), SIMD2(0, 0), SIMD2(1, 0)]
+            encoder.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 0)
+            encoder.setVertexBytes(&uvs, length: MemoryLayout<SIMD2<Float>>.stride * 4, index: 1)
+            encoder.setFragmentTexture(texture, index: 0)
+            for name in names {
+                encoder.setRenderPipelineState(pipelines[name]!)
+                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            }
+            encoder.endEncoding()
+        }
+        return pipelines
     }
 
     /// Samples drawn through the header pair: the state's sampled variant is made on the device at its first draw
     /// (TegraGM20BMetalCubic.mm renderVariant), its stand-in drawn until then, so the samples are taken again until the
     /// facade's header-pair binds move, up to two seconds
     func pairSamples(
-        _ texture: MTLTexture, _ fragment: String, shift: Float = 1.0 / 3
+        _ texture: MTLTexture, _ fragment: String, shift: Float = 1.0 / 3,
+        warmed: MTLRenderPipelineState? = nil
     ) async throws -> (halves: [UInt16], paired: Bool) {
+        let target = try gpu.texture(.rgba16Float, XRTwoPlaneTest.width, XRTwoPlaneTest.height)
+        let pipeline = try warmed ?? gpu.render(vertex: "textured_vertex", fragment: fragment, format: .rgba16Float)
         for _ in 0 ..< 200 {
             let before = GM20BFacade.counters(of: gpu.device)["xr_pair_binds"] ?? 0
-            let halves = try await Self.samples(gpu, texture, fragment, shift: shift)
-            if (GM20BFacade.counters(of: gpu.device)["xr_pair_binds"] ?? 0) > before { return (halves, true) }
+            try await Self.drawSample(gpu, texture, target: target, pipeline: pipeline, shift: shift)
+            if (GM20BFacade.counters(of: gpu.device)["xr_pair_binds"] ?? 0) > before {
+                return (try await Self.readHalves(gpu, target), true)
+            }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
-        return (try await Self.samples(gpu, texture, fragment, shift: shift), false)
+        try await Self.drawSample(gpu, texture, target: target, pipeline: pipeline, shift: shift)
+        return (try await Self.readHalves(gpu, target), false)
+    }
+
+    @inline(__always)
+    private static func sort4(_ a: UInt16, _ b: UInt16, _ c: UInt16, _ d: UInt16) -> (UInt16, UInt16, UInt16, UInt16) {
+        var x0 = a, x1 = b, x2 = c, x3 = d
+        if x0 > x1 { swap(&x0, &x1) }
+        if x2 > x3 { swap(&x2, &x3) }
+        if x0 > x2 { swap(&x0, &x2) }
+        if x1 > x3 { swap(&x1, &x3) }
+        if x1 > x2 { swap(&x1, &x2) }
+        return (x0, x1, x2, x3)
     }
 
     /// Pixels whose gather through the header pair (of alpha, else of red: the header's swizzle gives RGB10A2's third
     /// field, the red code, as red) is not, in any order, the values of the four texels `want` holds about its texel
     /// corner: each byte over 255, each code's (c - 384) / 510, as halves
-    func gatherWrong(_ texture: MTLTexture, _ want: [UInt64], alpha: Bool) async throws -> (wrong: Int, paired: Bool) {
+    func gatherWrong(
+        _ texture: MTLTexture, _ want: [UInt64], alpha: Bool, warmed: MTLRenderPipelineState? = nil
+    ) async throws -> (wrong: Int, paired: Bool) {
         let fragment = alpha ? "gather_alpha_fragment" : "gather_red_fragment"
-        let (halves, paired) = try await pairSamples(texture, fragment, shift: 0.5)
+        let (halves, paired) = try await pairSamples(texture, fragment, shift: 0.5, warmed: warmed)
         let w = XRTwoPlaneTest.width
-        let value = { (t: UInt64) -> UInt16 in
+        @inline(__always) func value(_ t: UInt64) -> UInt16 {
             alpha
                 ? Float16(Double(t >> 32 & 0xff) / 255).bitPattern
                 : Float16(Double(Int(t >> 20 & 0x3ff) - 384) / 510).bitPattern
@@ -241,9 +281,9 @@ struct XRTwoPlaneCells {
         for y in 0 ..< (XRTwoPlaneTest.height - 1) {
             for x in 0 ..< (w - 1) {
                 let i = y * w + x
-                let got = (0 ..< 4).map { halves[i * 4 + $0] }.sorted()
-                let around = [want[i], want[i + 1], want[i + w], want[i + w + 1]].map(value).sorted()
-                if got != around { wrong += 1 }
+                let g = Self.sort4(halves[i * 4], halves[i * 4 + 1], halves[i * 4 + 2], halves[i * 4 + 3])
+                let a = Self.sort4(value(want[i]), value(want[i + 1]), value(want[i + w]), value(want[i + w + 1]))
+                if g != a { wrong += 1 }
             }
         }
         return (wrong, paired)

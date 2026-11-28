@@ -33,6 +33,7 @@ kernel_headers()
 ios_binary(
     name = "AVE",
     srcs = [
+        "AVE/AVEEmitter.c",
         "AVE/AVEEncoder.c",
         "AVE/AVEInput.c",
         "AVE/AVELayoutProbe.c",
@@ -42,6 +43,7 @@ ios_binary(
         "AVE/HEVCEncSyntax.c",
         "AVE/HEVCNVENC.c",
         "AVE/NVENCClient.c",
+        "AVE/NVENCListener.c",
         "//kits/SwitchRefusal:SwitchRefusal.c",
     ],
     out = "build/switch-video/H264H7.videoencoder",
@@ -54,8 +56,10 @@ ios_binary(
         "//kits/SwitchRefusal:SwitchRefusal.h",
         "//kits/SwitchServiceWait:SwitchServiceWait.h",
     ],
-    copts = [
-        "-O2",
+    copts = select({
+        "//bazel:release": ["-O3"],
+        "//conditions:default": ["-O2"],
+    }) + [
         "-Wall",
         "-Wextra",
         "-Werror",

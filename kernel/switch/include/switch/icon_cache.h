@@ -16,6 +16,7 @@ extern "C" {
 #endif
 
 #define SWITCH_ICON_CACHE_TRASH             "Switch/icon-cache-trash"
+#define SWITCH_ICON_CACHE_KEEP              "Switch/icon-cache-keep"
 #define SWITCH_ICON_CACHE_SWEEP_MAX_DEPTH   4u
 #define SWITCH_ICON_CACHE_SWEEP_MAX_ENTRIES 65536u
 
@@ -45,8 +46,10 @@ struct switch_icon_cache_result {
     bool requested;     /* the deploy named a GPU build the cache was not last dropped for */
     bool trash_pending; /* SWITCH_ICON_CACHE_TRASH is present and needs post-boot sweep */
     int dropped;        /* __cache_info__ files unlinked (21H461) or salt folders moved to trash (24B119) */
+    int kept;           /* 24B119: salt folders kept for the build the marker named */
+    int restored;       /* 24B119: salt folders the named build left in the keep, moved back into the cache */
     int error;          /* what stopped it; the marker is then left as it was, so the next boot drops again */
-    char build[13];     /* the named build's first characters */
+    char build[13];     /* the named build's first characters, the keep's folder name for it */
 };
 
 void switch_icon_cache_drop(const struct switch_icon_cache_ops *ops, struct switch_icon_cache_result *result);

@@ -1,8 +1,11 @@
+import array
 import functools
+import hashlib
 import json
 import os
 import re
 import struct
+import sys
 from dataclasses import dataclass, field
 
 MAGIC = b'GM20BPK1'
@@ -25,10 +28,16 @@ MAGIC = b'GM20BPK1'
 # blob section, an argument table's entry past 254), programs' uniform buffers past set-0 byte 496 (a far table in the
 # blob section); 28: the selector section (PackSelectors), a state's shader-side stencil push word (shadow_stencil_word)
 # 31: the selector section gone; 32: the fast keys section (PackFastKeys); 33: two tiers (the header's tier0 table, each
-# section's tier 0 first, a stride twin as its record's index + 1), programs' facts (PackProgram.facts)
-VERSION = 33
-SECTIONS = 16  # runtime/pack.h PackSectionCount
+# section's tier 0 first, a stride twin as its record's index + 1), programs' facts (PackProgram.facts); 34: pre-built
+# tier-0 state segments in tier 0 of PackHeap (PackSegments) and tier0SlmPerWarp in PackHeader; 35: programs' header
+# facts (PackProgram.facts), a variant's set-0 memory reads (PackVariant.memoryEntries), the segments' words block
+# (PackSegmentTable); 36: a record's buffers' Metal address words (PIPELINE_V36); 37: the rules' identity, 16 bytes
+# after the tier-0 table (rules_identity), and a segment's blend kill
+# (segments.FLAG_BLEND_KILL)
+VERSION = 37
+SECTIONS = 17  # runtime/pack.h PackSectionCount
 ENTRY_COMPARES = 1  # runtime/pack.h kEntryCompares: a handle's sampler slot the state samples by comparison
+ENTRY_ARRAY_VIEW = 2  # runtime/pack.h kEntryArrayView: a handle bound as a 2D-array view (m2v cube_as_array)
 # PackIteratedBlend: count, enable, constants, uniformSlot, uniformOffset, uniformWords, reserved, alphaSource,
 # alphaDest, name, reservedName, constant[8][3], program[128]
 ITERATED = struct.Struct('<BBBBHBBIIQQ24H128I')
@@ -63,6 +72,10 @@ PIPELINE_V22 = struct.Struct(f'<{WRITTEN_SLOTS}HH2x')
 # PackPipeline's record-v24 tail: tessPrograms[2], strideTwin, amplificationLayerWord, amplificationViewportWord,
 # restoreDwords, restoreAt
 PIPELINE_V24 = struct.Struct('<2IQBBHI')
+# PackPipeline's record-v36 tail: guestBaseWord[4], guestBaseSlot[4] (m2v's SlotGuestBase fields)
+GUEST_BASES = 4  # runtime/pack.h kPackGuestBases
+GUEST_BASE_FRAGMENT = 0x80  # runtime/pack.h kGuestBaseFragment
+PIPELINE_V36 = struct.Struct(f'<{GUEST_BASES}s{GUEST_BASES}s')
 NO_UNIFORM = b'\xff\x00\x00\x00' * 8
 
 
@@ -100,21 +113,50 @@ FAR_AT_LIMIT = 1 << 24  # PackPipeline.farEntriesAt and PackProgram.farUbos: 24 
 V20_FAR_AT = 13  # PackPipeline.farEntriesAt's byte in the PIPELINE_V20 tail (its heapReserved before v27)
 V22_SPILL_HIGH = 2 * 16 + 2  # PackPipeline.spillEntryHigh's byte in the PIPELINE_V22 tail (its xrReserved before v27)
 TABLE_KINDS = {'texture_table': 8, 'sampler_table': 9, 'spill_table': 10}  # pack.h PackEntryKind
+TEX_KINDS = {'slot': 2, 'fetch': 3, 'tex3d': 4, 'depth_test': 6, 'stencil_test': 7}
+ENTRY_HANDLE = struct.Struct('<HBBBBBB')
+ENTRY_UBO = struct.Struct('<HBBBBH')
+PUSH_STRUCT = struct.Struct('<I32I')
+PIPE_HEAD = struct.Struct('<QIIIIIBBBBHHI')
+PIPE_DYNAMIC = struct.Struct('<HH')
+PIPE_STORAGE = struct.Struct('<BBBB8I')
+PIPE_TESTS = struct.Struct('<BBBBIII')
+VARIANT_STRUCT = struct.Struct('<III')
+FAST_KEY_STRUCT = struct.Struct('<QII')
+SPILL_HIGH_STRUCT = struct.Struct('<H')
+PROG_RECORD = struct.Struct('<IIIIIB18sBB3sI')
+FAR_UBOS_PACK = struct.Struct(f'<{PROGRAM_CBUFS}H')
+FAR_UBOS_UNPACK = struct.Struct(f'<{PROGRAM_CBUFS // 2}I')
+TSC_STRUCT = struct.Struct('<8I')
+BASE_STRUCT = struct.Struct('<II')
+INIT_STRUCT = struct.Struct('<HHII')
+_ZERO_8 = [0] * 8
+_ZERO_16 = [0] * 16
+_ZERO_7B = bytes(7)
+_ZERO_16B = bytes(16)
+_ZERO_8B = bytes(8)
+_CBUF_PAD = tuple(bytes(PROGRAM_CBUFS - i) for i in range(PROGRAM_CBUFS + 1))
 
 
 def entry_bytes(entries: list[dict]) -> bytearray:
     """Give the entries' PackEntry bytes: the first PACK_ENTRIES padded to PACK_ENTRIES, then every one past them."""
-    if len(entries) > SET_ENTRIES_MAX:
-        raise ValueError(f'{len(entries)} set-0 entries: a record holds {SET_ENTRIES_MAX}')
-    ents = bytearray()
-    for e in entries:
-        if e['kind'] == 'color_table':  # pack.h EntryColorTable
-            ents += struct.pack('<HBBBBBB', e['off'], 5, 2, 0, 0, 0, 0)
-        elif e['kind'] in TABLE_KINDS:  # EntryTextureTable, EntrySamplerTable, EntrySpillTable
-            ents += struct.pack('<HBBBBBB', e['off'], TABLE_KINDS[e['kind']], e['stage'], 0, 0, 0, 0)
-        elif e['kind'] == 'ubo':
-            ents += struct.pack(
-                '<HBBBBH',
+    count = len(entries)
+    if count > SET_ENTRIES_MAX:
+        raise ValueError(f'{count} set-0 entries: a record holds {SET_ENTRIES_MAX}')
+    ents = bytearray(8 * (count if count > PACK_ENTRIES else PACK_ENTRIES))
+    pack_handle = ENTRY_HANDLE.pack_into
+    pack_ubo = ENTRY_UBO.pack_into
+    for i, e in enumerate(entries):
+        off = i * 8
+        kind = e['kind']
+        if kind == 'color_table':  # pack.h EntryColorTable
+            pack_handle(ents, off, e['off'], 5, 2, 0, 0, 0, 0)
+        elif kind in TABLE_KINDS:  # EntryTextureTable, EntrySamplerTable, EntrySpillTable
+            pack_handle(ents, off, e['off'], TABLE_KINDS[kind], e['stage'], 0, 0, 0, 0)
+        elif kind == 'ubo':
+            pack_ubo(
+                ents,
+                off,
                 e['off'],
                 1,
                 1 if e['stage'] == 'v' else 2,
@@ -125,26 +167,25 @@ def entry_bytes(entries: list[dict]) -> bytearray:
         else:
             tk = e['tex']
             sk = e['smp']
-            tkind = 0 if tk is None else {'slot': 2, 'fetch': 3, 'tex3d': 4, 'depth_test': 6, 'stencil_test': 7}[tk[0]]
+            tkind = 0 if tk is None else TEX_KINDS[tk[0]]
             skind = 0 if sk is None else (1 if sk[0] == 'slot' else 2)
             stage = 1 if e.get('stage') == 'v' else 2
-            compares = ENTRY_COMPARES if e.get('compare') else 0  # pack.h kEntryCompares
-            ents += struct.pack(
-                '<HBBBBBB',
+            pad = (ENTRY_COMPARES if e.get('compare') else 0) | (ENTRY_ARRAY_VIEW if e.get('array_view') else 0)
+            pack_handle(
+                ents,
+                off,
                 e['off'],
                 tkind,
                 stage,
                 0 if tk is None else tk[1],
                 skind,
                 0 if sk is None else sk[1],
-                compares,
+                pad,
             )
-    if len(entries) < PACK_ENTRIES:
-        ents += bytes(8 * (PACK_ENTRIES - len(entries)))
     return ents
 
 
-def far_words(rec: dict) -> list[int]:
+def far_words(rec: dict, encoded_entries: bytearray | None = None) -> list[int]:
     """Give a record's far block (set_entries.h): its entries past PACK_ENTRIES, then their bound and memory bits.
 
     A record of PACK_ENTRIES entries or fewer has none.
@@ -152,7 +193,7 @@ def far_words(rec: dict) -> list[int]:
     count = len(rec['entries'])
     if count <= PACK_ENTRIES:
         return []
-    far = entry_bytes(rec['entries'])[8 * PACK_ENTRIES :]
+    far = (entry_bytes(rec['entries']) if encoded_entries is None else encoded_entries)[8 * PACK_ENTRIES :]
     masks = (count - PACK_ENTRIES + 31) // 32
     bound = rec.get('bound_entries', 0) >> PACK_ENTRIES
     memory = rec.get('memory_entries', (1 << count) - 1) >> PACK_ENTRIES
@@ -180,19 +221,41 @@ def buffer_kind(e: dict) -> int:
 def push_bytes(push: list[tuple[int, int]]) -> bytes:
     mask, words = 0, [0] * 32
     for o, val in push:
-        mask |= 1 << ((o - 0x700) // 4)
-        words[(o - 0x700) // 4] = val
-    return struct.pack('<I32I', mask, *words)
+        idx = (o - 0x700) >> 2
+        mask |= 1 << idx
+        words[idx] = val
+    return PUSH_STRUCT.pack(mask, *words)
 
 
 # A key's variant name (runtime/pack.h variantNameAt): " | cubic ...", " | tests=<n>", " | xrs=<slots>",
 # " | wtex=<slot>:<format>,..." at its end
-VARIANT_NAME = re.compile(r'( \| cubic [^|]*?)?( \| tests=\d+)?( \| xrs=\d+)?( \| wtex=[\d:,]+)?$')
+_WTEX_CHARS = frozenset('0123456789:,')
 
 
 def variant_name(key: str) -> str:
     """Give the name of the variant a record's key names after its state's key, '' for the state's own records."""
-    return VARIANT_NAME.search(key).group(0)
+    end = len(key)
+    pos = key.rfind(' | ', 0, end)
+    if pos >= 0:
+        seg = key[pos + 3 : end]
+        if seg.startswith('wtex=') and len(seg) > 5 and all(c in _WTEX_CHARS for c in seg[5:]):
+            end = pos
+            pos = key.rfind(' | ', 0, end)
+    if pos >= 0:
+        seg = key[pos + 3 : end]
+        if seg.startswith('xrs=') and len(seg) > 4 and seg[4:].isdecimal():
+            end = pos
+            pos = key.rfind(' | ', 0, end)
+    if pos >= 0:
+        seg = key[pos + 3 : end]
+        if seg.startswith('tests=') and len(seg) > 6 and seg[6:].isdecimal():
+            end = pos
+            pos = key.rfind(' | ', 0, end)
+    if pos >= 0:
+        seg = key[pos + 3 : end]
+        if seg.startswith('cubic ') and '|' not in seg:
+            end = pos
+    return key[end:]
 
 
 @functools.cache
@@ -212,51 +275,84 @@ def own_states() -> dict[str, int]:
     return states
 
 
-def key_hash(rec: dict) -> int:
+def key_hash(rec: dict, vname: str | None = None) -> int:
     """Give the hash the runtime looks a record up by: its state's key's, a variant's too (PipelineVariantRecord)."""
-    key = rec['key'][: len(rec['key']) - len(variant_name(rec['key']))]
-    parts = key.split(' | ')
-    pair = f'{parts[1].rstrip()[2:]} | {parts[2]}' if len(parts) == 3 and parts[1].startswith('v ') else ''
-    return own_states().get(pair, fnv(key.encode()))
+    raw = rec['key']
+    if vname is None:
+        vname = variant_name(raw)
+    key = raw[: len(raw) - len(vname)] if vname else raw
+    bar1 = key.find(' | ')
+    if bar1 >= 0 and key.startswith('v ', bar1 + 3):
+        bar2 = key.find(' | ', bar1 + 3)
+        if bar2 >= 0 and key.find(' | ', bar2 + 3) < 0:
+            pair = f'{key[bar1 + 5 : bar2].rstrip()} | {key[bar2 + 3 :]}'
+            hit = own_states().get(pair)
+            if hit is not None:
+                return hit
+    return fnv(key.encode())
 
 
-def pipeline_bytes(rec: dict, key_offset: int, blob_off: int, variants_off: int = 0, name_offset: int = 0) -> bytes:
-    vb = rec['vbs'][0] if rec['vbs'] else {'slot': 0xFF, 'stride': 0}
-    keyhash = key_hash(rec)
-    flags = (1 if rec['fetch'] else 0) | (2 if rec.get('form') == 'barrier' else 0)  # PackPipelineFlags
-    flags |= 4 if rec.get('push_metadata') else 0
-    flags |= 8 if rec.get('storage_mask') else 0
-    flags |= 16 if variant_name(rec['key']) else 0
-    flags |= 32 if rec.get('form') == 'free' else 0
-    flags |= 64 if rec.get('turn_refused') else 0  # PipelineTurnRefused
-    flags |= 256 if rec.get('raster_ordered') else 0  # PipelineRasterOrdered
-    head = struct.pack(
-        '<QIIIIIBBBBHHI',
+def pipeline_bytes(
+    rec: dict,
+    key_offset: int,
+    blob_off: int,
+    variants_off: int = 0,
+    name_offset: int = 0,
+    *,
+    keyhash: int | None = None,
+    vname: str | None = None,
+    entries_head: bytes | bytearray | None = None,
+    spill_at: int | None = None,
+    restore_at: int | None = None,
+    far_at: int | None = None,
+    stride_twin: int | None = None,
+) -> bytes:
+    vbs = rec['vbs']
+    vb_slot, vb_stride = (vbs[0]['slot'], vbs[0]['stride']) if vbs else (0xFF, 0)
+    if vname is None:
+        vname = variant_name(rec['key'])
+    if keyhash is None:
+        keyhash = key_hash(rec, vname)
+    form = rec.get('form')
+    storage_mask = rec.get('storage_mask', 0)
+    flags = (1 if rec['fetch'] else 0) | (2 if form == 'barrier' else 0)  # PackPipelineFlags
+    if rec.get('push_metadata'):
+        flags |= 4
+    if storage_mask:
+        flags |= 8
+    if vname:
+        flags |= 16
+    if form == 'free':
+        flags |= 32
+    if rec.get('turn_refused'):
+        flags |= 64  # PipelineTurnRefused
+    if rec.get('raster_ordered'):
+        flags |= 256  # PipelineRasterOrdered
+    entry_count = len(rec['entries'])
+    head = PIPE_HEAD.pack(
         keyhash,
         key_offset,
         rec['vs'],
         rec['fs'],
         blob_off,
         len(rec['blob']) * 2,
-        len(rec['entries']) & 0xFF,
+        entry_count & 0xFF,
         len(rec['push']),
-        vb['slot'],
-        len(rec['entries']) >> 8,
-        vb['stride'],
+        vb_slot,
+        entry_count >> 8,
+        vb_stride,
         rec['set_size'],
         flags,
     )
-    dynamic = struct.pack('<HH', rec.get('half_blend_color_word', 0), rec.get('iterated', 0))
-    storage = struct.pack(
-        '<BBBB8I',
-        rec.get('storage_mask', 0),
+    dynamic = PIPE_DYNAMIC.pack(rec.get('half_blend_color_word', 0), rec.get('iterated', 0))
+    storage = PIPE_STORAGE.pack(
+        storage_mask,
         rec.get('storage_write_mask', 0),
         rec.get('storage_samples', 0),
         rec.get('storage_tests', 0),
-        *rec.get('storage_tic', [0] * 8),
+        *rec.get('storage_tic', _ZERO_8),
     )
-    tests = struct.pack(
-        '<BBBBIII',
+    tests = PIPE_TESTS.pack(
         rec.get('depth_test_word', 0),
         rec.get('stencil_test_word', 0),
         rec.get('test_flags', 0),
@@ -265,77 +361,107 @@ def pipeline_bytes(rec: dict, key_offset: int, blob_off: int, variants_off: int 
         rec.get('stencil_tic', 0),
         0,
     )
-    counts = [sum(1 for v in rec.get('variants', []) if v['stage'] == stage) for stage in (0, 1)]
+    variants = rec.get('variants')
+    if variants:
+        c0 = sum(1 for v in variants if v['stage'] == 0)
+        c1 = sum(1 for v in variants if v['stage'] == 1)
+    else:
+        c0 = c1 = 0
+    fetch_rung = rec.get('fetch_rung')
     v15 = PIPELINE_V15.pack(
-        variants_off if any(counts) else 0,
-        *counts,
+        variants_off if (c0 or c1) else 0,
+        c0,
+        c1,
         rec.get('storage_blend_mask', 0),
         rec.get('storage_blend_model', 0),
         rec.get('bound_entries', 0) & 0xFFFFFFFF,
         rec.get('uniform', NO_UNIFORM),
-        bytes(rec.get('fetch_rung', [0] * 8)),
+        bytes(fetch_rung) if fetch_rung is not None else _ZERO_8B,
         name_offset,
     )
     v18 = PIPELINE_V18.pack(rec.get('memory_entries', ALL_ENTRIES) & 0xFFFFFFFF)
-    entries = entry_bytes(rec['entries'])[: 8 * PACK_ENTRIES]
-    tails = v15 + v18 + v20_tail(rec) + v21_tail(rec) + v22_tail(rec) + v24_tail(rec)
+    entries = entry_bytes(rec['entries'])[: 8 * PACK_ENTRIES] if entries_head is None else entries_head
+    tails = (
+        v15
+        + v18
+        + v20_tail(rec, spill_at=spill_at, far_at=far_at)
+        + v21_tail(rec)
+        + v22_tail(rec)
+        + v24_tail(rec, restore_at=restore_at, stride_twin=stride_twin)
+        + v36_tail(rec)
+    )
     return head + entries + push_bytes(rec['push']) + dynamic + storage + tests + tails
 
 
-def v20_tail(rec: dict) -> bytes:
+def v20_tail(rec: dict, *, spill_at: int | None = None, far_at: int | None = None) -> bytes:
     """Give a record's PIPELINE_V20 tail: what its reads through argument buffers take of a draw."""
-    heap = rec.get('heap', [])
+    heap = rec.get('heap', ())
     if len(heap) > HEAP_ARRAYS:
         raise ValueError(f'{len(heap)} set-1 heap arrays: a pipeline holds {HEAP_ARRAYS}')
-    pairs = [word for array in heap for word in (array['class'], array['offset'])]
+    pairs = [word for array in heap for word in (array['class'], array['offset'])] if heap else ()
+    spill = rec.get('spill', ((), ()))
+    spill_entry = rec.get('spill_entry', (0, 0))
+    spill_at_val = (rec.get('spill_at', 0) if spill_at is None else spill_at) if (spill[0] or spill[1]) else 0
     tail = PIPELINE_V20.pack(
-        *rec.get('root_table_word', [0, 0]),
-        *rec.get('status_word', [0, 0]),
-        *rec.get('root_slots', [0, 0]),
+        *rec.get('root_table_word', (0, 0)),
+        *rec.get('status_word', (0, 0)),
+        *rec.get('root_slots', (0, 0)),
         len(heap),
         rec.get('heap_bytes', 0),
         *pairs,
-        *[0] * (2 * HEAP_ARRAYS - len(pairs)),
-        *[entry & 0xFF for entry in rec.get('spill_entry', [0, 0])],
-        *[len(words) for words in rec.get('spill', [[], []])],
-        rec.get('spill_at', 0) if any(rec.get('spill', [[], []])) else 0,
+        *([0] * (2 * HEAP_ARRAYS - len(pairs)) if len(pairs) < 2 * HEAP_ARRAYS else ()),
+        spill_entry[0] & 0xFF,
+        spill_entry[1] & 0xFF,
+        len(spill[0]),
+        len(spill[1]),
+        spill_at_val,
     )
     if len(rec['entries']) <= PACK_ENTRIES:
         return tail
-    far_at = far_at_bytes(rec['far_at'])
-    return tail[:V20_FAR_AT] + far_at + tail[V20_FAR_AT + len(far_at) :]
+    far_at_bytes_val = far_at_bytes(rec['far_at'] if far_at is None else far_at)
+    return tail[:V20_FAR_AT] + far_at_bytes_val + tail[V20_FAR_AT + len(far_at_bytes_val) :]
 
 
 def v21_tail(rec: dict) -> bytes:
     """Give a record's PIPELINE_V21 tail: its tessellation, stride and amplification fields, streams and pass words."""
+    runtime_head = rec.get('runtime_head')
+    pulled_stride = rec.get('pulled_stride')
+    vertex_streams = rec.get('vertex_streams')
     return PIPELINE_V21.pack(
-        bytes(rec.get('runtime_head', bytes(7))),
+        bytes(runtime_head) if runtime_head is not None else _ZERO_7B,
         rec.get('array_length_word', 0),
-        bytes(rec.get('pulled_stride', bytes(16))),
-        bytes(rec.get('vertex_streams', [])).ljust(VERTEX_STREAMS, b'\0'),
+        bytes(pulled_stride) if pulled_stride is not None else _ZERO_16B,
+        bytes(vertex_streams).ljust(VERTEX_STREAMS, b'\0') if vertex_streams else _ZERO_7B,
         rec.get('viewport_count_word', 0),
     )
 
 
 def v22_tail(rec: dict) -> bytes:
     """Give a record's PIPELINE_V22 tail: written textures' formats, xrSlots and argument tables' entry high bytes."""
-    tail = PIPELINE_V22.pack(*rec.get('written_format', [0] * WRITTEN_SLOTS), rec.get('xr_slots', 0))
-    vertex, fragment = rec.get('spill_entry', [0, 0])
-    high = struct.pack('<H', vertex >> 8 | (fragment >> 8) << 8)
+    tail = PIPELINE_V22.pack(*rec.get('written_format', _ZERO_16), rec.get('xr_slots', 0))
+    vertex, fragment = rec.get('spill_entry', (0, 0))
+    if vertex <= 0xFF and fragment <= 0xFF:
+        return tail
+    high = SPILL_HIGH_STRUCT.pack(vertex >> 8 | (fragment >> 8) << 8)
     return tail[:V22_SPILL_HIGH] + high + tail[V22_SPILL_HIGH + 2 :]
 
 
-def v24_tail(rec: dict) -> bytes:
+def v24_tail(rec: dict, *, restore_at: int | None = None, stride_twin: int | None = None) -> bytes:
     """Give a record's PIPELINE_V24 tail: its tessellation programs, stride twin, amplification words, restore pairs."""
-    restore = rec.get('restore', [])
+    restore = rec.get('restore')
     return PIPELINE_V24.pack(
-        *rec.get('tess', [0, 0]),
-        rec.get('stride_twin', 0),
+        *rec.get('tess', (0, 0)),
+        rec.get('stride_twin', 0) if stride_twin is None else stride_twin,
         rec.get('amplification_layer_word', 0),
         rec.get('amplification_viewport_word', 0),
-        2 * len(restore),
-        rec.get('restore_at', 0) if restore else 0,
+        2 * len(restore) if restore else 0,
+        (rec.get('restore_at', 0) if restore_at is None else restore_at) if restore else 0,
     )
+
+
+def v36_tail(rec: dict) -> bytes:
+    """Give a record's PIPELINE_V36 tail: the push words each draw writes a buffer slot's Metal address to, and the slots."""
+    return PIPELINE_V36.pack(bytes(rec.get('guest_base_word', ())), bytes(rec.get('guest_base_slot', ())))
 
 
 def kernel_window(e: dict) -> int:
@@ -379,12 +505,33 @@ def kernel_bytes(k: dict, key_offset: int, spill_at: int = 0) -> bytes:
     )
 
 
+_PROGRAM_HASHES: dict[bytes, int] = {}
+
+
+def program_hash(program: dict) -> int:
+    """Give the FNV-1a of a program's header, code and shader data, memoised by a C digest."""
+    image = program['image']
+    data = program['data']
+    h = hashlib.blake2b(digest_size=16)
+    h.update(image)
+    if data:
+        h.update(data)
+    digest = h.digest()
+    known = _PROGRAM_HASHES.get(digest)
+    if known is None:
+        v = fnv(image)
+        if data:
+            v = fnv(data, v)
+        known = _PROGRAM_HASHES[digest] = v
+    return known
+
+
 def program_name(program: dict) -> str:
     """Give the name nvdec gives a bound program: the FNV-1a of its header, code and shader data.
 
     The pack's ids hold its constant buffer types too (directlink.py program_id), which nvdec cannot see.
     """
-    return f'{fnv(program["image"] + program["data"]):x}'
+    return f'{program_hash(program):x}'
 
 
 def place_graphics(
@@ -498,12 +645,14 @@ class Pack:
     # tier 0's programs and heap bytes (directlink.py lay_out_tiers); None: every program is tier 0's
     tier0_programs: int | None = None
     tier0_heap: int | None = None
+    segments: bytes = b''  # the PackSegments section (segments.py)
+    tier0_slm_per_warp: int = 0
 
 
 # The heap section starts on this boundary (runtime/pack.h kPackTierAlign), so its tier 0 ends on one in the file too
 TIER_ALIGN = 128 << 10
 # The sections whose tier 0 is the whole section: read at a process's open, or as a whole (the blob's runs are shared)
-WHOLE_SECTIONS = (2, 3, 4, 5, 12)  # samplers, baseline, init, blob, iterated
+WHOLE_SECTIONS = (2, 3, 4, 5, 12, 16)  # samplers, baseline, init, blob, iterated, segments
 # The sections no state of the launch set reads at its creation: their tier 0 is empty
 UNTIERED_SECTIONS = (8, 11, 13, 14)  # kernels, archives, compute states, reflections
 SECTION_NAMES = (
@@ -523,10 +672,11 @@ SECTION_NAMES = (
     'compute states',
     'reflections',
     'fast keys',
+    'segments',
 )
 
 
-def twin_indices(pipes: list[dict]) -> list[int]:
+def twin_indices(pipes: list[dict], *, hashes: list[int] | None = None, vnames: list[str] | None = None) -> list[int]:
     """Give each record's stride twin as the pack names it: the index + 1 of its twin's record of its form, 0: none.
 
     As Pack::find picks a state's record of a form: no variant record; the free form's or the barrier form's own; else
@@ -534,11 +684,13 @@ def twin_indices(pipes: list[dict]) -> list[int]:
     """
     runs: dict[int, list[int]] = {}
     for at, rec in enumerate(pipes):
-        if not variant_name(rec['key']):
-            runs.setdefault(key_hash(rec), []).append(at)
+        vname = variant_name(rec['key']) if vnames is None else vnames[at]
+        if not vname:
+            h = key_hash(rec, vname) if hashes is None else hashes[at]
+            runs.setdefault(h, []).append(at)
 
     def find(key: int, form: str) -> int:
-        ats = runs.get(key, [])
+        ats = runs.get(key, ())
         if form in ('free', 'barrier'):
             return next((at for at in ats if pipes[at].get('form') == form), -1)
         plain = [at for at in ats if pipes[at].get('form') not in ('free', 'barrier')]
@@ -548,7 +700,11 @@ def twin_indices(pipes: list[dict]) -> list[int]:
 
 
 def pipeline_sections(
-    pipes: list[dict], tier0: list[int] | None = None
+    pipes: list[dict],
+    tier0: list[int] | None = None,
+    *,
+    hashes: list[int] | None = None,
+    vnames: list[str] | None = None,
 ) -> tuple[bytearray, list[int], bytearray, bytearray]:
     """Give the pipelines, the blob, the strings and the variants; `tier0` gets tier 0's strings and variant bytes.
 
@@ -556,39 +712,76 @@ def pipeline_sections(
     vertex table's first (its spill_at), and the pairs its draws set back after it (its restore_at).
     """
     strings = bytearray()
+    strings_extend = strings.extend
+    strings_append = strings.append
 
     def string(s: str) -> int:
         off = len(strings)
-        strings.extend(s.encode() + b'\0')
+        strings_extend(s.encode())
+        strings_append(0)
         return off
 
-    blob, blobs = [], {}
+    if vnames is None:
+        vnames = [variant_name(rec['key']) for rec in pipes]
+    if hashes is None:
+        hashes = [key_hash(rec, vn) for rec, vn in zip(pipes, vnames, strict=True)]
+    blob: list[int] = []
+    blobs: dict[tuple[tuple[int, int], ...], int] = {}
     pipe_bin, variant_bin = bytearray(), bytearray()
-    for rec, twin in zip(pipes, twin_indices(pipes), strict=True):
+    pack_variant = VARIANT_STRUCT.pack
+    twins = twin_indices(pipes, hashes=hashes, vnames=vnames)
+    for rec, twin, keyhash, name in zip(pipes, twins, hashes, vnames, strict=True):
         if tier0 is not None and not tier0 and rec.get('tier', 0):
             tier0 += [len(strings), len(variant_bin)]
         pairs = tuple(rec['blob'])
-        if pairs not in blobs:
-            blobs[pairs] = len(blob)
+        blob_off = blobs.get(pairs)
+        if blob_off is None:
+            blob_off = blobs[pairs] = len(blob)
             for m, v in pairs:
-                blob += [m, v]
-        variants_off = len(variant_bin) // 8
-        for v in sorted(rec.get('variants', []), key=lambda v: v['stage']):
-            variant_bin += struct.pack('<II', v['assume'], v['program'])
+                blob.append(m)
+                blob.append(v)
+        variants_off = len(variant_bin) // VARIANT_STRUCT.size
+        variants = rec.get('variants')
+        if variants:
+            if len(variants) > 1:
+                variants = sorted(variants, key=lambda v: v['stage'])
+            for v in variants:
+                variant_bin += pack_variant(v['assume'], v['program'], v.get('memory', ALL_ENTRIES))
         # the key's attachment and vertex fields (what the runtime reads of it: gpu.cpp Device::pipeline), not the
         # functions' constants (some 1.5 KB a fixed-function state; pack.json has the whole key)
-        name = variant_name(rec['key'])
-        key_off = string(rec['key'].split(' | ')[0].rstrip())
+        key = rec['key']
+        bar = key.find(' | ')
+        key_off = string((key[:bar] if bar >= 0 else key).rstrip())
         spill_at = len(blob)
-        for words in rec.get('spill', [[], []]):
-            blob += words
+        spill = rec.get('spill')
+        if spill:
+            for words in spill:
+                if words:
+                    blob.extend(words)
         restore_at = len(blob)
-        for m, v in rec.get('restore', []):
-            blob += [m, v]
+        restore = rec.get('restore')
+        if restore:
+            for m, v in restore:
+                blob.append(m)
+                blob.append(v)
         far_at = len(blob)
-        blob += far_words(rec)
-        placed = dict(rec, spill_at=spill_at, restore_at=restore_at, far_at=far_at, stride_twin=twin)
-        pipe_bin += pipeline_bytes(placed, key_off, blobs[pairs], variants_off, string(name) if name else 0)
+        ents = entry_bytes(rec['entries'])
+        if len(rec['entries']) > PACK_ENTRIES:
+            blob.extend(far_words(rec, ents))
+        pipe_bin += pipeline_bytes(
+            rec,
+            key_off,
+            blob_off,
+            variants_off,
+            string(name) if name else 0,
+            keyhash=keyhash,
+            vname=name,
+            entries_head=ents[: 8 * PACK_ENTRIES],
+            spill_at=spill_at,
+            restore_at=restore_at,
+            far_at=far_at,
+            stride_twin=twin,
+        )
     if tier0 is not None and not tier0:
         tier0 += [len(strings), len(variant_bin)]
     return pipe_bin, blob, strings, variant_bin
@@ -622,7 +815,9 @@ def reflection_bytes(reflections: dict[tuple[bool, int], bytes]) -> bytes:
     return head + bytes(entries) + bytes(blobs)
 
 
-def fast_key_bytes(fast_keys: dict[int, int], pipes: list[dict]) -> tuple[bytes, int]:
+def fast_key_bytes(
+    fast_keys: dict[int, int], pipes: list[dict], *, hashes: list[int] | None = None
+) -> tuple[bytes, int]:
     """Give the PackFastKeys section (runtime/pack.h PackFastKey) and its tier-0 rows: by tier, then fast key.
 
     Each state's records are one run of the pipelines, which are in key hash order within each tier; a fast key whose
@@ -631,14 +826,17 @@ def fast_key_bytes(fast_keys: dict[int, int], pipes: list[dict]) -> tuple[bytes,
     runs: dict[int, tuple[int, int, int]] = {}
     last = (-1, -1)
     for at, rec in enumerate(pipes):
-        h = key_hash(rec)
-        if (rec.get('tier', 0), h) < last:
+        h = key_hash(rec) if hashes is None else hashes[at]
+        tier_val = rec.get('tier', 0)
+        order = (tier_val, h)
+        if order < last:
             raise ValueError(f'pipeline {at} ({h:016x}) after {last[1]:016x}: not in tier and key hash order')
-        tier, first, count = runs.get(h, (rec.get('tier', 0), at, 0))
-        runs[h] = (tier, first, count + 1)
-        last = (rec.get('tier', 0), h)
+        prev = runs.get(h)
+        runs[h] = (tier_val, at, 1) if prev is None else (prev[0], prev[1], prev[2] + 1)
+        last = order
     rows = sorted((runs[h][0], fast, runs[h][1], runs[h][2]) for fast, h in fast_keys.items() if h in runs)
-    return b''.join(struct.pack('<QII', *row[1:]) for row in rows), sum(1 for row in rows if row[0] == 0)
+    pack_row = FAST_KEY_STRUCT.pack
+    return b''.join(pack_row(row[1], row[2], row[3]) for row in rows), sum(1 for row in rows if row[0] == 0)
 
 
 def tier0_prefixes(pack: Pack, strings: int, variants: int, fast_rows: int, sections: list[bytes]) -> list[int]:
@@ -665,41 +863,70 @@ def sections_line(data: bytes) -> str:
     )
 
 
-def pack_bytes(pack: Pack) -> tuple[bytes, list[int]]:
+def rules_identity(pack: Pack) -> bytes:
+    """The first 16 bytes of the SHA-256 of the rules a device-made record is made by (record_parts.cpp
+    PackRules::of): the registers the pack's states set apart, the baseline, and the context its init leaves, as
+    little-endian words, each list's count first. The shader compiler names its store by it (compiler_store.h)."""
+    varying = sorted({m for rec in pack.pipes for m, _ in rec['blob']})
+    context: dict[int, int] = {}
+    for subc, method, data, reloc in pack.init:
+        if subc == 0 and reloc == 0 and data:
+            context[method] = data
+        elif subc == 0:
+            context.pop(method, None)
+    words = [len(varying), *varying]
+    for registers in (pack.baseline, context):
+        words += [len(registers), *[x for m, v in sorted(registers.items()) for x in (m, v)]]
+    return hashlib.sha256(struct.pack(f'<{len(words)}I', *words)).digest()[:16]
+
+
+def pack_bytes(pack: Pack, hashes: list[int] | None = None) -> tuple[bytes, list[int]]:
     tier0_strings_variants: list[int] = []
-    pipe_bin, blob, strings, variant_bin = pipeline_sections(pack.pipes, tier0_strings_variants)
+    vnames = [variant_name(rec['key']) for rec in pack.pipes]
+    if hashes is None:
+        hashes = [key_hash(rec, vn) for rec, vn in zip(pack.pipes, vnames, strict=True)]
+    pipe_bin, blob, strings, variant_bin = pipeline_sections(
+        pack.pipes, tier0_strings_variants, hashes=hashes, vnames=vnames
+    )
     kernel_bin = bytearray()
     for k in sorted(pack.kernels, key=lambda k: fnv(k['key'].encode())):
         kernel_bin += kernel_bytes(k, len(strings), len(blob))
         blob += k.get('spill', [])
-        strings.extend(k['key'].encode() + b'\0')
-    prog_bin = bytearray()
-    for pr in pack.programs:
-        types = bytes(pr['cbufs']) + bytes(PROGRAM_CBUFS - len(pr['cbufs']))
+        strings.extend(k['key'].encode())
+        strings.append(0)
+    prog_bin = bytearray(PROGRAM_BYTES * len(pack.programs))
+    pack_prog = PROG_RECORD.pack_into
+    for i, pr in enumerate(pack.programs):
+        cbufs = pr['cbufs']
+        types = bytes(cbufs) + _CBUF_PAD[len(cbufs)]
         far = b'\0\0\0'
-        if any(pr.get('far_ubos', [])):
+        far_ubos = pr.get('far_ubos')
+        if far_ubos and any(far_ubos):
             far = far_at_bytes(len(blob) + 1)
-            table = list(pr['far_ubos']) + [0] * (PROGRAM_CBUFS - len(pr['far_ubos']))
-            blob += list(struct.unpack(f'<{PROGRAM_CBUFS // 2}I', struct.pack(f'<{PROGRAM_CBUFS}H', *table)))
-        prog_bin += (
-            struct.pack(
-                '<IIIIIB',
-                pr['heap_offset'],
-                pr['program'],
-                pr['bytes'],
-                pr['data_offset'],
-                pr['data_bytes'],
-                len(pr['cbufs']),
-            )
-            + types
-            + struct.pack('<BB', pr.get('gprs', 0), pr.get('bound_textures', 0))
-            + far
-            + struct.pack('<I', pr.get('facts', 0))
+            table = list(far_ubos) + [0] * (PROGRAM_CBUFS - len(far_ubos))
+            blob.extend(FAR_UBOS_UNPACK.unpack(FAR_UBOS_PACK.pack(*table)))
+        pack_prog(
+            prog_bin,
+            i * PROGRAM_BYTES,
+            pr['heap_offset'],
+            pr['program'],
+            pr['bytes'],
+            pr['data_offset'],
+            pr['data_bytes'],
+            len(cbufs),
+            types,
+            pr.get('gprs', 0),
+            pr.get('bound_textures', 0),
+            far,
+            pr.get('facts', 0),
         )
-    tsc_bin = b''.join(struct.pack('<8I', *w) for w in pack.constexpr_tsc)
-    base_bin = b''.join(struct.pack('<II', m, v) for m, v in sorted(pack.baseline.items()))
-    init_bin = b''.join(struct.pack('<HHII', sc, m, d, rc) for sc, m, d, rc in pack.init)
-    blob_bin = struct.pack(f'<{len(blob)}I', *blob)
+    tsc_bin = b''.join(TSC_STRUCT.pack(*w) for w in pack.constexpr_tsc)
+    base_bin = b''.join(BASE_STRUCT.pack(m, v) for m, v in sorted(pack.baseline.items()))
+    init_bin = b''.join(INIT_STRUCT.pack(sc, m, d, rc) for sc, m, d, rc in pack.init)
+    if sys.byteorder == 'little' and array.array('I').itemsize == 4:
+        blob_bin = array.array('I', blob).tobytes()
+    else:
+        blob_bin = struct.pack(f'<{len(blob)}I', *blob)
     sections = [
         bytes(prog_bin),
         bytes(pipe_bin),
@@ -717,12 +944,13 @@ def pack_bytes(pack: Pack) -> tuple[bytes, list[int]]:
         compute_facts_bytes(pack.compute_facts),
         reflection_bytes(pack.reflections),
     ]
-    fast_bin, fast_rows = fast_key_bytes(pack.fast_keys, pack.pipes)
+    fast_bin, fast_rows = fast_key_bytes(pack.fast_keys, pack.pipes, hashes=hashes)
     sections.append(fast_bin)
+    sections.append(pack.segments)
     assert len(sections) == SECTIONS
     tier0 = tier0_prefixes(pack, *tier0_strings_variants, fast_rows, sections)
-    # the section table, then the stack key, chip facts and reserved, then the tier-0 table
-    header_size = 8 + 4 * 4 + 8 * 2 * len(sections) + 16 + 8 * len(sections)
+    # the section table, then the stack key, chip facts and tier0SlmPerWarp, then the tier-0 table and the rules' identity
+    header_size = 8 + 4 * 4 + 8 * 2 * len(sections) + 16 + 8 * len(sections) + 16
     offs, at = [], (header_size + 255) // 256 * 256
     body = bytearray()
     for i, s in enumerate(sections):
@@ -732,9 +960,30 @@ def pack_bytes(pack: Pack) -> tuple[bytes, list[int]]:
         body += s
     hdr = MAGIC + struct.pack('<IIII', VERSION, len(pack.programs), len(pack.pipes), len(pack.constexpr_tsc))
     hdr += struct.pack(f'<{2 * len(sections)}Q', *[x for o in offs for x in o])
-    hdr += struct.pack('<QII', 0, chip_facts(), 0)  # the stack key (make_pack.py stamps it), chip facts, reserved
+    hdr += struct.pack('<QII', 0, chip_facts(), pack.tier0_slm_per_warp)  # stack (make_pack.py), chip facts, tier0 SLM
     hdr += struct.pack(f'<{len(sections)}Q', *tier0)
+    hdr += rules_identity(pack)
     return hdr + bytes((header_size + 255) // 256 * 256 - len(hdr)) + body, blob
+
+
+def _json_default(o: object) -> str:
+    return o.hex() if isinstance(o, (bytes, bytearray)) else str(o)
+
+
+def _write_json_list(out, items: list, encode, chunk: int = 512) -> None:
+    if not items:
+        out.write('[]')
+        return
+    out.write('[\n')
+    for i in range(0, len(items), chunk):
+        encoded = encode(items[i : i + chunk])
+        # JSON escapes string newlines as \n, so every raw newline here is structural indentation to shift by one space.
+        inner = encoded[2:-2].replace('\n', '\n ')
+        if i:
+            out.write(',\n')
+        out.write(' ')
+        out.write(inner)
+    out.write('\n ]')
 
 
 def write_json(path: str, pack: Pack, varying: list[int]) -> None:
@@ -751,13 +1000,19 @@ def write_json(path: str, pack: Pack, varying: list[int]) -> None:
         'kernels': pack.kernels,
         'splits': pack.splits,
     }
+    encode = json.JSONEncoder(indent=1, default=_json_default).encode
     with open(path, 'w') as pack_json:
-        json.dump(
-            js,
-            pack_json,
-            indent=1,
-            default=lambda o: o.hex() if isinstance(o, (bytes, bytearray)) else str(o),
-        )
+        pack_json.write('{\n')
+        items = list(js.items())
+        for idx, (key, val) in enumerate(items):
+            if idx:
+                pack_json.write(',\n')
+            pack_json.write(f' {encode(key)}: ')
+            if isinstance(val, list):
+                _write_json_list(pack_json, val, encode)
+            else:
+                pack_json.write(encode(val).replace('\n', '\n '))
+        pack_json.write('\n}')
 
 
 def entry_kind(e: dict) -> str:

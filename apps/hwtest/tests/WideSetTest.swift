@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A render state of 40 Metal arguments, twenty storage buffers a stage, drawn on the driver: its set 0 holds more than

@@ -67,6 +67,7 @@ int nvdec_present(NVDECClient *client, const TegraNVDECPresent *present);
 // The H264Backend buffer and job callbacks (ctx = the client).
 int nvdec_alloc(void *client, uint64_t size, uint32_t *handle, void **va);
 void nvdec_free(void *client, uint32_t handle);
+TegraNVDECSubmit *nvdec_submit_buffer(NVDECClient *client);
 int nvdec_submit(void *client, const TegraNVDECSubmit *submit, TegraNVDECFence *reply);
 int nvdec_wait(void *client, const TegraNVDECWait *wait);
 

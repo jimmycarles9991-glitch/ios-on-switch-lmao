@@ -1,13 +1,10 @@
 import AVFoundation
 import HWTestCore
+import HWTestKit
+import HWTestShared
 import HWTestVideo
 import QuartzCore
 import UIKit
-
-final class PlayerView: UIView {
-    override class var layerClass: AnyClass { AVPlayerLayer.self }
-    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
-}
 
 /// Counts what a display link sees come out of AVPlayer, and checks some of it against the pattern.
 @MainActor

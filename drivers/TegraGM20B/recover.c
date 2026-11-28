@@ -225,7 +225,7 @@ static void chan_unbind(struct nvkm_chan *chan)
 	ctxsw.chan_nvkm->unbind(chan);
 }
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 int tgm_recover_copy_reset(int chid, void (*mark)(void), uint32_t *status)
 {
 	struct nvkm_device *device = ctxsw.fifo->engine.subdev.device;

@@ -603,7 +603,11 @@ cpu_idle(void)
 		}
 	}
 
-	if (__improbable(cpu_proximate_timer())) {
+	uint64_t ctime_for_deadline = mach_absolute_time();
+	bool proximate = (cpu_data_ptr->cpu_idle_latency == 0x0ULL)
+	    ? (cpu_data_ptr->rtcPop < ctime_for_deadline)
+	    : cpu_proximate_timer();
+	if (__improbable(proximate)) {
 		if (idle_proximate_timer_wfe == 1) {
 			/* Poll issuing WFEs until the expected
 			 * timer FIQ arrives.
@@ -666,6 +670,12 @@ cpu_idle(void)
 #if defined(APPLETYPHOON)
 		// <rdar://problem/15827409> CPU1 Stuck in WFIWT Because of MMU Prefetch
 		typhoon_prepare_for_wfi();
+#endif
+#if !HAS_RETENTION_STATE
+		if (__probable(cpu_data_ptr->cpu_idle_notify == NULL &&
+		    cpu_data_ptr->idle_timer_notify == NULL)) {
+			switch_idle_note_now(cpu_data_ptr, ctime_for_deadline);
+		}
 #endif
 		__builtin_arm_dsb(DSB_SY);
 #if HAS_RETENTION_STATE
@@ -918,7 +928,9 @@ cpu_data_init(cpu_data_t *cpu_data_ptr)
 	pmap_cpu_data_ptr->pv_free_spill_marker = NULL;
 #if !CONFIG_SPTM
 	pmap_cpu_data_ptr->cpu_nested_pmap = (struct pmap *) NULL;
+#if !HAS_16BIT_ASID
 	bzero(&(pmap_cpu_data_ptr->cpu_sw_asids[0]), sizeof(pmap_cpu_data_ptr->cpu_sw_asids));
+#endif /* !HAS_16BIT_ASID */
 #endif
 #endif /* !XNU_MONITOR */
 	cpu_data_ptr->halt_status = CPU_NOT_HALTED;

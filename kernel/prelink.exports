@@ -13,3 +13,7 @@ _switch_idle_set_frames_started
 _vnode_pagein
 _upl_phys_page
 _kernel_thread_start_priority
+# drivers/TegraGM20B: priority-inheriting condition waits and QoS-bounded thread calls.
+_lck_mtx_sleep_with_inheritor
+_wakeup_all_with_inheritor
+_thread_call_allocate_with_qos

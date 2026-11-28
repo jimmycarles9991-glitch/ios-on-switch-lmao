@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// Plain-format textures over planes whose rows overlap or run past the allocation, read by a kernel

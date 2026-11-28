@@ -52,8 +52,15 @@ def run(command: list[Path | str], work: Path) -> None:
         raise RuntimeError(f'native seed tool {command[0]} failed ({result.returncode}) in {work}:\n{output}')
 
 
+# A compute state's facts alone (kernel_shapes.h factsOnly: kernelharvest's facts lines): the pack takes its answers,
+# and the native seed makes no record of it (native_seed_compute.h computeRows)
+FACTS_ONLY = 'D ok=1 tg=0,0,0 edge=0,0,0 threads=0 '
+
+
 def native_lines(lines: list[str]) -> list[str]:
-    return [line for line in lines if line.startswith(('R ', 'D ')) and ' ok=1 ' in line]
+    return [
+        line for line in lines if line.startswith(('R ', 'D ')) and ' ok=1 ' in line and not line.startswith(FACTS_ONLY)
+    ]
 
 
 def split_lines(text: str) -> tuple[list[str], list[str]]:

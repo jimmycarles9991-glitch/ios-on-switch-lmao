@@ -37,15 +37,15 @@ void raise()
 }
 
 SwitchFalconInterrupt line;
-IOFilterInterruptEventSource *source;
+IOService *nub;
 
 class FalconInterrupt : public testing::Test {
 protected:
     static void SetUpTestSuite()
     {
         ASSERT_TRUE(line.start("TegraTest", 40, gEngine, failed));
-        source = IOWorkLoop::last();
-        ASSERT_NE(source, nullptr);
+        nub = switch_interrupt_nub(40, false);
+        ASSERT_NE(nub, nullptr);
     }
 
     void SetUp() override
@@ -65,12 +65,12 @@ TEST_F(FalconInterrupt, TheFilterOnlyReadsTheParkedErrorAndTheActionTurnsTheLine
         << "on() enables THI's falcon interrupt";
     gWrites.clear();
     raise();
-    ASSERT_TRUE(source->fire());
+    ASSERT_TRUE(nub->fire());
     EXPECT_TRUE(gWrites.empty()) << "the falcon must stay parked: nothing is cleared before the cancellation";
     ASSERT_EQ(gFailed.size(), 1u);
     EXPECT_EQ(gFailed[0].mailbox0, 8u);
     EXPECT_EQ(gFailed[0].mailbox1, 0x1234u);
-    EXPECT_FALSE(source->enabled) << "the line stays asserted until the reset: it must not come back on by itself";
+    EXPECT_FALSE(nub->enabled) << "the line stays asserted until the reset: it must not come back on by itself";
     char why[256];
     ASSERT_TRUE(line.failed(why, sizeof(why)));
     EXPECT_STREQ(why, "falcon error interrupt: MAILBOX0 0x8 (MSDECOS_ERROR_APPLICATION) MAILBOX1 0x1234; IRQSTAT 0x40 "
@@ -84,8 +84,8 @@ TEST_F(FalconInterrupt, AnEngineThatIsOffIsNotRead)
     line.on();
     line.off();
     raise();
-    source->enabled = true;  // an interrupt already on its way when the line was turned off
-    EXPECT_FALSE(source->fire());
+    nub->enabled = true;  // an interrupt already on its way when the line was turned off
+    EXPECT_FALSE(nub->fire());
     EXPECT_TRUE(gFailed.empty());
 }
 
@@ -104,7 +104,7 @@ TEST_F(FalconInterrupt, AnErrorPendingThroughACancellationThatTheFilterNeverTook
     line.lostCheckStart();
     EXPECT_THROW(line.lostCheckEnd(), std::runtime_error);
     line.lostCheckStart();
-    ASSERT_TRUE(source->fire());
+    ASSERT_TRUE(nub->fire());
     EXPECT_NO_THROW(line.lostCheckEnd()) << "taken while the check ran";
 }
 }  // namespace

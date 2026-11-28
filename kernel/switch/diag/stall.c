@@ -49,6 +49,8 @@ void switch_stall_tick(uint64_t now);
 
 #if DEVELOPMENT || DEBUG
 
+#if defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED
+
 void switch_stall_report(thread_call_param_t p0, thread_call_param_t p1);
 
 #define STALL_CHECK_NS 250000000ull /* the most often the tick samples */
@@ -143,7 +145,7 @@ static struct stall_slot *stall_slot_for(const char *name, bool widget)
 }
 
 /* kern_exec.c, after a successful posix_spawn or execve: the new main thread, if its process is a UI one. */
-void switch_stall_exec(thread_t thread)
+static void stall_exec_slot(thread_t thread)
 {
     char name[32];
     struct stall_slot *slot = NULL;
@@ -151,10 +153,6 @@ void switch_stall_exec(thread_t thread)
     struct stall_snapshot stale = {0};
     bool widget = false;
 
-    switch_sched_busy_exec(thread);
-#if SWITCH_RECORDER
-    switch_recorder_exec(thread);
-#endif
     switch_task_name(get_threadtask(thread), name, sizeof(name));
     widget = stall_widget(get_threadtask(thread), name);
     if (!widget && strcmp(name, "SpringBoard") != 0 && strcmp(name, "backboardd") != 0 &&
@@ -162,7 +160,7 @@ void switch_stall_exec(thread_t thread)
         return;
     }
     if (os_atomic_load(&stall_call, acquire) == NULL) {
-        thread_call_t call = thread_call_allocate_with_options(switch_stall_report, NULL, THREAD_CALL_PRIORITY_KERNEL,
+        thread_call_t call = thread_call_allocate_with_options(switch_stall_report, NULL, THREAD_CALL_PRIORITY_USER,
                                                                THREAD_CALL_OPTIONS_ONCE);
 
         nanoseconds_to_absolutetime(SWITCH_STALL_NS, &stall_threshold);
@@ -211,14 +209,10 @@ static void stall_sample(thread_t t, uint64_t now, struct switch_stall_sample *s
 }
 
 /* sched_prim.c sched_timeshare_maintenance_continue, on the scheduler's maintenance thread. */
-void switch_stall_tick(uint64_t now)
+static void stall_tick_slots(uint64_t now)
 {
     bool due = false;
 
-    switch_sched_busy_tick();
-#if SWITCH_RECORDER
-    switch_recorder_tick(now);
-#endif
     if (os_atomic_load(&stall_call, acquire) == NULL || now - stall_last < stall_check) {
         return;
     }
@@ -412,6 +406,30 @@ void switch_stall_report(__unused thread_call_param_t p0, __unused thread_call_p
         }
         thread_deallocate(t);
     }
+}
+
+#endif /* SWITCH_STATS_SCHED */
+
+void switch_stall_exec(thread_t thread)
+{
+    switch_sched_busy_exec(thread);
+#if SWITCH_RECORDER
+    switch_recorder_exec(thread);
+#endif
+#if defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED
+    stall_exec_slot(thread);
+#endif
+}
+
+void switch_stall_tick(uint64_t now)
+{
+    switch_sched_busy_tick();
+#if SWITCH_RECORDER
+    switch_recorder_tick(now);
+#endif
+#if defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED
+    stall_tick_slots(now);
+#endif
 }
 
 /*

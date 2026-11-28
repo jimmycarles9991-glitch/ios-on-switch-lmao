@@ -59,8 +59,12 @@ void planeDecide(const OriginalLegacySwapRequest *request, PlaneDecision &d)
         OSObject *e = effective[i] && effective[i]->metaCast("IOSurface") ? effective[i] : nullptr;
         if (updated & (1u << i)) {
             r.surface = e;
-            if (e)
-                r.layer = planeLayerOf(bytes, i, e);
+            if (e) {
+                if (const native_planes::Layer *cached = validatedLayerOf(request, i, e))
+                    r.layer = *cached;
+                else
+                    r.layer = planeLayerOf(bytes, i, e);
+            }
         } else if (e != r.surface) {
             // The family's inherited surface is not the one recorded (a swap retired unshown before its kick): a full-frame
             // BGRA one is the UI as it is; anything else cannot be placed and is not shown.

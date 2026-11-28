@@ -104,6 +104,30 @@ host_test(
     copts = ["-O1"],
 )
 
+# The worker's choice of chain in a model of the card, against the rule it replaced.
+host_test(
+    name = "sd_pick_test",
+    srcs = [
+        "sd_pick_model.h",
+        "sd_pick_test.cpp",
+        "//drivers/NativeSwitchBlock:SwitchQueue.h",
+        "//drivers/NativeSwitchBlock:SwitchSdPick.h",
+    ],
+    copts = ["-O1"],
+)
+
+# The write fence end to end in the same model: synchronizes beginning mid-run, on both windows, both merge paths.
+host_test(
+    name = "sd_fence_test",
+    srcs = [
+        "sd_pick_model.h",
+        "sd_fence_test.cpp",
+        "//drivers/NativeSwitchBlock:SwitchQueue.h",
+        "//drivers/NativeSwitchBlock:SwitchSdPick.h",
+    ],
+    copts = ["-O1"],
+)
+
 host_test(
     name = "sd_pool_test",
     srcs = [
@@ -135,6 +159,17 @@ host_test(
 )
 
 host_test(
+    name = "sd_pipeline_test",
+    srcs = [
+        "sd_pipeline_test.cpp",
+        "//drivers/NativeSwitchBlock:SwitchAdma.h",
+        "//drivers/NativeSwitchBlock:SwitchSdBus.h",
+        "//drivers/NativeSwitchBlock:SwitchSdCard.h",
+        "//drivers/NativeSwitchBlock:SwitchSdPipeline.h",
+    ],
+)
+
+host_test(
     name = "cryptex_map_test",
     size = "medium",
     srcs = [
@@ -152,6 +187,26 @@ host_test(
         "//drivers/NativeSwitchBlock:SwitchCryptexCache.h",
     ],
     copts = ["-O1"],
+)
+
+# The same cache as a release kernel compiles it (its stats compiled out), less the two cases that count those stats.
+host_test(
+    name = "cryptex_cache_release_test",
+    srcs = [
+        "cryptex_cache_test.cpp",
+        "//drivers/NativeSwitchBlock:SwitchCryptexCache.h",
+    ],
+    args = ["--gtest_filter=-CryptexCache.AColdMissReadsItsWholeWindowOnceAndNeighboursWaitForIt:" +
+            "CryptexCache.ReadAheadReadsExactlyItsBlocksAndRequestsFindThem"],
+    copts = [
+        "-O1",
+        "-UDEVELOPMENT",
+        "-DDEVELOPMENT=0",
+        "-UDEBUG",
+        "-DDEBUG=0",
+        "-DSWITCH_STATS_IO=0",
+    ],
+    defines = ["KERNEL"],
 )
 
 # --- Source guards: what the drivers (not built for the host) do with the engines above --------------------------------
@@ -204,6 +259,19 @@ host_test(
     copts = ["-O1"],
     data = ["//drivers/NativeSwitchBlock:NativeSwitchBlock.cpp"],
     deps = [":source_checks"],
+)
+
+# c37a9bd1c: the Priority feature on both devices, and the throttle both XNU trees keep on them.
+host_test(
+    name = "sd_priority_source_test",
+    srcs = ["sd_priority_source_test.cpp"],
+    copts = ["-O1"],
+    data = [
+        "//drivers/NativeSwitchBlock:NativeSwitchBlock.cpp",
+        "//drivers/NativeSwitchBlock:SwitchCryptex.cpp",
+        "//kernel/xnu-10063.141.1/bsd:vfs/vfs_subr.c",
+        "//kernel/xnu-12377.121.6/bsd:vfs/vfs_subr.c",
+    ],
 )
 
 host_test(

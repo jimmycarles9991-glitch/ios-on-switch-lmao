@@ -107,6 +107,19 @@ class Replies(unittest.TestCase):
         path.write_text(json.dumps(record))
         self.assertTrue(replies.inventory(self.root, strict=True)['inputComplete'])
 
+    def test_device_capture_without_digests_is_attributed(self):
+        name, path, record = capture(self.root)
+        data = (self.root / name).read_bytes()
+        (self.root / name).write_bytes(data[:16] + bytes(32) + data[48:])
+        device = {k: v for k, v in record.items() if not k.endswith('SHA256')} | {'schema': 2}
+        path.write_text(json.dumps(device))
+        report = replies.inventory(self.root, strict=True)
+        self.assertEqual(report['attributedReplies'], 1)
+        self.assertEqual(report['entries'][name]['metallibSHA256'], replies.sha(b'MTLB fixture'))
+        path.write_text(json.dumps(device | {'replySHA256': record['replySHA256']}))
+        with self.assertRaisesRegex(ValueError, 'states a digest'):
+            replies.inventory(self.root, strict=True)
+
     def test_duplicate_metadata_fields_are_refused(self):
         _, path, record = capture(self.root)
         path.write_text(json.dumps(record)[:-1] + ', "requestType": 13}')

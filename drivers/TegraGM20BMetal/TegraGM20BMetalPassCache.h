@@ -22,18 +22,23 @@ struct SwitchMetalPassEntry {
     std::array<uint32_t, 8> formats;
     uint32_t count, zeta, samples;
     uint8_t turn;
+    uint8_t colorMask;
+    bool hasZeta, hasResolve, hasXr;
     std::vector<uint8_t> key;
 };
 
 // `d`'s contents, as the key a find and a keep take: false where `d` is not of Metal's own descriptor classes, a sample
 // buffer attachment names a buffer (counter marks read and clear them on the pass's copy), or it names an object that is no
 // texture or buffer of this device
-bool gm20bPassKey(MTLRenderPassDescriptor *d, std::vector<uint8_t> &key, uint64_t &hash);
+bool gm20bPassKey(__unsafe_unretained MTLRenderPassDescriptor *d, std::vector<uint8_t> &key, uint64_t &hash,
+                  bool *hasCounters = nullptr);
 // A command buffer owns its bank from gm20bTakeRecording to gm20bRecordingDone: no trim touches an entry it found.
-SwitchMetalPassEntry *gm20bPassFind(SwitchMetalCommandBuffer *cb, const std::vector<uint8_t> &key, uint64_t hash);
+SwitchMetalPassEntry *gm20bPassFind(__unsafe_unretained SwitchMetalCommandBuffer *cb, const std::vector<uint8_t> &key,
+                                    uint64_t hash);
 // The pass just opened from `copy`, kept for the next one of the same contents
-void gm20bPassKeep(SwitchMetalCommandBuffer *cb, const std::vector<uint8_t> &key, uint64_t hash,
-                   MTLRenderPassDescriptor *copy, const SwitchMetalPass &facts, const SwitchMetalRenderEncoder *e);
+void gm20bPassKeep(__unsafe_unretained SwitchMetalCommandBuffer *cb, const std::vector<uint8_t> &key, uint64_t hash,
+                   __unsafe_unretained MTLRenderPassDescriptor *copy, const SwitchMetalPass &facts,
+                   __unsafe_unretained const SwitchMetalRenderEncoder *e);
 
 struct SwitchMetalPassTrim {
     size_t passes, textures;
@@ -48,7 +53,7 @@ SwitchMetalPassCachePtr gm20bNewPassCache();
 // Its command buffer is done: every copy it named textures in names none
 void gm20bPassCacheUnbind(SwitchMetalPassCache *cache);
 // The kept copy `pass` names its pass's textures for `cb`, once a command buffer
-void gm20bPassBind(SwitchMetalCommandBuffer *cb, MTLRenderPassDescriptor *pass);
+void gm20bPassBind(__unsafe_unretained SwitchMetalCommandBuffer *cb, __unsafe_unretained MTLRenderPassDescriptor *pass);
 SwitchMetalPassTrim gm20bPassCacheTrim(SwitchMetalPassCache *cache);
 SwitchMetalPassTrim gm20bPassCacheHeld(const SwitchMetalPassCache *cache);
 size_t gm20bPassCacheBytes(const SwitchMetalPassCache *cache);

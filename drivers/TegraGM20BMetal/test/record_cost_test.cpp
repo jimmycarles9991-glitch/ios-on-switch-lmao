@@ -10,7 +10,9 @@
 
 #include <gtest/gtest.h>
 #include <dlfcn.h>
+#include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <time.h>
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
@@ -335,6 +337,39 @@ TEST(GM20BRecordCost, CompositorScaleFrame)
     EXPECT_EQ(difference(repeated, one).counts.retains, 0u);
 }
 
+// An encoder whose pass shape the pass cache has not seen (TegraGM20BMetalPassCache.h): its clear colour new each round, so
+// every pass is a miss that copies its descriptor and reads every attachment, as a quarter to a half of the render
+// server's passes did on 25 Nov (frame line hit= against kept=). Printed beside a kept shape's encoder.
+TEST(GM20BRecordCost, AMissedPassShapeAgainstAKeptOne)
+{
+    Bench &b = bench();
+    ASSERT_TRUE(b.device != nil && b.state != nil);
+    using Passes = const std::vector<MTLRenderPassDescriptor *>;
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    const auto made = [] {
+        const auto &passes = gm20b::frameCpuCounts().passes;
+        return passes[size_t(gm20b::PassOpen::Kept)].load() + passes[size_t(gm20b::PassOpen::Unkept)].load();
+    };
+    const uint64_t madeBefore = made();
+#endif
+    const Sample hit = measure([&](id<MTLCommandBuffer> cb, Passes &into, uint32_t) {
+        emptyEncoders(cb, b, into);
+    });
+    const Sample missed = measure([&](id<MTLCommandBuffer> cb, Passes &into, uint32_t round) {
+        for (int p = 0; p < kEncoders; p++) {
+            into[size_t(p)].colorAttachments[0].loadAction = MTLLoadActionClear;
+            into[size_t(p)].colorAttachments[0].clearColor =
+                MTLClearColorMake(double(round) / 64, double(p) / 64, 0, 1);
+        }
+        emptyEncoders(cb, b, into);
+    });
+    print("kept-shape encoder", hit, kEncoders, "encoder");
+    print("missed-shape encoder", missed, kEncoders, "encoder");
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    EXPECT_GE(made() - madeBefore, uint64_t(kEncoders) * kRounds);
+#endif
+}
+
 // Command buffers recorded back to back before any is committed, so the setBytes chunk pool runs dry: the recording
 // thread takes chunks or makes its own, and the pool's refill is left to the completions
 TEST(GM20BRecordCost, ABurstDispatchesNothingFromTheRecordingThread)
@@ -611,58 +646,6 @@ TEST(GM20BRecordCost, TheFrameLineReportsEnqueueTimingAndLateBoundWrites)
     EXPECT_EQ(beforeFirst, 1u) << line;
     EXPECT_EQ(beforeCommit, 1u) << line;
     EXPECT_EQ(never, 1u) << line;
-
-    const SEL setPeriod = sel_registerName("switchMetalProbeLateWritePeriod:");
-    ASSERT_TRUE([(id)b.device respondsToSelector:setPeriod]);
-    NSNumber *prevPeriod = ((NSNumber * (*)(id, SEL, NSNumber *)) objc_msgSend)(b.device, setPeriod, @1);
-
-    struct RestorePeriod {
-        id device;
-        SEL sel;
-        NSNumber *prev;
-
-        ~RestorePeriod()
-        {
-            ((void (*)(id, SEL, NSNumber *))objc_msgSend)(device, sel, prev);
-        }
-    } restore{b.device, setPeriod, prevPeriod};
-
-    (void)metal_frame_rates(line, sizeof line);
-    {
-        id<MTLCommandBuffer> clean = [b.queue commandBuffer];
-        recordPass(clean);
-        [clean commit];
-        [clean waitUntilCompleted];
-        ASSERT_EQ(clean.status, MTLCommandBufferStatusCompleted);
-    }
-    ASSERT_GT(metal_frame_rates(line, sizeof line), 0u);
-    const char *latew = strstr(line, " latew=");
-    unsigned long long sampled = 0, bufW = 0, repW = 0, surfW = 0;
-    ASSERT_TRUE(latew && sscanf(latew, " latew=%llu/%llu/%llu/%llu", &sampled, &bufW, &repW, &surfW) == 4) << line;
-    EXPECT_EQ(sampled, 1u) << line;
-    EXPECT_EQ(bufW, 0u) << line;
-    EXPECT_EQ(repW, 0u) << line;
-    EXPECT_EQ(surfW, 0u) << line;
-
-    {
-        id<MTLCommandBuffer> dirty = [b.queue commandBuffer];
-        recordPass(dirty);
-        static_cast<uint8_t *>(sharedBuf.contents)[0] ^= 0xff;
-        const uint32_t pixels[16 * 16] = {};
-        [sharedTex replaceRegion:MTLRegionMake2D(0, 0, 16, 16) mipmapLevel:0 withBytes:pixels bytesPerRow:64];
-        IOSurfaceLock(surface, 0, nullptr);
-        IOSurfaceUnlock(surface, 0, nullptr);
-        [dirty commit];
-        [dirty waitUntilCompleted];
-        ASSERT_EQ(dirty.status, MTLCommandBufferStatusCompleted);
-    }
-    ASSERT_GT(metal_frame_rates(line, sizeof line), 0u);
-    latew = strstr(line, " latew=");
-    ASSERT_TRUE(latew && sscanf(latew, " latew=%llu/%llu/%llu/%llu", &sampled, &bufW, &repW, &surfW) == 4) << line;
-    EXPECT_EQ(sampled, 1u) << line;
-    EXPECT_EQ(bufW, 1u) << line;
-    EXPECT_EQ(repW, 1u) << line;
-    EXPECT_EQ(surfW, 1u) << line;
     CFRelease(surface);
 }
 #endif
@@ -766,5 +749,146 @@ TEST(GM20BRecordCost, CompositorFrameWords)
     EXPECT_FALSE(words.empty());
 }
 #endif
+
+double threadCpuMicroseconds(const char *name)
+{
+    thread_act_array_t list = nullptr;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(mach_task_self(), &list, &count) != KERN_SUCCESS || !list)
+        return 0;
+    double found = 0;
+    for (mach_msg_type_number_t i = 0; i < count; ++i) {
+        thread_extended_info_data_t info{};
+        mach_msg_type_number_t size = THREAD_EXTENDED_INFO_COUNT;
+        if (thread_info(list[i], THREAD_EXTENDED_INFO, reinterpret_cast<thread_info_t>(&info), &size) == KERN_SUCCESS &&
+            strcmp(info.pth_name, name) == 0) {
+            found = double(info.pth_user_time + info.pth_system_time) / 1000.0;
+            break;
+        }
+    }
+    for (mach_msg_type_number_t i = 0; i < count; ++i)
+        mach_port_deallocate(mach_task_self(), list[i]);
+    vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(list), vm_size_t(count) * sizeof(thread_t));
+    return found;
+}
+
+// Mirrors apps/hwtest/tests/FrameRecordCostTest.swift: 20 passes over 4 repeating 256x256 targets plus a memoryless
+// RGBA16Float scratch, 125 draws with 8 setBytes + scissor + triangleStrip, measuring both recording and submit-worker CPU.
+TEST(GM20BRecordCost, HomeScreenFrameCost)
+{
+    Bench &b = bench();
+    ASSERT_TRUE(b.device != nil && b.state != nil);
+    constexpr int kPasses = 20, kHomeDraws = 125, kHomeTargets = 4, kSide = 256, kHomeWarm = 16, kHomeFrames = 48;
+    std::vector<id<MTLTexture>> targets;
+    for (int i = 0; i < kHomeTargets; ++i)
+        targets.push_back(texture(b.device, kSide, kSide, MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead));
+    MTLTextureDescriptor *sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                                                  width:kSide
+                                                                                 height:kSide
+                                                                              mipmapped:NO];
+    sd.storageMode = MTLStorageModeMemoryless;
+    sd.usage = MTLTextureUsageRenderTarget;
+    id<MTLTexture> scratch = [b.device newTextureWithDescriptor:sd];
+    ASSERT_NE(scratch, nil);
+
+    struct Shape {
+        int passes, draws, binds;
+    };
+    struct Cost {
+        double recordUs = 0, workerUs = 0, recordInstr = 0;
+        record_count counts{};
+    };
+    const uint8_t zeros[256] = {};
+    const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const auto encode = [&](id<MTLCommandBuffer> cb, Shape shape) {
+        for (int pass = 0; pass < shape.passes; ++pass) {
+            MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
+            d.colorAttachments[0].texture = targets[size_t(pass % kHomeTargets)];
+            d.colorAttachments[0].loadAction = pass < kHomeTargets ? MTLLoadActionClear : MTLLoadActionLoad;
+            d.colorAttachments[0].storeAction = MTLStoreActionStore;
+            d.colorAttachments[1].texture = scratch;
+            d.colorAttachments[1].loadAction = MTLLoadActionClear;
+            d.colorAttachments[1].storeAction = MTLStoreActionDontCare;
+            id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:d];
+            [e setRenderPipelineState:b.state];
+            const int mine = shape.draws / shape.passes + (pass < shape.draws % shape.passes ? 1 : 0);
+            for (int draw = 0; draw < mine; ++draw) {
+                const float x = float(draw % 8) / 4.0f - 1.0f, y = float(pass % 6) / 3.0f - 1.0f;
+                const float vertices[16] = {x, y, 0, 1, x + 0.25f, y, 0, 1, x, y + 0.3f, 0, 1, x + 0.25f, y + 0.3f, 0,
+                                            1};
+                for (int k = 0; k < shape.binds; ++k) {
+                    [e setVertexBytes:vertices length:sizeof vertices atIndex:1];
+                    [e setVertexBytes:identity length:sizeof identity atIndex:2];
+                    [e setVertexBytes:zeros length:sizeof zeros atIndex:0];
+                    [e setVertexBytes:zeros length:sizeof zeros atIndex:3];
+                    for (NSUInteger slot = 0; slot < 4; ++slot)
+                        [e setFragmentBytes:zeros length:sizeof zeros atIndex:slot];
+                }
+                [e setScissorRect:MTLScissorRect{NSUInteger((draw % 8) * 32), NSUInteger((pass % 8) * 32), 32, 32}];
+                [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+            }
+            [e endEncoding];
+        }
+    };
+    const auto run = [&](Shape shape) -> Cost {
+        for (int i = 0; i < kHomeWarm; ++i)
+            @autoreleasepool {
+                id<MTLCommandBuffer> cb = [b.queue commandBuffer];
+                encode(cb, shape);
+                [cb commit];
+                [cb waitUntilCompleted];
+                EXPECT_EQ(cb.status, MTLCommandBufferStatusCompleted);
+            }
+        const double workerBefore = threadCpuMicroseconds("com.brunostjohn.switch.gm20b.submit");
+        double recordUs = 0, recordInstr = 0;
+        record_count total{};
+        std::vector<id<MTLCommandBuffer>> held;
+        for (int i = 0; i < kHomeFrames; ++i)
+            @autoreleasepool {
+                id<MTLCommandBuffer> cb = [b.queue commandBuffer];
+                const Counts c0 = counts();
+                record_count_start();
+                const uint64_t t0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID);
+                encode(cb, shape);
+                [cb commit];
+                [cb waitUntilScheduled];
+                const uint64_t dt = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - t0;
+                record_count c{};
+                record_count_stop(&c);
+                const Counts c1 = counts();
+                recordUs += double(dt) / 1000.0;
+                recordInstr += double(c1.instructions - c0.instructions);
+                total.locks += c.locks;
+                total.mallocs += c.mallocs;
+                total.weaks += c.weaks;
+                total.retains += c.retains;
+                held.push_back(cb);
+                if (held.size() == 3) {
+                    for (id<MTLCommandBuffer> h : held)
+                        [h waitUntilCompleted];
+                    held.clear();
+                }
+            }
+        for (id<MTLCommandBuffer> h : held)
+            [h waitUntilCompleted];
+        const double workerAfter = threadCpuMicroseconds("com.brunostjohn.switch.gm20b.submit");
+        return {recordUs / kHomeFrames, (workerAfter - workerBefore) / kHomeFrames, recordInstr / kHomeFrames, total};
+    };
+    const Cost base = run({kPasses, kHomeDraws, 1});
+    const Cost morePasses = run({2 * kPasses, kHomeDraws, 1});
+    const Cost moreDraws = run({kPasses, 2 * kHomeDraws, 1});
+    const Cost moreBinds = run({kPasses, kHomeDraws, 2});
+    printf("home frame: record %.1f us (%.0f instr) worker %.1f us total %.1f us | "
+           "per pass: rec %.2f us (%.0f instr) wrk %.2f us | "
+           "per draw: rec %.2f us (%.0f instr) wrk %.2f us | "
+           "per bind: rec %.3f us (%.0f instr) wrk %.3f us\n",
+           base.recordUs, base.recordInstr, base.workerUs, base.recordUs + base.workerUs,
+           (morePasses.recordUs - base.recordUs) / kPasses, (morePasses.recordInstr - base.recordInstr) / kPasses,
+           (morePasses.workerUs - base.workerUs) / kPasses, (moreDraws.recordUs - base.recordUs) / kHomeDraws,
+           (moreDraws.recordInstr - base.recordInstr) / kHomeDraws, (moreDraws.workerUs - base.workerUs) / kHomeDraws,
+           (moreBinds.recordUs - base.recordUs) / (kHomeDraws * 8.0),
+           (moreBinds.recordInstr - base.recordInstr) / (kHomeDraws * 8.0),
+           (moreBinds.workerUs - base.workerUs) / (kHomeDraws * 8.0));
+}
 
 }  // namespace

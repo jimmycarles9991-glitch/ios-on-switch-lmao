@@ -37,8 +37,21 @@ class KindTest(unittest.TestCase):
         cls.overlay = load_overlay()
         cls.manifest = manifest()
 
-    def plan(self, kind: str, given: list[str] | None = None) -> dict:
-        return self.overlay.plan(self.manifest, False, kind, given, release=True)
+    def plan(
+        self,
+        kind: str,
+        given: list[str] | None = None,
+        *,
+        release: bool = True,
+        hwtest: bool | None = None,
+    ) -> dict:
+        return self.overlay.plan(
+            self.manifest,
+            False,
+            kind,
+            given,
+            self.overlay.BuildOptions(release=release, hwtest=hwtest),
+        )
 
     def kinded(self) -> list[str]:
         return sorted({entry['kind'] for entry in self.manifest['files'] if 'kind' in entry})
@@ -48,7 +61,7 @@ class KindTest(unittest.TestCase):
         self.assertLessEqual(set(self.kinded()), set(KINDS))
 
     def released(self) -> list[dict]:
-        return [e for e in self.manifest['files'] if not e.get('debug')]
+        return [e for e in self.manifest['files'] if not (e.get('debug') or e.get('hwtest'))]
 
     @staticmethod
     def union(entry: dict) -> str:
@@ -71,7 +84,9 @@ class KindTest(unittest.TestCase):
 
     def test_entries_without_a_kind_are_planned_for_both(self):
         unkinded = {
-            e['path'] for e in self.manifest['files'] if not ('kind' in e or e.get('debug') or e.get('portrait'))
+            e['path']
+            for e in self.manifest['files']
+            if not ('kind' in e or e.get('debug') or e.get('hwtest') or e.get('portrait'))
         }
         for kind in KINDS:
             files = self.plan(kind)['files']
@@ -79,14 +94,17 @@ class KindTest(unittest.TestCase):
             self.assertEqual({f['path'] for f in files} - kinded, unkinded, kind)
 
     def test_managed_packages_are_readable_at_the_workers_paths_in_both_profiles(self):
-        names = {'sileo.deb', 'ellekit.deb', 'uikittools.deb', 'launchctl.deb'}
-        expected = {
-            f'/usr/share/Switch/bootstrap/packages/{name}': f'build/switch-bootstrap/packages/{name}' for name in names
-        }
+        base = {'sileo.deb', 'ellekit.deb', 'uikittools.deb', 'launchctl.deb'}
+        dev = {'openssh-client.deb', 'openssh-sftp-server.deb', 'openssh-server.deb', 'switch-ssh.deb', 'top.deb'}
         for kind in KINDS:
             for release in (False, True):
+                names = base if release else base | dev
+                expected = {
+                    f'/usr/share/Switch/bootstrap/packages/{name}': f'build/switch-bootstrap/packages/{name}'
+                    for name in names
+                }
                 with self.subTest(kind=kind, release=release):
-                    plan = self.overlay.plan(self.manifest, False, kind, release=release)
+                    plan = self.plan(kind, release=release)
                     packages = [
                         entry
                         for entry in plan['files']
@@ -104,7 +122,7 @@ class KindTest(unittest.TestCase):
         for kind in KINDS:
             for release in (False, True):
                 with self.subTest(kind=kind, release=release):
-                    plan = self.overlay.plan(self.manifest, False, kind, release=release)
+                    plan = self.plan(kind, release=release)
                     entries = {entry['path']: entry for entry in plan['files']}
                     for path, source in expected.items():
                         self.assertEqual(entries[path]['source'], source)
@@ -114,8 +132,7 @@ class KindTest(unittest.TestCase):
 
     def test_a_debug_package_carries_its_kinds_test_apps(self):
         apps = {
-            kind: sorted(f['path'] for f in self.overlay.plan(self.manifest, False, kind)['files'] if f['bundle'])
-            for kind in KINDS
+            kind: sorted(f['path'] for f in self.plan(kind, release=False)['files'] if f['bundle']) for kind in KINDS
         }
         self.assertEqual(
             apps['21H461'],
@@ -136,11 +153,42 @@ class KindTest(unittest.TestCase):
                 kind,
             )
 
+    def test_hwtest_can_be_opted_in_on_release_and_opted_out_on_debug(self):
+        hwtest_paths = {
+            '21H461': {
+                '/Applications/SwitchHWTest.app',
+                '/usr/bin/switch-texpeer',
+            },
+            '24B119': {
+                '/Applications/SwitchHWTest.app',
+                '/Applications/SwitchHWTest27e.app',
+                '/usr/bin/switch-texpeer',
+                '/private/preboot/Cryptexes/Supplemental/System/Library/LaunchDaemons/com.brunostjohn.switch.texpeer.plist',
+            },
+        }
+        debug_only = {
+            '/usr/bin/switch-fetchform',
+            '/usr/share/Switch/bootstrap/packages/switch-ssh.deb',
+        }
+        for kind in KINDS:
+            with self.subTest(kind=kind):
+                release_default = {f['path'] for f in self.plan(kind, release=True)['files']}
+                self.assertFalse(hwtest_paths[kind] & release_default)
+                self.assertFalse(debug_only & release_default)
+
+                release_hwtest = {f['path'] for f in self.plan(kind, release=True, hwtest=True)['files']}
+                self.assertLessEqual(hwtest_paths[kind], release_hwtest)
+                self.assertFalse(debug_only & release_hwtest)
+
+                debug_no_hwtest = {f['path'] for f in self.plan(kind, release=False, hwtest=False)['files']}
+                self.assertFalse(hwtest_paths[kind] & debug_no_hwtest)
+                self.assertLessEqual(debug_only, debug_no_hwtest)
+
     def test_installer_is_trusted_in_both_profiles_and_kinds(self):
         for kind in KINDS:
             for release in (False, True):
                 with self.subTest(kind=kind, release=release):
-                    plan = self.overlay.plan(self.manifest, False, kind, release=release)
+                    plan = self.plan(kind, release=release)
                     [entry] = [
                         entry for entry in plan['files'] if entry['source'] == 'build/switch-apps/SwitchInstaller.ipa'
                     ]
@@ -165,7 +213,7 @@ class KindTest(unittest.TestCase):
             for release in (False, True):
                 with self.subTest(kind=kind, release=release), tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary)
-                    plan = self.overlay.plan(self.manifest, False, kind, release=release)
+                    plan = self.plan(kind, release=release)
                     [entry] = [e for e in plan['files'] if e['path'] == path]
                     self.assertEqual(entry['source'], source)
                     self.assertIn(['/Applications', ''], plan['dirs'])

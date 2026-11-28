@@ -29,6 +29,7 @@ DEVELOPMENT = struct(
         "bsd/dev/mem.c",
         "bsd/dev/munge.c",
         "bsd/dev/unix_startup.c",
+        "bsd/dev/monotonic.c",
         "bsd/libkern/crc32.c",
         "bsd/libkern/random.c",
         "bsd/libkern/scanc.c",
@@ -375,6 +376,8 @@ DEVELOPMENT = struct(
         "gen:ioconf.c",
         "bsd/kern/imageboot.c",
         "osfmk/kperf/kperfbsd.c",
+        "bsd/kern/kern_kpc.c",
+        "bsd/kern/kern_cpc.c",
         "bsd/kern/proc_uuid_policy.c",
         "bsd/pgo/profile_runtime.c",
         "bsd/pgo/profile_runtime_data.c",
@@ -594,6 +597,10 @@ DEVELOPMENT = struct(
             "-Wno-shorten-64-to-32",
             "-Wno-sign-conversion",
         ],
+        "bsd/dev/monotonic.c": [
+            "-Wno-sign-conversion",
+            "-Wno-vla",
+        ],
         "bsd/dev/munge.c": [
             "-Wno-cast-align",
             "-Wno-sign-conversion",
@@ -668,6 +675,9 @@ DEVELOPMENT = struct(
         ],
         "bsd/kern/kern_guarded.c": [
             "-Wno-cast-align",
+            "-Wno-sign-conversion",
+        ],
+        "bsd/kern/kern_kpc.c": [
             "-Wno-sign-conversion",
         ],
         "bsd/kern/kern_lockf.c": [
@@ -3289,6 +3299,7 @@ RELEASE = struct(
         "bsd/dev/mem.c",
         "bsd/dev/munge.c",
         "bsd/dev/unix_startup.c",
+        "bsd/dev/monotonic.c",
         "bsd/libkern/crc32.c",
         "bsd/libkern/random.c",
         "bsd/libkern/scanc.c",
@@ -3629,6 +3640,8 @@ RELEASE = struct(
         "gen:ioconf.c",
         "bsd/kern/imageboot.c",
         "osfmk/kperf/kperfbsd.c",
+        "bsd/kern/kern_kpc.c",
+        "bsd/kern/kern_cpc.c",
         "bsd/kern/proc_uuid_policy.c",
         "bsd/pgo/profile_runtime_data.c",
         "bsd/miscfs/bindfs/bind_subr.c",
@@ -3759,6 +3772,10 @@ RELEASE = struct(
             "-Wno-shorten-64-to-32",
             "-Wno-sign-conversion",
         ],
+        "bsd/dev/monotonic.c": [
+            "-Wno-sign-conversion",
+            "-Wno-vla",
+        ],
         "bsd/dev/munge.c": [
             "-Wno-cast-align",
             "-Wno-sign-conversion",
@@ -3830,6 +3847,9 @@ RELEASE = struct(
         ],
         "bsd/kern/kern_guarded.c": [
             "-Wno-cast-align",
+            "-Wno-sign-conversion",
+        ],
+        "bsd/kern/kern_kpc.c": [
             "-Wno-sign-conversion",
         ],
         "bsd/kern/kern_lockf.c": [

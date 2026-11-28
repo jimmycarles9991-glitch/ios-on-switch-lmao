@@ -29,23 +29,29 @@ typedef struct lck_mtx lck_mtx_t;
 typedef struct lck_rw lck_rw_t;
 typedef int lck_sleep_action_t;
 
-#define NSEC_PER_USEC             1000u
-#define NSEC_PER_MSEC             1000000u
-#define THREAD_UNINT              0
-#define THREAD_AWAKENED           0
-#define THREAD_TIMED_OUT          1
-#define THREAD_CONTINUE_NULL      ((void *)0)
-#define LCK_GRP_ATTR_NULL         ((void *)0)
-#define LCK_ATTR_NULL             ((void *)0)
-#define LCK_SLEEP_DEFAULT         0
-#define OS_LOG_DEFAULT            0
-#define THREAD_CALL_PRIORITY_HIGH 0
-#define THREAD_CALL_OPTIONS_ONCE  1u
+#define NSEC_PER_USEC                    1000u
+#define NSEC_PER_MSEC                    1000000u
+#define THREAD_UNINT                     0
+#define THREAD_AWAKENED                  0
+#define THREAD_TIMED_OUT                 1
+#define THREAD_CONTINUE_NULL             ((void *)0)
+#define LCK_GRP_ATTR_NULL                ((void *)0)
+#define LCK_ATTR_NULL                    ((void *)0)
+#define LCK_SLEEP_DEFAULT                0
+#define OS_LOG_DEFAULT                   0
+#define THREAD_CALL_PRIORITY_HIGH        0
+#define THREAD_CALL_PRIORITY_KERNEL      1
+#define THREAD_CALL_PRIORITY_LOW         2
+#define THREAD_CALL_OPTIONS_ONCE         1u
+#define THREAD_CALL_DELAY_SYS_BACKGROUND 0x02u
+#define THREAD_CALL_DELAY_LEEWAY         0x20u
 
 void switch_linux_record(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 extern boolean_t switch_linux_stub_interrupts;
 extern int switch_linux_stub_preemption;
 extern uint64_t switch_linux_stub_now;
+// what each mach_absolute_time call moves the clock on by (0: a stopped clock)
+extern uint64_t switch_linux_stub_tick;
 extern wait_result_t switch_linux_stub_wait_result;
 
 void IOLog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -86,6 +92,8 @@ thread_call_t thread_call_allocate_with_options(thread_call_func_t func, thread_
 boolean_t thread_call_free(thread_call_t call);
 boolean_t thread_call_enter(thread_call_t call);
 boolean_t thread_call_enter_delayed(thread_call_t call, uint64_t deadline);
+boolean_t thread_call_enter_delayed_with_leeway(thread_call_t call, thread_call_param_t param1, uint64_t deadline,
+                                                uint64_t leeway, uint32_t flags);
 boolean_t thread_call_cancel(thread_call_t call);
 boolean_t thread_call_cancel_wait(thread_call_t call);
 

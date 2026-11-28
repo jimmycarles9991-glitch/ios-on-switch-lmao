@@ -46,7 +46,7 @@ XNU_TARGETS = {
     "10063.141.1": struct(
         recipes = {"DEVELOPMENT": DEVELOPMENT_RECIPES, "RELEASE": RELEASE_RECIPES},
         ios_min = "17.0",
-        cpu = [],
+        cpu = ["-mcpu=cortex-a57"],
     ),
     "12377.121.6": struct(
         recipes = {"DEVELOPMENT": DEVELOPMENT_RECIPES_12377, "RELEASE": RELEASE_RECIPES_12377},
@@ -183,14 +183,17 @@ def _impl(ctx):
             requires = [feature_set(features = ["kernel_" + name, "apple_clang_only"])],
             flag_sets = [flag_set(actions = actions, flag_groups = _flags(expand(recipe.apple)))],
         ))
-        if [f for f in recipe.flags + recipe.apple if f.startswith("-flto")]:
-            # XNU's CFLAGS_NOLTO_FLAG (-fno-lto; BUILT_LTO=1 stays): driver objects are never part of XNU's LTO (their
-            # archives link after its PRE_LTO step), and the late objects' llvm-objcopy and the ABI checks need Mach-O.
+        has_lto = bool([f for f in recipe.flags + recipe.apple if f.startswith("-flto")])
+        has_built_lto = any([f.startswith("BUILT_LTO") or f.startswith("-DBUILT_LTO") for f in recipe.flags + recipe.apple])
+        nolto_flags = (["-fno-lto"] if has_lto else []) + (["-UBUILT_LTO"] if has_lto or has_built_lto else [])
+        if nolto_flags:
+            # Driver objects stay Mach-O: SwitchABI bindings/vtable checks and late-object llvm-objcopy require Mach-O,
+            # and driver archives link after XNU's PRE_LTO step. Undefine BUILT_LTO so macros match the non-LTO objects.
             features.append(feature(
                 name = "kernel_{}_nolto".format(name),
                 enabled = True,
                 requires = [feature_set(features = ["kernel_" + name])],
-                flag_sets = [flag_set(actions = actions, flag_groups = _flags(["-fno-lto"]))],
+                flag_sets = [flag_set(actions = actions, flag_groups = _flags(nolto_flags))],
             ))
 
     # cmake/XnuRecipes.cmake switch_compile_command: `xcrun --sdk iphoneos clang -arch arm64 -mkernel ...` (link stubs).
@@ -262,6 +265,17 @@ def _impl(ctx):
                 iterate_over = "user_compile_flags",
                 expand_if_available = "user_compile_flags",
             )])],
+        ),
+        # After recipe and user flags: Apple clang's -march=armv8-a strips +crc even when -mcpu=cortex-a57 follows it,
+        # so C/C++ passes -march=armv8-a+crc explicitly. Assembly keeps only -mcpu=cortex-a57 for +aes/+sha2.
+        feature(
+            name = "kernel_cpu",
+            enabled = True,
+            requires = [feature_set(features = ["apple_clang_only"])],
+            flag_sets = [
+                flag_set(actions = _C + _CXX, flag_groups = _flags(target.cpu + ["-march=armv8-a+crc"])),
+                flag_set(actions = _ASM, flag_groups = _flags(target.cpu)),
+            ],
         ),
         feature(
             name = "dependency_file",

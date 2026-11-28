@@ -33,6 +33,8 @@ struct LatchedTime {
 volatile uint8_t *gRtc;
 IOSimpleLock *gLatch;
 uint64_t gBaseUsec;
+int64_t gOffsetUsec;
+bool gOffsetSet;
 
 LatchedTime latch()
 {
@@ -47,6 +49,10 @@ LatchedTime latch()
 
 bool calendarOffsetUsec(const LatchedTime &t, int64_t *offset)
 {
+    if (__atomic_load_n(&gOffsetSet, __ATOMIC_ACQUIRE)) {
+        *offset = __atomic_load_n(&gOffsetUsec, __ATOMIC_RELAXED);
+        return true;
+    }
     uint64_t utc = 0;
     if (switch_rtc_utc_usec(&utc) != kIOReturnSuccess)
         return false;
@@ -80,7 +86,16 @@ int monotonicOffset SYSCTL_HANDLER_ARGS
 {
     int64_t offset = 0;
     (void)calendarOffsetUsec(latch(), &offset);
-    return SYSCTL_OUT(req, &offset, sizeof(offset));
+    int err = SYSCTL_OUT(req, &offset, sizeof(offset));
+    if (err || !req->newptr)
+        return err;
+    int64_t next = 0;
+    err = SYSCTL_IN(req, &next, sizeof(next));
+    if (err)
+        return err;
+    __atomic_store_n(&gOffsetUsec, next, __ATOMIC_RELAXED);
+    __atomic_store_n(&gOffsetSet, true, __ATOMIC_RELEASE);
+    return 0;
 }
 
 struct sysctl_oid gOids[4];
@@ -114,6 +129,7 @@ extern "C" bool switch_monotonic_clock_start(int64_t rtc_secs, uint64_t rtc_stam
     gBaseUsec = switch_monotonic_base_usec(rtc_secs, first.monotonicUsec, sinceRtcNsec / 1000, machNsec / 1000);
 
     constexpr unsigned kRead = CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED;
+    constexpr unsigned kReadWrite = CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED;
     switch_sysctl_oid(&gOids[0], &sysctl__kern_children, "monotonicclock", static_cast<int>(CTLTYPE_INT | kRead),
                       monotonicSeconds, "IU", "elapsed time");
     switch_sysctl_oid(&gOids[1], &sysctl__kern_children, "monotonicclock_usecs", static_cast<int>(CTLTYPE_QUAD | kRead),
@@ -121,7 +137,7 @@ extern "C" bool switch_monotonic_clock_start(int64_t rtc_secs, uint64_t rtc_stam
     switch_sysctl_oid(&gOids[2], &sysctl__kern_children, "monotonicclock_rate_usecs",
                       static_cast<int>(CTLTYPE_QUAD | kRead), monotonicRate, "Q", "elapsed time rate");
     switch_sysctl_oid(&gOids[3], &sysctl__kern_children, "monotoniclock_offset_usecs",
-                      static_cast<int>(CTLTYPE_QUAD | kRead), monotonicOffset, "Q", "calendar time offset");
+                      static_cast<int>(CTLTYPE_QUAD | kReadWrite), monotonicOffset, "Q", "calendar time offset");
     for (struct sysctl_oid &oid : gOids)
         sysctl_register_oid(&oid);
 #if DEVELOPMENT || DEBUG
@@ -145,4 +161,10 @@ extern "C" bool switch_monotonic_clock_read(uint64_t *usec, uint64_t *mach_time)
 extern "C" bool switch_monotonic_clock_offset(int64_t *usec)
 {
     return (gRtc != nullptr) && calendarOffsetUsec(latch(), usec);
+}
+
+extern "C" void switch_monotonic_clock_set_offset(int64_t usec)
+{
+    __atomic_store_n(&gOffsetUsec, usec, __ATOMIC_RELAXED);
+    __atomic_store_n(&gOffsetSet, true, __ATOMIC_RELEASE);
 }

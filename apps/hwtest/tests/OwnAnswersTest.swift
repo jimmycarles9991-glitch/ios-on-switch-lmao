@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// What the facade answers itself (drivers/TegraGM20BMetal TegraGM20BMetalLibrary.mm,

@@ -78,6 +78,7 @@ OSDefineMetaClassAndStructors(SwitchSocTherm, OSObject)
     namespace
 {
     SwitchSocTherm *gSocTherm;
+    IOWorkLoop *gSharedLoop;
 }  // namespace
 
 SwitchSocTherm *SwitchSocTherm::create()
@@ -85,7 +86,12 @@ SwitchSocTherm *SwitchSocTherm::create()
     auto *self = OSTypeAlloc(SwitchSocTherm);
     if (!self || !self->OSObject::init())
         goto fail;
-    self->loop = IOWorkLoop::workLoop();
+    if (IOWorkLoop *sharedLoop = __atomic_load_n(&gSharedLoop, __ATOMIC_ACQUIRE)) {
+        sharedLoop->retain();
+        self->loop = sharedLoop;
+    } else {
+        self->loop = IOWorkLoop::workLoop();
+    }
     if (!self->loop)
         goto fail;
     self->source = IOInterruptEventSource::interruptEventSource(self, &SwitchSocTherm::fired,
@@ -276,6 +282,11 @@ extern "C" void switch_soctherm_armed(volatile unsigned char *regs)
 {
     if (SwitchSocTherm *socTherm = shared())
         socTherm->arm(regs);
+}
+
+void switch_soctherm_use_workloop(IOWorkLoop *workLoop)
+{
+    __atomic_store_n(&gSharedLoop, workLoop, __ATOMIC_RELEASE);
 }
 
 extern "C" int switch_soctherm_read(enum switch_soctherm_group group, int *millic)

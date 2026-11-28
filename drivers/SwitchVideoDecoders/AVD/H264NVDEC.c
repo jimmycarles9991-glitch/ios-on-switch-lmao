@@ -440,12 +440,13 @@ static int decodePicture(H264Decoder *d, const H264Slice *sh, void *token, bool 
     memcpy(input->va + d->bits_off + d->bits_len, endOfStream, sizeof(endOfStream));
     ((uint32_t *)(input->va + d->slices_off))[d->slices] = d->bits_len;
 
-    TegraNVDECSubmit submit;
-    memset(&submit, 0, sizeof(submit));
-    fillSetup(d, (nvdec_h264_pic_s *)submit.setup, sh, &cur);
-    fillSubmit(d, &submit, (uint8_t)picIdx);
+    TegraNVDECSubmit stackSubmit;
+    TegraNVDECSubmit *submit = d->b.submit_buffer ? d->b.submit_buffer : &stackSubmit;
+    memset(submit, 0, sizeof(*submit));
+    fillSetup(d, (nvdec_h264_pic_s *)submit->setup, sh, &cur);
+    fillSubmit(d, submit, (uint8_t)picIdx);
     uint32_t fence = 0;
-    if (d->b.submit(d->b.ctx, &submit, &fence)) {
+    if (d->b.submit(d->b.ctx, submit, &fence)) {
         if (second) {  // the first field's frame goes out marked bad, so its sample is answered
             d->held_refused = true;
             finishUnpaired(d);

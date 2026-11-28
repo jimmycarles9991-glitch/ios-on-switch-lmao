@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// The depths Metal's draws store into Depth32Float on the driver, against an M4 Max's (macOS 27.2.1): in clip mode

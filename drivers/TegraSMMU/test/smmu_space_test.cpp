@@ -91,3 +91,28 @@ TEST(SmmuSpace, FillsAGibibyteWindowOfFourKSurfaces)
         ASSERT_TRUE(s.space.release(iova, surface));
     EXPECT_EQ(s.space.bytesFree(), 1ULL << 30);
 }
+
+TEST(SmmuSpace, RespectsReserveBytesWithoutStarvingUnreservedAllocations)
+{
+    Space s(8 * kGranule);
+    const uint64_t reserve = 3 * kGranule;
+
+    const uint64_t a = s.space.alloc(3 * kGranule, reserve);
+    ASSERT_EQ(a, kBase);
+    EXPECT_EQ(s.space.bytesFree(), 5 * kGranule);
+
+    EXPECT_EQ(s.space.alloc(3 * kGranule, reserve), 0u) << "would leave only 2 granules < 3 reserve";
+    const uint64_t b = s.space.alloc(2 * kGranule, reserve);
+    ASSERT_EQ(b, kBase + 3 * kGranule);
+    EXPECT_EQ(s.space.bytesFree(), reserve);
+    EXPECT_EQ(s.space.alloc(kGranule, reserve), 0u) << "at exact reserve floor";
+
+    const uint64_t reservedUse = s.space.alloc(3 * kGranule);
+    ASSERT_EQ(reservedUse, kBase + 5 * kGranule);
+    EXPECT_EQ(s.space.bytesFree(), 0u);
+
+    ASSERT_TRUE(s.space.release(reservedUse, 3 * kGranule));
+    ASSERT_TRUE(s.space.release(b, 2 * kGranule));
+    ASSERT_TRUE(s.space.release(a, 3 * kGranule));
+    EXPECT_EQ(s.space.bytesFree(), 8 * kGranule);
+}

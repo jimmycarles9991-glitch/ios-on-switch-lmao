@@ -116,6 +116,36 @@ void retainedBinaryDispatch()
     EXPECT_TRUE(computeLaunched(jobs));
 }
 
+void anotherProgramAtTheName()
+{
+    LibraryCompiler compiler;
+    compiler.nameTaken = true;
+    ASSERT_TRUE(compiler.serve());
+    id<MTLDevice> device = completing();
+    ASSERT_TRUE(device != nil);
+    id<MTLLibrary> library = functions(device);
+    ASSERT_TRUE(library != nil);
+    // a binary function name no other test of this store links, so every entry this state needs is missing
+    MTLComputePipelineDescriptor *d = descriptor(library, binaryFunction(library, @"passed_over"));
+    ASSERT_TRUE(d != nil);
+    NSError *error = nil;
+    id<MTLComputePipelineState> state =
+        [device newComputePipelineStateWithDescriptor:d options:MTLPipelineOptionNone reflection:nil error:&error];
+    ASSERT_TRUE(state != nil) << text(error);
+    const size_t jobs = kernel_model::model.jobs.size();
+    id<MTLCommandBuffer> commands = [[device newCommandQueue] commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
+    [encoder setComputePipelineState:state];
+    [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    [encoder endEncoding];
+    [commands commit];
+    [commands waitUntilCompleted];
+    EXPECT_EQ(commands.status, MTLCommandBufferStatusCompleted) << text(commands.error);
+    ASSERT_FALSE(compiler.consumers.empty());
+    EXPECT_EQ(compiler.consumers.back().kind, gm20b::RequestKind::Kernel);
+    EXPECT_TRUE(computeLaunched(jobs));
+}
+
 void binaryIdentity()
 {
     LibraryCompiler compiler;
@@ -295,6 +325,11 @@ void groupedWithoutCompiler()
 TEST(GM20BFacadeBinaryFunctions, OwnsItsFunctionsAfterTheCallerReleasesTheDescriptorAndLibrary)
 {
     switch_ios::test::ExpectPassesInFreshProcess(retainedBinaryDispatch);
+}
+
+TEST(GM20BFacadeBinaryFunctions, AnEntryOfAnotherProgramUnderTheNameIsPassedOver)
+{
+    switch_ios::test::ExpectPassesInFreshProcess(anotherProgramAtTheName);
 }
 
 TEST(GM20BFacadeBinaryFunctions, SpecializedNamesAndConstantsHaveDistinctNativeKeys)

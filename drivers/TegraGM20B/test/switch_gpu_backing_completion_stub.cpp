@@ -2,6 +2,8 @@
 #include <cstddef>
 #include <cstdio>
 
+struct switch_gpu_backing;
+
 extern "C" void switch_gpu_bridge_completed()
 {
 }
@@ -31,6 +33,20 @@ extern "C" int switch_gpu_ready_waiting(void)
 
 // The path counts (SwitchGpuPathStats.h) are the kernel's; a test that reads them defines its own.
 extern "C" __attribute__((weak)) void switch_gpu_path_taken(int, unsigned)
+{
+}
+
+// Retirement's memory batch (SwitchGpuAllocatedMemory.cpp), for tests that do not build it.
+extern "C" __attribute__((weak)) void switch_gpu_memory_retire_begin(void)
+{
+}
+
+extern "C" __attribute__((weak)) bool switch_gpu_memory_retire_end(switch_gpu_backing *)
+{
+	return false;
+}
+
+extern "C" __attribute__((weak)) void switch_gpu_memory_retire_parked(void)
 {
 }
 

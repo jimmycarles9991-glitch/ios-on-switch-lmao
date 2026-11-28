@@ -16,15 +16,22 @@ bool SwitchAudio::displayInit()
     if (!memory[SwitchAudioMemoryDisplayControl])
         return false;
     bzero(memory[SwitchAudioMemoryDisplayControl]->getBytesNoCopy(), PAGE_SIZE);
+    displayLoop = IOWorkLoop::workLoop();
+    displayGate = displayLoop ? IOCommandGate::commandGate(this) : nullptr;
+    displayPowerTimer =
+        displayGate ? IOTimerEventSource::timerEventSource(this, &SwitchAudio::displayPowerFired) : nullptr;
+    if (!displayPowerTimer || displayLoop->addEventSource(displayGate) != kIOReturnSuccess ||
+        displayLoop->addEventSource(displayPowerTimer) != kIOReturnSuccess)
+        return false;
     auto *page = static_cast<SwitchAudioControl *>(memory[SwitchAudioMemoryDisplayControl]->getBytesNoCopy());
-    if (!displayAudio.initialize(gate, page, hz))
+    if (!displayAudio.initialize(displayLoop, displayGate, displayPowerTimer, page, hz))
         return false;
     IOService *nub = switch_interrupt_nub(SwitchHDA::kIntid, false);
     displayInterrupt = IOInterruptEventSource::interruptEventSource(this, displayFired, nub, 0);
-    if (!displayInterrupt || loop->addEventSource(displayInterrupt) != kIOReturnSuccess)
+    if (!displayInterrupt || displayLoop->addEventSource(displayInterrupt) != kIOReturnSuccess)
         panic("SwitchAudio: cannot attach HDA interrupt, INTID %u", SwitchHDA::kIntid);
     displayEvent = IOInterruptEventSource::interruptEventSource(this, displayChanged);
-    if (!displayEvent || loop->addEventSource(displayEvent) != kIOReturnSuccess)
+    if (!displayEvent || displayLoop->addEventSource(displayEvent) != kIOReturnSuccess)
         return false;
     displayEvent->enable();
     displayCall =
@@ -36,8 +43,8 @@ void SwitchAudio::displayFree()
 {
     if (displayEvent) {
         displayEvent->disable();
-        if (loop)
-            loop->removeEventSource(displayEvent);
+        if (displayLoop)
+            displayLoop->removeEventSource(displayEvent);
         OSSafeReleaseNULL(displayEvent);
     }
     if (displayCall) {
@@ -47,11 +54,23 @@ void SwitchAudio::displayFree()
     }
     if (displayInterrupt) {
         displayInterrupt->disable();
-        if (loop)
-            loop->removeEventSource(displayInterrupt);
+        if (displayLoop)
+            displayLoop->removeEventSource(displayInterrupt);
         OSSafeReleaseNULL(displayInterrupt);
     }
     displayAudio.release();
+    if (displayPowerTimer) {
+        displayPowerTimer->cancelTimeout();
+        if (displayLoop)
+            displayLoop->removeEventSource(displayPowerTimer);
+        OSSafeReleaseNULL(displayPowerTimer);
+    }
+    if (displayGate) {
+        if (displayLoop)
+            displayLoop->removeEventSource(displayGate);
+        OSSafeReleaseNULL(displayGate);
+    }
+    OSSafeReleaseNULL(displayLoop);
 }
 
 void SwitchAudio::displayFired(OSObject *owner, IOInterruptEventSource *, int)
@@ -59,13 +78,18 @@ void SwitchAudio::displayFired(OSObject *owner, IOInterruptEventSource *, int)
     static_cast<SwitchAudio *>(owner)->displayAudio.interrupt();
 }
 
+void SwitchAudio::displayPowerFired(OSObject *owner, IOTimerEventSource *)
+{
+    static_cast<SwitchAudio *>(owner)->displayAudio.powerOffTimerFired();
+}
+
 void SwitchAudio::displayProbe(thread_call_param_t owner, thread_call_param_t)
 {
     auto *self = static_cast<SwitchAudio *>(owner);
     SwitchAudioSink sink;
-    const bool prepared = self->gate->runAction(displayPrepareGated, &sink) == kIOReturnSuccess;
+    const bool prepared = self->displayGate->runAction(displayPrepareGated, &sink) == kIOReturnSuccess;
     const bool present = prepared && switch_displayport_audio_prepare_presence();
-    self->gate->runAction(displayConnectGated, present ? &sink : nullptr);
+    self->displayGate->runAction(displayConnectGated, present ? &sink : nullptr);
 }
 
 IOReturn SwitchAudio::displayPrepareGated(OSObject *owner, void *capture, void *, void *, void *)
@@ -97,15 +121,14 @@ IOReturn SwitchAudio::displayConnectGated(OSObject *owner, void *present, void *
     self->displayPresencePending = false;
     const auto *sink = static_cast<const SwitchAudioSink *>(present);
     if (!sink || self->displayAsleep || sink->generation != switch_audio_display_sink().generation ||
-        !self->displayAudio.connect(sink->formats) ||
-        sink->generation != switch_audio_display_sink().generation) {
+        !self->displayAudio.connect(sink->formats) || sink->generation != switch_audio_display_sink().generation) {
         self->displayAudio.sleep(true);
         self->displayInterrupt->disable();
     } else {
         auto *page = static_cast<SwitchAudioControl *>(self->memory[SwitchAudioMemoryDisplayControl]->getBytesNoCopy());
         __atomic_store_n(&page->jack, SwitchAudioJackHeadphones, __ATOMIC_RELEASE);
     }
-    self->gate->commandWakeup(&self->displayPresencePending, false);
+    self->displayGate->commandWakeup(&self->displayPresencePending, false);
     self->messageClients(kIOMessageServicePropertyChange);
     return kIOReturnSuccess;
 }
@@ -149,14 +172,14 @@ IOReturn SwitchAudio::displayRequest(bool start)
         static_cast<const SwitchAudioControl *>(memory[SwitchAudioMemoryDisplayControl]->getBytesNoCopy());
     if (start && (!page->jack || !switch_displayport_audio_format(page->rate, 2, page->sample_bits)))
         return kIOReturnNotReady;
-    const IOReturn result = gate->runAction(displayRequestGated, start ? this : nullptr);
+    const IOReturn result = displayGate->runAction(displayRequestGated, start ? this : nullptr);
     switch_displayport_audio_enable(start && result == kIOReturnSuccess);
     return result;
 }
 
 IOReturn SwitchAudio::displaySetRate(uint32_t rate)
 {
-    return gate->runAction(
+    return displayGate->runAction(
         [](OSObject *owner, void *value, void *, void *, void *) -> IOReturn {
             return static_cast<SwitchAudio *>(owner)->displayAudio.setRate(
                 static_cast<uint32_t>(reinterpret_cast<uintptr_t>(value)));
@@ -172,9 +195,10 @@ IOReturn SwitchAudio::displaySleepGated(OSObject *owner, void *entering, void *,
         self->displayAudio.disconnect();
         uint64_t deadline = 0;
         clock_interval_to_deadline(200, kMillisecondScale, &deadline);
-        // SwitchSuspend and PM callers wait here; the worker finishes DP with the Audio gate open.
+        // SwitchSuspend and PM callers wait here; the worker finishes DP with the Display Audio gate open.
         while (self->displayPresencePending) {
-            if (self->gate->commandSleep(&self->displayPresencePending, deadline, THREAD_UNINT) == THREAD_TIMED_OUT) {
+            if (self->displayGate->commandSleep(&self->displayPresencePending, deadline, THREAD_UNINT) ==
+                THREAD_TIMED_OUT) {
                 IOLog("SwitchAudio: timed out waiting for display presence before sleep\n");
                 break;
             }

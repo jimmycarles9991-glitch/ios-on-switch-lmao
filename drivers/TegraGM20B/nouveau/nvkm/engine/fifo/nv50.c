@@ -228,7 +228,6 @@ nv50_runl_wait(struct nvkm_runl *runl)
 	nvkm_msec(fifo->engine.subdev.device, fifo->timeout.chan_msec,
 		if (!nvkm_runl_update_pending(runl))
 			return 0;
-		usleep_range(1, 2);
 	);
 
 	return -ETIMEDOUT;

@@ -311,7 +311,7 @@
 #define MAX_CPUS                       8 /* sheng: SM8550 has eight cores */
 #define MAX_CPU_CLUSTERS               1
 
-#define CORE_NCTRS                     8 /* Placeholder; KPC is not enabled for this target */
+#define CORE_NCTRS                     7
 #endif  /* ARM64_BOARD_CONFIG_BCM2837 */
 
 #ifdef ARM64_BOARD_CONFIG_VMAPPLE

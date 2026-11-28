@@ -38,6 +38,8 @@ typedef struct {
 } nir_fp_analysis_state;
 
 nir_fp_analysis_state nir_create_fp_analysis_state(nir_function_impl *impl);
+void nir_grow_fp_analysis_state(nir_fp_analysis_state *state);
+void nir_invalidate_fp_analysis_users(nir_fp_analysis_state *state, nir_def *def);
 void nir_invalidate_fp_analysis_state(nir_fp_analysis_state *state);
 void nir_free_fp_analysis_state(nir_fp_analysis_state *state);
 

@@ -4,9 +4,9 @@ QuartzCore's get_pipeline_spec (24B119 0x1843882b4-0x184388410, 21H461 0x18942f2
 state's c (the full-precision colour function, fixed_frag_lph_cpf over fixed_frag_lph_cph) where the state lacks
 h, where CADeviceUseCIF10 holds, or where one of its images' formats asks for it. CADeviceUseCIF10 is MobileGestalt's
 HasExtendedColorDisplay, overridden by the CAEnableDeepFramebuffer preference where that is set; the stager sets it
-false for every process (stage-tegra-gm20b-metal.py PREFS). Apple's offline compilation manifest names its states for
-extended-colour devices, with c: without CADeviceUseCIF10 this device asks for each such state without c, and with c
-only where the state has an image whose format sets it.
+false for every process (tools/gpu/stage_format.py PREFS, which every stage manifest carries). Apple's offline
+compilation manifest names its states for extended-colour devices, with c: without CADeviceUseCIF10 this device asks for
+each such state without c, and with c only where the state has an image whose format sets it.
 """
 
 import ast
@@ -17,12 +17,12 @@ import caspec
 PREFERENCE = 'CAEnableDeepFramebuffer'
 
 
-def cif10(stager: Path) -> bool | None:
-    """Give CADeviceUseCIF10 as the stager's preferences fix it, None where MobileGestalt's answer decides it."""
-    for node in ast.parse(stager.read_text()).body:
+def cif10(preferences: Path) -> bool | None:
+    """Give CADeviceUseCIF10 as the staged preferences fix it, None where MobileGestalt's answer decides it."""
+    for node in ast.parse(preferences.read_text()).body:
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'PREFS' for t in node.targets):
             return None if ast.literal_eval(node.value).get(PREFERENCE, True) else False
-    raise ValueError(f'{stager} sets no PREFS: the preferences the device runs with are unknown')
+    raise ValueError(f'{preferences} sets no PREFS: the preferences the device runs with are unknown')
 
 
 def _flag_order(tables: caspec.Tables) -> str:

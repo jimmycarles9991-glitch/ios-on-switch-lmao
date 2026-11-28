@@ -12,7 +12,7 @@ use crate::direct_abi::{HEAP_ARRAYS, NmbDirectStage};
 use crate::direct_compute_abi::{NmbDirectDispatch, NmbDirectKernel};
 use crate::direct_compute_binds::{Run, bind_state, dropped_stores, mapped_samplers};
 use crate::direct_compute_words::{
-    access_masks, arguments_of, layout_of, push_words, record_residuals, region_word, stage_in_words,
+    access_masks, arguments_of, guest_bases, layout_of, push_words, record_residuals, region_word, stage_in_words,
 };
 use crate::direct_compute_writes::{Samplers, kernel_write};
 use crate::direct_layout::Layout;
@@ -280,7 +280,7 @@ pub fn direct(
         .iter()
         .map(|w| {
             let parts = (&plain.commands, &plain.pipeline.layout);
-            kernel_write(w, parts, compile, &plain.state, &mut samplers)
+            kernel_write(w, parts, compile, ask, &plain.state, &mut samplers)
         })
         .collect::<Result<Vec<_>, String>>()?;
     let first = plain.commands.regions.first();
@@ -359,6 +359,11 @@ pub fn direct(
         &layout,
         &mut kernel,
     )?;
+    kernel.other_holes += [&plain, &moved, &bound]
+        .iter()
+        .map(|s| guest_bases(s.plan.push.fields.iter().map(|p| &p.field)))
+        .max()
+        .unwrap_or(0);
     // SAFETY: the caller's contract; everything `kernel` points at lives until after the call.
     Ok(unsafe { each(&kernel, ctx) })
 }

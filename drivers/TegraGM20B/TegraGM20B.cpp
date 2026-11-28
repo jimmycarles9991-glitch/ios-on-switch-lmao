@@ -8,6 +8,9 @@
 // The work runs on its own kernel thread, so the probe returns at once; switch_root_boot_prepare() calls it once the
 // SD disk is published. From the end of stage 1 the GPU interrupts (SPI 157/158) drive nvkm; there is no polled mode.
 // Logs one line per stage reached ("tegra-gm20b: M1 ok ..."), or the line of the stage that failed.
+#ifndef SWITCH_IPSW_BUILD
+#error "TegraGM20B compiles with the IPSW kind's header (IPSW_KIND_FLAGS)"
+#endif
 #include <IOKit/IOLib.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOPlatformExpert.h>
@@ -22,10 +25,12 @@
 #include "../../kits/SwitchSysctl/SwitchSysctl.h"
 #include "../SwitchSuspend/SwitchWake.h"
 #include "TegraGM20BGpu.h"
+#include "SwitchGpuPackImage.h"
 #include "SwitchGpuPathStats.h"
 #include "SwitchGpuShaderCompiler.h"
 #include "TegraGM20BRail.h"
 #include "TegraGM20BSleep.h"
+#include "shim/include/switch_nvn_golden.h"
 #include "shim/include/switch_tiled_cache.h"
 
 extern "C" {
@@ -40,6 +45,9 @@ void tegra_gm20b_accelerator_static_init(void) __asm__("__GLOBAL__sub_I_TegraGM2
 	__attribute__((weak));
 IOService *tegra_gm20b_accelerator_allocate(void) __attribute__((weak));
 unsigned tegra_gm20b_accelerator_instance_size(void) __attribute__((weak));
+#if SWITCH_IPSW_KIND_24B119
+void tegra_gm20b_accelerator_set_super_meta(const OSMetaClass *meta) __attribute__((weak));
+#endif
 }
 extern "C" OSReturn switch_kernel_classes(void (*initialize)());
 
@@ -125,6 +133,15 @@ IOReturn publish()
 	if (!parent || parent->getClassSize() != 136 ||
 	    tegra_gm20b_accelerator_instance_size() != 136)
 		return kIOReturnNotFound;
+#if SWITCH_IPSW_KIND_24B119
+	const OSSymbol *iogpuName = OSSymbol::withCString("IOGPU");
+	const OSMetaClass *iogpu =
+		iogpuName ? OSMetaClass::getMetaClassWithName(iogpuName) : nullptr;
+	OSSafeReleaseNULL(iogpuName);
+	if (!iogpu || iogpu->getSuperClass() != parent || !tegra_gm20b_accelerator_set_super_meta)
+		return kIOReturnNotFound;
+	tegra_gm20b_accelerator_set_super_meta(iogpu);
+#endif
 	const IOReturn ret = switch_kernel_classes(tegra_gm20b_accelerator_static_init);
 	if (ret)
 		return ret;
@@ -161,7 +178,7 @@ IOReturn publish()
 	return kIOReturnSuccess;
 }
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 // debug.switch_gpu_clkgate (debug kernels): 1 clock gating on, 0 off, for a frame-time A/B within one boot; BlueTool
 // writes it when the Mac posts com.brunostjohn.switch.debug.gpu-clkgate-on / -off.
 int gClkgateOn = 1;
@@ -182,6 +199,18 @@ int clkgateSysctl SYSCTL_HANDLER_ARGS
 }
 
 struct sysctl_oid gClkgateOid;
+
+int gpcKhzSysctl SYSCTL_HANDLER_ARGS
+{
+	if (req->newptr)
+		return EPERM;
+	if (!req->oldptr)
+		return SYSCTL_OUT(req, nullptr, sizeof(int));
+	const int khz = switch_gpu_gpc_khz();
+	return khz < 0 ? -khz : SYSCTL_OUT(req, &khz, sizeof(khz));
+}
+
+struct sysctl_oid gGpcKhzOid;
 
 // debug.switch_gpu_regdump (debug kernels, read-only): the registers L4T's capture.sh reads, as text for diff_regs.py
 // (TegraGM20BRegDump.h). Reading it wakes the GPU if it is rail-gated.
@@ -212,6 +241,11 @@ void registerClkgateSysctl()
 		clkgateSysctl, "I", "GPU clock gating on (1) or off (0), debug A/B");
 	sysctl_register_oid(&gClkgateOid);
 	switch_sysctl_oid(
+		&gGpcKhzOid, &sysctl__debug_children, "switch_gpu_gpc_khz",
+		static_cast<int>(CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED),
+		gpcKhzSysctl, "I", "GPU core clock from the active GPC PLL dividers in kHz");
+	sysctl_register_oid(&gGpcKhzOid);
+	switch_sysctl_oid(
 		&gRegdumpOid, &sysctl__debug_children, "switch_gpu_regdump",
 		static_cast<int>(CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED),
 		regdumpSysctl, "A", "GM20B registers for the L4T diff");
@@ -234,7 +268,7 @@ void bringup(void *arg, wait_result_t)
 		}
 		// Bring-up: the text console lags the log, and logd flushes every few seconds; let both catch up so a stage
 		// that hangs the machine still leaves the previous stage's result on screen and on Data.
-		if (TGM_STATS && nvxnu_trace_paced())
+		if (TGM_DEBUG_PROBES && nvxnu_trace_paced())
 			IOSleep(3000);
 	}
 	if (stage >= 4) {
@@ -244,9 +278,10 @@ void bringup(void *arg, wait_result_t)
 		} else {
 			IOLog("tegra-gm20b: M4 ok published AGXAccelerator (MetalPluginName "
 			      "TegraGM20BMetal)\n");
+			switch_gpu_pack_gpu_usable();
 		}
 	}
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 	registerClkgateSysctl();
 	switch_gpu_path_register();
 #endif
@@ -283,6 +318,16 @@ extern "C" int switch_tiled_cache_on(void)
 	return static_cast<int>(
 		(PE_parse_boot_argn("switch-no-tiled-cache", &off, sizeof(off)) == 0) ||
 		(off == 0u));
+}
+
+extern "C" uint32_t switch_nvn_golden_skipped(void)
+{
+	unsigned skipped = 0;
+#if DEVELOPMENT || DEBUG
+	if (!PE_parse_boot_argn("switch-no-nvn-golden", &skipped, sizeof(skipped)))
+		skipped = 0;
+#endif
+	return skipped;
 }
 
 extern "C" int switch_gpu_compression_on(void)
@@ -397,7 +442,7 @@ extern "C" void tegra_gm20b_display_expected(void)
 	thread_call_enter(gRailCall);
 }
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 // TegraGM20BRailCycle.cpp's one rail-gate and rail-up, each made under gRailLock as the rail worker makes it. 0, or
 // tgm_rail_down's -EBUSY, also while system sleep holds the GPU.
 extern "C" int tgm_rail_cycle_once(void)

@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Shared cached memory must contain the GPU's completed writes even when the caller never asks for contents again.

@@ -16,12 +16,10 @@ struct ComputeResourceSlots {
     {
         for (uint32_t i = 0; i < record.entries; ++i) {
             const auto &entry = record.entry[i];
-            if (entry.slot >= 31)
-                continue;
-            if (entry.kind == KernelBuffer)
+            if (entry.kind == KernelBuffer && entry.slot < 31)
                 buffers |= 1u << entry.slot;
-            else if (entry.kind == KernelTexture)
-                textures |= 1u << entry.slot;
+            else if (entry.kind == KernelTexture && kernelTextureSlot(entry) < 31)
+                textures |= 1u << kernelTextureSlot(entry);
         }
     }
 

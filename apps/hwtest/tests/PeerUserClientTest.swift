@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import IOSurface
 
 /// The texture peer (peer/texpeer.mm) opens IOSurfaceRootUserClient: 24B119's system policy denies it to a process

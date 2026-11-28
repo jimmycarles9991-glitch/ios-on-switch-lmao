@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A one-sample RGBA8Unorm attachment drawn a gradient of exact codes (texel_values, each channel c / 255; red + blue

@@ -71,19 +71,66 @@ void AGXDeviceUserClient::retirementWork(thread_call_param_t owner, thread_call_
 	static_cast<AGXDeviceUserClient *>(owner)->retireBatch();
 }
 
+void AGXDeviceUserClient::chanRetireWork(thread_call_param_t owner, thread_call_param_t)
+{
+	static_cast<AGXDeviceUserClient *>(owner)->retireChannels();
+}
+
+// Detached channels tear down off lock_ and submitGate_. Taking submitLocks_[slot] first
+// waits out any room wait that dropped submitGate_ while still referencing the channel.
+void AGXDeviceUserClient::retireChannels()
+{
+	for (;;) {
+		tgm_chan *chan = nullptr;
+		uint32_t slot = kMaxChannels;
+		IOLockLock(lock_);
+		for (uint32_t i = 0; i < kMaxChannels; ++i) {
+			if (retiringChans_[i].chan) {
+				chan = retiringChans_[i].chan;
+				retiringChans_[i].chan = nullptr;
+				slot = i;
+				break;
+			}
+		}
+		IOLockUnlock(lock_);
+		if (!chan)
+			return;
+		IOLockLock(submitLocks_[slot]);
+		IOLockUnlock(submitLocks_[slot]);
+		tgm_chan_del(&chan);
+		IOLockLock(lock_);
+		__atomic_store_n(&retiringChans_[slot].active, false, __ATOMIC_RELEASE);
+		retiringChans_[slot].queue = 0;
+		retiringChans_[slot].resetGeneration = 0;
+		if (!__atomic_load_n(&retirementStopped_, __ATOMIC_ACQUIRE)) {
+			releasePromises(false);
+			scheduleRetirement();
+		}
+		IOLockWakeup(lock_, &retiringChans_, false);
+		IOLockUnlock(lock_);
+	}
+}
+
 bool AGXDeviceUserClient::bindingIdle(const RetiredBinding *binding) const
 {
 	for (uint32_t slot = 0; slot < kMaxChannels; ++slot) {
 		const auto &snapshot = binding->snapshots[slot];
-		if (!snapshot.engine || !chans_[slot])
+		if (!snapshot.engine)
 			continue;
-		switch_gpu_backing_token current = {};
-		switch_gpu_chan_next_token(chans_[slot], &current);
-		if (snapshot.queue == current.queue &&
-		    snapshot.reset_generation == current.reset_generation &&
-		    !tgm_chan_error(chans_[slot]) &&
-		    int32_t(tgm_chan_completed(chans_[slot]) - uint32_t(snapshot.value)) < 0)
+		if (chans_[slot]) {
+			switch_gpu_backing_token current = {};
+			switch_gpu_chan_next_token(chans_[slot], &current);
+			if (snapshot.queue == current.queue &&
+			    snapshot.reset_generation == current.reset_generation &&
+			    !tgm_chan_error(chans_[slot]) &&
+			    int32_t(tgm_chan_completed(chans_[slot]) - uint32_t(snapshot.value)) <
+				    0)
+				return false;
+		} else if (retiringChans_[slot].active &&
+			   snapshot.queue == retiringChans_[slot].queue &&
+			   snapshot.reset_generation == retiringChans_[slot].resetGeneration) {
 			return false;
+		}
 	}
 	return true;
 }
@@ -241,9 +288,8 @@ void AGXDeviceUserClient::releaseLeft()
 	const Left left = left_;
 	left_ = {};
 #ifdef KERNEL
-	while ((left.bos || left.indexes || left.bindings || reclaimDeferredCount_) &&
-	       submitGate_.mutating())
-		IOLockSleep(lock_, &submitGate_, THREAD_UNINT);
+	if (left.bos || left.indexes || left.bindings || reclaimDeferredCount_)
+		submitGate_.waitMutationEnd(lock_);
 	const uint64_t reclaimSeq = reclaimDeferredCount_ ? reclaimSeq_ : 0u;
 	IOLockUnlock(lock_);
 	if (!left.bos && !left.indexes && !left.bindings && !reclaimSeq)
@@ -253,8 +299,8 @@ void AGXDeviceUserClient::releaseLeft()
 	if (reclaimSeq)
 		drainDeferredReclaims(reclaimSeq);
 #else
-	while ((left.bos || left.indexes || left.bindings) && submitGate_.mutating())
-		IOLockSleep(lock_, &submitGate_, THREAD_UNINT);
+	if (left.bos || left.indexes || left.bindings)
+		submitGate_.waitMutationEnd(lock_);
 	IOLockUnlock(lock_);
 	if (!left.bos && !left.indexes && !left.bindings)
 		return;
@@ -272,6 +318,7 @@ void AGXDeviceUserClient::releaseWork(thread_call_param_t owner, thread_call_par
 void AGXDeviceUserClient::publishBindings(BindingTable::Snapshot *made)
 {
 	bindTable_.publish(made, binds_, nbinds_);
+	bumpBindGen();
 	__atomic_store_n(&retirementPending_, 1u, __ATOMIC_RELEASE);
 	scheduleRetirement();
 }
@@ -307,6 +354,10 @@ void AGXDeviceUserClient::retire(RetiredBinding *record)
 			record->snapshots[slot].value = uint32_t(record->snapshots[slot].value - 1);
 			// its retirement (and the bind epoch behind it) waits for that seqno's interrupt
 			tgm_chan_need(chans_[slot], uint32_t(record->snapshots[slot].value));
+		} else if (retiringChans_[slot].active) {
+			record->snapshots[slot] = {0, retiringChans_[slot].resetGeneration,
+						   SWITCH_GPU_ENGINE_GM20B,
+						   retiringChans_[slot].queue};
 		}
 	}
 	record->next = nullptr;
@@ -360,7 +411,7 @@ void AGXDeviceUserClient::drainResources()
 #ifdef KERNEL
 	drainParkedRanges();
 #endif
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 	tgm_readback_closed(this);
 #endif
 	IOLockLock(lock_);
@@ -378,6 +429,13 @@ void AGXDeviceUserClient::drainResources()
 	hangHolder_ = nullptr;
 	IOLockUnlock(lock_);
 	// Channel destruction drains the callbacks before their preallocated work is cancelled.
+	if (chanRetireCall_)
+		thread_call_cancel_wait(chanRetireCall_);
+	for (auto &retiring : retiringChans_) {
+		if (retiring.chan)
+			tgm_chan_del(&retiring.chan);
+		retiring = {};
+	}
 	if (retireCall_)
 		thread_call_cancel_wait(retireCall_);
 	if (wakeCall_)
@@ -388,6 +446,8 @@ void AGXDeviceUserClient::drainResources()
 	while (nbinds_)
 		unbindOverlaps(binds_[0].va, binds_[0].range, nullptr);
 	boIndex_.clear();
+	bumpBoGen();
+	bumpBindGen();
 	while (bos_) {
 		auto *bo = bos_;
 		bos_ = bo->next;
@@ -406,7 +466,9 @@ void AGXDeviceUserClient::drainResources()
 // are taken; resource set members also end the set's generation and rewrite its member list.
 IOReturn AGXDeviceUserClient::boFree(const TegraGM20BAbiBoFree *in)
 {
+#if TGM_STATS
 	const uint64_t start = nowNs();
+#endif
 	Bo **p = findLink(in->handle);
 	if (!*p)
 		return kIOReturnBadArgument;
@@ -419,8 +481,10 @@ IOReturn AGXDeviceUserClient::boFree(const TegraGM20BAbiBoFree *in)
 	const IOReturn freed = *p ? freeBo(p) : kIOReturnBadArgument;
 	if (mutation)
 		submitGate_.endMutation(lock_);
+#if TGM_STATS
 	if (!freed)
 		tgm_stats_bo_free(nowNs() - start);
+#endif
 	return freed;
 }
 
@@ -448,6 +512,7 @@ IOReturn AGXDeviceUserClient::freeBo(Bo **p)
 #endif
 	switch_gpu_backing_member_freed(bo->backing);
 	boIndex_.erase(bo->handle);
+	bumpBoGen();
 	for (uint32_t i = 0; i < nbinds_;) {
 		if (binds_[i].bo == bo) {
 			unbindOverlaps(binds_[i].va, binds_[i].range, bo);

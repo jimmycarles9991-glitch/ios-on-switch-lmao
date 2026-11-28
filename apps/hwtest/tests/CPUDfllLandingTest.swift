@@ -1,5 +1,7 @@
 import Darwin
 import HWTestCore
+import HWTestKit
+import HWTestShared
 
 /// The DFLL's rows asked from above and from below (drivers/SwitchPower/SwitchThermalDfllLanding.h, debug kernels):
 /// the kernel asks each case's first rate, lets it settle, asks the row and measures the CPU's clock where it runs

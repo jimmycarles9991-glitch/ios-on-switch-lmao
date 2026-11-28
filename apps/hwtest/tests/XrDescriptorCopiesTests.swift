@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// Copies between RGB10A8_2P_XR10 textures a descriptor made (17x4, 16x8, 2x8, 33x5; Shared and Private) and one over a

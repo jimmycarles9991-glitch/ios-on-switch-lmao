@@ -69,21 +69,63 @@ bool SwitchXUDC::start(IOService *provider)
         IOLog("SwitchUSB: no timer for re-enumeration: forceReEnumeration stays off the bus\n");
         OSSafeReleaseNULL(busReturn);
     }
+    settleGate = IOCommandGate::commandGate(this);
+    settleTimer = IOTimerEventSource::timerEventSource(this, &SwitchXUDC::settleTimerFired);
+    if (settleGate && settleTimer && loop->addEventSource(settleGate) == kIOReturnSuccess &&
+        loop->addEventSource(settleTimer) == kIOReturnSuccess) {
+        hw.setSettleWait(&SwitchXUDC::waitForSettle, this);
+    } else {
+        if (settleGate && settleGate->getWorkLoop() == loop)
+            loop->removeEventSource(settleGate);
+        if (settleTimer && settleTimer->getWorkLoop() == loop)
+            loop->removeEventSource(settleTimer);
+        OSSafeReleaseNULL(settleGate);
+        OSSafeReleaseNULL(settleTimer);
+    }
     readyForHost();  // control request, USB device description defaults, registerService()
     return true;
 }
 
 void SwitchXUDC::stop(IOService *provider)
 {
-    if (interrupt)
-        interrupt->disable();
-    if (busReturn) {
-        (void)endReturn();
-        loop->removeEventSource(busReturn);
+    if (loop) {
+        loop->runAction(
+            [](OSObject *owner, void *, void *, void *, void *) {
+                auto *self = static_cast<SwitchXUDC *>(owner);
+                self->waitForSettling(UINT32_MAX);
+                if (self->interrupt)
+                    self->interrupt->disable();
+                if (self->busReturn)
+                    (void)self->endReturn();
+                self->setBus(false);
+                self->hw.setSettleWait(nullptr, nullptr);
+                if (self->settleTimer) {
+                    self->settleTimer->cancelTimeout();
+                    self->settleTimerArmed = false;
+                }
+                if (self->settleGate) {
+                    self->settleGate->commandWakeup(&self->settleEvent, false);
+                    self->settleGate->commandWakeup(&self->settleWaiters, false);
+                }
+                return kIOReturnSuccess;
+            },
+            this);
+        if (busReturn)
+            loop->removeEventSource(busReturn);
+        if (settleTimer)
+            loop->removeEventSource(settleTimer);
+        if (settleGate)
+            loop->removeEventSource(settleGate);
+        if (interrupt)
+            loop->removeEventSource(interrupt);
+    } else {
+        if (interrupt)
+            interrupt->disable();
+        if (busReturn)
+            (void)endReturn();
+        setBus(false);
+        hw.setSettleWait(nullptr, nullptr);
     }
-    setBus(false);
-    if (interrupt && loop)
-        loop->removeEventSource(interrupt);
     IOUSBDeviceController::stop(provider);
 }
 
@@ -91,6 +133,8 @@ void SwitchXUDC::free()
 {
     OSSafeReleaseNULL(interrupt);
     OSSafeReleaseNULL(busReturn);
+    OSSafeReleaseNULL(settleTimer);
+    OSSafeReleaseNULL(settleGate);
     for (Endpoint &ep : endpoints) {
         ep.serial.release();
         if (ep.queue)
@@ -205,6 +249,7 @@ IOReturn SwitchXUDC::systemSleep(bool entering)
         busAfterSleep = wantBus || onBus || returned;
         if (!hostOwnsPort)
             setBus(false);
+        waitForSettling(UINT32_MAX);
         interrupt->disable();
         return kIOReturnSuccess;
     }
@@ -245,6 +290,7 @@ void switchxudc_sleep(bool entering)
 
 void SwitchXUDC::setBus(bool on)
 {
+    waitForSettling(UINT32_MAX);
     if (on == onBus)
         return;
     if (on && (lostToSleep || asleep || !__atomic_load_n(&gHostVbus, __ATOMIC_ACQUIRE) ||
@@ -252,8 +298,11 @@ void SwitchXUDC::setBus(bool on)
         return;
     if (on) {
         ep0Cancel(kIOReturnAborted);
-        hw.initEndpoint(0, EP_CONTROL, 64, 0);
-        (void)hw.reloadEndpoint(0);
+        {
+            const DciOp op(this, 1u);
+            hw.initEndpoint(0, EP_CONTROL, 64, 0);
+            (void)hw.reloadEndpoint(0);
+        }
         hw.connect();
         hw.setVbus(__atomic_load_n(&gHostVbus, __ATOMIC_ACQUIRE));
         onBus = true;
@@ -340,6 +389,59 @@ void SwitchXUDC::busReturned(OSObject *owner, IOTimerEventSource *)
     auto *self = static_cast<SwitchXUDC *>(owner);
     if (self->returning)
         self->goOnBus(true);
+}
+
+void SwitchXUDC::settleTimerFired(OSObject *owner, IOTimerEventSource *)
+{
+    auto *self = static_cast<SwitchXUDC *>(owner);
+    self->settleTimerArmed = false;
+    self->settleGate->commandWakeup(&self->settleEvent, false);
+}
+
+void SwitchXUDC::waitForSettle(void *context, uint32_t mask, uint64_t remainingNs)
+{
+    static_cast<SwitchXUDC *>(context)->sleepForSettle(mask, remainingNs);
+}
+
+void SwitchXUDC::sleepForSettle(uint32_t mask, uint64_t remainingNs)
+{
+    if (!settleGate || !settleTimer || !loop || !loop->inGate())
+        return;
+    const uint32_t us = static_cast<uint32_t>((remainingNs + 999ULL) / 1000ULL);
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(us ? us : 1u, kMicrosecondScale, &deadline);
+    const uint32_t addedMask = mask & ~settlingDcis;
+    settlingDcis |= addedMask;
+    ++settleWaiters;
+    settleDeferredDrain = true;
+    if (!settleTimerArmed || deadline < settleDeadline) {
+        settleDeadline = deadline;
+        settleTimerArmed = true;
+        settleTimer->wakeAtTime(deadline);
+    }
+    settleGate->commandSleep(&settleEvent, deadline, THREAD_UNINT);
+    settlingDcis &= ~addedMask;
+    if (addedMask && settleBlockedWaiters)
+        settleGate->commandWakeup(&settleWaiters, false);
+    if (--settleWaiters == 0 && settleTimerArmed) {
+        settleTimer->cancelTimeout();
+        settleTimerArmed = false;
+    }
+    if (addedMask && settleDeferredDrain && !settlingDcis) {
+        settleDeferredDrain = false;
+        drainSoon();
+    }
+}
+
+void SwitchXUDC::waitForSettling(uint32_t mask)
+{
+    if (!settleGate || !loop || !loop->inGate())
+        return;
+    while (settlingDcis & mask) {
+        ++settleBlockedWaiters;
+        settleGate->commandSleep(&settleWaiters, THREAD_UNINT);
+        --settleBlockedWaiters;
+    }
 }
 
 // Registration: SwitchXUDC's metaclass needs the loaded original family, so its static initializer is staged

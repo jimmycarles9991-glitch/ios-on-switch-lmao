@@ -22,11 +22,10 @@ inline std::string encodeFactsEntry(const CacheKey &k, const uint32_t *facts, co
             w.value(facts[i]);
     else
         w.text(refusal);
-    w.value(Pack::fnv(w.out.data(), w.out.size()));
     return w.out;
 }
 
-inline RecordCache::Found decodeFactsEntry(const std::string &bytes, const CacheKey &k, PackComputeFacts &facts,
+inline RecordCache::Found decodeFactsEntry(std::string_view bytes, const CacheKey &k, PackComputeFacts &facts,
                                            std::string &refusal)
 {
     Reader r(bytes);
@@ -35,7 +34,7 @@ inline RecordCache::Found decodeFactsEntry(const std::string &bytes, const Cache
         return RecordCache::Found::None;
     if (kind == kKindFactsRefusal) {
         refusal = r.text();
-        return r.ok() && r.at() == bytes.size() - 8 ? RecordCache::Found::Refusal : RecordCache::Found::None;
+        return r.ok() && r.at() == bytes.size() ? RecordCache::Found::Refusal : RecordCache::Found::None;
     }
     if (kind != kKindFacts)
         return RecordCache::Found::None;
@@ -44,7 +43,7 @@ inline RecordCache::Found decodeFactsEntry(const std::string &bytes, const Cache
     made.maxThreads = r.value<uint32_t>();
     made.executionWidth = r.value<uint32_t>();
     made.staticMemory = r.value<uint32_t>();
-    if (!r.ok() || r.at() != bytes.size() - 8)
+    if (!r.ok() || r.at() != bytes.size())
         return RecordCache::Found::None;
     facts = made;
     return RecordCache::Found::Record;

@@ -1,5 +1,7 @@
 import Foundation
 import HWTestCore
+import HWTestKit
+import HWTestShared
 
 /// The display's window probes (drivers/NativeMobileDisplay/DisplayWindowProbe.h, debug kernels): each shows test
 /// pictures on the panel for about 0.7 s, through a route the display does not use yet and through a known-good one,
@@ -66,6 +68,24 @@ struct DisplayWindowProbeTest: HWTest {
         DisplayWindowProbeTest(
             id: "display.x1.offset_crop", name: "A block-linear NV12 crop through window B's H/V offsets (CRC)",
             probe: "V5c", number: 3
+        ),
+        DisplayWindowProbeTest(
+            id: "display.x1.column_scan_bgra",
+            name: "Window B column-scanning landscape BGRA in 16-GOB blocks, both quarter turns (CRC)",
+            probe: "V6",
+            number: 7
+        ),
+        DisplayWindowProbeTest(
+            id: "display.x1.column_scan_words",
+            name: "Window B column-scanning BGRA by words 6 and 5, a pitch-linear half turn, and a start one pixel in (CRC)",
+            probe: "V7",
+            number: 8
+        ),
+        DisplayWindowProbeTest(
+            id: "display.x1.flip_words",
+            name: "Window B flipping BGRA across, down and both, pitch linear and in 16-GOB blocks (CRC)",
+            probe: "V8",
+            number: 9
         ),
         DisplayWindowProbeTest(
             id: "display.x1.window_formats",

@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// The texel bytes of a texture as the CPU models them, and the rectangles uploads write into them.

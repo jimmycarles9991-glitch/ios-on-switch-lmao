@@ -27,7 +27,9 @@
 #include "compiler_debug.h"
 #include "compiler_engine.h"
 #include "compiler_log.h"
+#include "compiler_persist.h"
 #include "compiler_pool.h"
+#include "compiler_record.h"
 #include "compiler_refusals.h"
 #include "compiler_restart.h"
 #include "compiler_sandbox.h"
@@ -65,12 +67,12 @@ struct Asked : Work {
     std::string request;  // what the log keeps of a client's request ("": the log's own, which it keeps already)
     int32_t pid = 0;      // the process that asked first, whose share of the store the record takes
     dispatch_semaphore_t done = nullptr;  // signalled once it ran, for the replay that waits on it
-#if SWITCH_DEBUG
+#if SWITCH_DEBUG && SWITCH_METAL_STATS
     uint64_t takenNs = 0, preparedNs = 0;  // the kernel handed it over, and it was prepared
 #endif
 };
 
-#if SWITCH_DEBUG
+#if SWITCH_DEBUG && SWITCH_METAL_STATS
 // When the take thread's request came out of the kernel (0: the replay's own)
 thread_local uint64_t tTakenNs;
 #endif
@@ -99,8 +101,11 @@ std::unique_ptr<uint8_t[]> untouched(size_t bytes)
 // The heap the workers' compiles freed goes back to the system once the pool has nothing queued or running
 void idle()
 {
+    // Avoid holding libmalloc zone locks at background QoS while interactive compiles allocate.
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
     malloc_zone_pressure_relief(nullptr, 0);
-#if SWITCH_DEBUG
+    pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+#if SWITCH_DEBUG && SWITCH_METAL_STATS
     logFootprint(logger(), "idle");
 #endif
 }
@@ -117,9 +122,13 @@ private:
     RequestLog log_;
     std::unique_ptr<ConfirmedRefusals> refusals_;  // this build's refusals (compiler_refusals.h), made at open
     SystemLibraries system_;
+    std::unique_ptr<ClientLibraries> clientLibraries_;
     std::unique_ptr<Pool> pool_;
     size_t bufferBytes_ = 1u << 20;
     std::unique_ptr<uint8_t[]> buffer_ = untouched(bufferBytes_);
+    Persister persister_{[this] {
+        persist();
+    }};
 
     int call(uint32_t method, const void *in, size_t inSize, void *out, size_t outSize)
     {
@@ -141,10 +150,23 @@ private:
 
     std::mutex publishLock_;
 
+    void persist();
+
+    // Where `p`'s entry is (Store::find over its candidate names): `bytes`, and `stored` its result, -1 for none or one to
+    // make again. A publish chooses again as it writes (Store::put), since another content may have taken the name
+    // meanwhile.
+    struct Placed {
+        gm20b::Digest name{};
+        int32_t stored = -1;
+        std::string bytes;
+    };
+
+    Placed placed(const Prepared &p) const;
     int32_t run(Work &work);
     void remember(const Asked &asked, int32_t ran);
-    bool publish(const gm20b::Digest *name, const gm20b::CacheKey &key, const std::string &entry, bool slots,
+    bool publish(gm20b::Digest *name, const gm20b::CacheKey &key, const std::string &entry, bool slots, bool keepMade,
                  std::string &why);
+    bool filedAsPlain(const Prepared &p, const std::string &entry, bool write);
     bool connect(std::string &why, StartFailure &failure);
     void decline();
     bool kernelGaveUp();
@@ -166,56 +188,117 @@ int32_t packed(int32_t result, bool stored, qos_class_t ran)
     return result | (stored ? kStoredBit : 0) | int32_t(bandOf(uint32_t(ran), true)) << kClassShift;
 }
 
-// The entry under `name` (null: the store holds it already), and with `slots` its program slots ahead of it
+// The entry of `key` placed from `name` (Store::put; null: the store holds it already), `name` then the one it went
+// under, and with `slots` its program slots ahead of it. `keepMade`: a made entry of `key` already there stays (a
+// compile's result: one content compiles to one record, and the one there may be a full form's, filedAsPlain)
 // (Store::putProgramSlots): a full store is written again with its newest half and registered again, then takes both
-bool Service::publish(const gm20b::Digest *name, const gm20b::CacheKey &key, const std::string &entry, bool slots,
-                      std::string &why)
+bool Service::publish(gm20b::Digest *name, const gm20b::CacheKey &key, const std::string &entry, bool slots,
+                      bool keepMade, std::string &why)
 {
     std::lock_guard<std::mutex> l(publishLock_);
     const auto putAll = [&] {
         if (slots && store_.putProgramSlots(key, entry) == Store::Put::Full)
             return Store::Put::Full;
-        return name ? store_.put(*name, entry) : Store::Put::Added;
+        if (!name)
+            return Store::Put::Added;
+        gm20b::Digest at{};
+        const Store::Put put = store_.put(*name, key, entry, at, [&](const std::string &held) {
+            return keepMade && storedResult(held, key) == TegraGM20BCompileMade;
+        });
+        if (put == Store::Put::Added || put == Store::Put::Kept)
+            *name = at;
+        return put;
     };
     Store::Put put = putAll();
     if (put == Store::Put::Full) {
+#if SWITCH_DEBUG
         const uint32_t before = store_.entries();
+#endif
         if (!store_.makeRoom(why) || !registerStore(uint64_t(TEGRA_STACK_KEY), why))
             return false;
+#if SWITCH_DEBUG
         os_log(logger(), "SwitchShaderCompiler: the full store kept its newest %u of %u entries", store_.entries(),
                before);
+#endif
         put = putAll();
     }
-    if (put != Store::Put::Added)
+    if (put != Store::Put::Added && put != Store::Put::Kept)
         why = "the store took no entry";
-    return put == Store::Put::Added;
+    if (put == Store::Put::Added)
+        persister_.soon();
+    return put == Store::Put::Added || put == Store::Put::Kept;
+}
+
+// Whether a full form's stored record `entry` is also what its plain content's lookup finds (asPrimary); with `write`,
+// filed there where it is not. A plain compile racing the full one, or an entry an older build made, leaves the plain
+// record under that content, and the state's creations would wait for their full form at every launch.
+bool Service::filedAsPlain(const Prepared &p, const std::string &entry, bool write)
+{
+    const std::string filed = asPrimary(p, entry);
+    std::string held;
+    gm20b::Digest at{};
+    if (filed.empty() || (store_.find(p.primaryName, p.primaryContent, held, at) && held == filed))
+        return true;
+    if (!write)
+        return false;
+    gm20b::Digest primary = p.primaryName;
+    std::string ignored;
+    return publish(&primary, p.primaryContent, filed, false, false, ignored);
+}
+
+void Service::persist()
+{
+#if SWITCH_DEBUG && SWITCH_METAL_STATS
+    const uint64_t began = uptimeNs();
+#endif
+    if (!store_.persist())
+        os_log_error(logger(),
+                     "SwitchShaderCompiler: the store not synced (%d): a crash before the next sync drops its newest "
+                     "entries",
+                     errno);
+    if (!log_.persist())
+        os_log_error(logger(), "SwitchShaderCompiler: the request log not synced (%d)", errno);
+#if SWITCH_DEBUG && SWITCH_METAL_STATS
+    static uint32_t syncs = 0;  // the persister's serial queue alone runs this
+    os_log(logger(), "SwitchShaderCompiler: store and request log synced in %llu us (sync %u)",
+           (unsigned long long)((uptimeNs() - began) / 1000), ++syncs);
+#endif
+}
+
+Service::Placed Service::placed(const Prepared &p) const
+{
+    Placed out;
+    if (store_.find(p.name, p.content, out.bytes, out.name))
+        out.stored = storedResult(out.bytes, p.content);
+    return out;
 }
 
 int32_t Service::run(Work &work)
 {
     Asked &asked = static_cast<Asked &>(work);
-    const Prepared &p = asked.prepared;
+    Prepared &p = asked.prepared;
     const qos_class_t workerClass = qos_class_self();
 #if SWITCH_DEBUG
     tJobSplit = {};
 #endif
-    std::string entry, why;
-    if (store_.find(p.name, entry)) {
-        const int32_t stored = storedResult(entry, p.key);
-        if (stored >= 0) {
-            noCompile();
-            return packed(stored, true, workerClass);
-        }
-        store_.retire(p.name);
+    std::string why;
+    if (const Placed place = placed(p); place.stored >= 0) {
+        p.name = place.name;
+        if (gm20b::fullForm(p.request.form) && place.stored == TegraGM20BCompileMade)
+            filedAsPlain(p, place.bytes, true);
+        noCompile();
+        return packed(place.stored, true, workerClass);
     }
-    entry.clear();
+    std::string entry;
     compileStarted();
     int32_t result = engine_.compile(p, entry, why);
 #if SWITCH_DEBUG
     const uint64_t publishing = uptimeNs();
 #endif
-    if (!entry.empty() && !publish(&p.name, p.key, entry, result == TegraGM20BCompileMade, why))
+    if (!entry.empty() && !publish(&p.name, p.content, entry, result == TegraGM20BCompileMade, true, why))
         result = TegraGM20BCompileFailed;
+    if (result == TegraGM20BCompileMade && gm20b::fullForm(p.request.form))
+        filedAsPlain(p, entry, true);
 #if SWITCH_DEBUG
     tJobSplit.storeNs = uptimeNs() - publishing;
 #endif
@@ -230,7 +313,7 @@ int32_t Service::run(Work &work)
             switch_refusal_key_with(switch_refusal_key("m2v", line.reason), switch_refusal_key(line.text.c_str(), "")),
             "m2v", line.reason, "%s", line.text.c_str());
     }
-#if SWITCH_DEBUG
+#if SWITCH_DEBUG && SWITCH_METAL_STATS
     logJob(logger(), result, asked.takenNs, asked.preparedNs, unsigned(workerClass), asked.pid, p.key.key);
 #endif
     return packed(result, false, workerClass);
@@ -243,8 +326,14 @@ void Service::remember(const Asked &asked, int32_t ran)
     const int32_t result = ran & 0xff;
     if (ran & kStoredBit)
         return;
-    if ((result == TegraGM20BCompileMade || result == TegraGM20BCompileRefused) && !asked.request.empty())
+    // Scoped requests omit their scope from the log; front-end library requests are compiled by Apple's MTLCompiler
+    // (already persisted across builds in msl/*.reply), so logging them would reload MTLCompiler and re-run syntax
+    // errors on every boot.
+    if ((result == TegraGM20BCompileMade || result == TegraGM20BCompileRefused) && !asked.request.empty() &&
+        asked.prepared.request.kind != gm20b::RequestKind::Library && !gm20b::scoped(asked.prepared.request)) {
         log_.add(asked.prepared.name, asked.request);
+        persister_.soon();
+    }
     if (result == TegraGM20BCompileRefused)
         refusals_->confirm(asked.prepared.name);
 }
@@ -253,20 +342,18 @@ void Service::remember(const Asked &asked, int32_t ran)
 bool Service::submit(Prepared prepared, std::string request, const Waiter &waiter, int32_t pid,
                      dispatch_semaphore_t done)
 {
-    std::string bytes;
-    if (store_.find(prepared.name, bytes)) {
-        const int32_t stored = storedResult(bytes, prepared.key);
-        if (stored >= 0) {
-            complete(waiter, stored, TegraGM20BCompileStored);
-            return false;
-        }
-        store_.retire(prepared.name);
+    // a full form stored but not yet filed as its plain content's record goes to a worker, which files it
+    if (const Placed place = placed(prepared);
+        place.stored >= 0 && (!gm20b::fullForm(prepared.request.form) || place.stored != TegraGM20BCompileMade ||
+                              filedAsPlain(prepared, place.bytes, false))) {
+        complete(waiter, place.stored, TegraGM20BCompileStored);
+        return false;
     }
     auto work = std::make_unique<Asked>();
     work->pid = pid;
     work->request = std::move(request);
     work->done = done;
-#if SWITCH_DEBUG
+#if SWITCH_DEBUG && SWITCH_METAL_STATS
     work->takenNs = tTakenNs;
     work->preparedNs = uptimeNs();
 #endif
@@ -287,13 +374,18 @@ void Service::take(uint64_t stack)
     }
     if (error == kIOReturnAborted)
         return;
+    if (error == kIOReturnBadArgument)
+        notServing("the kernel refused this build's Take reply size: the GPU kext is of another build",
+                   StartFailure::Structural);
     if (error || !reply.id) {
         os_log_error(logger(), "SwitchShaderCompiler: no request taken (0x%x): the kernel let go of the compiler",
                      error);
         exit(1);
     }
-#if SWITCH_DEBUG
+#if SWITCH_DEBUG && SWITCH_METAL_STATS
     tTakenNs = uptimeNs();
+#endif
+#if SWITCH_DEBUG
     dieIfArmedFor(reply.pid);
 #endif
     const bool waited = reply.flags & TegraGM20BCompileWaited;
@@ -301,11 +393,21 @@ void Service::take(uint64_t stack)
     const Waiter waiter = {reply.id, reply.client, bandOf(reply.qos, waited), false};
     Prepared prepared;
     std::string why;
-    if (!prepare(request, stack, system_, prepared, why)) {
+    gm20b::StoreScope scope;
+    scope.kind = reply.scope.kind;
+    scope.identity.assign(reinterpret_cast<const char *>(reply.scope.identity),
+                          std::min<size_t>(reply.scope.bytes, sizeof reply.scope.identity));
+    if (!prepare(request, stack, system_, prepared, why, reply.client, clientLibraries_.get(), scope)) {
         os_log_error(logger(), "SwitchShaderCompiler: pid %d's request not taken: %{public}s", reply.pid, why.c_str());
         return complete(waiter, TegraGM20BCompileUnavailable, TegraGM20BCompileCompiled);
     }
-    submit(std::move(prepared), std::move(request), waiter, reply.pid);
+    bool hasHandles = false;
+    for (const gm20b::RequestLibrary &l : prepared.request.libraries)
+        if (l.libraryId) {
+            hasHandles = true;
+            break;
+        }
+    submit(std::move(prepared), hasHandles ? std::string() : std::move(request), waiter, reply.pid);
 }
 
 bool Service::connect(std::string &why, StartFailure &failure)
@@ -398,7 +500,7 @@ void Service::open(uint64_t stack)
         os_log_error(logger(), "SwitchShaderCompiler: running without its sandbox: %{public}s", why.c_str());
     os_log(logger(), "SwitchShaderCompiler: serving at %llu ms of uptime",
            (unsigned long long)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000000));
-#if SWITCH_DEBUG
+#if SWITCH_DEBUG && SWITCH_METAL_STATS
     logFootprint(logger(), "serving");
 #endif
 }
@@ -417,22 +519,25 @@ void Service::warm(uint64_t stack)
     log_.replay([&](const std::string &request, gm20b::Digest &name) {
         Prepared prepared;
         std::string why;
-        if (!prepare(restacked(request, stack), stack, system_, prepared, why)) {
+        // Drop requests that no longer prepare, scoped requests (scope not in log), and front-end library requests
+        // (compiled by Apple's MTLCompiler; replaying them loads MTLCompiler and re-runs syntax errors every boot).
+        if (!prepare(restacked(request, stack), stack, system_, prepared, why) ||
+            prepared.request.kind == gm20b::RequestKind::Library || gm20b::scoped(prepared.request)) {
             dropped++;
             return false;
         }
-        name = prepared.name;
-        const gm20b::CacheKey key = prepared.key;
-        std::string bytes;
-        const int32_t stored = store_.find(name, bytes) ? storedResult(bytes, key) : -1;
+        const Placed place = placed(prepared);
+        name = place.name;
+        const std::string &bytes = place.bytes;
+        const int32_t stored = place.stored;
         const bool unconfirmed = stored == TegraGM20BCompileRefused && !confirmed.confirmed(name);
         if (stored < 0 || unconfirmed) {
             if (unconfirmed)
-                store_.retire(name);
+                store_.retire(name, prepared.content);
             (unconfirmed ? refusals : again)++;
-            if (submit(std::move(prepared), std::string(), {0, 0, Band::Background, false}, 0, ran))
+            if (submit(std::move(prepared), std::string(), {0, 0, Band::Background, false, false, true}, 0, ran))
                 dispatch_semaphore_wait(ran, DISPATCH_TIME_FOREVER);
-        } else if (stored == TegraGM20BCompileMade && !publish(nullptr, prepared.key, bytes, true, why)) {
+        } else if (stored == TegraGM20BCompileMade && !publish(nullptr, prepared.content, bytes, true, false, why)) {
             os_log_error(logger(), "SwitchShaderCompiler: a stored record's program slots not kept: %{public}s",
                          why.c_str());
         }
@@ -452,15 +557,49 @@ void Service::serve()
     armDeath();  // before the sandbox, which looks up no notification center
 #endif
     open(stack);
+    clientLibraries_ = std::make_unique<ClientLibraries>(
+        [this](uint64_t client, uint64_t id, const uint8_t *&data, size_t &size, std::string &why) {
+            const TegraGM20BAbiCompilerMapLibrary in = {id, client, 0, 0};
+            TegraGM20BAbiCompilerMapLibraryReply reply = {};
+            const int error = call(TegraGM20BMethodCompilerMapLibrary, &in, sizeof in, &reply, sizeof reply);
+            if (error || !reply.address || !reply.bytes) {
+                char text[64];
+                snprintf(text, sizeof text, "client library map failed (0x%x)", error);
+                why = text;
+                return false;
+            }
+            data = reinterpret_cast<const uint8_t *>(uintptr_t(reply.address));
+            size = size_t(reply.bytes);
+            return true;
+        },
+        [this](uint64_t client, uint64_t id) {
+            const TegraGM20BAbiCompilerUnmapLibrary in = {id, client, 0, 0};
+            const int error = call(TegraGM20BMethodCompilerUnmapLibrary, &in, sizeof in, nullptr, 0);
+            if (error && error != kIOReturnNotFound)
+                os_log_error(logger(), "SwitchShaderCompiler: unmapping client %llu library %llu: 0x%x",
+                             (unsigned long long)client, (unsigned long long)id, error);
+        });
     Pool::Hooks hooks;
     hooks.run = [this](Work &work, const std::function<void(int32_t)> &primary) {
+        const Asked &asked = static_cast<Asked &>(work);
+        // Keep live client async/background compiles out of DarwinBG priority 4 while staying in the background lane.
+        const bool lifted = asked.pid != 0 && qos_class_self() == QOS_CLASS_BACKGROUND;
+        if (lifted)
+            pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
         const int32_t result = run(work);
         primary(result);
-        const Asked &asked = static_cast<Asked &>(work);
+        if (lifted)
+            pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
         remember(asked, result);
         if (asked.done)
             dispatch_semaphore_signal(asked.done);
         return result;
+    };
+    hooks.same = [](const Work &a, const Work &b) {
+        const gm20b::CacheKey &x = static_cast<const Asked &>(a).prepared.content,
+                              &y = static_cast<const Asked &>(b).prepared.content;
+        return x.stack == y.stack && !memcmp(x.vertexAir, y.vertexAir, sizeof x.vertexAir) &&
+               !memcmp(x.fragmentAir, y.fragmentAir, sizeof x.fragmentAir) && x.key == y.key;
     };
     hooks.complete = [this](const Waiter &waiter, int32_t result) {
         const uint32_t how = result & kStoredBit ? TegraGM20BCompileStored
@@ -503,7 +642,9 @@ void Service::serve()
 // it only sleeps in the kernel and hands each request on, and a compile runs at its waiters' class on a pool worker.
 extern "C" __attribute__((visibility("default"))) int switch_shader_compiler_main(void)
 {
-    static switch_compiler::Service service;
+    // Never destroyed: the take thread, the pool's workers and a pending sync of the store still run while exit()
+    // runs static destructors
+    static switch_compiler::Service &service = *new switch_compiler::Service;
     IONotificationPortRef port = IONotificationPortCreate(kIOMainPortDefault);
     IONotificationPortSetDispatchQueue(port, dispatch_get_main_queue());
     io_iterator_t matches = 0;

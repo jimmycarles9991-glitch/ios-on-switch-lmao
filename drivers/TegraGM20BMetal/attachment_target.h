@@ -6,6 +6,7 @@
 #pragma once
 #include <algorithm>
 #include <cstdint>
+#include "attachment_lifetime.h"
 #include "fx/fx_image.h"
 #include "format_standin.h"
 #include "gpu.h"
@@ -92,6 +93,7 @@ inline bool texelBufferTarget(const Texture &t, Texture &out)
 // The command buffer's scratch (CommandBuffer::turnScratch) of colour j's plane image (planeInBlocks): 24 + j, between the
 // device's backing tags and the turn copies' (gpu.h BackingTag, turned_pass.cpp kTurnTag)
 constexpr uint32_t kPlaneImageTag = 24;
+static_assert(kPlaneImageTag + 8 <= kDriverPassColorTag, "the plane images' tags below a driver pass's colour tags");
 
 // Plane `plane` of level 0 of a one-level 3D texture laid out several planes a block (texture_shape.cpp volumeView2d:
 // one made without render-target usage), which no colour target addresses alone: the pass renders a one-plane-a-block image
@@ -207,12 +209,14 @@ constexpr bool formatStandInSamples(uint32_t format, uint32_t samples, bool memo
 // its stand-in format's resolve stored by the store state (harness/standinresolveoracle.mm, 4096 texels at 2x and 4x:
 // R8Unorm_sRGB exact, A1BGR5Unorm, ABGR4Unorm and BGRA4Unorm 98.8% to 99.3% exact), as the tile holds their colours before
 // its store. RGB9E5Float's tile holds its words after each draw: its state takes the samples' words, their decoded mean
-// rounded to the nearest word (98.3% exact at 2x, 88.9% at 4x, every texel within one mantissa code). An extended-range
-// texture resolves to the mean of its samples' stored codes (harness/resolvecodesoracle.mm): its state takes each
-// sample's store code and that mean (pack/xr_target.metal)
+// rounded to the nearest word (98.3% exact at 2x, 88.9% at 4x, every texel within one mantissa code). BGRA10_XR and
+// BGR10_XR resolve to the mean of their samples' stored codes (harness/resolvecodesoracle.mm): their states take each
+// sample's store code and that mean (pack/xr_target.metal). Their sRGB twins resolve as their stand-in does, the mean of
+// the samples' values encoded once: within one code of an M4 Max at every texel of gpu.gm20b.standin_ms_resolve's
+// scene at 2x and 4x, where the mean of their sRGB codes lands up to 258 codes off (the twins' own resolve states, 11-24)
 constexpr const char *formatResolveState(uint32_t format)
 {
-    if (xrTarget(format))
+    if (format == 552 || format == 554)  // BGRA10_XR, BGR10_XR
         return xrTargetState(format, XrStep::Resolve);
     return format == kRgb9e5Float ? "raw.fmt.fmt_resolve_rgb9e5_frag" : nullptr;
 }

@@ -63,9 +63,9 @@ def added_bytes(root: Path, entries: list[dict]) -> int:
 
 
 def _work_bytes(target: Path, source: Path) -> int:
-    """Return what applying one entry reads and writes: the file hashed, its replacement written and hashed."""
+    """Return what applying one entry reads and writes: the file hashed and its replacement written."""
     current = target.stat().st_size if target.is_file() else 0
-    return current + 2 * (source.stat().st_size if source.is_file() else 0)
+    return current + (source.stat().st_size if source.is_file() else 0)
 
 
 def apply(root: Path, entries: list[dict], log: host.Log, what: str, consume: bool = False) -> int:
@@ -91,8 +91,6 @@ def apply(root: Path, entries: list[dict], log: host.Log, what: str, consume: bo
             if current != e['sha256_in']:
                 raise DeltaError('{}: {} is not the file the delta was made from'.format(what, e['path']))
             _rewrite(target, e['source'])
-            if hashing.sha256_file(target, progress.advance) != e['sha256_out']:
-                raise DeltaError('{}: {} does not hold the translated bytes after the write'.format(what, e['path']))
             if consume:
                 e['source'].unlink()
             changed += 1

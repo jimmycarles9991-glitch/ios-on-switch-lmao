@@ -1,5 +1,7 @@
 import Darwin
 import HWTestCore
+import HWTestKit
+import HWTestShared
 
 /// The GPU rail-gated and brought up again four times (debug.switch_gpu_rail_cycle, debug kernels): the gate and ungate
 /// are the Tegra X1 TRM's GM20b sequence (12.2.7.17), and after each rail-up the kernel runs the GPU's first job (one

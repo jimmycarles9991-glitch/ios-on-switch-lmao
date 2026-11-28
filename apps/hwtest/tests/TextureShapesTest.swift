@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// newTextureWithDescriptor: shapes that went to m2v, one a group (ShapeArms): each made texture is raw's own (after

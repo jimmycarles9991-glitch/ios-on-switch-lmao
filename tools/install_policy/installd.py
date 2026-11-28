@@ -133,7 +133,7 @@ def entitlements(path: Path) -> dict:
     return value
 
 
-def prepare_files(system_version: Path, source: Path, pins: dict, out: Path) -> None:
+def prepare_files(system_version: Path, source: Path, pins: dict, out: Path, arm64e: Path | None = None) -> None:
     build = plistlib.loads(system_version.read_bytes())
     if build.get('ProductBuildVersion') != pins['build']:
         raise ValueError('OS volume build differs from the selected IPSW pins')
@@ -161,6 +161,20 @@ def prepare_files(system_version: Path, source: Path, pins: dict, out: Path) -> 
             check=True,
             capture_output=True,
         )
+        if arm64e is not None:
+            translated = Path(scratch) / 'installd.translated'
+            report_path = Path(scratch) / 'installd.report.json'
+            subprocess.run(
+                [str(arm64e), 'pretranslate', '-r', str(report_path), str(target), str(translated)],
+                check=True,
+                capture_output=True,
+            )
+            slices = json.loads(report_path.read_text()).get('slices', [])
+            if not slices or any(s.get('status') == 'fallback' for s in slices):
+                reasons = ', '.join(s.get('why') or s.get('status', '?') for s in slices)
+                raise ValueError(f'installd pretranslation fell back ({reasons})')
+            os.replace(translated, target)
+            target.chmod(0o755)
         subprocess.run(['/usr/bin/codesign', '--verify', '--strict', str(target)], check=True, capture_output=True)
         if entitlements(target) != original:
             raise ValueError('re-signing changed installd entitlements')
@@ -169,8 +183,8 @@ def prepare_files(system_version: Path, source: Path, pins: dict, out: Path) -> 
         os.replace(target, out)
 
 
-def prepare(root: Path, pins: dict, out: Path) -> None:
-    prepare_files(root / 'System/Library/CoreServices/SystemVersion.plist', root / SOURCE, pins, out)
+def prepare(root: Path, pins: dict, out: Path, arm64e: Path | None = None) -> None:
+    prepare_files(root / 'System/Library/CoreServices/SystemVersion.plist', root / SOURCE, pins, out, arm64e)
 
 
 def main() -> None:
@@ -179,9 +193,10 @@ def main() -> None:
     parser.add_argument('--installd', required=True, type=Path)
     parser.add_argument('--pins', required=True, type=Path)
     parser.add_argument('--out', required=True, type=Path)
+    parser.add_argument('--arm64e', type=Path)
     args = parser.parse_args()
     pins = json.loads(args.pins.read_text())
-    prepare_files(args.system_version, args.installd, pins, args.out)
+    prepare_files(args.system_version, args.installd, pins, args.out, args.arm64e)
 
 
 if __name__ == '__main__':

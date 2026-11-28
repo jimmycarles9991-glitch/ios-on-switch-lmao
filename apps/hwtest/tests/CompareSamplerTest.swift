@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A runtime sampler with a compare function on the driver (drivers/TegraGM20BMetal/sampler.h

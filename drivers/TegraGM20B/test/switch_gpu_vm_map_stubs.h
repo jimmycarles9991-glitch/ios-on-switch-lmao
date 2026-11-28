@@ -166,13 +166,26 @@ bool nvif_mmu_kind_valid(Mmu *, u8)
 	return true;
 }
 
+int statsOn;
+uint64_t mappedSmall, mappedBig, mappedCould;
+unsigned logged;
+int ctorRefuses;
+
 int stats_on()
 {
-	return 0;
+	return statsOn;
 }
 
-void tgm_stats_map(uint64_t, uint64_t, uint64_t)
+void tgm_stats_map(uint64_t small, uint64_t big, uint64_t could)
 {
+	mappedSmall += small;
+	mappedBig += big;
+	mappedCould += could;
+}
+
+void nvxnu_log(const char *, ...)
+{
+	++logged;
 }
 
 int l2_on()
@@ -301,7 +314,7 @@ int nvif_mem_ctor_type(Mmu *, const char *, int, unsigned, u8 shift, u64 bytes, 
 {
 	++constructors;
 	*mem = {shift, bytes};
-	return 0;
+	return ctorRefuses ? -ctorRefuses : 0;
 }
 
 int nvif_vmm_get(nvif_vmm *vm, int, bool, u8 shift, unsigned, u64 bytes, nvif_vma *vma)

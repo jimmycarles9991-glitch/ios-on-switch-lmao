@@ -84,14 +84,14 @@ OSStatus avd_start_tile_session(VTVideoDecoderRef ref, VTTileDecoderSession sess
     Decoder *d = CMBaseObjectGetDerivedStorage(ref);
     if (!d->hevc)
         return kVTVideoDecoderUnsupportedDataFormatErr;
-    pthread_mutex_lock(&d->lock);
+    avd_decoder_enter(d);
     if (d->avcC)
         CFRelease(d->avcC);
     d->avcC = avd_copy_atom(format, CFSTR("hvcC"));
     const HEVCSPS *sps = d->avcC && !avd_load_hvcc(d, d->avcC) ? hevc_decoder_sps(d->hevc) : NULL;
     const char *why = prepare(d, sps);
     if (why) {
-        pthread_mutex_unlock(&d->lock);
+        avd_decoder_leave(d);
         switch_refusal("AVD", why, "tile session left to the next decoder");
         return kVTVideoDecoderUnsupportedDataFormatErr;
     }
@@ -105,7 +105,7 @@ OSStatus avd_start_tile_session(VTVideoDecoderRef ref, VTTileDecoderSession sess
     const OSStatus status = VTTileDecoderSessionSetTileDecodeRequirements(session, attributes, requirements);
     CFRelease(attributes);
     CFRelease(requirements);
-    pthread_mutex_unlock(&d->lock);
+    avd_decoder_leave(d);
     if (status)
         os_log_error(gAVDLog, "AVD: tile requirements refused in %{public}s: %d", getprogname(), (int)status);
     else
@@ -128,10 +128,10 @@ void *avd_tile_decoded(Decoder *d, const H264Picture *picture)
 
 void avd_tile_emit(Decoder *d, Output *out)
 {
-    avd_emitter_settle_output(d->emitter, out);
-    VTDecoderSessionEmitDecodedTile(d->tileSession, (int64_t)(intptr_t)out->frame, out->status, 0, NULL);
+    const int64_t frame = (int64_t)(intptr_t)out->frame;
+    const OSStatus status = avd_emitter_settle_output(d->emitter, out);
+    VTDecoderSessionEmitDecodedTile(d->tileSession, frame, status, 0, NULL);
     d->tile.answered = true;
-    free(out);
 }
 
 OSStatus avd_decode_tile(VTVideoDecoderRef ref, int64_t frameID, CMSampleBufferRef sample, VTInt32Point tile,
@@ -146,11 +146,11 @@ OSStatus avd_decode_tile(VTVideoDecoderRef ref, int64_t frameID, CMSampleBufferR
     uint8_t *copy = NULL;
     size_t bytes = 0;
     const bool readable = avd_sample_bytes(sample, &data, &bytes, &copy);
-    pthread_mutex_lock(&d->lock);
+    avd_decoder_enter(d);
     d->tile =
         (AVDTile){frameID, canvas, offset.x < 0 ? 0 : (uint32_t)offset.x, offset.y < 0 ? 0 : (uint32_t)offset.y, false};
-    const uint64_t began = mach_absolute_time(), placed = d->copyTicks;
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    const uint64_t began = mach_absolute_time(), placed = d->copyTicks;
     avd_frame_begin(&d->timing, began);
 #endif
     const int ret = readable && offset.x >= 0 && offset.y >= 0
@@ -159,9 +159,10 @@ OSStatus avd_decode_tile(VTVideoDecoderRef ref, int64_t frameID, CMSampleBufferR
     if (ret == 1) {
         hevc_decoder_flush(d->hevc);
         d->frames++;
-        d->decodeTicks += mach_absolute_time() - began - (d->copyTicks - placed);
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-        avd_frame_end(&d->timing, mach_absolute_time());
+        const uint64_t done = mach_absolute_time();
+        d->decodeTicks += done - began - (d->copyTicks - placed);
+        avd_frame_end(&d->timing, done);
 #endif
     }
     if (!d->tile.answered) {
@@ -169,7 +170,7 @@ OSStatus avd_decode_tile(VTVideoDecoderRef ref, int64_t frameID, CMSampleBufferR
         VTDecoderSessionEmitDecodedTile(d->tileSession, frameID, status, kVTDecodeInfo_FrameDropped, NULL);
     }
     d->tile.canvas = NULL;
-    pthread_mutex_unlock(&d->lock);
+    avd_decoder_leave(d);
     free(copy);
     return noErr;
 }

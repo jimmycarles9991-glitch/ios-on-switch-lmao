@@ -54,8 +54,8 @@ TEST(SwitchMotionStats, TheLineSaysWhatItConvertsForWhomAndWhatWokeIt)
     switchMotionLine(line, sizeof(line), s, state, 10000);
     EXPECT_EQ(std::string(line),
               "10000 ms at 25000 mHz: accel 1 (client 0 us, batch 0 us), gyro 0 (client 10000 us, batch 15000 us), "
-              "detector 1, panel lit 0, FIFO 1 (watermark 5); 50 interrupts (5/s), 2 empty, posted 0 accel 0 gyro, "
-              "50 drains of 250 records, 0 overflows");
+              "motion 0 us, detector 1, panel lit 0, FIFO 1 (watermark 5); 50 interrupts (5/s), 2 empty, posted 0 "
+              "accel 0 gyro 0 motion, 50 drains of 250 records, 0 overflows");
 }
 
 TEST(SwitchMotionStats, ALineCutShortStaysInItsBuffer)

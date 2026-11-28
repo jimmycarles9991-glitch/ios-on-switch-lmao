@@ -54,9 +54,34 @@ inline const char *refusal(uint64_t bytes, uint64_t held, uint64_t avail, const 
 // nvkm's page tables and channels are physically contiguous too and have only the pool: the floor stays theirs, and is
 // the only room any client's compressed memory leaves. Boot 22's largest step of that share in a 5 s window was 8 MiB,
 // its peak 55 MiB. A refusal is no failure: the target renders uncompressed.
-inline const char *compressibleRefusal(uint64_t bytes, uint64_t avail, const Limits &l)
+//
+// Above the floor, an app leaves the compositor's reserve (compositorReserve) for its next compressed targets. 25 Nov
+// 19:47 and 19:59: 255 of backboardd's compressed targets were refused at the floor, with SwitchHWTest holding 116-148 MiB
+// of the pool and compressed memory 87-109 MiB of it, so the screen's targets rendered uncompressed. The reserve is
+// CompositorCompressedBytes, which holds one screen-sized target (7488 KiB) and leaves boot 22's icons (21 MiB from
+// 48 MiB free) served. A refused compositor target grows it to that target's size, up to CompositorCompressedMost, until
+// the compositor's next compressed BO is made: no fixed reserve covers 19:59's burst (31 refusals in 3.8 s, 4.2 to
+// 24 MiB each, 272 MiB of distinct sizes against a 256 MiB pool, the compositor holding 14-15 MiB), and 24 MiB, a
+// full-screen target, is the largest ask of nearly every burst that boot (20261125-201323).
+constexpr uint64_t CompositorCompressedBytes = 8ULL << 20, CompositorCompressedMost = 24ULL << 20;
+
+// The reserve an app's compressed BO leaves, after the compositor's largest refused ask since its last made one
+inline uint64_t compositorReserve(uint64_t refusedWant)
 {
-	return avail < bytes + l.floorBytes ? "the pool's last 16 MiB stay for nvkm" : nullptr;
+	const uint64_t want =
+		refusedWant < CompositorCompressedMost ? refusedWant : CompositorCompressedMost;
+	return want > CompositorCompressedBytes ? want : CompositorCompressedBytes;
+}
+
+inline const char *compressibleRefusal(uint64_t bytes, uint64_t avail, const Limits &l,
+				       bool compositor = false,
+				       uint64_t reserve = CompositorCompressedBytes)
+{
+	if (avail < bytes + l.floorBytes)
+		return "the pool's last 16 MiB stay for nvkm";
+	if (!compositor && avail < bytes + l.floorBytes + reserve)
+		return "the compositor's compressed reserve stays free";
+	return nullptr;
 }
 
 struct SmmuCompLimits {

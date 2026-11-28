@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// A 540 target over a '420v' whose rows overlap (gpu/YcbcrOverlapRows.swift): a, 64x16 of pitch 16, and b, 64x64 of

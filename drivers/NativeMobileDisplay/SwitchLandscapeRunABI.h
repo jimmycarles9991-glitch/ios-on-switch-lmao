@@ -4,7 +4,8 @@
 // the calling connection until it closes; SAMPLE has the display record its next frame ends (DC A's CRC, the mode,
 // what scanned and what it cost); QUERY returns the last sample; PORTRAIT holds landscape off for the next value frame
 // ends (0 ends it), so the copy route can be sampled whatever the traits; FAIL makes the next change into landscape
-// fail as a reservation that could not be armed (the forced-failure arm). A release kernel answers
+// fail as a reservation that could not be armed (the forced-failure arm); COPY holds direct scanout off for the next
+// value frame ends. A release kernel answers
 // kIOReturnNotPermitted. C.
 #pragma once
 #include <stdint.h>
@@ -29,6 +30,9 @@ enum {
     SWITCH_DISPLAY_LANDSCAPE_QUERY = 3,
     SWITCH_DISPLAY_LANDSCAPE_PORTRAIT = 4,  // value: frame ends, at most SWITCH_DISPLAY_LANDSCAPE_PORTRAIT_FRAMES
     SWITCH_DISPLAY_LANDSCAPE_FAIL = 5,      // value: 1 arms it, 0 disarms it
+    // value: frame ends to scan no UI frame from its own surface, at most SWITCH_DISPLAY_LANDSCAPE_PORTRAIT_FRAMES (0
+    // ends it): every UI frame takes the GPU's present copy, the route HW Test's copy engine resets cut
+    SWITCH_DISPLAY_LANDSCAPE_COPY = 6,
 };
 
 enum {

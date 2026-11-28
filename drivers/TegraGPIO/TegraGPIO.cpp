@@ -10,9 +10,12 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOInterruptController.h>
+#include <IOKit/IOInterruptEventSource.h>
 #include <IOKit/IOFilterInterruptEventSource.h>
 #include <IOKit/IOPlatformExpert.h>
+#include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
+#include <kern/clock.h>
 #include <libkern/OSAtomic.h>
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSData.h>
@@ -130,6 +133,7 @@ uint32_t lvlBits(uint8_t trigger)
 }
 
 constexpr char kPortNames[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+constexpr uint32_t kDeliveryGraceMS = 50;
 }
 
 // NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage (its kalloc type view)
@@ -142,12 +146,24 @@ class TegraGPIO : public IOInterruptController {
     volatile uint8_t *car = nullptr;  // sleep resume only (mapped at start: resume runs with interrupts off)
     IOWorkLoop *loop = nullptr;
     IOFilterInterruptEventSource *banks[kBanks] = {};
+    IOTimerEventSource *deliveryTimer = nullptr;
+    IOInterruptEventSource *deliveryKick = nullptr;
     IOLock *nubLock = nullptr;
-    IOSimpleLock *portLock = nullptr;  // INT_LVL and DBC_CNT read-modify-write
+    IOLock *deliveryLock = nullptr;
     IOService *nubs[TEGRA_GPIO_COUNT] = {};
     uint8_t triggers[TEGRA_GPIO_COUNT] = {};
     uint8_t debounce[TEGRA_GPIO_COUNT / 8] = {};
     uint8_t debouncePins[TEGRA_GPIO_COUNT / 8] = {};  // pins with debounce on, per port (DBC_EN is write-only)
+    uint32_t serviced[TEGRA_GPIO_COUNT] = {};
+
+    struct PendingCheck {
+        const char *who;
+        uint32_t seenCount;
+        uint64_t deadline;
+    };
+
+    PendingCheck checks[TEGRA_GPIO_COUNT] = {};
+    uint64_t checkMask[TEGRA_GPIO_COUNT / 64] = {};
 
     // System sleep: each port's registers, saved before SC7 (the controller and its clock come back at reset).
     struct Saved {
@@ -176,7 +192,10 @@ class TegraGPIO : public IOInterruptController {
     {}
 
     static bool bankInterrupt(OSObject *owner, IOFilterInterruptEventSource *sender);
+    static void deliveryKicked(OSObject *owner, IOInterruptEventSource *sender, int count);
+    static void deliveryFired(OSObject *owner, IOTimerEventSource *sender);
     void serviceBank(unsigned bank);
+    void runDeliveryChecks();
     void configurePin(unsigned pin, uint8_t trigger);
     IOService *makeNub(unsigned pin);
 
@@ -206,6 +225,7 @@ public:
     }
 
     void describe(unsigned pin, char *buffer, size_t size) const;
+    void checkDelivery(unsigned pin, const char *who);
 
     bool latched(unsigned pin) const
     {
@@ -232,9 +252,9 @@ bool TegraGPIO::start(IOService *provider)
     pinmux = switch_mmio_map(kPinmuxPA, 0x1000);
     car = switch_mmio_map(kCarPA, 0x1000);
     nubLock = IOLockAlloc();
-    portLock = IOSimpleLockAlloc();
+    deliveryLock = IOLockAlloc();
     vectors = IONewZero(IOInterruptVector, TEGRA_GPIO_COUNT);
-    if (!gpio || !pinmux || !car || !nubLock || !portLock || !vectors)
+    if (!gpio || !pinmux || !car || !nubLock || !deliveryLock || !vectors)
         return false;
     for (unsigned i = 0; i < TEGRA_GPIO_COUNT; ++i) {
         vectors[i].interruptLock = IOLockAlloc();
@@ -249,8 +269,13 @@ bool TegraGPIO::start(IOService *provider)
     }
 
     loop = IOWorkLoop::workLoop();
-    if (!loop)
+    deliveryTimer = loop ? IOTimerEventSource::timerEventSource(this, &TegraGPIO::deliveryFired) : nullptr;
+    deliveryKick = loop ? IOInterruptEventSource::interruptEventSource(this, &TegraGPIO::deliveryKicked) : nullptr;
+    if (!loop || !deliveryTimer || !deliveryKick || loop->addEventSource(deliveryTimer) != kIOReturnSuccess ||
+        loop->addEventSource(deliveryKick) != kIOReturnSuccess) {
         return false;
+    }
+    deliveryKick->enable();
     for (unsigned b = 0; b < kBanks; ++b) {
         IOService *nub = switch_interrupt_nub(32 + kBankSpi[b], false);  // sleeps until the GIC is up
         banks[b] = IOFilterInterruptEventSource::filterInterruptEventSource(this, &TegraGPIO::unused,
@@ -279,6 +304,20 @@ void TegraGPIO::free()
         bank->release();
         bank = nullptr;
     }
+    if (deliveryTimer) {
+        deliveryTimer->cancelTimeout();
+        if (loop)
+            loop->removeEventSource(deliveryTimer);
+        deliveryTimer->release();
+        deliveryTimer = nullptr;
+    }
+    if (deliveryKick) {
+        deliveryKick->disable();
+        if (loop)
+            loop->removeEventSource(deliveryKick);
+        deliveryKick->release();
+        deliveryKick = nullptr;
+    }
     OSSafeReleaseNULL(loop);
     if (vectors) {
         for (unsigned i = 0; i < TEGRA_GPIO_COUNT; ++i) {
@@ -288,8 +327,8 @@ void TegraGPIO::free()
         IODelete(vectors, IOInterruptVector, TEGRA_GPIO_COUNT);
         vectors = nullptr;
     }
-    if (portLock)
-        IOSimpleLockFree(portLock);
+    if (deliveryLock)
+        IOLockFree(deliveryLock);
     if (nubLock)
         IOLockFree(nubLock);
     IOInterruptController::free();
@@ -306,6 +345,79 @@ bool TegraGPIO::bankInterrupt(OSObject *owner, IOFilterInterruptEventSource *sen
     return false;
 }
 
+void TegraGPIO::deliveryKicked(OSObject *owner, IOInterruptEventSource *, int)
+{
+    if (auto *self = OSDynamicCast(TegraGPIO, owner))
+        self->runDeliveryChecks();
+}
+
+void TegraGPIO::deliveryFired(OSObject *owner, IOTimerEventSource *)
+{
+    if (auto *self = OSDynamicCast(TegraGPIO, owner))
+        self->runDeliveryChecks();
+}
+
+void TegraGPIO::checkDelivery(unsigned pin, const char *who)
+{
+    if (!latched(pin))
+        return;
+    const uint32_t count = __atomic_load_n(&serviced[pin], __ATOMIC_RELAXED);
+    if (!latched(pin))
+        return;
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(kDeliveryGraceMS, kMillisecondScale, &deadline);
+    bool added = false;
+    IOLockLock(deliveryLock);
+    if (!checks[pin].who) {
+        checks[pin] = {who, count, deadline};
+        checkMask[pin >> 6] |= 1ULL << (pin & 63);
+        added = true;
+    }
+    IOLockUnlock(deliveryLock);
+    if (added)
+        deliveryKick->interruptOccurred(nullptr, nullptr, 0);
+}
+
+void TegraGPIO::runDeliveryChecks()
+{
+    const uint64_t now = mach_absolute_time();
+    uint64_t earliest = 0;
+    unsigned lostPin = TEGRA_GPIO_COUNT;
+    const char *lostWho = nullptr;
+    IOLockLock(deliveryLock);
+    for (unsigned w = 0; w < TEGRA_GPIO_COUNT / 64; ++w) {
+        uint64_t bits = checkMask[w];
+        while (bits) {
+            const unsigned bit = static_cast<unsigned>(__builtin_ctzll(bits));
+            bits &= bits - 1;
+            const unsigned pin = w * 64 + bit;
+            PendingCheck &c = checks[pin];
+            if (!c.who || __atomic_load_n(&serviced[pin], __ATOMIC_RELAXED) != c.seenCount || !latched(pin)) {
+                c.who = nullptr;
+                checkMask[w] &= ~(1ULL << bit);
+            } else if (now >= c.deadline) {
+                lostPin = pin;
+                lostWho = c.who;
+                c.who = nullptr;
+                checkMask[w] &= ~(1ULL << bit);
+                break;
+            } else if (!earliest || c.deadline < earliest) {
+                earliest = c.deadline;
+            }
+        }
+        if (lostWho)
+            break;
+    }
+    IOLockUnlock(deliveryLock);
+    if (lostWho) {
+        char state[256];
+        describe(lostPin, state, sizeof(state));
+        panic("%s: GPIO %u interrupt lost: %s", lostWho, lostPin, state);
+    }
+    if (earliest)
+        deliveryTimer->wakeAtTime(earliest);
+}
+
 void TegraGPIO::serviceBank(unsigned bank)
 {
     for (unsigned port = 0; port < 4; ++port) {
@@ -317,6 +429,7 @@ void TegraGPIO::serviceBank(unsigned bank)
         for (; pending; pending &= pending - 1) {
             const IOInterruptVectorNumber number =
                 static_cast<IOInterruptVectorNumber>(first + static_cast<unsigned>(__builtin_ctz(pending)));
+            __atomic_store_n(&serviced[number], serviced[number] + 1, __ATOMIC_RELAXED);
             IOInterruptVector *vector = &vectors[number];
             vector->interruptActive = 1;
             OSMemoryBarrier();
@@ -365,10 +478,8 @@ void TegraGPIO::configurePin(unsigned pin, uint8_t trigger)
         switch_mmio_rmw32(pinmux, mux.offset, PULL_MASK, mux.pull | TRISTATE | INPUT);
     }
     maskWrite(pin, MSK_INT_ENB, false);
-    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(portLock);
     const uint32_t shift = pin & 7;
     wr(portReg(pin, INT_LVL), (rd(portReg(pin, INT_LVL)) & ~(kLvlMask << shift)) | (lvlBits(trigger) << shift));
-    IOSimpleLockUnlockEnableInterrupt(portLock, state);
     maskWrite(pin, MSK_OE, false);
     maskWrite(pin, MSK_CNF, true);
     wr(portReg(pin, INT_CLR), pinBit(pin));
@@ -444,21 +555,22 @@ IOService *TegraGPIO::nubFor(unsigned pin, unsigned trigger)
 
 void TegraGPIO::setDebounce(unsigned pin, unsigned ms)
 {
+    IOLockLock(nubLock);
     if (!ms) {
         debouncePins[pin >> 3] &= static_cast<uint8_t>(~pinBit(pin));
         maskWrite(pin, MSK_DBC_EN, false);
+        IOLockUnlock(nubLock);
         return;
     }
     if (ms > 255)
         ms = 255;
-    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(portLock);
     if (debounce[pin >> 3] < ms) {
         debounce[pin >> 3] = static_cast<uint8_t>(ms);
         wr(portReg(pin, DBC_CNT), ms);
     }
     debouncePins[pin >> 3] |= static_cast<uint8_t>(pinBit(pin));
-    IOSimpleLockUnlockEnableInterrupt(portLock, state);
     maskWrite(pin, MSK_DBC_EN, true);
+    IOLockUnlock(nubLock);
 }
 
 // System sleep (SwitchSuspend quiesce/active actions: boot CPU, interrupts off, the other cores off; pinmux is
@@ -634,17 +746,11 @@ extern "C" void tegra_gpio_describe(unsigned gpio, char *buffer, size_t size)
 }
 
 // The bank filter acknowledges a pending, enabled pin within microseconds, so one still latched after 50 ms never
-// reached the CPU.
+// reached the CPU. Re-checked asynchronously on TegraGPIO's work loop so callers never sleep.
 extern "C" void tegra_gpio_check_delivery(unsigned gpio, const char *who)
 {
-    if (!gController || gpio >= TEGRA_GPIO_COUNT || !gController->latched(gpio))
-        return;
-    IOSleep(50);
-    if (!gController->latched(gpio))
-        return;
-    char state[256];
-    gController->describe(gpio, state, sizeof(state));
-    panic("%s: GPIO %u interrupt lost: %s", who, gpio, state);
+    if (gController && gpio < TEGRA_GPIO_COUNT)
+        gController->checkDelivery(gpio, who);
 }
 
 extern "C" int tegra_gpio_set_debounce(unsigned gpio, unsigned ms)

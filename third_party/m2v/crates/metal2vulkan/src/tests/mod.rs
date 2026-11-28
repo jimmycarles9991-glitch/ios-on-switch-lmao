@@ -20,6 +20,7 @@ mod engine_agx;
 mod engine_air_2_2;
 mod engine_air_2_9;
 mod engine_amplification;
+mod engine_amplified_storage;
 mod engine_arena;
 mod engine_argument_tables;
 mod engine_arith;

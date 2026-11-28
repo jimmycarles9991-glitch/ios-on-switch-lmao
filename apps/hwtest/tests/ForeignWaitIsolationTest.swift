@@ -1,6 +1,9 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 import QuartzCore
 import UIKit
@@ -60,7 +63,11 @@ struct ForeignWaitIsolationTest: HWTest {
         }
         let connection = GPUConnection()
         guard GPUPaths.foreignWaits(connection) != nil else {
-            return .skip("release kernel: no compositor foreign-wait counters")
+            return .skip(
+                KernelSysctl.isReleaseKernel()
+                    ? "release kernel: no compositor foreign-wait counters"
+                    : "no compositor foreign-wait counters (build with --//bazel:stats_gpu)"
+            )
         }
         let pipeline: MTLRenderPipelineState
         do {

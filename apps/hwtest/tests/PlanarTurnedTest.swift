@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// Turned planar render targets (gpu/PlanarTurned.swift): 550 rotations 1 and 3 over 'b3a8' planes, 550 rotation 2 and

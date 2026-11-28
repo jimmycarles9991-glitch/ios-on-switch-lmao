@@ -8,6 +8,7 @@
 #include "bazel/testing/fresh_process.h"
 
 #include <gtest/gtest.h>
+#include <type_traits>
 #include <objc/message.h>
 #include <chrono>
 #include <mutex>
@@ -109,6 +110,12 @@ void anEncodeAheadWithNoChannelLeavesTheFailureToTheCommit()
     NSDictionary *q = pipelined(back);
     ASSERT_NE(q, nil);
     EXPECT_NE([q[@"given_back"] intValue] & int(VetoChannel), 0) << [[q description] UTF8String];
+}
+
+// One count per reason an encode ahead is given back, none spare: a reason added to SwitchMetalPipelineVeto widens it
+TEST(GM20BFacadeAheadFailures, TheAbandonCountsAreOnePerVetoKind)
+{
+    EXPECT_EQ(std::extent_v<decltype(gRM->stats.pipelineAbandons)>, size_t(VetoKinds));
 }
 
 }  // namespace

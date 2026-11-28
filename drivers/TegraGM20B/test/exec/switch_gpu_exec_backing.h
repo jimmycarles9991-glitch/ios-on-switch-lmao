@@ -16,7 +16,8 @@ void publish_write(switch_gpu_backing *backing, const switch_gpu_backing_token &
 // The engines with recorded work a reader of the backing would wait for.
 uint32_t pending(switch_gpu_backing *backing);
 bool recorded(switch_gpu_backing *backing, const switch_gpu_backing_token &token);
-bool order_held();
+bool lock_held(switch_gpu_backing *backing);
+bool any_lock_held();
 uint64_t status_reads();
 // Every timeline failed and every record retired.
 void retire_all();

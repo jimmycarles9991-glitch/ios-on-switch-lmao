@@ -3632,6 +3632,15 @@ IOCopyPropertyCompatible(IORegistryEntry * regEntry, const char * name)
 	return obj;
 }
 
+#if CONFIG_MACF
+static bool
+native_sandbox_allow_get_property(IORegistryEntry * entry, const char * property_name)
+{
+	return entry && property_name && !strcmp(property_name, "gpu-core-count") &&
+	       entry->metaCast("AGXAccelerator");
+}
+#endif
+
 /* Routine io_registry_entry_get_property */
 kern_return_t
 is_io_registry_entry_get_property_bytes(
@@ -3653,7 +3662,8 @@ is_io_registry_entry_get_property_bytes(
 	CHECK( IORegistryEntry, registry_entry, entry );
 
 #if CONFIG_MACF
-	if (0 != mac_iokit_check_get_property(kauth_cred_get(), entry, property_name)) {
+	if (!native_sandbox_allow_get_property(entry, property_name) &&
+	    0 != mac_iokit_check_get_property(kauth_cred_get(), entry, property_name)) {
 		return kIOReturnNotPermitted;
 	}
 #endif
@@ -3721,7 +3731,8 @@ is_io_registry_entry_get_property(
 	CHECK( IORegistryEntry, registry_entry, entry );
 
 #if CONFIG_MACF
-	if (0 != mac_iokit_check_get_property(kauth_cred_get(), entry, property_name)) {
+	if (!native_sandbox_allow_get_property(entry, property_name) &&
+	    0 != mac_iokit_check_get_property(kauth_cred_get(), entry, property_name)) {
 		return kIOReturnNotPermitted;
 	}
 #endif
@@ -3768,7 +3779,8 @@ is_io_registry_entry_get_property_recursively(
 	CHECK( IORegistryEntry, registry_entry, entry );
 
 #if CONFIG_MACF
-	if (0 != mac_iokit_check_get_property(kauth_cred_get(), entry, property_name)) {
+	if (!native_sandbox_allow_get_property(entry, property_name) &&
+	    0 != mac_iokit_check_get_property(kauth_cred_get(), entry, property_name)) {
 		return kIOReturnNotPermitted;
 	}
 #endif
@@ -3830,7 +3842,9 @@ GetPropertiesEditor(void                  * reference,
 		ref->root = container;
 	}
 	if (ref->root == container) {
-		if (0 != mac_iokit_check_get_property(ref->cred, ref->entry, name->getCStringNoCopy())) {
+		const char * propName = name->getCStringNoCopy();
+		if (!native_sandbox_allow_get_property(ref->entry, propName) &&
+		    0 != mac_iokit_check_get_property(ref->cred, ref->entry, propName)) {
 			value = NULL;
 		}
 	}
@@ -3958,7 +3972,8 @@ is_io_registry_entry_get_property_bin_buf(
 	CHECK( IORegistryEntry, registry_entry, entry );
 
 #if CONFIG_MACF
-	if (0 != mac_iokit_check_get_property(kauth_cred_get(), entry, property_name)) {
+	if (!native_sandbox_allow_get_property(entry, property_name) &&
+	    0 != mac_iokit_check_get_property(kauth_cred_get(), entry, property_name)) {
 		return kIOReturnNotPermitted;
 	}
 #endif
@@ -3980,7 +3995,9 @@ is_io_registry_entry_get_property_bin_buf(
 					while ((NULL == obj) && (entry = iter->getNextObject())) {
 						OSObject * currentObj = IOCopyPropertyCompatible(entry, property_name);
 #if CONFIG_MACF
-						if (currentObj != NULL && 0 != mac_iokit_check_get_property(kauth_cred_get(), entry, property_name)) {
+						if (currentObj != NULL &&
+						    !native_sandbox_allow_get_property(entry, property_name) &&
+						    0 != mac_iokit_check_get_property(kauth_cred_get(), entry, property_name)) {
 							// Record that MAC hook blocked this entry and property, and continue to next entry
 							err = kIOReturnNotPermitted;
 							OSSafeReleaseNULL(currentObj);

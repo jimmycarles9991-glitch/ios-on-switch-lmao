@@ -54,6 +54,36 @@ pretranslated_delta = rule(
     },
 )
 
+def _pretranslated_updates_impl(ctx):
+    out = ctx.actions.declare_directory(ctx.label.name)
+    delta = ctx.attr.delta[DeltaInfo]
+    args = ctx.actions.args()
+    args.add("updates")
+    args.add("--delta", delta.dir.path)
+    args.add("--role", delta.role)
+    args.add("--pinned", ctx.file.pinned)
+    args.add("--out", out.path)
+    ctx.actions.run(
+        executable = ctx.executable._translate,
+        arguments = [args],
+        inputs = [delta.dir, ctx.file.pinned],
+        outputs = [out],
+        mnemonic = "PretranslatedUpdates",
+        progress_message = "Taking the boot package's translated updates from %{label}'s delta",
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+pretranslated_updates = rule(
+    implementation = _pretranslated_updates_impl,
+    doc = "The delta's translations of the files the pinned update list names, at their System paths, and the list: " +
+          "what //deploy:sd and //install:sd place under Data's Switch/pretranslated-updates (pretranslate.py).",
+    attrs = {
+        "delta": attr.label(mandatory = True, providers = [DeltaInfo]),
+        "pinned": attr.label(mandatory = True, allow_single_file = True, doc = "ipsw/pretranslated/<kind>/os.updates.json"),
+        "_translate": attr.label(default = "//tools/install:translate", executable = True, cfg = "exec"),
+    },
+)
+
 def _translated_cryptex_impl(ctx):
     image = ctx.actions.declare_file(ctx.label.name + "/" + ctx.file.image.basename)
     sha256 = ctx.actions.declare_file(ctx.label.name + "/" + ctx.file.image.basename + ".sha256")

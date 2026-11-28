@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// replaceRegion and getBytes of private one-aspect depth and stencil textures (drivers/TegraGM20BMetal/

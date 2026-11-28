@@ -1,7 +1,9 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
 import HWTestKit
+import HWTestScenes
 
 struct CAGlassSplitTest: HWTest {
     let scene = Scenes.glassSplit

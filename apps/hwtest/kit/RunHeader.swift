@@ -11,21 +11,68 @@ struct RunHeader: View {
             if !suite.notice.isEmpty {
                 Label(suite.notice, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
             }
-            if let report = suite.report {
-                if suite.running {
-                    progress(list.progress)
-                    failures(list.progress.failed)
-                } else {
-                    counts(report)
-                    failures(report.results.filter { $0.verdict == .fail }.map(\.id))
+            summaryContent
+            if !suite.running, let pending = suite.pendingRun {
+                Text("Unfinished run: \(pending.results.count) of \(pending.summary.planned) tests completed")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                if let error = suite.resumeError {
+                    Text(error).font(.footnote).foregroundStyle(.red)
                 }
-                Text("Report: Library/Application Support/hwtest/\(report.fileName)")
-                    .font(.caption2).foregroundStyle(.secondary)
-            } else {
-                Text("Tap Run All. The run needs nothing else from you.").font(.headline)
             }
         }
         .padding(.vertical, 6)
+        if !suite.running, suite.pendingRun != nil {
+            Button {
+                suite.continueRun()
+            } label: {
+                Label("Continue run", systemImage: "play.fill").font(.headline)
+            }
+            .disabled(!suite.idle)
+            Button("Start new run") { suite.startNewRun() }
+                .disabled(!suite.idle)
+        }
+    }
+
+    @ViewBuilder private var summaryContent: some View {
+        if suite.running {
+            progress(list.progress)
+            failures(list.progress.failed)
+            if suite.reportSaved, let report = suite.report { reportPath(report) }
+        } else if let report = suite.report {
+            counts(report)
+            failures(report.results.filter { $0.verdict == .fail }.map(\.id))
+            if suite.reportSaved {
+                reportPath(report)
+            } else {
+                Text("Ad-hoc results (unfinished run kept saved)").font(.caption2).foregroundStyle(.secondary)
+            }
+        } else if let pending = suite.pendingRun {
+            counts(pending)
+            failures(pending.results.filter { $0.verdict == .fail }.map(\.id))
+            reportPath(pending)
+        } else {
+            startPrompt
+        }
+    }
+
+    private var startPrompt: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("No test run yet.").font(.headline)
+            Text("Start a full run, or pick Interactive, Bench, or any test below.")
+                .font(.subheadline).foregroundStyle(.secondary)
+            Button {
+                suite.requestRunAll()
+            } label: {
+                Label("Start", systemImage: "play.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!suite.idle)
+        }
+    }
+
+    private func reportPath(_ report: Report) -> some View {
+        Text("Report: Library/Application Support/hwtest/\(report.fileName)")
+            .font(.caption2).foregroundStyle(.secondary)
     }
 
     func progress(_ progress: RunList.Progress) -> some View {

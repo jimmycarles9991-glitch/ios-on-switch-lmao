@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// R10Unorm_PACKED and RG10Unorm_PACKED over planes of any surface (gpu/PackedPlaneAnySurface.swift), against an M4 Max

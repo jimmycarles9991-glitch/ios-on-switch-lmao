@@ -21,8 +21,8 @@ TEST(GM20BDeviceOpen, TheRawDeviceCarriesTheClassOfWhatItMetToThePluginsLine)
     EXPECT_THAT(facade, HasSubstr("failure = dev->openFailure();"));
     EXPECT_THAT(Body(facade, "id<MTLDevice> metal_device_open("), HasSubstr("gOpenFailure = failure;"));
     const std::string gpu = SourceText("../gpu.cpp");
-    const std::string open =
-        Body(gpu, "bool Device::open(const char *packPath, uint64_t stack, std::string &err, Role role)");
+    const std::string open = Body(
+        gpu, "bool Device::open(const char *packPath, uint64_t stack, std::string &err, Role role, bool asyncPackWindow)");
     EXPECT_LT(open.find("openFailure_ = OpenFailure::Structural;"), open.find("pack_.load("));
     EXPECT_LT(open.find("openFailure_ = OpenFailure::Transient;"), open.find("k_.open(err)"));
     EXPECT_THAT(Body(SourceText("../TegraGM20BMetalPlugin.mm"),
@@ -38,9 +38,11 @@ TEST(GM20BDeviceOpen, EveryAskOfAProcessWithNoDeviceOpensAfresh)
     EXPECT_THAT(plugin, Not(HasSubstr("static bool tried")));
     EXPECT_THAT(plugin, Not(HasSubstr("DeviceOpens")));
     const std::string open = Body(plugin, "id openDevice(unsigned port)");
-    EXPECT_THAT(open, HasSubstr("if (device)\n            return device;"));
+    EXPECT_THAT(open, HasSubstr("if (device)\n        return device;"));
     EXPECT_THAT(open, HasSubstr("device = openOnce(port, failure, why);"));
     EXPECT_THAT(open, HasSubstr("gm20b::openFailureText(failure), why);"));
+    const std::string container = Body(plugin, "bool systemContainerCache(char *out, size_t size)");
+    EXPECT_LT(container.find("entitledToSystemContainer(identifier)"), container.find("lookup(identifier, &error)"));
 }
 
 TEST(GM20BDeviceOpen, APreparedRawDeviceThatDidNotOpenIsPreparedAgain)

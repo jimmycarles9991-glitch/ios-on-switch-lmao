@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Buffer-to-texture blits into private textures (block-linear where the shape tiles) at offsets and sizes no GOB

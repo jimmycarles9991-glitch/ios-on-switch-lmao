@@ -1,7 +1,10 @@
 import Darwin
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import QuartzCore
 import UIKit
 
@@ -40,7 +43,11 @@ struct LaunchHitchTest: HWTest {
     func run(_ context: TestContext) async throws -> Outcome {
         guard let connection = GPUConnection() else { return .skip("no TegraGM20B connection") }
         guard Self.drain(connection) != nil else {
-            return .skip("the kernel keeps no compositor spans (a release kernel)")
+            return .skip(
+                KernelSysctl.isReleaseKernel()
+                    ? "the kernel keeps no compositor spans (a release kernel)"
+                    : "no compositor spans (build with --//bazel:stats_gpu)"
+            )
         }
         guard let url = Bundle.main.url(forResource: "ca_generic_keys", withExtension: "txt"),
               let table = try? String(contentsOf: url, encoding: .utf8)
@@ -113,7 +120,9 @@ struct LaunchHitchTest: HWTest {
 
     /// One spans line; nil off a debug kernel
     static func spans(_ connection: GPUConnection) -> String? {
-        let (kr, reply) = connection.call(GPUPaths.method, GPUConnection.words([spansOp, 0]), outputSize: 512)
+        let (kr, reply) = connection.call(
+            GPUPaths.method, GPUConnection.words([spansOp, 0]), outputSize: GPUPaths.replySize
+        )
         guard kr == KERN_SUCCESS else { return nil }
         return String(decoding: reply.prefix { $0 != 0 }, as: UTF8.self)
     }

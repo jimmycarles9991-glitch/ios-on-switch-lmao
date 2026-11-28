@@ -64,5 +64,25 @@ class BuildPackageTest(unittest.TestCase):
         self.assertEqual(len(self.bazel.calls), 4 * len(boot.KINDS))
 
 
+class CardTimeTest(unittest.TestCase):
+    def test_card_time_reaches_every_sd_controller(self):
+        inputs = boot.machine.Inputs(
+            qemu=Path('/q'), package=Path('/p'), regwrite=Path('/r'), sd=None, qmp=Path('/s'), sd_card_time=(580, 10)
+        )
+        with mock.patch.object(boot.machine, 'stage', return_value=[]):
+            args = boot.machine.command(Path('/run'), inputs)
+        self.assertIn('driver=generic-sdhci,property=latency-us,value=580', args)
+        self.assertIn('driver=generic-sdhci,property=us-per-kib,value=10', args)
+
+    def test_no_card_time_leaves_the_model_as_it_was(self):
+        inputs = boot.machine.Inputs(qemu=Path('/q'), package=Path('/p'), regwrite=Path('/r'), sd=None, qmp=Path('/s'))
+        with mock.patch.object(boot.machine, 'stage', return_value=[]):
+            args = boot.machine.command(Path('/run'), inputs)
+        self.assertFalse([arg for arg in args if 'generic-sdhci' in arg])
+        self.assertEqual(boot.card_time('580,10'), (580, 10))
+        with self.assertRaises(ValueError):
+            boot.card_time('-1,10')
+
+
 if __name__ == '__main__':
     unittest.main()

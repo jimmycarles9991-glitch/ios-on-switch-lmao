@@ -38,7 +38,7 @@ public:
         const State ready = state();
         if (ready != State::Pending)
             return ready;
-        std::lock_guard<gm20b::Mutex> lock(lock_);
+        std::lock_guard<gm20b::UnfairMutex> lock(lock_);
         const State current = state();
         if (current == State::Pending && observer)
             observers_.push_back(std::move(observer));
@@ -49,7 +49,7 @@ public:
     {
         std::vector<std::function<void()>> notify;
         {
-            std::lock_guard<gm20b::Mutex> lock(lock_);
+            std::lock_guard<gm20b::UnfairMutex> lock(lock_);
             if (state() != State::Pending)
                 return;
             wait_ = std::move(wait);
@@ -65,7 +65,7 @@ public:
             return;
         bool already = false;
         {
-            std::lock_guard<gm20b::Mutex> lock(lock_);
+            std::lock_guard<gm20b::UnfairMutex> lock(lock_);
             if (state() != State::Pending)
                 return;
             already = static_cast<bool>(wait_);
@@ -79,7 +79,7 @@ public:
     {
         WaitFn fn;
         {
-            std::lock_guard<gm20b::Mutex> lock(lock_);
+            std::lock_guard<gm20b::UnfairMutex> lock(lock_);
             if (state() != State::Pending || !wait_)
                 return false;
             fn = wait_;
@@ -109,7 +109,7 @@ public:
     {
         if (!unserved_.load(std::memory_order_acquire))
             return false;
-        std::lock_guard<gm20b::Mutex> lock(lock_);
+        std::lock_guard<gm20b::UnfairMutex> lock(lock_);
         if (!unserved_.load(std::memory_order_relaxed))
             return false;
         unserved_.store(false, std::memory_order_relaxed);
@@ -123,7 +123,7 @@ private:
         std::vector<std::function<void()>> observers, waitObservers;
         WaitFn wait;
         {
-            std::lock_guard<gm20b::Mutex> lock(lock_);
+            std::lock_guard<gm20b::UnfairMutex> lock(lock_);
             if (state() != State::Pending)
                 return false;
             value_ = value;
@@ -138,7 +138,7 @@ private:
         return true;
     }
 
-    mutable gm20b::Mutex lock_;
+    mutable gm20b::UnfairMutex lock_;
     std::atomic<State> state_{State::Pending};
     std::atomic<bool> unserved_{false};
     T *value_ = nullptr;

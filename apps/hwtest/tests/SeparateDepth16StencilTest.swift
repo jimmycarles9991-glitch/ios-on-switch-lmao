@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A Depth16Unorm texture and a Stencil8 texture as one pass's attachments (pass.ds: GM20B has no 16-bit depth zeta with

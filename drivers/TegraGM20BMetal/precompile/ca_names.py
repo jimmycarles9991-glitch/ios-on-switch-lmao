@@ -3,7 +3,8 @@
 
 usage: ca_names.py <ca-names/<build>.txt> <decoded log>...   (idevicesyslog's or `log show`'s text)
 
-A state.unpacked refusal names a Core Animation state by its label alone, com.apple.coreanimation.<name>. The m2v
+A state.unpacked refusal, an in-process state the pack lacks (debug builds) and a render state the pack lacks (every
+build: TegraGM20BMetalStatesMiss.mm) name a Core Animation state by its label, com.apple.coreanimation.<name>. The m2v
 journals hold no such state: raw makes Core Animation's states, and the harvest reads only the caches of the system
 containers it opens. The name is enough, as QuartzCore makes the state of a name (pack/ca/caspec.py), and the pack
 generator adds each name of the IPSW kind's file to its Core Animation corpus tier (pack/make_pack.py ca_states).
@@ -14,7 +15,11 @@ import re
 import sys
 from pathlib import Path
 
-UNPACKED = re.compile(r' state\.unpacked: .*\bcom\.apple\.coreanimation\.([A-Za-z0-9_]+)')
+UNPACKED = re.compile(
+    r'(?: state\.unpacked: .*\b|SwitchMetal: in-process state the pack lacks [0-9a-f]{16} \((?:record|refusal)\): label='
+    r'|SwitchMetal: \S+: a render (?:variant )?state the pack lacks [0-9a-f]{16} \()'
+    r'com\.apple\.coreanimation\.([A-Za-z0-9_]+)'
+)
 
 
 def names(logs: list[Path]) -> set[str]:

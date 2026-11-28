@@ -92,6 +92,11 @@ class NativeSeedTests(unittest.TestCase):
         source = 'C ok=1 form=d opt=0 | k kernel lib=data:compute |\n# derived\nC ok=1 form=f | k kernel |\n'
         self.assertEqual(native_seed.split_lines(source), ([], []))
 
+    def test_a_facts_only_dispatch_line_makes_no_native_record(self):
+        facts = 'D ok=1 tg=0,0,0 edge=0,0,0 threads=0 os=24B119 | form=d opt=0 max=0 tgm=0 label=- | k kernel |'
+        source = f'{facts}\nD ok=1 tg=8,8,1 edge=0,0,0 threads=0 | k kernel |\n'
+        self.assertEqual(native_seed.split_lines(source), (['D ok=1 tg=8,8,1 edge=0,0,0 threads=0 | k kernel |'], []))
+
     def test_unseeded_dispatch_cannot_hide_behind_render_coverage(self):
         self.manifest['records'].append({'kind': 'compute', 'derived': False, 'status': 'refused'})
         report = self.report(2)

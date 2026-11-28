@@ -104,17 +104,42 @@ void installDeviceAnswers(Class cls)
 - (instancetype)initWithCPUType:(int)type cpuSubtype:(int)subtype;
 @end
 
+struct SwitchTargetDeviceArchVersion {
+    uint16_t major;
+    uint8_t minor;
+    uint8_t update;
+};
+
 @interface SwitchMetalDevice (Identity)
 @end
 @implementation SwitchMetalDevice (Identity)
 
-// targetDeviceArchitecture stays the base class's nil: Metal picks AGX slices of libraries and archives by it, and this GPU
-// runs none of them
 - (MTLArchitecture *)architecture
 {
     static MTLArchitecture *const architecture = [[MTLArchitecture alloc] initWithCPUType:int(gm20b::kAppleGpuCpuType)
                                                                                cpuSubtype:int(kKind.gpuSubtype)];
     return architecture;
+}
+
+- (id)targetDeviceArchitecture
+{
+    static id target = []() -> id {
+        Class cls = NSClassFromString(@"MTLTargetDeviceArchitecture");
+        if (!cls)
+            return nil;
+        id obj = [[cls alloc] init];
+        if (!obj)
+            return nil;
+        ((void (*)(id, SEL, unsigned int))objc_msgSend)(obj, sel_registerName("setCpuType:"),
+                                                        unsigned(gm20b::kAppleGpuCpuType));
+        ((void (*)(id, SEL, unsigned int))objc_msgSend)(obj, sel_registerName("setSubType:"),
+                                                        unsigned(kKind.gpuSubtype));
+        const SwitchTargetDeviceArchVersion version = {0, 0, 0};
+        ((void (*)(id, SEL, SwitchTargetDeviceArchVersion))objc_msgSend)(obj, sel_registerName("setVersion:"), version);
+        ((void (*)(id, SEL, unsigned long long))objc_msgSend)(obj, sel_registerName("setDriverVersion:"), 0ull);
+        return obj;
+    }();
+    return target;
 }
 
 // The identity's GPU name, its vendor, family and product names joined as -[_MTLDevice name] joins them. Frameworks key

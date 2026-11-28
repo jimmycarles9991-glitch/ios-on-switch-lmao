@@ -57,6 +57,7 @@
 #include <vm/vm_page_internal.h>
 #include <vm/vm_object_internal.h>
 #include <switch/prefetch_vm.h>
+#include <switch/fvariant_hooks.h>
 
 #include <sys/kdebug_triage.h>
 #include <sys/random.h>
@@ -921,6 +922,8 @@ retry_src_fault:
 					retval = KERN_MEMORY_ERROR;
 				} else {
 					shared_region_pager_slid++;
+					switch_fvariant_fill_page(pager->srp_slide_info, (uint8_t *)dst_vaddr,
+					    offset_in_backing_object - pager->srp_slide_info->si_start + slide_start_address, PAGE_SIZE);
 				}
 			}
 			goto part_done;
@@ -1006,6 +1009,9 @@ retry_src_fault:
 				break;
 			}
 			shared_region_pager_slid++;
+			/* After the slide: a page with no rebases (page_starts NO_REBASE) can still hold slots. */
+			switch_fvariant_fill_page(pager->srp_slide_info, (uint8_t *)(dst_vaddr + offset_in_page),
+			    offset_in_sliding_range + slide_start_address, slide_info_page_size);
 		}
 
 #if !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__ && !SWITCH_VM_16K_PAGES

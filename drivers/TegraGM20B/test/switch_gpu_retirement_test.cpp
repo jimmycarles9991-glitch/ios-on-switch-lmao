@@ -420,3 +420,19 @@ TEST_F(Retirement, ConsumedTimerRearmsEqualDeadlineOnAnotherQueue)
 	switch_gpu_backing_retire();
 	ASSERT_TRUE(releases == 3 && armed == 0);
 }
+
+TEST_F(Retirement, UnrelatedCompletionDoesNotScheduleRetirement)
+{
+	auto *pending = make();
+	publish(pending, 7);
+	switch_gpu_backing_release(pending);
+	switch_gpu_backing_retire();
+	ASSERT_EQ(releases.load(), 0u);
+	scheduled = 0;
+	complete(99);
+	EXPECT_EQ(scheduled.load(), 0u);
+	complete(7);
+	EXPECT_EQ(scheduled.load(), 1u);
+	switch_gpu_backing_retire();
+	EXPECT_EQ(releases.load(), 1u);
+}

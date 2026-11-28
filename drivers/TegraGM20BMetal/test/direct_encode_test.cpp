@@ -250,4 +250,12 @@ TEST(DirectEncode, HeapSetQmd)
     EXPECT_FALSE(gm20b::computeQmd(set2, 0x100, 0x8000, a));
 }
 
+TEST(DirectEncode, VkFormatSrgbMatchesSrgbFormatsAlone)
+{
+    for (uint32_t srgb : {15u, 22u, 43u, 50u, 132u, 134u, 136u, 138u, 146u, 148u, 150u, 152u, 158u, 172u, 184u})
+        EXPECT_TRUE(gm20b::vkFormatSrgb(srgb)) << srgb;
+    for (uint32_t linear : {9u, 16u, 37u, 44u, 97u, 131u, 145u, 147u, 157u, 171u, 183u, 1000470001u})
+        EXPECT_FALSE(gm20b::vkFormatSrgb(linear)) << linear;
+}
+
 }  // namespace

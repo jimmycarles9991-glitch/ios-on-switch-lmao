@@ -81,7 +81,8 @@ inline bool switch_native_plane_offset_image(const native_planes::Layer &l, uint
 
 // The decoder's picture as window B or C scans it, or false for its pitch representation (a VIC copy). The whole
 // picture, unclipped, as imageOf places it; a crop (the decoder's or the layer's) or a clipped destination through the
-// offsets once V5a and V5c have passed.
+// offsets once V5a and V5c have passed. A turned picture is the plane conversion job's, which reads these blocks in
+// place (switch_native_vic_image): its pitch representation would cost a VIC copy ahead of the turn.
 inline bool switch_native_plane_image(const native_planes::Layer &layer, uint32_t width, uint32_t height,
                                       const switch_gpu_backing_layout &layout, uint32_t cropX, uint32_t cropY,
                                       native_planes::Image &image,
@@ -97,6 +98,9 @@ inline bool switch_native_plane_image(const native_planes::Layer &layer, uint32_
     native.surface.primaries = layout.primaries;
     native.surface.chromaTop = layout.chroma_top;
     native.surface.chromaBottom = layout.chroma_bottom;
+    if (layer.transform)
+        return imageOf(native, width, height, image) && image.convert &&
+               switch_native_plane_planes(layer, layout, image);
     const bool whole = !cropX && !cropY && !layer.src.x && !layer.src.y &&
                        layer.src.w == int32_t(layer.surface.width) && layer.src.h == int32_t(layer.surface.height) &&
                        layer.dst.x >= 0 && layer.dst.y >= 0 && int64_t(layer.dst.x) + layer.dst.w <= width &&

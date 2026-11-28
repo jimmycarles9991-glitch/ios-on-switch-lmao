@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// BGRA10_XR (552) multisampled resolves: a 64x64 target at 2x and 4x, each sample drawn its own codes

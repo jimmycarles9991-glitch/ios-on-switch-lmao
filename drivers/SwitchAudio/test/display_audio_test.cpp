@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #include <gtest/gtest.h>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 #include "../hal/SwitchDisplayAudio.h"
@@ -10,6 +13,11 @@ SwitchAudioControl *gKernelControl;
 uint32_t gMaps, gStarts, gStops;
 int32_t gMappedRing[2];
 kern_return_t gMapResult;
+std::mutex gHookMutex;
+std::condition_variable gHookCv;
+bool gBlockStartIoctl = false;
+bool gInStartIoctl = false;
+bool gReleaseStartIoctl = false;
 }
 
 extern "C" kern_return_t IOConnectMapMemory64(io_connect_t, uint32_t type, task_t, mach_vm_address_t *address,
@@ -26,6 +34,16 @@ extern "C" kern_return_t IOConnectCallScalarMethod(mach_port_t, uint32_t selecto
                                                    uint32_t count, uint64_t *, uint32_t *)
 {
     if (selector == SwitchAudioStartDisplayOutput) {
+        {
+            std::unique_lock<std::mutex> lock(gHookMutex);
+            if (gBlockStartIoctl) {
+                gInStartIoctl = true;
+                gHookCv.notify_all();
+                gHookCv.wait(lock, [] {
+                    return gReleaseStartIoctl;
+                });
+            }
+        }
         ++gStarts;
         gKernelControl->state = SwitchAudioOutputRunning;
     } else if (selector == SwitchAudioStopDisplayOutput) {
@@ -75,6 +93,9 @@ protected:
         gConfigurationChanges.clear();
         gMaps = gStarts = gStops = 0;
         gMapResult = KERN_SUCCESS;
+        gBlockStartIoctl = false;
+        gInStartIoctl = false;
+        gReleaseStartIoctl = false;
         gKernelControl = &control;
         switch_audio_display_attach(&gCallbacks, &control, nullptr);
     }
@@ -230,6 +251,40 @@ TEST_F(DisplayAudio, MappingFailureDoesNotStartDMA)
     EXPECT_EQ(switch_audio_display_start(1), kAudioHardwareNotRunningError);
     EXPECT_EQ(gMaps, 1u);
     EXPECT_EQ(gStarts, 0u);
+    EXPECT_EQ(control.state, 0u);
+}
+
+TEST_F(DisplayAudio, DropsDisplayLockAcrossBlockingStartIoctlWhileSerializingStop)
+{
+    control.jack = SwitchAudioJackHeadphones;
+    switch_audio_display_changed();
+    gBlockStartIoctl = true;
+
+    std::thread starter([] {
+        EXPECT_EQ(switch_audio_display_start(1), 0);
+    });
+    {
+        std::unique_lock<std::mutex> lock(gHookMutex);
+        gHookCv.wait(lock, [] {
+            return gInStartIoctl;
+        });
+    }
+
+    EXPECT_EQ(switch_audio_display_perform(1, 44100), 0);
+    EXPECT_EQ(control.rate, 44100u);
+
+    std::thread stopper([] {
+        EXPECT_EQ(switch_audio_display_stop(1), 0);
+    });
+    {
+        const std::lock_guard<std::mutex> lock(gHookMutex);
+        gReleaseStartIoctl = true;
+    }
+    gHookCv.notify_all();
+    starter.join();
+    stopper.join();
+    EXPECT_EQ(gStarts, 1u);
+    EXPECT_EQ(gStops, 1u);
     EXPECT_EQ(control.state, 0u);
 }
 }

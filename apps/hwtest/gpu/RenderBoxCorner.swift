@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// An icon's mask the way iconservicesagent draws the App Library's icons: RenderBox (RBDevice over this process's

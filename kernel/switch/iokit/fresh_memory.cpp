@@ -37,7 +37,7 @@ void SwitchFreshMemory::free()
     }
 }
 
-IOMemoryDescriptor *switch_iokit_fresh_memory(uint64_t bytes, uint64_t run, void **cpu)
+IOMemoryDescriptor *switch_iokit_fresh_memory(uint64_t bytes, uint64_t run, switch_iokit_fresh_cache cache, void **cpu)
 {
 #if XNU_12377_121_6
     const kma_flags_t flags = KMA_DATA_SHARED;
@@ -64,7 +64,16 @@ IOMemoryDescriptor *switch_iokit_fresh_memory(uint64_t bytes, uint64_t run, void
     memory->pages = va;
     memory->bytes = size;
     IOAddressRange range = {va, size};
-    const IOOptionBits options = kIOMemoryTypeVirtual64 | kIODirectionInOut | kIOMemoryMapperNone;
+    IOOptionBits options = kIOMemoryTypeVirtual64 | kIODirectionInOut | kIOMemoryMapperNone;
+    /*
+     * IOBufferMemoryDescriptor's way: a persistent descriptor makes its memory reference in initWithOptions, which
+     * sets the allocation's own VM object (kmem gives one per allocation without KMA_KOBJECT) write-combined. The pmap
+     * then rewrites each page's mappings and the physical aperture, and cleans and invalidates its lines
+     * (pmap_sync_wimg), all here on the caller's thread, before the first task mapping.
+     */
+    if (cache == SWITCH_IOKIT_FRESH_WRITE_COMBINED) {
+        options |= kIOMemoryPersistent | (kIOWriteCombineCache << kIOMemoryBufferCacheShift);
+    }
     if (!memory->initWithOptions(&range, 1, 0, kernel_task, options, nullptr)) {
         memory->release();
         return nullptr;

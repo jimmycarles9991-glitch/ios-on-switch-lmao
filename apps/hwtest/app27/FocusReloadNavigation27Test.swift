@@ -1,6 +1,7 @@
 import GameController
 import HWTestCore
 import HWTestKit
+import HWTestShared
 import UIKit
 
 struct FocusReloadNavigation27Test: HWTest {

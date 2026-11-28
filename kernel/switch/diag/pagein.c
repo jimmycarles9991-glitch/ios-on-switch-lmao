@@ -22,7 +22,7 @@
 #include <os/log.h>
 #include <string.h>
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
 
 #include <kern/counter.h>
 #include <kern/host_statistics.h>
@@ -39,11 +39,10 @@ extern const char *vnode_getname(struct vnode *vp);
 extern void vnode_putname(const char *name);
 extern struct vnode *vnode_pager_lookup_vnode(memory_object_t pager);
 
-/* Page-ins come from every core at once into one window; the lock is held for two hash probes. A file's name is
- * taken outside it (vnode_getname may sleep), by a read, never by a wait (which runs under the VM object's lock). */
 static LCK_GRP_DECLARE(pagein_grp, "switch_pagein");
 static LCK_SPIN_DECLARE(pagein_lock, &pagein_grp);
-static struct switch_pagein_window window;
+static struct switch_pagein_window windows[2];
+static struct switch_pagein_window *active_window = &windows[0];
 static switch_cryptex_cache_counts_t cryptex_counts;
 
 void switch_diag_pagein(struct vnode *vp, uint64_t bytes, uint64_t read)
@@ -55,14 +54,14 @@ void switch_diag_pagein(struct vnode *vp, uint64_t bytes, uint64_t read)
 
     switch_task_name(task, process, sizeof(process));
     lck_spin_lock(&pagein_lock);
-    noted = switch_pagein_note_read(&window, task_pid(task), process, (uint64_t)(uintptr_t)vp, NULL, bytes, read);
+    noted = switch_pagein_note_read(active_window, task_pid(task), process, (uint64_t)(uintptr_t)vp, NULL, bytes, read);
     lck_spin_unlock(&pagein_lock);
     if (noted) {
         return;
     }
     file = vnode_getname(vp);
     lck_spin_lock(&pagein_lock);
-    switch_pagein_note_read(&window, task_pid(task), process, (uint64_t)(uintptr_t)vp,
+    switch_pagein_note_read(active_window, task_pid(task), process, (uint64_t)(uintptr_t)vp,
                             file != NULL ? file : "(no name)", bytes, read);
     lck_spin_unlock(&pagein_lock);
     if (file != NULL) {
@@ -88,7 +87,7 @@ void switch_diag_page_waited(const struct switch_page_wait *wait)
 
     switch_task_name(task, process, sizeof(process));
     lck_spin_lock(&pagein_lock);
-    switch_pagein_note_wait(&window, task_pid(task), process, (uint64_t)(uintptr_t)wait->file, waited);
+    switch_pagein_note_wait(active_window, task_pid(task), process, (uint64_t)(uintptr_t)wait->file, waited);
     lck_spin_unlock(&pagein_lock);
 }
 
@@ -112,7 +111,7 @@ static void xnu_counts(struct switch_pagein_xnu *out)
 
 void switch_diag_pagein_report(char *line, size_t size, uint64_t window_ns)
 {
-    static struct switch_pagein_window taken;
+    struct switch_pagein_window *taken;
     struct switch_pagein_xnu xnu;
     const switch_cryptex_cache_counts_t counts = os_atomic_load(&cryptex_counts, acquire);
     mach_timebase_info_data_t tb;
@@ -120,20 +119,21 @@ void switch_diag_pagein_report(char *line, size_t size, uint64_t window_ns)
 
     clock_timebase_info(&tb);
     lck_spin_lock(&pagein_lock);
-    taken = window;
-    memset(&window, 0, sizeof(window));
+    taken = active_window;
+    active_window = taken == &windows[0] ? &windows[1] : &windows[0];
     lck_spin_unlock(&pagein_lock);
     at = (size_t)snprintf(line, size, "SwitchSched page-ins (%llu ms): ", window_ns / NSEC_PER_MSEC);
     at = MIN(at, size - 1);
     xnu_counts(&xnu);
-    switch_pagein_format(line + at, size - at, &taken, &xnu, tb.numer, tb.denom);
+    switch_pagein_format(line + at, size - at, taken, &xnu, tb.numer, tb.denom);
     os_log(OS_LOG_DEFAULT, "%s", line);
     at = (size_t)snprintf(line, size,
                           "SwitchSched page-ins by file (%llu ms; reads/KiB asked/ms reading/waits/ms waiting):",
                           window_ns / NSEC_PER_MSEC);
     at = MIN(at, size - 1);
-    switch_pagein_format_files(line + at, size - at, &taken, tb.numer, tb.denom);
+    switch_pagein_format_files(line + at, size - at, taken, tb.numer, tb.denom);
     os_log(OS_LOG_DEFAULT, "%s", line);
+    memset(taken, 0, sizeof(*taken));
     if (counts == NULL) {
         return;
     }
@@ -149,5 +149,13 @@ void switch_diag_cryptex_cache(switch_cryptex_cache_counts_t counts)
 {
     os_atomic_store(&cryptex_counts, counts, release);
 }
+
+#elif DEVELOPMENT || DEBUG
+
+void switch_diag_pagein_report(__unused char *line, __unused size_t size, __unused uint64_t window_ns)
+{}
+
+void switch_diag_cryptex_cache(__unused switch_cryptex_cache_counts_t counts)
+{}
 
 #endif /* DEVELOPMENT || DEBUG */

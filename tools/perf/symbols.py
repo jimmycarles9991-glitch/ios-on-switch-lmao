@@ -2,17 +2,24 @@
 
 Shared-cache addresses are unslid, so one table per IPSW build under
 ~/Library/Application Support/switch-ios/symbols/<build>/ names them without keeping a gigabyte shared cache on disk.
+dsc.tsv holds the images' ranges and loads at once; dsc-functions.tsv.gz holds every code symbol (7.3 M for 24B119,
+11.5 s and 2.5 GB to read whole), so the first lookup it is needed for writes a sorted index beside it
+(dsc-functions.idx), which every later lookup maps and bisects.
 Our own kernel and bundle offsets symbolize from unstripped build outputs (or .tsv tables extracted from them).
 """
 
 from __future__ import annotations
 
 import bisect
+import gzip
 import json
+import mmap
 import re
 import shutil
 import struct
 import subprocess
+import zlib
+from array import array
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +34,88 @@ HEX_TOKEN = re.compile(r'^(?:0x)?[0-9a-fA-F]+$')
 WHERE_DSC = re.compile(r'^dsc\s+0x(?P<addr>[0-9a-fA-F]+)$')
 WHERE_MAIN = re.compile(r'^main\+0x(?P<off>[0-9a-fA-F]+)$')
 WHERE_KERN = re.compile(r'^k\s+0x(?P<addr>[0-9a-fA-F]+)$')
+FUNCTIONS = 'dsc-functions.tsv.gz'
+FUNCTION_INDEX = 'dsc-functions.idx'
+INDEX_HEAD = struct.Struct('<8sQQ')  # magic, symbols, images
+INDEX_MAGIC = b'SWFN0003'
+INDEX_BLOCK = 1024  # names per compressed block: a lookup inflates one
+
+
+def build_function_index(table: Path, index: Path) -> None:
+    """Write a function table's code symbols as a sorted index.
+
+    After the head: the addresses (u64), each one's image (u16), the image names, each names block's offset (u64, one
+    past the last), then the blocks, each INDEX_BLOCK names deflated.
+    """
+    rows: list[tuple[int, int, bytes]] = []
+    images: dict[str, int] = {}
+    with gzip.open(table, 'rt', errors='replace') as f:
+        for line in f:
+            if not line.startswith('S\t'):
+                continue
+            parts = line.rstrip('\n').split('\t')
+            if len(parts) >= 4 and (addr := _parse_hex(parts[1])) is not None:
+                img = images.setdefault(_base_name(parts[2]), len(images))
+                rows.append((addr, img, parts[3].encode()))
+    rows.sort(key=lambda r: r[0])
+    blocks = [
+        zlib.compress(b'\0'.join(r[2] for r in rows[k : k + INDEX_BLOCK]), 6) for k in range(0, len(rows), INDEX_BLOCK)
+    ]
+    offsets, at = array('Q'), 0
+    for block in blocks:
+        offsets.append(at)
+        at += len(block)
+    offsets.append(at)
+    partial = index.with_suffix('.partial')
+    with partial.open('wb') as f:
+        f.write(INDEX_HEAD.pack(INDEX_MAGIC, len(rows), len(images)))
+        array('Q', (r[0] for r in rows)).tofile(f)
+        array('H', (r[1] for r in rows)).tofile(f)
+        f.write(b''.join(name.encode() + b'\0' for name in images))
+        offsets.tofile(f)
+        for block in blocks:
+            f.write(block)
+    partial.replace(index)
+
+
+class FunctionIndex:
+    """A function index mapped read-only: the symbol at or before an address."""
+
+    def __init__(self, index: Path):
+        with index.open('rb') as f:
+            self._map = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        magic, n, nimages = INDEX_HEAD.unpack_from(self._map, 0)
+        if magic != INDEX_MAGIC:
+            raise ValueError(f'{index} is not a function index of this version')
+        view = memoryview(self._map)
+        at = INDEX_HEAD.size
+        self.addrs = view[at : at + 8 * n].cast('Q')
+        self.image_of = view[at + 8 * n : at + 10 * n].cast('H')
+        at += 10 * n
+        self.images = []
+        for _ in range(nimages):
+            end = self._map.find(b'\0', at)
+            self.images.append(self._map[at:end].decode('utf-8', 'replace'))
+            at = end + 1
+        nblocks = -(-n // INDEX_BLOCK)
+        self.block_at = view[at : at + 8 * (nblocks + 1)].cast('Q')
+        self.blocks = at + 8 * (nblocks + 1)
+        self._names: dict[int, list[bytes]] = {}
+
+    def _block(self, k: int) -> list[bytes]:
+        if k not in self._names:
+            if len(self._names) >= 64:
+                self._names.clear()
+            raw = self._map[self.blocks + self.block_at[k] : self.blocks + self.block_at[k + 1]]
+            self._names[k] = zlib.decompress(raw).split(b'\0')
+        return self._names[k]
+
+    def lookup(self, addr: int) -> tuple[int, str] | None:
+        i = bisect.bisect_right(self.addrs, addr) - 1
+        if i < 0:
+            return None
+        name = self._block(i // INDEX_BLOCK)[i % INDEX_BLOCK].decode('utf-8', 'replace')
+        return self.addrs[i], f'{self.images[self.image_of[i]]} {name}'
 
 
 @dataclass(frozen=True)
@@ -208,7 +297,9 @@ def _parse_int_field(val: object) -> int:
 def _parse_ipsw_entry(item: object) -> tuple[int, int, str] | None:
     if not isinstance(item, dict):
         return None
-    addr = _parse_int_field(item.get('load_addr') or item.get('address') or item.get('vmaddr') or 0)
+    addr = _parse_int_field(
+        item.get('load_addr') or item.get('load_address') or item.get('address') or item.get('vmaddr') or 0
+    )
     size = _parse_int_field(item.get('size') or 0)
     name = item.get('name') or item.get('path') or ''
     return (addr, size, _base_name(str(name))) if addr and name else None
@@ -261,13 +352,39 @@ class Symbols:
     kernel: Table = field(default_factory=Table)
     binaries: dict[str, Table] = field(default_factory=dict)
     dsc_cache: str | None = None
+    dsc_functions: Path | None = None  # dsc-functions.tsv.gz, indexed at its first use
+    _functions: FunctionIndex | None = field(default=None, repr=False)
     _live: dict[int, str | None] = field(default_factory=dict, repr=False)
 
     @property
     def active(self) -> bool:
-        return not self.dsc.empty or not self.kernel.empty or bool(self.binaries) or bool(self.dsc_cache)
+        return (
+            not self.dsc.empty
+            or not self.kernel.empty
+            or bool(self.binaries)
+            or bool(self.dsc_cache)
+            or bool(self.dsc_functions)
+        )
+
+    def function(self, addr: int) -> str | None:
+        """Return the shared-cache function at an unslid address from dsc-functions, inside the image that holds it."""
+        if self.dsc_functions is None:
+            return None
+        if self._functions is None:
+            index = self.dsc_functions.with_name(FUNCTION_INDEX)
+            if not index.is_file() or index.stat().st_mtime < self.dsc_functions.stat().st_mtime:
+                build_function_index(self.dsc_functions, index)
+            self._functions = FunctionIndex(index)
+        found = self._functions.lookup(addr)
+        img = self.dsc.find_image(addr)
+        if not found or addr - found[0] >= MAX_SYMBOL_SPAN or (img is not None and found[0] < img.start):
+            return None
+        off = addr - found[0]
+        return found[1] + (f'+0x{off:x}' if off else '')
 
     def dsc_addr(self, addr: int) -> str:
+        if self.dsc_functions is not None and (name := self.function(addr)):
+            return name
         if hit := self.dsc.lookup(addr):
             return hit
         if self.dsc_cache:
@@ -308,7 +425,9 @@ def _load_dir(root: Path, syms: Symbols) -> None:
     for path in sorted(root.iterdir()):
         if not path.is_file():
             continue
-        if path.name == 'dsc.tsv':
+        if path.name == FUNCTIONS:
+            syms.dsc_functions = path
+        elif path.name == 'dsc.tsv':
             with path.open(errors='replace') as f:
                 syms.dsc = _merge_tables(syms.dsc, parse_tsv(f))
         elif path.name == 'kernel.tsv':
@@ -369,12 +488,29 @@ def write_tsv(out: Path, table: Table) -> int:
     return len(rows)
 
 
+def ipsw_symbol(line: str) -> str | None:
+    """Return `ipsw dyld symaddr`'s line (address, section, name, image, tab-separated) as an S row of code only."""
+    parts = line.rstrip('\n').split('\t')
+    if len(parts) < 4 or '__TEXT.__text' not in parts[1] or not parts[0].startswith('0x'):
+        return None
+    return f'S\t{parts[0][2:].rstrip(":")}\t{_base_name(parts[3])}\t{parts[2]}\n'
+
+
 def extract_dsc(dsc_path: Path, out_tsv: Path) -> int:
-    """Extract unslid dylib image ranges from a dyld shared cache with `ipsw dyld` into a reusable TSV."""
+    """Extract a dyld shared cache's unslid image ranges into dsc.tsv and its code symbols into dsc-functions.tsv.gz."""
     imgs = _ipsw_images(dsc_path)
     if not imgs:
         raise SystemExit(f'could not read shared cache images from {dsc_path} (is `ipsw` installed?)')
-    return write_tsv(out_tsv, build_table((), imgs))
+    rows = write_tsv(out_tsv, build_table((), imgs))
+    with (
+        subprocess.Popen(['ipsw', 'dyld', 'symaddr', str(dsc_path)], stdout=subprocess.PIPE, text=True) as proc,
+        gzip.open(out_tsv.with_name(FUNCTIONS), 'wt') as out,
+    ):
+        for line in proc.stdout or ():
+            if row := ipsw_symbol(line):
+                out.write(row)
+                rows += 1
+    return rows
 
 
 def extract_macho(macho_path: Path, out_tsv: Path, *, relative: bool) -> int:

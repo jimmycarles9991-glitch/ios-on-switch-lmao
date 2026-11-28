@@ -8,6 +8,7 @@
 #include "../compile_request.h"
 #include "../compute_facts_entry.h"
 #include "../compute_key.h"
+#include "request_store_key.h"
 #include "../../../kits/SwitchSeedPack/SwitchSeedStore.h"
 #include "bazel/testing/fresh_process.h"
 
@@ -55,19 +56,17 @@ struct FactsCompiler {
                 return int32_t(TegraGM20BCompileUnavailable);
             asked.push_back(r.key);
             requests.push_back(r);
-            std::vector<gm20b::LibraryIdentity> ids;
-            for (const gm20b::RequestLibrary &l : r.libraries)
-                ids.push_back(gm20b::identityOf(l));
             const bool facts = r.kind == gm20b::RequestKind::Facts && !r.key.rfind(kFactsPrefix, 0);
             const bool kernel = r.kind == gm20b::RequestKind::Kernel && !r.key.rfind(kKernelPrefix, 0);
             if (!facts && !kernel)
                 return int32_t(TegraGM20BCompileUnavailable);
             const gm20b::CacheKey k = facts ? gm20b::factsCacheKey(r.stack, r.key.substr(sizeof kFactsPrefix - 1))
                                             : gm20b::kernelCacheKey(r.stack, r.key.substr(sizeof kKernelPrefix - 1));
-            const std::string entry = facts ? gm20b::encodeFactsEntry(k, kFacts, "")
-                                            : gm20b::encodeKernelEntry(k, nullptr, "a kernel this compiler refuses");
-            const gm20b::Digest name = gm20b::storeName(k, r, ids);
-            store.put(name.data(), reinterpret_cast<const uint8_t *>(entry.data()), uint32_t(entry.size()));
+            const gm20b::StoreKey key = harness::requestStoreKey(k, r);
+            const std::string entry =
+                facts ? gm20b::encodeFactsEntry(key.content, kFacts, "")
+                      : gm20b::encodeKernelEntry(key.content, nullptr, "a kernel this compiler refuses");
+            store.put(key.name.data(), reinterpret_cast<const uint8_t *>(entry.data()), uint32_t(entry.size()));
             return int32_t(facts ? TegraGM20BCompileMade : TegraGM20BCompileRefused);
         };
         return true;

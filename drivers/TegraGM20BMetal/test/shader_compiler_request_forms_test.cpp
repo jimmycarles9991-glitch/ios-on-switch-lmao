@@ -352,7 +352,7 @@ TEST(CompileRequestForms, TheCompilersDescriptorCarriesEveryFieldTheClientRead)
 TEST(CompileRequestForms, EveryFieldGoesOverTheWire)
 {
     gm20b::CompileRequest r = render(blurDownsample(), {}).request;
-    r.form = gm20b::RequestForm::Split;
+    r.form = gm20b::RequestForm::Full;
     r.fields.amplification = 2;
     r.fields.patchType = 2;
     r.fields.tessellation = {1, 1, 2, 1, 2, 32, 1};

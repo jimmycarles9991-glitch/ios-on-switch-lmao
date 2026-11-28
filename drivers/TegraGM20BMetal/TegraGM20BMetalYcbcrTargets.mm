@@ -19,6 +19,10 @@
 #include "ycbcr_meet.h"
 #include "ycbcr_store.h"
 
+static_assert(gm20b::kPackedLoadTag + 8 <= gm20b::kDriverPassColorTag &&
+                  gm20b::kDriverPassColorTag + 8 <= gm20b::kYcbcrLoadTag,
+              "the driver passes' colour tags between the loaded packed planes' and the loaded YCbCr textures'");
+
 static gm20b::Pipeline *packState(const char *name)
 {
     return name ? gRM->raw->ownPipeline(name) : nullptr;
@@ -157,25 +161,6 @@ int storeYcbcrPlanes(gm20b::CommandBuffer *rc, const gm20b::Texture &t, const gm
         gm20b::BlitEncoder *merge = rc->blit();
         merge->mergePlane(t);
         merge->end();
-    }
-    static std::atomic<bool> said{false}, saidPlane{false};
-    if (t.ycbcrStore->plane) {
-        if (!saidPlane.exchange(true, std::memory_order_relaxed))
-            os_log(gm20bLog(),
-                   "SwitchMetal: packed 10-bit plane stored on the GPU (first: %ux%u, %u codes a texel): pass into a "
-                   "memoryless "
-                   "stand-in, words drawn by the pack's store state",
-                   t.width, t.height, t.ycbcrStore->plane);
-    } else if (!said.exchange(true, std::memory_order_relaxed)) {
-        os_log(
-            gm20bLog(),
-            "SwitchMetal: YCbCr target stored on the GPU (first: %ux%u, chroma %ux%u, %u-bit %{public}s): pass into a "
-            "memoryless stand-in, luma and chroma blocks drawn by the pack's store states",
-            t.width, t.height, t.chroma ? t.chroma->width : 0, t.chroma ? t.chroma->height : 0,
-            t.ycbcrStore->max > 255 ? 10u : 8u,
-            t.ycbcrStore->srgb        ? "sRGB"
-            : t.ycbcrStore->converted ? "converted"
-                                      : "codes");
     }
     return 0;
 }

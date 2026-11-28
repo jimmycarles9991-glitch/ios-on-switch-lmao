@@ -20,6 +20,7 @@ RAW = [
     "layouts.py",
     "packfile.py",
     "kernels.py",
+    "segments.py",
     "splits.py",
     "eqcheck.py",
     "fetchfree_link.py",

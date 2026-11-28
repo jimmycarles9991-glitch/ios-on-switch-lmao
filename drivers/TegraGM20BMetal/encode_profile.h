@@ -6,7 +6,8 @@
 // batches; execUses: the job uses they carried). Draw (which holds Prepare, and Prepare Geometry, Descriptors (which
 // holds Textures), Barriers and SplitLaunch), PassEnd and Kernel (every kernel call) are counted in whichever phase they
 // run. Use (each resource a command buffer names), Uniforms (each setBytes chunk
-// bound), Bind (a draw's state, root and depth/stencil words), Variant (a draw's program form) and PassPrologue (a
+// bound), Bind (a draw's state, root and depth/stencil words), Variant (a draw's program form), VariantLookup (the
+// device's variant of the draw's pipeline for its binding facts, before the form is chosen) and PassPrologue (a
 // pass's targets and clears, inside PassEnd) and PassBegin (the raw encoder's pass set up, inside Pass) are counted
 // wherever they run too. Retire is the facade's work after the encode returned, outside its wall time. A span outside an encode (another thread, or the submit worker between
 // encodes) costs one thread-local read.
@@ -14,7 +15,13 @@
 #include <cstddef>
 #include <cstdint>
 
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+#if (!defined(SWITCH_DEBUG) || SWITCH_DEBUG) && defined(SWITCH_PROF_GPU) && SWITCH_PROF_GPU
+#define SWITCH_METAL_ENCODE_PROFILE 1
+#else
+#define SWITCH_METAL_ENCODE_PROFILE 0
+#endif
+
+#if SWITCH_METAL_ENCODE_PROFILE
 #include <TargetConditionals.h>
 #include <mach/mach_time.h>
 #include <atomic>
@@ -53,6 +60,7 @@ enum class EncodePart : uint8_t {
     Textures,
     Retire,
     PassBegin,
+    VariantLookup,
     Count
 };
 
@@ -253,6 +261,15 @@ struct EncodeTotals {
 #else
 #include <mutex>
 #include <type_traits>
+
+namespace gm20b {
+inline void noteExecUses(uint64_t)
+{}
+
+inline void noteExecPushes(uint64_t)
+{}
+}  // namespace gm20b
+
 #define SWITCH_METAL_ENCODE_SPAN(part)        static_cast<void>(0)
 #define SWITCH_METAL_ENCODE_BEGIN(name, part) static_cast<void>(0)
 #define SWITCH_METAL_ENCODE_END(name)         static_cast<void>(0)

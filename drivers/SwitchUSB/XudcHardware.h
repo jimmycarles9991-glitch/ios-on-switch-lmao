@@ -99,6 +99,10 @@ public:
     void finishEvents();                      // ERDP update + EHB clear after a batch
     bool takeInterrupt();                     // ST.IP or ST.DSE set? Then acknowledge them (W1C)
 
+    bool nextTransferEventReady(uint32_t blockedDcis) const;
+    using SettleSleep = void (*)(void *context, uint32_t mask, uint64_t remainingNs);
+    void setSettleWait(SettleSleep fn, void *context);
+
     struct SystemError {  // the first ST.DSE: the IPFS's interrupt code and signature
         bool seen;
         uint32_t code, signature;
@@ -185,6 +189,8 @@ private:
     DmaBuffer events;   // the event ring's two segments of kEventSegmentTrbs
     Ring rings[kMaxDci];
     uint32_t eventIndex = 0, eventCycle = 1;
+    SettleSleep settleSleep = nullptr;
+    void *settleContext = nullptr;
 
     uint32_t xr(uint32_t o)
     {

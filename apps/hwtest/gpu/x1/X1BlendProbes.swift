@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// COMPILER.md E4: GM20B's ROP blend on BGRA8 against Metal's half arithmetic, per factor pair, over the domain Core

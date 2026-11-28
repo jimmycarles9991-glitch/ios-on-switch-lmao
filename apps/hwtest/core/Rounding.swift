@@ -10,14 +10,18 @@ public enum X1Channel: Sendable, Equatable {
     case float32
 
     /// The code's value; an sRGB code's is its encoded value (code / 255), the space its rounding happens in
+    @inline(__always)
     public func value(_ code: UInt32) -> Double {
         switch self {
         case .unorm(let bits): return Double(code) / Double((1 << bits) - 1)
         case .srgb8: return Double(code) / 255
         case .float(let m):
-            let exponent = Int(code >> UInt32(m)) & 31, fraction = Double(code & ((1 << UInt32(m)) - 1))
-            let one = Double(1 << m)
-            return exponent == 0 ? fraction / one * pow(2, -14) : (1 + fraction / one) * pow(2, Double(exponent - 15))
+            let exponent = Int(code >> UInt32(m)) & 31
+            let fraction = Double(code & ((1 << UInt32(m)) - 1))
+            if exponent == 0 {
+                return fraction * Double(bitPattern: UInt64(1023 - 14 - m) << 52)
+            }
+            return (Double(1 << m) + fraction) * Double(bitPattern: UInt64(1023 + exponent - 15 - m) << 52)
         case .float32: return Double(Float(bitPattern: code))
         }
     }
@@ -40,6 +44,7 @@ public enum X1Channel: Sendable, Equatable {
     }
 
     /// The codes on either side of a non-negative value: (below or equal, the next one up)
+    @inline(__always)
     public func bracket(_ v: Double) -> (UInt32, UInt32) {
         switch self {
         case .unorm, .srgb8:
@@ -48,17 +53,63 @@ public enum X1Channel: Sendable, Equatable {
             let low = UInt32(x.rounded(.down))
             return (low, min(low + 1, UInt32((1 << bits) - 1)))
         case .float(let m):
-            var low: UInt32 = 0
-            var step: UInt32 = 1 << UInt32(m + 4)
-            while step > 0 {
-                if value(low + step) <= v { low += step }
-                step >>= 1
+            guard v > 0 else { return (0, 1) }
+            let maxCode = UInt32((1 << (m + 5)) - 1)
+            if v >= value(maxCode) { return (maxCode, maxCode + 1) }
+            if v < 0x1p-14 {
+                let low = UInt32(v * Double(bitPattern: UInt64(1023 + 14 + m) << 52))
+                return (low, low + 1)
             }
+            let bits = v.bitPattern
+            let exp = Int((bits >> 52) & 0x7ff) - 1023
+            let frac = UInt32((bits & 0x000f_ffff_ffff_ffff) >> UInt64(52 - m))
+            let low = (UInt32(exp + 15) << UInt32(m)) | frac
             return (low, low + 1)
         case .float32:
             let f = Float(v)
             let low = Double(f) <= v ? f : f.nextDown
             return (low.bitPattern, low.nextUp.bitPattern)
+        }
+    }
+}
+
+/// Every X1Rounding's code for one (exact value, channel) pair, computed from a single bracket lookup.
+public struct X1RuleCodes: Sendable, Equatable {
+    public let nearest: UInt32
+    public let tiesDown: UInt32
+    public let tiesEven: UInt32
+    public let down: UInt32
+    public let up: UInt32
+    public let trunc4TiesDown: UInt32
+    public let metal: UInt32
+
+    @inline(__always)
+    public init(_ v: Double, _ channel: X1Channel, metal: X1Rounding) {
+        let (low, high) = channel.bracket(v)
+        let a = channel.value(low), b = channel.value(high)
+        if a == v || high == low {
+            (nearest, tiesDown, tiesEven, down, up, trunc4TiesDown, self.metal) = (low, low, low, low, low, low, low)
+            return
+        }
+        down = low
+        up = high
+        let d = (v - a) - (b - v)
+        nearest = d < 0 ? low : high
+        tiesDown = d > 0 ? high : low
+        tiesEven = d < 0 ? low : d > 0 ? high : (low & 1 == 0 ? low : high)
+        if let bits = channel.codeBits {
+            let sixteenths = (min(max(v, 0), 1) * Double((1 << bits) - 1) * 16).rounded(.down)
+            trunc4TiesDown = sixteenths - Double(low) * 16 > 8 ? high : low
+        } else {
+            trunc4TiesDown = tiesDown
+        }
+        switch metal {
+        case .nearest: self.metal = nearest
+        case .tiesDown: self.metal = tiesDown
+        case .tiesEven: self.metal = tiesEven
+        case .down: self.metal = down
+        case .up: self.metal = up
+        case .trunc4TiesDown: self.metal = trunc4TiesDown
         }
     }
 }
@@ -98,33 +149,112 @@ public enum X1Rounding: String, CaseIterable, Sendable {
 /// code off it, and per rule the channels it misses (0: the rule the unit followed in this cell).
 public struct X1RuleTally: Sendable {
     public var texels = 0, offMetal = 0, beyondOne = 0
-    public var misses: [X1Rounding: Int] = [:]
+    private var missesNearest = 0, missesTiesDown = 0, missesTiesEven = 0
+    private var missesDown = 0, missesUp = 0, missesTrunc4 = 0
     public var first = ""
 
     public init() {}
+
+    public var misses: [X1Rounding: Int] {
+        get {
+            var out: [X1Rounding: Int] = [:]
+            if missesNearest != 0 { out[.nearest] = missesNearest }
+            if missesTiesDown != 0 { out[.tiesDown] = missesTiesDown }
+            if missesTiesEven != 0 { out[.tiesEven] = missesTiesEven }
+            if missesDown != 0 { out[.down] = missesDown }
+            if missesUp != 0 { out[.up] = missesUp }
+            if missesTrunc4 != 0 { out[.trunc4TiesDown] = missesTrunc4 }
+            return out
+        }
+        set {
+            missesNearest = newValue[.nearest] ?? 0
+            missesTiesDown = newValue[.tiesDown] ?? 0
+            missesTiesEven = newValue[.tiesEven] ?? 0
+            missesDown = newValue[.down] ?? 0
+            missesUp = newValue[.up] ?? 0
+            missesTrunc4 = newValue[.trunc4TiesDown] ?? 0
+        }
+    }
+
+    @inline(__always)
+    private mutating func addChannel(_ got: UInt32, codes: X1RuleCodes, at t: Int, channel c: Int, off: inout Bool) {
+        if got != codes.metal {
+            off = true
+            if abs(Int64(got) - Int64(codes.metal)) > 1 { beyondOne += 1 }
+            if first.isEmpty { first = "\(t).\(c):\(got),want_\(codes.metal)" }
+        }
+        if got != codes.nearest { missesNearest += 1 }
+        if got != codes.tiesDown { missesTiesDown += 1 }
+        if got != codes.tiesEven { missesTiesEven += 1 }
+        if got != codes.down { missesDown += 1 }
+        if got != codes.up { missesUp += 1 }
+        if got != codes.trunc4TiesDown { missesTrunc4 += 1 }
+    }
 
     /// `exact`: per channel, the exact value the unit should have rounded
     public mutating func add(_ got: [UInt32], exact: [Double], channels: [X1Channel], metal: X1Rounding, at t: Int) {
         texels += 1
         var off = false
         for (c, channel) in channels.enumerated() {
-            let want = metal.code(exact[c], channel)
-            if got[c] != want {
-                off = true
-                if abs(Int64(got[c]) - Int64(want)) > 1 { beyondOne += 1 }
-                if first.isEmpty { first = "\(t).\(c):\(got[c]),want_\(want)" }
-            }
-            for rule in X1Rounding.allCases where rule.code(exact[c], channel) != got[c] {
-                misses[rule, default: 0] += 1
-            }
+            addChannel(got[c], codes: X1RuleCodes(exact[c], channel, metal: metal), at: t, channel: c, off: &off)
         }
         if off { offMetal += 1 }
     }
 
-    public var rules: [X1Rounding] { X1Rounding.allCases.filter { (misses[$0] ?? 0) == 0 } }
+    @inline(__always)
+    public mutating func add(
+        _ got: SIMD4<UInt32>, exact: SIMD4<Double>, channels: [X1Channel], metal: X1Rounding, at t: Int
+    ) {
+        texels += 1
+        var off = false
+        for c in 0 ..< channels.count {
+            addChannel(got[c], codes: X1RuleCodes(exact[c], channels[c], metal: metal), at: t, channel: c, off: &off)
+        }
+        if off { offMetal += 1 }
+    }
+
+    @inline(__always)
+    public mutating func add(_ got: SIMD4<UInt32>, expected: [X1RuleCodes], at t: Int) {
+        texels += 1
+        var off = false
+        for c in 0 ..< expected.count {
+            addChannel(got[c], codes: expected[c], at: t, channel: c, off: &off)
+        }
+        if off { offMetal += 1 }
+    }
+
+    /// Folds a later chunk's tally into this one, keeping the earliest `first` mismatch.
+    public mutating func merge(_ other: X1RuleTally) {
+        texels += other.texels
+        offMetal += other.offMetal
+        beyondOne += other.beyondOne
+        missesNearest += other.missesNearest
+        missesTiesDown += other.missesTiesDown
+        missesTiesEven += other.missesTiesEven
+        missesDown += other.missesDown
+        missesUp += other.missesUp
+        missesTrunc4 += other.missesTrunc4
+        if first.isEmpty { first = other.first }
+    }
+
+    public var rules: [X1Rounding] {
+        var out: [X1Rounding] = []
+        if missesNearest == 0 { out.append(.nearest) }
+        if missesTiesDown == 0 { out.append(.tiesDown) }
+        if missesTiesEven == 0 { out.append(.tiesEven) }
+        if missesDown == 0 { out.append(.down) }
+        if missesUp == 0 { out.append(.up) }
+        if missesTrunc4 == 0 { out.append(.trunc4TiesDown) }
+        return out
+    }
 
     /// The fewest channels any one rule misses
-    public var fewestMisses: Int { X1Rounding.allCases.map { misses[$0] ?? 0 }.min() ?? 0 }
+    public var fewestMisses: Int {
+        min(
+            min(missesNearest, missesTiesDown),
+            min(min(missesTiesEven, missesDown), min(missesUp, missesTrunc4))
+        )
+    }
 
     /// exact (Metal's rule everywhere), near (off it by one code at most), wrong
     public var grade: String { offMetal == 0 ? "exact" : beyondOne == 0 ? "near" : "wrong" }

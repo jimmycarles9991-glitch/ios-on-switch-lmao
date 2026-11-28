@@ -104,9 +104,12 @@ int blitAspect(SwitchMetalTexture *t, MTLBlitOption options)
     if (t->_descriptor.pixelFormat != MTLPixelFormatX32_Stencil8 && !(options & MTLBlitOptionStencilFromDepthStencil))
         return gm20b::kAspectDepth;
     SwitchMetalTexture *owner = t->_levelsOwner ?: t;
-    @synchronized(owner) {
-        return gRM->raw->stencilTemp(owner->_raw) ? gm20b::kAspectStencil : kAspectNoMemory;
-    }
+    if (__atomic_load_n(&owner->_raw.stencilTemp, __ATOMIC_ACQUIRE))
+        return gm20b::kAspectStencil;
+    os_unfair_lock_lock(&owner->_auxLock);
+    const bool made = gRM->raw->stencilTemp(owner->_raw);
+    os_unfair_lock_unlock(&owner->_auxLock);
+    return made ? gm20b::kAspectStencil : kAspectNoMemory;
 }
 
 uint32_t blitUnit(SwitchMetalTexture *t, int aspect)
@@ -118,7 +121,7 @@ uint32_t blitUnit(SwitchMetalTexture *t, int aspect)
 
 SwitchMetalTexture *gm20bTexture(id<MTLTexture> t)
 {
-    return [(id)t isKindOfClass:[SwitchMetalTexture class]] ? (SwitchMetalTexture *)t : nil;
+    return gm20bAsTexture(t);
 }
 
 void notRawTexture(SwitchMetalCommandBuffer *cb, id<MTLTexture> t)

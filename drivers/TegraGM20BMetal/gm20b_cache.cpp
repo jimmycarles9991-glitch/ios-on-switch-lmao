@@ -135,14 +135,22 @@ void removeStale(const std::string &parent, const std::string &ours)
 
 }  // namespace
 
+static uint64_t fnvStep(uint64_t h, const void *p, size_t n)
+{
+    const uint8_t *b = static_cast<const uint8_t *>(p);
+    for (size_t i = 0; i < n; i++)
+        h = (h ^ b[i]) * 0x100000001b3ull;
+    return h;
+}
+
 uint64_t CacheKey::name() const
 {
-    uint64_t h = Pack::fnv(&stack, sizeof stack);
-    std::string all(reinterpret_cast<const char *>(&h), sizeof h);
-    all.append(reinterpret_cast<const char *>(vertexAir), sizeof vertexAir);
-    all.append(reinterpret_cast<const char *>(fragmentAir), sizeof fragmentAir);
-    all += key;
-    return Pack::fnv(all.data(), all.size());
+    const uint64_t stackHash = Pack::fnv(&stack, sizeof stack);
+    uint64_t h = 0xcbf29ce484222325ull;
+    h = fnvStep(h, &stackHash, sizeof stackHash);
+    h = fnvStep(h, vertexAir, sizeof vertexAir);
+    h = fnvStep(h, fragmentAir, sizeof fragmentAir);
+    return fnvStep(h, key.data(), key.size());
 }
 
 void writeEntryHead(Writer &w, const CacheKey &k, uint32_t kind)
@@ -156,13 +164,9 @@ void writeEntryHead(Writer &w, const CacheKey &k, uint32_t kind)
     w.text(k.key);
 }
 
-bool readEntryHead(const std::string &bytes, Reader &r, const CacheKey &k, uint32_t &kind)
+bool readEntryHead(std::string_view bytes, Reader &r, const CacheKey &k, uint32_t &kind)
 {
-    if (bytes.size() < sizeof kEntryMagic + 8)
-        return false;
-    uint64_t sum;
-    memcpy(&sum, bytes.data() + bytes.size() - 8, 8);
-    if (sum != Pack::fnv(bytes.data(), bytes.size() - 8))
+    if (bytes.size() < sizeof kEntryMagic)
         return false;
     char magic[sizeof kEntryMagic];
     uint8_t vertexAir[32], fragmentAir[32];
@@ -172,7 +176,7 @@ bool readEntryHead(const std::string &bytes, Reader &r, const CacheKey &k, uint3
     const uint64_t stack = r.value<uint64_t>();
     r.bytes(vertexAir, sizeof vertexAir);
     r.bytes(fragmentAir, sizeof fragmentAir);
-    const std::string key = r.text();
+    const std::string_view key = r.textView();
     return r.ok() && !memcmp(magic, kEntryMagic, sizeof kEntryMagic) && format == kEntryFormat && stack == k.stack &&
            !memcmp(vertexAir, k.vertexAir, sizeof vertexAir) &&
            !memcmp(fragmentAir, k.fragmentAir, sizeof fragmentAir) && key == k.key;
@@ -273,11 +277,10 @@ std::string encodeEntry(const CacheKey &k, const RuntimeRecord *record, const st
         writeRecord(w, record);
     else
         w.text(refusal);
-    w.value(Pack::fnv(w.out.data(), w.out.size()));
     return w.out;
 }
 
-RecordCache::Found decodeEntry(const std::string &bytes, const CacheKey &k, RuntimeRecord &record, std::string &refusal)
+RecordCache::Found decodeEntry(std::string_view bytes, const CacheKey &k, RuntimeRecord &record, std::string &refusal)
 {
     Reader r(bytes);
     uint32_t kind = 0;
@@ -285,12 +288,12 @@ RecordCache::Found decodeEntry(const std::string &bytes, const CacheKey &k, Runt
         return RecordCache::Found::None;
     if (kind == kKindRefusal) {
         refusal = r.text();
-        return r.ok() && r.at() == bytes.size() - 8 ? RecordCache::Found::Refusal : RecordCache::Found::None;
+        return r.ok() && r.at() == bytes.size() ? RecordCache::Found::Refusal : RecordCache::Found::None;
     }
     if (kind != kKindRecord)
         return RecordCache::Found::None;
     RuntimeRecord rec;
-    if (!readRecord(r, rec, true) || r.at() != bytes.size() - 8)
+    if (!readRecord(r, rec, true) || r.at() != bytes.size())
         return RecordCache::Found::None;
     record = std::move(rec);
     return RecordCache::Found::Record;
@@ -307,19 +310,24 @@ bool RecordCache::open(const std::string &dir, uint64_t stack, uint64_t capBytes
     return true;
 }
 
-bool RecordCache::attach(const std::string &dir, uint64_t stack, uint64_t capBytes)
+bool RecordCache::attach(const std::string &dir, uint64_t stack, uint64_t capBytes, bool exclusive)
 {
     std::lock_guard<std::mutex> l(lock_);
     const std::string mine = dir + "/rec-" + hex16(stack);
     if (dir.empty() || (mkdir(mine.c_str(), 0700) != 0 && errno != EEXIST) || access(mine.c_str(), W_OK) != 0)
         return false;
+    dirReady_.store(false, std::memory_order_release);
     parent_ = dir;
     dir_ = mine;
-    if (stack_ != stack)
+    if (seed_ && seedStack_ != stack)
         seed_.reset();
     stack_ = stack;
     cap_ = capBytes;
     bytes_ = 0;
+    exclusive_ = exclusive;
+    anyStored_ = false;
+    diskMayHaveEntries_.store(true, std::memory_order_release);
+    dirReady_.store(true, std::memory_order_release);
     return true;
 }
 
@@ -333,7 +341,7 @@ bool RecordCache::attachSeed(const std::string &dir, uint64_t stack)
     auto seed = std::make_unique<switch_seed_pack::Seed>();
     if (!seed->open(dir + "/rec-" + hex16(stack), sizeof(uint64_t), identity))
         return false;
-    stack_ = stack;
+    seedStack_ = stack;
     seed_ = std::move(seed);
     return true;
 }
@@ -356,14 +364,23 @@ const uint8_t *RecordCache::findSeedSlot(const uint8_t *slot, size_t size, const
 
 void RecordCache::tidy()
 {
+    std::string parent, mine;
+    {
+        std::lock_guard<std::mutex> l(lock_);
+        if (dir_.empty())
+            return;
+        parent = parent_;
+        mine = "rec-" + hex16(stack_);
+    }
+    removeStale(parent, mine);
+    std::lock_guard<std::mutex> l(lock_);  // background stores cannot race the directory accounting snapshot
     if (dir_.empty())
         return;
-    removeStale(parent_, "rec-" + hex16(stack_));
-    std::lock_guard<std::mutex> l(lock_);  // background stores cannot race the directory accounting snapshot
     uint64_t bytes = 0;
     for (const File &f : files(dir_, ".rec"))
         bytes += f.bytes;
     bytes_ = bytes;
+    diskMayHaveEntries_.store(!exclusive_ || bytes != 0 || anyStored_, std::memory_order_release);
 }
 
 std::string RecordCache::path(const CacheKey &k) const
@@ -371,70 +388,95 @@ std::string RecordCache::path(const CacheKey &k) const
     return dir_ + "/" + hex16(k.name()) + ".rec";
 }
 
-bool RecordCache::loadBytes(bool seed, const CacheKey &k, std::string &bytes) const
+bool RecordCache::findSeedBytes(const CacheKey &k, std::string_view &bytes) const
 {
-    if (k.stack != stack_)
+    if (!seed_ || k.stack != seedStack_)
         return false;
-    if (!seed)
-        return !dir_.empty() && readFile(path(k), bytes);
     const uint64_t value = k.name();
     uint8_t name[sizeof value];
     for (unsigned i = 0; i < sizeof name; ++i)
         name[i] = uint8_t(value >> (8 * (sizeof name - 1 - i)));
     switch_seed_pack::Bytes found;
-    if (!seed_ || !seed_->find(name, found) || found.size > kSizeLimit)
+    if (!seed_->find(name, found) || found.size > kSizeLimit)
         return false;
-    bytes.assign(reinterpret_cast<const char *>(found.data), found.size);
+    bytes = std::string_view(reinterpret_cast<const char *>(found.data), found.size);
     return true;
+}
+
+bool RecordCache::loadDiskBytes(const CacheKey &k, std::string &bytes) const
+{
+    if (!dirReady_.load(std::memory_order_acquire) || !diskMayHaveEntries_.load(std::memory_order_acquire))
+        return false;
+    std::string file;
+    {
+        std::lock_guard<std::mutex> l(lock_);
+        if (dir_.empty() || k.stack != stack_)
+            return false;
+        file = path(k);
+    }
+    return readFile(file, bytes);
 }
 
 RecordCache::Found RecordCache::load(const CacheKey &k, RuntimeRecord &record, std::string &refusal, bool *seeded)
 {
+    std::string_view seedView;
+    if (findSeedBytes(k, seedView))
+        if (const Found found = decodeEntry(seedView, k, record, refusal); found != Found::None) {
+            if (seeded)
+                *seeded = true;
+            return found;
+        }
     std::string bytes;
-    for (const bool seed : {true, false})
-        if (loadBytes(seed, k, bytes))
-            if (const Found found = decodeEntry(bytes, k, record, refusal); found != Found::None) {
-                if (seeded)
-                    *seeded = seed;
-                return found;
-            }
+    if (loadDiskBytes(k, bytes))
+        if (const Found found = decodeEntry(bytes, k, record, refusal); found != Found::None) {
+            if (seeded)
+                *seeded = false;
+            return found;
+        }
     return Found::None;
 }
 
 RecordCache::Found RecordCache::loadKernel(const CacheKey &k, ComputeRecord &record, std::string &refusal)
 {
+    std::string_view seedView;
+    if (findSeedBytes(k, seedView))
+        if (const Found found = decodeKernelEntry(seedView, k, record, refusal); found != Found::None)
+            return found;
     std::string bytes;
-    for (const bool seed : {true, false})
-        if (loadBytes(seed, k, bytes))
-            if (const Found found = decodeKernelEntry(bytes, k, record, refusal); found != Found::None)
-                return found;
+    if (loadDiskBytes(k, bytes))
+        if (const Found found = decodeKernelEntry(bytes, k, record, refusal); found != Found::None)
+            return found;
     return Found::None;
 }
 
 bool RecordCache::store(const CacheKey &k, const RuntimeRecord *record, const std::string &refusal)
 {
-    return dir_.empty() || k.stack != stack_ ? false : storeBytes(k, encodeEntry(k, record, refusal));
+    return dirReady_.load(std::memory_order_acquire) ? storeBytes(k, encodeEntry(k, record, refusal)) : false;
 }
 
 bool RecordCache::storeKernel(const CacheKey &k, const ComputeRecord *record, const std::string &refusal)
 {
-    return dir_.empty() || k.stack != stack_ ? false : storeBytes(k, encodeKernelEntry(k, record, refusal));
+    return dirReady_.load(std::memory_order_acquire) ? storeBytes(k, encodeKernelEntry(k, record, refusal)) : false;
 }
 
 bool RecordCache::storeBytes(const CacheKey &k, const std::string &bytes)
 {
     static std::atomic<uint32_t> serial{0};
-    const std::string final = path(k);
     std::lock_guard<std::mutex> l(lock_);
+    if (dir_.empty() || k.stack != stack_)
+        return false;
+    const std::string final = path(k);
     if (cap_ && bytes.size() > cap_ / 4 * 3)
         return false;
     if (cap_ && bytes_ + bytes.size() > cap_)
         evict(bytes.size());
-    const std::string temporary = dir_ + "/" + std::to_string(getpid()) + "-" + std::to_string(serial++) + ".tmp";
+    const std::string temporary = dir_ + "/" + std::to_string(getpid()) + "-" +
+                                  std::to_string(serial.fetch_add(1, std::memory_order_relaxed)) + ".tmp";
     const int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (fd < 0)
         return false;
-    const bool written = writeAll(fd, bytes);
+    // synced before it is renamed in: nothing reads an entry's bytes again to find it whole after a crash
+    const bool written = writeAll(fd, bytes) && fsync(fd) == 0;
     close(fd);
     struct stat old;
     const uint64_t replaced = stat(final.c_str(), &old) == 0 ? uint64_t(old.st_size) : 0;
@@ -443,6 +485,8 @@ bool RecordCache::storeBytes(const CacheKey &k, const std::string &bytes)
         return false;
     }
     bytes_ = bytes_ - std::min(bytes_, replaced) + bytes.size();
+    anyStored_ = true;
+    diskMayHaveEntries_.store(true, std::memory_order_release);
     return true;
 }
 

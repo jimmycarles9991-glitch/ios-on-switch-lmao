@@ -6,7 +6,7 @@
 // column scan's does, and restores windows A and B by itself. Its state is static: the instance is at the 16 KiB a
 // kalloc_type class may have.
 
-#if SWITCH_FRAME_TIMELINE
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
 static constexpr uint32_t kWindowBSelect = 1u << 5;
 // Window B's DC_WIN and DC_WINBUF words the probe writes (NativePlanes.h's block-relative numbers), WIN_OPTIONS last.
 static constexpr uint32_t kOverlayWindowState[] = {

@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 
 /// The compression thread's debug event (CompressionSettled, gpu.h compWhenSettled): a private BGRA8 target of a

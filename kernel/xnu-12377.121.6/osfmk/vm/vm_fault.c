@@ -119,6 +119,8 @@
 #include <vm/vm_memtag.h>
 #endif /* HAS_MTE */
 #include <switch/prefetch_vm.h>
+#include <switch/tiled_fault.h>
+#include <switch/vm_lazy_cow.h>
 
 #include <sys/codesign.h>
 #include <sys/code_signing.h>
@@ -4606,6 +4608,12 @@ vm_map_lookup_object_and_lock_entry(
 	fault_page_mask = MIN(VM_MAP_PAGE_MASK(original_map), PAGE_MASK);
 	vaddr = VM_MAP_TRUNC_PAGE(vaddr, fault_page_mask);
 
+	if (__improbable(vml_ctx_for_vaddr == NULL && !try_lock_entry &&
+	    (fault_type & VM_PROT_WRITE) &&
+	    os_atomic_load(&switch_vm_lazy_rw_global_active, relaxed) != 0u)) {
+		switch_vm_lazy_rw_fault(original_map, vaddr);
+	}
+
 	bool would_resolve_cow = force_copy || (fault_type & VM_PROT_WRITE);
 	vmrl_sh_flags_t flags = VMRL_SH_STREAM_NO_HOLES |
 	    VMRL_SH_DESCEND_INTO_CONSTANT |
@@ -4863,7 +4871,9 @@ vm_fault_internal(
 	vm_map_lock_ctx_t      vml_ctx_for_vaddr)
 {
 	/* Switch (r17-faults): for the kprof faults lines (switch_kprof_fault, at done) */
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
 	const uint64_t          switch_began = mach_absolute_time();
+#endif
 	bool                    switch_device = false;    /* the page entered was a device pager's */
 	bool                    switch_purgeable = false; /* a zero fill in a purgeable object */
 	boolean_t               wired;          /* Should mapping be wired down? */
@@ -5012,6 +5022,7 @@ vm_fault_internal(
 
 	bool     rtfault = (cthread->sched_mode == TH_MODE_REALTIME);
 	bool     page_sleep_needed = false;
+	ppnum_t  switch_tiled_checked_pn = 0;
 	uint64_t fstart = 0;
 
 	if (rtfault) {
@@ -5703,6 +5714,34 @@ FastPmapEnter:
 				}
 				assertf(VM_PAGE_OBJECT(m) == m_object, "m=%p m_object=%p object=%p", m, m_object, object);
 				assert(VM_PAGE_OBJECT(m) != VM_OBJECT_NULL);
+				if (__improbable(!caller_pmap && !wired && !fault_info->fi_change_wiring &&
+				    wire_tag == VM_KERN_MEMORY_NONE && physpage_p == NULL &&
+				    vml_ctx_for_vaddr == NULL && map != kernel_map && original_map != kernel_map &&
+				    m->vmp_hashed && !m->vmp_busy &&
+				    VM_PAGE_GET_PHYS_PAGE(m) != switch_tiled_checked_pn &&
+				    switch_vm_tiled_page_maybe(VM_PAGE_GET_PHYS_PAGE(m)))) {
+					const ppnum_t tiled_pn = VM_PAGE_GET_PHYS_PAGE(m);
+					const uint64_t tiled_pa = ((uint64_t)tiled_pn << PAGE_SHIFT) + fault_phys_offset;
+					vm_object_unlock(object);
+					if (top_object != VM_OBJECT_NULL) {
+						vm_object_unlock(top_object);
+						top_object = VM_OBJECT_NULL;
+					}
+					vm_fault_unlock_ctx(ctx, vml_ctx_for_vaddr);
+					const int tiled_rc = switch_vm_tiled_cpu_fault(original_map, real_vaddr, tiled_pa, caller_prot);
+					if (tiled_rc < 0) {
+						kr = KERN_MEMORY_ERROR;
+						goto done;
+					}
+					if (tiled_rc > 1) {
+						kr = KERN_SUCCESS;
+						goto done;
+					}
+					if (tiled_rc == 0) {
+						switch_tiled_checked_pn = tiled_pn;
+					}
+					goto RetryFault;
+				}
 				need_retry = false;
 				switch_device = vm_page_is_private(m);
 				if (caller_pmap) {
@@ -6847,6 +6886,14 @@ handle_copy_delay:
 			goto RetryFault;
 		}
 
+		if (__improbable(kr == KERN_PROTECTION_FAILURE &&
+		    vml_ctx_for_vaddr == NULL &&
+		    (fault_type & VM_PROT_WRITE) &&
+		    os_atomic_load(&switch_vm_lazy_rw_global_active, relaxed) != 0u &&
+		    switch_vm_lazy_rw_page_active(original_map, vaddr))) {
+			goto RetryFault;
+		}
+
 		if (kr == KERN_INVALID_ADDRESS) {
 			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_ADDRESS_NOT_FOUND), 0 /* arg */);
 		}
@@ -7018,6 +7065,31 @@ handle_copy_delay:
 		}
 		assertf(VM_PAGE_OBJECT(m) == m_object, "m=%p m_object=%p", m, m_object);
 		assert(VM_PAGE_OBJECT(m) != VM_OBJECT_NULL);
+		if (__improbable(!caller_pmap && !wired && !fault_info->fi_change_wiring &&
+		    wire_tag == VM_KERN_MEMORY_NONE && physpage_p == NULL &&
+		    vml_ctx_for_vaddr == NULL && map != kernel_map && original_map != kernel_map &&
+		    VM_PAGE_GET_PHYS_PAGE(m) != switch_tiled_checked_pn &&
+		    switch_vm_tiled_page_maybe(VM_PAGE_GET_PHYS_PAGE(m)))) {
+			const ppnum_t tiled_pn = VM_PAGE_GET_PHYS_PAGE(m);
+			const uint64_t tiled_pa = ((uint64_t)tiled_pn << PAGE_SHIFT) + fault_phys_offset;
+			vm_page_wakeup_done(m_object, m);
+			vm_fault_cleanup(m_object, top_page);
+			vm_object_deallocate(object);
+			vm_fault_unlock_ctx(ctx, vml_ctx_for_vaddr);
+			const int tiled_rc = switch_vm_tiled_cpu_fault(original_map, real_vaddr, tiled_pa, caller_prot);
+			if (tiled_rc < 0) {
+				kr = KERN_MEMORY_ERROR;
+				goto done;
+			}
+			if (tiled_rc > 1) {
+				kr = KERN_SUCCESS;
+				goto done;
+			}
+			if (tiled_rc == 0) {
+				switch_tiled_checked_pn = tiled_pn;
+			}
+			goto RetryFault;
+		}
 		need_retry = false;
 		switch_device = vm_page_is_private(m);
 		if (caller_pmap) {
@@ -7331,6 +7403,7 @@ done:
 		DEBUG4K_FAULT("map %p original %p vaddr 0x%llx -> 0x%x\n", map, original_map, (uint64_t)trace_real_vaddr, kr);
 	}
 
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
 	/* Switch (r17-faults): this fault for the kprof faults lines */
 	{
 		unsigned int switch_class;
@@ -7365,6 +7438,10 @@ done:
 		    (switch_purgeable && switch_class == SWITCH_FAULT_ZF ? SWITCH_FAULT_PURGEABLE : 0),
 		    switch_began, (uint64_t)vaddr);
 	}
+#else
+	(void)switch_device;
+	(void)switch_purgeable;
+#endif
 
 	vmlp_api_end(VM_FAULT_INTERNAL, kr);
 	return kr;
@@ -9108,7 +9185,7 @@ vm_page_validate_cs_mapped_slow(
 	/* Boot-argument fixups of signed text land after validation, through the physical aperture, before any mapping. */
 	if (validated == VMP_CS_ALL_TRUE && tainted == VMP_CS_ALL_FALSE &&
 	    cs_text_fixup_page(vnode, mo_offset, (void *)phystokv((pmap_paddr_t)VM_PAGE_GET_PHYS_PAGE(page) << PAGE_SHIFT)) != 0) {
-		cache_sync_page(VM_PAGE_GET_PHYS_PAGE(page));
+		pmap_sync_page_data_phys(VM_PAGE_GET_PHYS_PAGE(page));
 	}
 #endif
 

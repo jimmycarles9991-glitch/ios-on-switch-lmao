@@ -235,7 +235,7 @@ extern "C" void sheng_pmgr_run(void)
             }
             // thermalmonitord's DVD factor writes (setProperties below): the original sandbox profiles name only the
             // original classes, as for SwitchBacklight's brightness writes (XNU native_sandbox_grant).
-            provider->setProperty("NativeSandboxGrantProcess", "thermalmonitord");
+            provider->setProperty("NativeSandboxGrantProcess", "thermalmonitord,ReportCrashService");
             provider->registerService(kIOServiceSynchronous);
             nub->registerService(kIOServiceSynchronous);
             sheng_pmgr_observation[0] = 5;

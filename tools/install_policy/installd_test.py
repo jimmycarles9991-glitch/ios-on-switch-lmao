@@ -184,6 +184,48 @@ class PreparationTest(unittest.TestCase):
             installd.prepare(self.root, {'build': '24B119'}, self.out)
         self.assertFalse(self.out.exists())
 
+    def test_arm64e_pretranslates_after_signing_and_rejects_fallback(self):
+        original = self.source.read_bytes()
+        tool = Path(self.tmp.name) / 'arm64e'
+        commands = []
+
+        def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            commands.append(command)
+            if command[0] == str(tool):
+                report = Path(command[command.index('-r') + 1])
+                src, dst = Path(command[-2]), Path(command[-1])
+                patched = bytearray(src.read_bytes())
+                struct.pack_into('<I', patched, 28, 0x41363458)
+                dst.write_bytes(patched)
+                report.write_text('{"slices": [{"status": "translated"}]}')
+            return subprocess.CompletedProcess(command, 0)
+
+        with (
+            mock.patch.object(installd, 'entitlements', side_effect=[self.rights, self.rights]),
+            mock.patch.object(installd.subprocess, 'run', side_effect=run),
+        ):
+            installd.prepare(self.root, {'build': '24B119'}, self.out, arm64e=tool)
+        self.assertEqual([cmd[0] for cmd in commands], ['/usr/bin/codesign', str(tool), '/usr/bin/codesign'])
+        self.assertEqual(struct.unpack_from('<I', self.out.read_bytes(), 28)[0], 0x41363458)
+        self.assertEqual(self.out.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(self.source.read_bytes(), original)
+
+        def run_fallback(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            if command[0] == str(tool):
+                report = Path(command[command.index('-r') + 1])
+                Path(command[-1]).write_bytes(Path(command[-2]).read_bytes())
+                report.write_text('{"slices": [{"status": "fallback", "why": "no room"}]}')
+            return subprocess.CompletedProcess(command, 0)
+
+        fallback_out = Path(self.tmp.name) / 'out/fallback'
+        with (
+            mock.patch.object(installd, 'entitlements', return_value=self.rights),
+            mock.patch.object(installd.subprocess, 'run', side_effect=run_fallback),
+            self.assertRaisesRegex(ValueError, 'no room'),
+        ):
+            installd.prepare(self.root, {'build': '24B119'}, fallback_out, arm64e=tool)
+        self.assertFalse(fallback_out.exists())
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -676,4 +676,38 @@ TEST(SilentFences, AnIdleChannelIsNeverStuck)
 	EXPECT_FALSE(job.check(10 * kTick));
 	EXPECT_FALSE(job.check(20 * kTick));
 }
+
+TEST(ProgressWord, BandReleasesKeepAOnePointThreeSecondJobFromBeingStuck)
+{
+	const uint32_t completed = 100, submitted = 101, irqDone = 100;
+	uint32_t seenFence = 100, seenWord = 0, strikes = 0, confirmed = 0;
+	uint64_t progressNs = 0;
+	for (uint64_t now = 100 * kMs; now <= 1300 * kMs; now += 100 * kMs) {
+		const uint32_t word = uint32_t(now / kMs);  // one band release per ms
+		int moved = tgm_progress_seen(completed, irqDone, &seenFence);
+		if (tgm_progress_word_seen(word, &seenWord))
+			moved = 1;
+		if (moved)
+			progressNs = now;
+		const int stuck = tgm_stuck(0, completed, submitted, now, progressNs);
+		EXPECT_FALSE(stuck) << now / kMs;
+		EXPECT_EQ(tgm_hang_confirm(stuck, completed, &strikes, &confirmed), 0) << now / kMs;
+	}
+	// Once the progress word stops moving, the stuck rule blames the job after two checks.
+	const uint32_t frozen = seenWord;
+	int blamed = 0;
+	for (uint64_t now = 1400 * kMs; now <= 2500 * kMs; now += 100 * kMs) {
+		int moved = tgm_progress_seen(completed, irqDone, &seenFence);
+		if (tgm_progress_word_seen(frozen, &seenWord))
+			moved = 1;
+		if (moved)
+			progressNs = now;
+		const int stuck = tgm_stuck(0, completed, submitted, now, progressNs);
+		if (tgm_hang_confirm(stuck, completed, &strikes, &confirmed)) {
+			blamed = 1;
+			break;
+		}
+	}
+	EXPECT_TRUE(blamed);
+}
 }  // namespace

@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT
-// A new Private texture of the driver's own memory starts as Apple's GPUs start one (fresh.h), written by the copy
-// engine on the raw channel ahead of the first submission that may reach it (fresh_queue.h). Stale pool memory never
-// shows through.
+// A new Private texture of the driver's own memory starts as Apple's GPUs start one (fresh.h), and a new buffer on a span
+// no CPU zeroed reads zeros: both written by the copy engine on the raw channel ahead of the first submission that may
+// reach them (fresh_queue.h). Stale pool memory never shows through.
 #pragma once
 #import "TegraGM20BMetalInternal.h"
 #include <vector>
 
 void establishFresh(SwitchMetalTexture *t, MTLTextureDescriptor *d);
+// A new buffer on a reused span no CPU zeroed (gm20b::Buffer::freshFill): filled with zeros by the copy engine ahead of
+// the first submission that names it, as a fresh texture is written, so it reads as Metal's new buffer does
+void establishFreshBuffer(SwitchMetalBuffer *b);
 // Whether establishFresh takes `t`: a Private texture of the driver's own pool memory, written to its first contents
 // ahead of its first use
 bool freshFills(SwitchMetalTexture *t, MTLTextureDescriptor *d);

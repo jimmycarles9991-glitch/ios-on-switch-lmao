@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import ImageIO
 import IOSurface
 import Metal
@@ -25,14 +26,16 @@ import SwitchTexturePattern
 /// (`image`, its colour bytes). Two shapes: 256x256 and the 260x260 of the home screen's large widget. A read that
 /// matches the pattern laid out in GOBs reports `<case>_<reader>_gob=1`: block-linear texels seen as rows (the Maps
 /// widget's garbage on boot 21).
-struct SurfaceCrossProcessTest: HWTest {
-    let id = "gpu.iosurface.cross_process"
-    let name = "An IOSurface one process renders reads as rows in another, by CPU lock and by GPU import"
-    let subsystem = Subsystem.metal
+public struct SurfaceCrossProcessTest: HWTest {
+    public let id = "gpu.iosurface.cross_process"
+    public let name = "An IOSurface one process renders reads as rows in another, by CPU lock and by GPU import"
+    public let subsystem = Subsystem.metal
 
-    static let sizes = [256, 260]
+    public static let sizes = [256, 260]
 
-    func run(_ context: TestContext) async throws -> Outcome {
+    public init() {}
+
+    public func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
         guard GM20BFacade.kind(of: gpu.device) == "gm20b" else { return .skip("the default device is not the facade") }
         let connection = try await TexturePeerLink.connection()
@@ -85,7 +88,7 @@ struct SurfaceCrossProcessTest: HWTest {
 
     /// The surface, rendered by the peer in `order`, with the texture through which the app sampled it first ("sampled":
     /// held until the reads, so the pitch decision stands), or nil when the peer did not answer ok
-    static func rendered(
+    public static func rendered(
         _ gpu: GPU, _ connection: NSXPCConnection, _ order: String, _ size: Int, _ metrics: inout Metrics
     ) async throws
         -> (IOSurface, MTLTexture?)?
@@ -126,7 +129,7 @@ struct SurfaceCrossProcessTest: HWTest {
         return answer?.hasPrefix("ok ") == true ? (surface, sampler) : nil
     }
 
-    static func ask(
+    public static func ask(
         _ connection: NSXPCConnection, _ call: @escaping (SharedTexturePeer, @escaping (String) -> Void) -> Void
     ) async -> String? {
         let answer = HandlerValue<String?>(nil)
@@ -142,7 +145,7 @@ struct SurfaceCrossProcessTest: HWTest {
     }
 
     /// Its texels as rows, through a read-only CPU lock, and the microseconds from the lock to the unlock's return
-    static func cpuRows(_ surface: IOSurface) -> ([UInt8], Int) {
+    public static func cpuRows(_ surface: IOSurface) -> ([UInt8], Int) {
         let start = DispatchTime.now().uptimeNanoseconds
         surface.lock(options: .readOnly, seed: nil)
         var out = [UInt8](repeating: 0, count: surface.width * surface.height * 4)
@@ -159,7 +162,7 @@ struct SurfaceCrossProcessTest: HWTest {
 
     /// A CGImage over the surface's bytes under a read lock, PNG-encoded, then decoded by ImageIO and drawn into BGRA
     /// rows (opaque: the colour bytes survive the round trip exactly, its alpha byte is 255)
-    static func imageRows(_ surface: IOSurface) -> [UInt8] {
+    public static func imageRows(_ surface: IOSurface) -> [UInt8] {
         let width = surface.width, height = surface.height
         let bgra = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.noneSkipFirst.rawValue
         let space = CGColorSpace(name: CGColorSpace.sRGB)!
@@ -195,7 +198,7 @@ struct SurfaceCrossProcessTest: HWTest {
     }
 
     /// The pattern into every texel through a CPU write lock; the microseconds from the lock to the unlock's return
-    static func cpuWrite(_ surface: IOSurface) -> Int {
+    public static func cpuWrite(_ surface: IOSurface) -> Int {
         let start = DispatchTime.now().uptimeNanoseconds
         surface.lock(options: [], seed: nil)
         write(surface)
@@ -204,7 +207,7 @@ struct SurfaceCrossProcessTest: HWTest {
     }
 
     /// The pattern into every texel through the surface's own mapping, with or without a lock around it
-    static func write(_ surface: IOSurface) {
+    public static func write(_ surface: IOSurface) {
         for y in 0 ..< surface.height {
             let row = surface.baseAddress + y * surface.bytesPerRow
             for x in 0 ..< surface.width {
@@ -214,7 +217,7 @@ struct SurfaceCrossProcessTest: HWTest {
     }
 
     /// Its texels as rows, through this process's own GPU import of it (a blit into a buffer), and that texture
-    static func gpuRows(_ gpu: GPU, _ surface: IOSurface) async throws -> ([UInt8], MTLTexture) {
+    public static func gpuRows(_ gpu: GPU, _ surface: IOSurface) async throws -> ([UInt8], MTLTexture) {
         let d = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm, width: surface.width, height: surface.height, mipmapped: false
         )
@@ -241,7 +244,7 @@ struct SurfaceCrossProcessTest: HWTest {
 
     /// Bytes of each texel's first `channels` that differ from the pattern, and the first one's offset in the rows
     /// (-1: none)
-    static func wrong(_ got: [UInt8], _ surface: IOSurface, channels: Int = 4) -> (Int, Int) {
+    public static func wrong(_ got: [UInt8], _ surface: IOSurface, channels: Int = 4) -> (Int, Int) {
         var wrong = 0, first = -1
         for y in 0 ..< surface.height {
             for x in 0 ..< surface.width {
@@ -254,13 +257,13 @@ struct SurfaceCrossProcessTest: HWTest {
         return (wrong, first)
     }
 
-    static func byte(_ x: Int, _ y: Int, _ c: Int) -> UInt8 {
+    public static func byte(_ x: Int, _ y: Int, _ c: Int) -> UInt8 {
         switch_texpeer_surface_byte(UInt32(x), UInt32(y), UInt32(c))
     }
 
     /// Whether the first rows read are the pattern laid out block-linear (drivers/TegraGM20B/TegraGM20BLayout.h at
     /// NIL's block height) and read back as rows of the surface's pitch
-    static func readAsGobs(_ got: [UInt8], _ surface: IOSurface, channels: Int = 4) -> Bool {
+    public static func readAsGobs(_ got: [UInt8], _ surface: IOSurface, channels: Int = 4) -> Bool {
         let rowBytes = (surface.width * 4 + 63) & ~63
         let yLog2 = blockHeightLog2(surface.height)
         let pitch = surface.bytesPerRow
@@ -281,18 +284,9 @@ struct SurfaceCrossProcessTest: HWTest {
         return true
     }
 
-    static func blockHeightLog2(_ height: Int) -> Int {
-        let y = height >= 86 ? 4 : height >= 43 ? 3 : height >= 22 ? 2 : height >= 11 ? 1 : 0
-        var clamp = 0
-        while (1 << clamp) < (height + 7) / 8 { clamp += 1 }
-        return min(y, clamp)
-    }
+    public static func blockHeightLog2(_ height: Int) -> Int { GobLayout.blockHeightLog2(height) }
 
-    static func gobOffset(_ rowBytes: Int, _ yLog2: Int, _ xB: Int, _ y: Int) -> Int {
-        let blockRows = 8 << yLog2
-        let block = (y / blockRows) * (rowBytes / 64) + xB / 64
-        let inGob =
-            ((xB % 64) / 32) * 256 + ((y % 8) / 2) * 64 + ((xB % 32) / 16) * 32 + (y % 2) * 16 + (xB % 16)
-        return block * (512 << yLog2) + ((y % blockRows) / 8) * 512 + inGob
+    public static func gobOffset(_ rowBytes: Int, _ yLog2: Int, _ xB: Int, _ y: Int) -> Int {
+        GobLayout.offset(rowBytes, yLog2, xB, y)
     }
 }

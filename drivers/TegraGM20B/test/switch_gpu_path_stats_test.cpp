@@ -8,6 +8,7 @@
 #include "switch_gpu_path_stats_stubs.h"
 #include "drivers/TegraGM20B/SwitchGpuPathStats.h"
 #include "drivers/TegraGM20B/TegraGM20BGpu.h"
+#include "drivers/TegraGM20B/TegraGM20BPathsABI.h"
 extern "C" {
 #include "drivers/TegraGM20B/TegraGM20BSched.h"
 }
@@ -38,6 +39,10 @@ extern "C" void tgm_hold_samples_take(int, uint32_t *n, uint64_t *max_ns,
 {
 	*n = 0;
 	*max_ns = 0;
+}
+
+extern "C" void tgm_spare_seeds_line(char *, unsigned long)
+{
 }
 
 extern "C" int tgm_deadline_counts(struct tgm_deadline_counts *)
@@ -137,4 +142,43 @@ TEST(PathStats, AKernelThreadCountsForTheProcessItIsChargedTo)
 	charged = 0;
 	pid = 4604;
 	EXPECT_NE(line().find(" promise_waits=1 "), std::string::npos) << line();
+}
+
+TEST(PathStats, AbiReplyLineHoldsEveryCounterWithoutTruncation)
+{
+	pid = 9090;
+	for (uint32_t i = 0; i < SWITCH_GPU_PATH_COUNT; ++i)
+		switch_gpu_path_taken(static_cast<switch_gpu_path>(i), 1000000u + i);
+	TegraGM20BAbiPathsReply reply = {};
+	switch_gpu_path_line(reply.line, sizeof(reply.line));
+	const std::string text(reply.line);
+	EXPECT_LT(text.size(), sizeof(reply.line) - 1);
+	EXPECT_NE(text.find(" internal_jobs="), std::string::npos) << text;
+	EXPECT_NE(text.find(" external_jobs="), std::string::npos) << text;
+	EXPECT_NE(text.find(" volatile_jobs="), std::string::npos) << text;
+	EXPECT_NE(text.find(" ranged_uses="), std::string::npos) << text;
+	EXPECT_NE(text.find(" promise_waits="), std::string::npos) << text;
+	EXPECT_NE(text.find(" preempt_ge4000_us="), std::string::npos) << text;
+}
+
+// HW Test's gpu.path.job_visibility reads a Shared buffer back through a Volatile job and a no-copy one through an
+// External job: each kind of job has its own count
+TEST(PathStats, EachJobCountsUnderItsVisibility)
+{
+	pid = 5151;
+	switch_gpu_path_job(SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT, 0, 0, 0);
+	switch_gpu_path_job(SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT |
+				    SWITCH_GPU_SUBMIT_VOLATILE_VISIBILITY,
+			    0, 0, 0);
+	switch_gpu_path_job(SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT |
+				    SWITCH_GPU_SUBMIT_VOLATILE_VISIBILITY,
+			    0, 0, 0);
+	switch_gpu_path_job(SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT |
+				    SWITCH_GPU_SUBMIT_EXTERNAL_VISIBILITY |
+				    SWITCH_GPU_SUBMIT_VOLATILE_VISIBILITY,
+			    0, 0, 0);
+	const std::string counts = line();
+	EXPECT_NE(counts.find(" internal_jobs=1 "), std::string::npos) << counts;
+	EXPECT_NE(counts.find(" volatile_jobs=2"), std::string::npos) << counts;
+	EXPECT_NE(counts.find(" external_jobs=1 "), std::string::npos) << counts;
 }

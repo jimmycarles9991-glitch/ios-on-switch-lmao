@@ -151,6 +151,7 @@ IOReturn AGXDeviceUserClient::attachSet(const TegraGM20BAbiResourceSetCreate *in
 	}
 	if (made)
 		sets_[index] = made;
+	bumpBoGen();
 	*out = {index + 1, generation, kFenceToken, (TegraGM20BSetGenerationWord + index) * 4};
 	return kIOReturnSuccess;
 }
@@ -162,6 +163,7 @@ IOReturn AGXDeviceUserClient::resourceSetRelease(const TegraGM20BAbiResourceSetR
 		return kIOReturnBadArgument;
 	switch_gpu_set_destroy(sets_[in->set - 1]);
 	sets_[in->set - 1] = nullptr;
+	bumpBoGen();
 	return kIOReturnSuccess;
 }
 
@@ -171,4 +173,5 @@ void AGXDeviceUserClient::destroySets()
 		switch_gpu_set_destroy(set);
 		set = nullptr;
 	}
+	bumpBoGen();
 }

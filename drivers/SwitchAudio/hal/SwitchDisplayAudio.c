@@ -5,9 +5,13 @@
 #include "../../../kits/SwitchDMA/SwitchDcache.h"
 #include <mach/mach_time.h>
 #include <os/log.h>
+#include <pthread.h>
 #include <stddef.h>
 #include <string.h>
 
+static pthread_mutex_t gDisplayLock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t gDisplayCond = PTHREAD_COND_INITIALIZER;
+static Boolean gDisplayTransitioning;
 static AudioServerPlugInHostRef gHost;
 static SwitchAudioControl *gControl;
 static void *gOutput;
@@ -328,38 +332,82 @@ OSStatus switch_audio_display_perform(io_connect_t connection, UInt64 rate)
 
 OSStatus switch_audio_display_start(io_connect_t connection)
 {
-    if (!switch_audio_display_available() || !gControl)
+    pthread_mutex_lock(&gDisplayLock);
+    while (gDisplayTransitioning)
+        pthread_cond_wait(&gDisplayCond, &gDisplayLock);
+    if (!switch_audio_display_available() || !gControl) {
+        pthread_mutex_unlock(&gDisplayLock);
         return kAudioHardwareNotRunningError;
-    if (!gOutput) {
+    }
+    gDisplayTransitioning = true;
+    SwitchAudioControl *const control = gControl;
+    const Boolean needMap = gOutput == NULL;
+    const Boolean needStart = !(control->state & SwitchAudioOutputRunning);
+    pthread_mutex_unlock(&gDisplayLock);
+
+    void *mapped = NULL;
+    if (needMap) {
         mach_vm_address_t address = 0;
         mach_vm_size_t size = 0;
         if (IOConnectMapMemory64(connection, SwitchAudioMemoryDisplayOutput, mach_task_self(), &address, &size,
-                                 kIOMapAnywhere) != kIOReturnSuccess)
-            return kAudioHardwareNotRunningError;
-        gOutput = (void *)(uintptr_t)address;
-    }
-    if (!(gControl->state & SwitchAudioOutputRunning)) {
-        const kern_return_t result =
-            IOConnectCallScalarMethod(connection, SwitchAudioStartDisplayOutput, NULL, 0, NULL, NULL);
-        if (result != KERN_SUCCESS) {
-            os_log_error(OS_LOG_DEFAULT, "SwitchAudio: display IO not started: the kernel service refused (%#x)",
-                         result);
+                                 kIOMapAnywhere) != kIOReturnSuccess) {
+            pthread_mutex_lock(&gDisplayLock);
+            gDisplayTransitioning = false;
+            pthread_cond_broadcast(&gDisplayCond);
+            pthread_mutex_unlock(&gDisplayLock);
             return kAudioHardwareNotRunningError;
         }
-        ++gSeed;
-        os_log(OS_LOG_DEFAULT, "SwitchAudio: display IO started (%u-bit, %u Hz)", gControl->sample_bits,
-               gControl->rate);
+        mapped = (void *)(uintptr_t)address;
     }
-    ++gUsers;
-    return 0;
+    kern_return_t result = KERN_SUCCESS;
+    if (needStart)
+        result = IOConnectCallScalarMethod(connection, SwitchAudioStartDisplayOutput, NULL, 0, NULL, NULL);
+
+    pthread_mutex_lock(&gDisplayLock);
+    if (mapped)
+        gOutput = mapped;
+    OSStatus status = 0;
+    if (needStart && result != KERN_SUCCESS) {
+        os_log_error(OS_LOG_DEFAULT, "SwitchAudio: display IO not started: the kernel service refused (%#x)", result);
+        status = kAudioHardwareNotRunningError;
+    } else {
+        if (needStart) {
+            ++gSeed;
+            os_log(OS_LOG_DEFAULT, "SwitchAudio: display IO started (%u-bit, %u Hz)", control->sample_bits,
+                   control->rate);
+        }
+        ++gUsers;
+    }
+    gDisplayTransitioning = false;
+    pthread_cond_broadcast(&gDisplayCond);
+    pthread_mutex_unlock(&gDisplayLock);
+    return status;
 }
 
 OSStatus switch_audio_display_stop(io_connect_t connection)
 {
-    if (gUsers && --gUsers == 0) {
-        (void)IOConnectCallScalarMethod(connection, SwitchAudioStopDisplayOutput, NULL, 0, NULL, NULL);
-        os_log(OS_LOG_DEFAULT, "SwitchAudio: display IO stopped");
+    pthread_mutex_lock(&gDisplayLock);
+    while (gDisplayTransitioning)
+        pthread_cond_wait(&gDisplayCond, &gDisplayLock);
+    Boolean stopNow = false;
+    if (gUsers) {
+        --gUsers;
+        stopNow = gUsers == 0;
     }
+    if (!stopNow) {
+        pthread_mutex_unlock(&gDisplayLock);
+        return 0;
+    }
+    gDisplayTransitioning = true;
+    pthread_mutex_unlock(&gDisplayLock);
+
+    (void)IOConnectCallScalarMethod(connection, SwitchAudioStopDisplayOutput, NULL, 0, NULL, NULL);
+    os_log(OS_LOG_DEFAULT, "SwitchAudio: display IO stopped");
+
+    pthread_mutex_lock(&gDisplayLock);
+    gDisplayTransitioning = false;
+    pthread_cond_broadcast(&gDisplayCond);
+    pthread_mutex_unlock(&gDisplayLock);
     return 0;
 }
 

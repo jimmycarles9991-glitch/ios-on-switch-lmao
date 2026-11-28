@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 
 /// Depth/stencil textures past stored render targets, raw's in zeta memory (zeta_cpu.h, createOwnedZeta): a

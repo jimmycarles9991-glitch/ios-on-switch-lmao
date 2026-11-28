@@ -35,9 +35,6 @@
 #include "TegraGM20BTiled.h"
 #include "SwitchGpuBacking.h"
 #include "SwitchGpuPathStats.h"
-#if TGM_STATS
-#include <os/log.h>
-#endif
 #include "../TegraDisplayFlip/TegraScanoutCopy.h"
 
 struct tgm_coh {
@@ -72,7 +69,6 @@ struct tgm_coh {
 	uint64_t writers
 		[TGM_COH_WRITERS];  // atomic: marking submissions, channel uid << 32 | seqno (0: free slot)
 	int writersLost;  // atomic: one found no slot: a lock waits for every channel's submitted work
-	uint32_t traced;  // atomic: CPU lock and unlock lines logged for it (debug kernels)
 	int compressible;
 	uint32_t pendingKind;
 };
@@ -94,19 +90,13 @@ int gExternalScanout;
 struct {
 	uint64_t invalN, invalBytes, cleanN, cleanBytes, waitedN, cannotLockN;
 } gStats;  // registry lock
-#endif
 
 void count(bool unlock, uint64_t n, uint64_t bytes)  // registry lock held
 {
-#if TGM_STATS
 	(unlock ? gStats.cleanN : gStats.invalN) += n;
 	(unlock ? gStats.cleanBytes : gStats.invalBytes) += bytes;
-#else
-	(void)unlock;
-	(void)n;
-	(void)bytes;
-#endif
 }
+#endif
 
 tgm_coh **pageSlot(uint64_t pa)
 {
@@ -126,7 +116,7 @@ void idUnlink(const tgm_coh *c)
 	for (tgm_coh **p = idBucket(c->surfaceId); *p; p = &(*p)->idNext) {
 		if (*p == c) {
 			*p = c->idNext;
-			__atomic_sub_fetch(&gWithId, 1, __ATOMIC_RELAXED);
+			__atomic_store_n(&gWithId, gWithId - 1, __ATOMIC_RELAXED);
 			return;
 		}
 	}
@@ -134,6 +124,8 @@ void idUnlink(const tgm_coh *c)
 
 void entryFree(tgm_coh *c)
 {
+	if (c->tiled && c->tiled->tiled)
+		tgm_tiled_unmark_pages(c->pas, c->npages);
 	switch_gpu_backing_release(c->backing);
 	if (c->releaseSurface)
 		c->releaseSurface(c->surface);
@@ -168,7 +160,7 @@ bool defer(tgm_coh *c, void **surface, void (**releaseSurface)(void *))
 	if (!c->record || !c->surface || c->parked)
 		return false;
 	c->deferred = true;
-	__atomic_add_fetch(&gDeferred, 1, __ATOMIC_RELAXED);
+	__atomic_store_n(&gDeferred, gDeferred + 1, __ATOMIC_RELAXED);
 	tgm_record_park(c->record, c);
 	*surface = c->surface;
 	*releaseSurface = c->releaseSurface;
@@ -196,7 +188,9 @@ void drop(tgm_coh *const *cs, uint32_t n)
 			--c->refs;
 		}
 		if (c->refs == 1 && tiledNow(c)) {
-			if (defer(c, &surfaces[ndeferred], &releases[ndeferred]))
+			const tgm_tiled *t = __atomic_load_n(&c->tiled, __ATOMIC_ACQUIRE);
+			if ((!t || !__atomic_load_n(&t->unlockedViews, __ATOMIC_ACQUIRE)) &&
+			    defer(c, &surfaces[ndeferred], &releases[ndeferred]))
 				ndeferred++;
 			else
 				last[nlast++] = c;
@@ -251,35 +245,6 @@ uint32_t findById(uint32_t surfaceId, uint32_t skip, tgm_coh **out)
 }
 
 // A lock invalidates the entries the GPU may have written since the last lock; an unlock that wrote cleans them all.
-#if TGM_STATS
-extern "C" void proc_selfname(char *buf, int size);
-extern "C" int proc_selfpid(void);
-
-constexpr uint32_t kTraced = 6, kTracedFullScreen = 64;
-constexpr uint32_t kFullScreenPages =
-	900;  // 3.5 MiB of 4 KiB pages: a 720x1280 BGRA surface (the framebuffers' 3840 KiB)
-
-// The first CPU locks and writing unlocks of a GPU-imported surface after its entry was made, with the process and what
-// the trap did: who writes a surface the GPU samples, and whether through IOSurfaceLock/Unlock at all (a writer that is
-// not, a hardware engine or a CPU writer without locks, never shows here). Full-screen surfaces get more, so a periodic
-// reader of the framebuffers shows its cadence.
-void trace(tgm_coh *c, uint32_t surfaceId, bool unlock, bool readOnly, bool maintained)
-{
-	const uint32_t most = c->npages >= kFullScreenPages ? kTracedFullScreen : kTraced;
-	if (__atomic_fetch_add(&c->traced, 1u, __ATOMIC_RELAXED) >= most)
-		return;
-	char name[32];
-	proc_selfname(name, sizeof(name));
-	os_log(OS_LOG_DEFAULT, "tegra-gm20b: IOSurface %u (%u KiB) CPU %s by %s[%d]%s", surfaceId,
-	       c->npages * 4,
-	       unlock     ? "unlock after a write"
-	       : readOnly ? "lock read-only"
-			  : "lock for writing",
-	       name, proc_selfpid(),
-	       maintained ? (unlock ? ", cleaned" : ", invalidated (GPU-written)") : "");
-}
-#endif
-
 void surfaceTrapped(uint32_t surfaceId, bool unlock, bool readOnly)
 {
 	tgm_coh *found[kBatch];
@@ -288,8 +253,10 @@ void surfaceTrapped(uint32_t surfaceId, bool unlock, bool readOnly)
 		n = findById(surfaceId, skip, found);
 		if (!n)
 			break;
+#if TGM_STATS
 		uint64_t bytes = 0;
 		uint64_t done = 0;
+#endif
 		for (uint32_t i = 0; i < n; i++) {
 			if (!unlock) {
 				__atomic_add_fetch(&found[i]->cpuLocks, 1, __ATOMIC_ACQ_REL);
@@ -305,20 +272,21 @@ void surfaceTrapped(uint32_t surfaceId, bool unlock, bool readOnly)
 								__ATOMIC_ACQ_REL) != 0);
 			auto *backing = switch_gpu_backing_find_pa(found[i]->pa);
 			if (maintained && !backing) {
+#if TGM_STATS
 				bytes += maintain(found[i]);
 				done++;
+#else
+				(void)maintain(found[i]);
+#endif
 			}
 			if (backing)
 				switch_gpu_backing_release(backing);
-#if TGM_STATS
-			trace(found[i], surfaceId, unlock, readOnly, maintained);
-#else
-			(void)readOnly;
-#endif
 		}
+#if TGM_STATS
 		IOLockLock(gRegistryLock);
 		count(unlock, done, bytes);
 		IOLockUnlock(gRegistryLock);
+#endif
 		drop(found, n);
 	}
 }
@@ -390,7 +358,7 @@ extern "C" struct tgm_coh *tgm_coherency_add(uint64_t pa, uint32_t surface_id, c
 			c->parked = false;
 		} else if (c->deferred) {
 			c->deferred = false;
-			__atomic_sub_fetch(&gDeferred, 1, __ATOMIC_RELAXED);
+			__atomic_store_n(&gDeferred, gDeferred - 1, __ATOMIC_RELAXED);
 			tgm_record_take(c->record);
 		} else {
 			c->refs++;
@@ -404,7 +372,7 @@ extern "C" struct tgm_coh *tgm_coherency_add(uint64_t pa, uint32_t surface_id, c
 			tgm_coh **b = idBucket(surface_id);
 			c->idNext = *b;
 			*b = c;
-			__atomic_add_fetch(&gWithId, 1, __ATOMIC_RELAXED);
+			__atomic_store_n(&gWithId, gWithId + 1, __ATOMIC_RELAXED);
 		}
 	}
 	IOLockUnlock(gRegistryLock);
@@ -788,6 +756,105 @@ extern "C" struct tgm_coh *tgm_coh_find_tiled_pa(uint64_t pa, uint64_t *offset)
 	return found;
 }
 
+extern "C" struct tgm_coh *tgm_coh_find_tiled_scratch_pa(uint64_t pa)
+{
+	if (!gRegistryLock || !tgm_tiled_any())
+		return nullptr;
+	const uint64_t page = pa & ~0xfffULL;
+	tgm_coh *matched = nullptr;
+	for (uint32_t skip = 0; !matched;) {
+		tgm_coh *candidates[kBatch];
+		uint32_t n = 0, seen = 0;
+		IOLockLock(gRegistryLock);
+		for (uint32_t b = 0; b < kBuckets && n < kBatch; b++) {
+			for (tgm_coh *c = gByPage[b]; c && n < kBatch; c = c->next) {
+				const tgm_tiled *t = __atomic_load_n(&c->tiled, __ATOMIC_ACQUIRE);
+				if (t && __atomic_load_n(&t->tiled, __ATOMIC_ACQUIRE) &&
+				    __atomic_load_n(&t->scratchMarked, __ATOMIC_ACQUIRE) &&
+				    seen++ >= skip) {
+					c->refs++;
+					candidates[n++] = c;
+				}
+			}
+		}
+		IOLockUnlock(gRegistryLock);
+		for (uint32_t i = 0; i < n; i++) {
+			tgm_coh *c = candidates[i];
+			if (!matched) {
+				IOLockLock(c->lock);
+				const tgm_tiled *t = __atomic_load_n(&c->tiled, __ATOMIC_ACQUIRE);
+				if (t && t->tiled && t->scratch && t->scratchMarked) {
+					tgm_relayout_pages rows = {};
+					tgm_scratch_pages(t->scratch, &rows);
+					for (uint32_t p = 0; p < rows.npages; p++) {
+						if (rows.pas[p] == page) {
+							matched = c;
+							break;
+						}
+					}
+				}
+				IOLockUnlock(c->lock);
+			}
+			if (c != matched)
+				tgm_coherency_put(c);
+		}
+		if (n < kBatch)
+			break;
+		skip += n;
+	}
+	return matched;
+}
+
+extern "C" void tgm_coh_for_each_unlocked_write(void (*fn)(struct tgm_coh *))
+{
+	if (!gRegistryLock || !tgm_tiled_any() || !fn)
+		return;
+	tgm_coh *batch[kBatch];
+	for (;;) {
+		uint32_t n = 0;
+		IOLockLock(gRegistryLock);
+		for (uint32_t b = 0; b < kBuckets && n < kBatch; b++) {
+			for (tgm_coh *c = gByPage[b]; c && n < kBatch; c = c->next) {
+				const tgm_tiled *t = __atomic_load_n(&c->tiled, __ATOMIC_ACQUIRE);
+				if (t && __atomic_load_n(&t->tiled, __ATOMIC_ACQUIRE) &&
+				    __atomic_load_n(&t->unlockedWrote, __ATOMIC_ACQUIRE)) {
+					c->refs++;
+					batch[n++] = c;
+				}
+			}
+		}
+		IOLockUnlock(gRegistryLock);
+		if (!n)
+			return;
+		for (uint32_t i = 0; i < n; i++)
+			fn(batch[i]);
+		drop(batch, n);
+		if (n < kBatch)
+			return;
+	}
+}
+
+extern "C" void *tgm_coh_surface(const struct tgm_coh *c)
+{
+	return c ? c->surface : nullptr;
+}
+
+extern "C" int tgm_coh_is_deferred(struct tgm_coh *c)
+{
+	if (!c || !gRegistryLock)
+		return 0;
+	IOLockLock(gRegistryLock);
+	const int deferred = c->deferred ? 1 : 0;
+	IOLockUnlock(gRegistryLock);
+	return deferred;
+}
+
+extern "C" void tgm_coh_clear_gpu_dirty(struct tgm_coh *c)
+{
+	if (c)
+		__atomic_store_n(&c->gpuDirty, 0, __ATOMIC_RELEASE);
+}
+
 extern "C" struct tgm_coh *tgm_coh_find_pa(uint64_t pa)
 {
 	if (!gRegistryLock)
@@ -935,7 +1002,7 @@ extern "C" void tgm_coh_undefer(struct tgm_coh *c)
 	const bool deferred = c->deferred;
 	if (deferred) {
 		c->deferred = false;
-		__atomic_sub_fetch(&gDeferred, 1, __ATOMIC_RELAXED);
+		__atomic_store_n(&gDeferred, gDeferred - 1, __ATOMIC_RELAXED);
 		tgm_record_take(c->record);
 	}
 	IOLockUnlock(gRegistryLock);
@@ -997,7 +1064,7 @@ extern "C" void tgm_coherency_record_gone(struct tgm_record *record)
 	bool dead = false;
 	if (c && c->deferred) {
 		c->deferred = false;
-		__atomic_sub_fetch(&gDeferred, 1, __ATOMIC_RELAXED);
+		__atomic_store_n(&gDeferred, gDeferred - 1, __ATOMIC_RELAXED);
 		c->record = nullptr;
 		dead = release(c);
 	}

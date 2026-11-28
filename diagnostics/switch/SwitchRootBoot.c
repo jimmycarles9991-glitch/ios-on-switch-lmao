@@ -112,12 +112,6 @@ void switch_root_boot_prepare(void)
     int error = switch_block_publish();
     if (error)
         panic("Switch: SD block device publish failed (%d); see SwitchSD lines above", error);
-    /* NVRAM controller: IODTNVRAM gains a backend and the "IONVRAM" resource is
-     * published (AppleImage4's NVRAM writes wait on it forever). It keeps the
-     * NVRAM in RAM until Data is mounted, then in /private/var/Switch/nvram.bin. */
-    extern int switch_nvram_publish(void);
-    if (switch_nvram_publish())
-        printf("Switch: NVRAM controller not registered\n");
     switch_board_start();
     switch_root_record_stage(5);
 }

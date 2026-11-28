@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A stitched library of the app library's own visible functions (shaders/Stitching.metal) is made by the system shader

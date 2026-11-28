@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// fetch_blend_vertex's pipelines (FramebufferFetch.metal): a float4 vertex attribute (clip x, y, tag), an instance
@@ -206,14 +207,10 @@ struct FetchBlendMesh: Sendable {
 enum FetchBlendState {
     static let clear = SIMD4<Int>(2, 0, 1, 3)
 
-    static func scale(_ format: TexelFormat) -> Float { format.isFloat ? 256 : format == .bgr10a2Unorm ? 1023 : 255 }
+    static func scale(_ format: TexelFormat) -> Float { FetchBlendRef.scale(format) }
 
     /// What the pixel's next fetch reads back of state `n` once stored in `format`: itself, but a two-bit alpha's
-    static func stored(_ n: SIMD4<Int>, _ format: TexelFormat) -> SIMD4<Int> {
-        let scale = scale(format)
-        let values = format.decode(format.encode((0 ..< 4).map { Float(n[$0]) / scale })[...])
-        return SIMD4((0 ..< 4).map { Int((values[$0] * scale).rounded()) })
-    }
+    static func stored(_ n: SIMD4<Int>, _ format: TexelFormat) -> SIMD4<Int> { FetchBlendRef.stored(n, format) }
 
     static func step(_ n: SIMD4<Int>, _ tag: UInt32) -> SIMD4<Int> {
         let full = n.x < 255 ? 0 : 1
@@ -223,20 +220,23 @@ enum FetchBlendState {
 
     static func replay(_ layers: [FetchBlendLayer], size: Int, format: TexelFormat) -> [SIMD4<Int>] {
         var pixels = [SIMD4<Int>](repeating: stored(clear, format), count: size * size)
-        for layer in layers {
-            let (xs, ys) = ((max(0, layer.x0), min(size, layer.x1)), (max(0, layer.y0), min(size, layer.y1)))
-            guard xs.0 < xs.1, ys.0 < ys.1 else { continue }
-            for y in ys.0 ..< ys.1 {
-                for x in xs.0 ..< xs.1 { pixels[y * size + x] = stored(step(pixels[y * size + x], layer.tag), format) }
+        pixels.withUnsafeMutableBufferPointer { buf in
+            let p = buf.baseAddress!
+            for layer in layers {
+                let x0 = max(0, layer.x0), x1 = min(size, layer.x1)
+                let y0 = max(0, layer.y0), y1 = min(size, layer.y1)
+                guard x0 < x1, y0 < y1 else { continue }
+                let tag = layer.tag
+                for y in y0 ..< y1 {
+                    let row = y * size
+                    for x in x0 ..< x1 { p[row + x] = FetchBlendRef.stored(step(p[row + x], tag), format) }
+                }
             }
         }
         return pixels
     }
 
-    static func bytes(_ pixels: [SIMD4<Int>], _ format: TexelFormat) -> [UInt8] {
-        let scale = scale(format)
-        return pixels.flatMap { n in format.encode((0 ..< 4).map { Float(n[$0]) / scale }) }
-    }
+    static func bytes(_ pixels: [SIMD4<Int>], _ format: TexelFormat) -> [UInt8] { FetchBlendRef.bytes(pixels, format) }
 
     static func units(_ bytes: [UInt8], _ format: TexelFormat, pixel: Int) -> SIMD4<Int> {
         let at = pixel * format.bytesPerTexel

@@ -223,8 +223,10 @@ private:
     static void rootWords(const PackKernel &r, const uint32_t base[3], const uint32_t groups[3], uint64_t setVa,
                           uint32_t residualMask, const std::array<uint32_t, 32> &residuals, const uint32_t region[8],
                           uint32_t *root);
+    static uint32_t activeRootBytes(const ComputeState &k, const PackKernel &r, uint32_t residualMask,
+                                    bool indirectStageIn);
     static bool qmdWords(const ComputeState &k, const uint32_t groups[3], uint64_t rootVa, uint64_t setVa,
-                         uint32_t *qmd, const char **why);
+                         uint32_t *qmd, const char **why, uint32_t rootBytes = 0x800);
     // Why an indirect dispatch command cannot carry kernel `k`, null where it can
     static const char *icbRefusal(const ComputeState &k);
     // The header index sampler entry `e`, whose record holds its pairs, binds: its own, where the address maps of the
@@ -266,12 +268,27 @@ private:
     uint32_t residualMask_ = 0;
     SpillResiduals spilled_;
     uint64_t setVa_ = 0, rootVa_ = 0;
+    uint32_t rootBytes_ = 0x800;
     uint64_t slotTableVa_ = 0;  // this dispatch's argument root-slot table, shared by its band pieces (argumentRoot)
     std::array<uint32_t, 3> grid_{}, base_{};
     std::array<uint32_t, 8> region_{};
     StageIn stageIn_;
     const Buffer *stageInRegion_ = nullptr;
     uint64_t stageInRegionOffset_ = 0;
+
+    struct AccessRange {
+        uint64_t lo = 0, hi = 0;
+    };
+
+    static constexpr uint32_t kHazardRanges = 32;
+    AccessRange curReads_[kHazardRanges] = {}, curWrites_[kHazardRanges] = {};
+    uint32_t curReadCount_ = 0, curWriteCount_ = 0;
+    bool curUnknownRead_ = false, curUnknownWrite_ = false;
+    AccessRange pendingReads_[kHazardRanges] = {}, pendingWrites_[kHazardRanges] = {};
+    uint32_t pendingReadCount_ = 0, pendingWriteCount_ = 0;
+    bool pendingUnknownRead_ = false, pendingUnknownWrite_ = false;
+    bool dispatchHasHazard(const AccessRange *extraReads = nullptr, uint32_t extraReadCount = 0) const;
+    void recordDispatchAccesses(const AccessRange *extraReads = nullptr, uint32_t extraReadCount = 0);
     // `bytes` at `dst` written by the compute class's inline engine from the same bytes at `src`, which the channel
     // fetches after the method header as a continuation of the stream (nvk_cmd_compute_indirect_copy)
     void inlineFrom(uint64_t dst, uint64_t src, uint32_t bytes);

@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 
 /// A stored one-sample depth texture made plain for want of compressed memory moves onto it once some is made

@@ -225,6 +225,16 @@ pub(crate) fn stage_in_words(plan: &BindingPlan) -> Result<(i32, [[u32; 2]; 4]),
     Ok((region, strides))
 }
 
+/// The kernel's SlotGuestBase fields (a buffer slot's Metal address its program reads): no record word fills one, so they
+/// count with the other holes and the record is refused (direct_compute.cpp recordable), never dispatched reading the
+/// field's static word as an address
+pub(crate) fn guest_bases<'a>(fields: impl IntoIterator<Item = &'a PushField>) -> u32 {
+    fields
+        .into_iter()
+        .filter(|f| matches!(f, PushField::SlotGuestBase(_)))
+        .count() as u32
+}
+
 pub(crate) fn region_word(plan: &BindingPlan) -> i32 {
     plan.push
         .fields
@@ -276,6 +286,18 @@ mod tests {
         assert_eq!(order.as_deref(), Some("the order of its descriptor writes"));
         let specialized = offset_change([&plain, &plain], true, &[layout.clone(), layout]);
         assert_eq!(specialized.as_deref(), Some("its specialization constants"));
+    }
+
+    #[test]
+    fn a_slot_guest_base_counts_as_a_hole_and_other_fields_do_not() {
+        let fields = [
+            PushField::SlotBindOffset(buffer(2)),
+            PushField::SlotGuestBase(buffer(5)),
+            PushField::DispatchRegion,
+            PushField::SlotGuestBase(buffer(6)),
+        ];
+        assert_eq!(guest_bases(&fields), 2);
+        assert_eq!(guest_bases(&fields[..1]), 0);
     }
 
     #[test]

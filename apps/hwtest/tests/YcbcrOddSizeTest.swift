@@ -1,7 +1,9 @@
 import CoreVideo
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Subsampled two-plane YCbCr textures of an odd width or height: Metal makes one used only to be read and none it may

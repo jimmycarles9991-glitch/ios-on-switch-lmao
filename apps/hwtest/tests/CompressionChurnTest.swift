@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 
 /// GM20B colour and depth compression for memoryless targets follows what a pass needs now (boot 15: backboardd and
@@ -42,37 +44,46 @@ struct CompressionChurnTest: HWTest {
         }
         let start = GM20BFacade.compression(of: gpu.device)
         var paths: Set<String> = []
-        func sweep(_ order: [Int]) async throws {
-            for index in order {
-                let target = targets[index]
-                let timing = try await gpu.run { commands in
-                    let pass = MTLRenderPassDescriptor()
-                    pass.colorAttachments[0].texture = target.colour
-                    pass.colorAttachments[0].loadAction = .clear
-                    pass.colorAttachments[0].storeAction = .dontCare
-                    pass.depthAttachment.texture = target.zeta
-                    pass.depthAttachment.loadAction = .clear
-                    pass.depthAttachment.storeAction = .dontCare
-                    pass.stencilAttachment.texture = target.zeta
-                    pass.stencilAttachment.loadAction = .clear
-                    pass.stencilAttachment.storeAction = .dontCare
-                    commands.makeRenderCommandEncoder(descriptor: pass)!.endEncoding()
-                }
-                paths.insert(timing.path)
+        func encodePass(_ target: (colour: MTLTexture, zeta: MTLTexture)) -> (MTLCommandBuffer) -> Void {
+            { commands in
+                let pass = MTLRenderPassDescriptor()
+                pass.colorAttachments[0].texture = target.colour
+                pass.colorAttachments[0].loadAction = .clear
+                pass.colorAttachments[0].storeAction = .dontCare
+                pass.depthAttachment.texture = target.zeta
+                pass.depthAttachment.loadAction = .clear
+                pass.depthAttachment.storeAction = .dontCare
+                pass.stencilAttachment.texture = target.zeta
+                pass.stencilAttachment.loadAction = .clear
+                pass.stencilAttachment.storeAction = .dontCare
+                commands.makeRenderCommandEncoder(descriptor: pass)!.endEncoding()
             }
         }
-        // the largest first, as a full-screen layer comes before the smaller ones
-        try await sweep(Array(sizes.indices))
+        func sweep(_ order: [Int]) throws {
+            let buffers = try order.map { try gpu.commit(encodePass(targets[$0])) }
+            try gpu.finish(buffers)
+            for buffer in buffers { paths.insert(GM20BFacade.path(of: buffer)) }
+        }
+        // the largest first, settled so its compressed backing holds every smaller pass of the sweep
+        let firstTiming = try await gpu.run(encodePass(targets[0]))
+        paths.insert(firstTiming.path)
+        try await CompressionSettled.settle(gpu.device)
+        try sweep(Array(sizes.indices.dropFirst()))
         try await CompressionSettled.settle(gpu.device)
         let warm = GM20BFacade.compression(of: gpu.device)
         var held: [Int] = []
         for round in 1 ..< Self.sweeps {
-            try await sweep(sizes.indices.map { ($0 * 7 + round) % sizes.count })
+            try sweep(sizes.indices.map { ($0 * 7 + round) % sizes.count })
             held.append(GM20BFacade.compression(of: gpu.device)["held_bytes"] ?? -1)
         }
         let swept = GM20BFacade.compression(of: gpu.device)
-        try await Task.sleep(nanoseconds: UInt64(Self.idleSeconds * 1e9))
-        let idle = GM20BFacade.compression(of: gpu.device)
+        let idleDeadline = Date().addingTimeInterval(Self.idleSeconds)
+        try await Task.sleep(nanoseconds: 10_050_000_000)
+        var idle = GM20BFacade.compression(of: gpu.device)
+        while ((idle["held"] ?? -1) != 0 || (idle["views"] ?? -1) != 0) && Date() < idleDeadline {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            idle = GM20BFacade.compression(of: gpu.device)
+        }
 
         let made = (swept["made"] ?? 0) - (start["made"] ?? 0)
         let refused = (swept["refused"] ?? 0) - (start["refused"] ?? 0)

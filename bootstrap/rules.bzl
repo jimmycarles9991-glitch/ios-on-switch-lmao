@@ -64,10 +64,15 @@ def _payload_impl(ctx):
     args.add("--out", out)
     args.add("--manifest", manifest)
     args.add("--debs", packages.path)
+    inputs = list(files.values())
+    if ctx.attr.development:
+        development = ctx.attr.development[OutputGroupInfo].packages.to_list()[0]
+        args.add("--development", development.path)
+        inputs.append(development)
     ctx.actions.run(
         executable = ctx.executable._tool,
         arguments = [args],
-        inputs = files.values(),
+        inputs = inputs,
         outputs = [out, manifest, packages],
         execution_requirements = {"requires-darwin": ""},
         mnemonic = "BootstrapPayload",
@@ -96,6 +101,7 @@ bootstrap_payload = rule(
         "sileo_built": attr.label(allow_single_file = True, mandatory = True),
         "sileo_deb": attr.label(allow_single_file = True, mandatory = True),
         "built": attr.label(allow_single_file = True, mandatory = True),
+        "development": attr.label(),
         "uicache": attr.label(default = "//drivers/SwitchAppRegistration:switch-appregd", allow_single_file = True),
         "sbreload": attr.label(default = "//bootstrap/respring:sbreload", allow_single_file = True),
         "launchctl": attr.label(default = "//bootstrap/launchctl:launchctl", allow_single_file = True),
@@ -103,5 +109,58 @@ bootstrap_payload = rule(
         "sources": attr.label(default = "//bootstrap:sources.json", allow_single_file = True),
         "_zstd": attr.label(default = "//bootstrap:zstd", allow_single_file = True, cfg = "exec"),
         "_tool": attr.label(default = "//bootstrap:assemble", executable = True, cfg = "exec"),
+    },
+)
+
+DEVELOPMENT_PACKAGES = ["openssh-client", "openssh-sftp-server", "openssh-server", "switch-ssh", "top"]
+
+def _development_impl(ctx):
+    out = ctx.actions.declare_directory(ctx.label.name + ".packages")
+    files = {
+        "openssh-client": ctx.file.openssh_client,
+        "openssh-sftp-server": ctx.file.openssh_sftp_server,
+        "openssh-server": ctx.file.openssh_server,
+        "top": ctx.file.top,
+        "wrapper": ctx.file.wrapper,
+        "switch-threads": ctx.file.switch_threads,
+        "zstd-lib": ctx.file._zstd,
+    }
+    args = ctx.actions.args()
+    for name, file in files.items():
+        args.add("--" + name, file.path)
+    args.add("--out", out.path)
+    ctx.actions.run(
+        executable = ctx.executable._tool,
+        arguments = [args],
+        inputs = files.values(),
+        outputs = [out],
+        execution_requirements = {"requires-darwin": ""},
+        mnemonic = "BootstrapDevelopment",
+        progress_message = "Signing a development image's SSH server and process tools",
+    )
+    groups = {"packages": depset([out])}
+    for name in DEVELOPMENT_PACKAGES:
+        package = ctx.actions.declare_file(ctx.label.name + "." + name + ".deb")
+        ctx.actions.run_shell(
+            inputs = [out],
+            outputs = [package],
+            arguments = [out.path + "/" + name + ".deb", package.path],
+            command = '/bin/cp "$1" "$2"',
+            mnemonic = "BootstrapDevelopmentPackage",
+        )
+        groups[name.replace("-", "_")] = depset([package])
+    return [DefaultInfo(files = depset([out])), OutputGroupInfo(**groups)]
+
+bootstrap_development = rule(
+    implementation = _development_impl,
+    attrs = {
+        "openssh_client": attr.label(allow_single_file = True, mandatory = True),
+        "openssh_sftp_server": attr.label(allow_single_file = True, mandatory = True),
+        "openssh_server": attr.label(allow_single_file = True, mandatory = True),
+        "top": attr.label(allow_single_file = True, mandatory = True),
+        "wrapper": attr.label(default = "//bootstrap:switch-sshd.sh", allow_single_file = True),
+        "switch_threads": attr.label(default = "//bootstrap/threads:switch-threads", allow_single_file = True),
+        "_zstd": attr.label(default = "//bootstrap:zstd", allow_single_file = True, cfg = "exec"),
+        "_tool": attr.label(default = "//bootstrap:development_tool", executable = True, cfg = "exec"),
     },
 )

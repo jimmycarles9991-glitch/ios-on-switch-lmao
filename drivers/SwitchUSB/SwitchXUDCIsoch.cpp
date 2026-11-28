@@ -39,7 +39,8 @@ void SwitchXUDC::kickIsoc(uint32_t dci)
     bool queued = false;
     bool waiting = false;
     HeldTrb held = {};
-    while (ep.active && !ep.iso->fenced() && ep.iso->onRing() < ep.count && ep.iso->onRing() < kIsocRequests) {
+    while (ep.active && !ep.iso->fenced() && !(settlingDcis & (1u << dci)) && ep.iso->onRing() < ep.count &&
+           ep.iso->onRing() < kIsocRequests) {
         HeldTrb last = {};
         const Admit a = admitIsoc(dci, ep.queue[(ep.head + ep.iso->onRing()) % kQueueDepth], &last);
         if (a == Admit::Queued) {
@@ -230,6 +231,7 @@ void SwitchXUDC::finishIsoc(_IOUSBDeviceIORequestTag *request, IOReturn status)
 void SwitchXUDC::cancelIsoc(uint32_t dci, IOReturn status)
 {
     Endpoint &ep = endpoints[dci];
+    DciOp op(this, 1u << dci);
     if (ep.iso->busy())
         hw.dropQueued(dci);
     for (uint32_t k = 0; k < ep.iso->onRing(); ++k) {
@@ -251,6 +253,7 @@ void SwitchXUDC::cancelIsoc(uint32_t dci, IOReturn status)
     ep.head = ep.count = 0;
     if (ep.iso->cancel() && !draining && !hw.eventPending())
         ep.iso->liftFence();
+    op.end();
     drainSoon();
     for (uint32_t i = 0; i < count; ++i)
         finishIsoc(pending[i], status);

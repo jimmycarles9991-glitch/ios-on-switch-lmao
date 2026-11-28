@@ -17,8 +17,12 @@ extern "C" {
  * protected surface; -1: one that is not of the whole descriptor, which a view cannot put back), and the replacement of
  * that range by `memory` (an IOMemoryDescriptor: a scratch, or the surface's own to put it back). */
 int tgm_cpu_view_of(void *client, uint32_t id, struct tgm_cpu_view *out);
+int tgm_cpu_view_at(void *task, struct tgm_coh *c, uint64_t fault_va, uint64_t page_offset,
+		    struct tgm_cpu_view *out);
 int tgm_cpu_view_remap(const struct tgm_cpu_view *view, void *memory, uint64_t offset,
 		       int prefault);
+void tgm_cpu_view_protect_ro(const struct tgm_cpu_view *view);
+int tegra_gm20b_tiled_cpu_fault(void *task, uint64_t vaddr, uint64_t pa, uint32_t prot);
 /* The descriptor the task's map of the surface is of, for putting a view back at view->offset (retained for the caller;
  * tgm_memory_release) */
 void *tgm_surface_memory(void *client, uint32_t id);

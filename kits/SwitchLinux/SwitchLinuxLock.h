@@ -61,7 +61,7 @@ static inline void switch_linux_spin_lock(switch_linux_spinlock *lock)
     _disable_preemption();
     const uintptr_t self = switch_linux_thread();
     uintptr_t unlocked = 0;
-    if (!__atomic_compare_exchange_n(&lock->holder, &unlocked, self, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+    if (!__atomic_compare_exchange_n(&lock->holder, &unlocked, self, true, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
         switch_linux_spin_contended(lock, self);
 }
 
@@ -117,7 +117,7 @@ static inline void switch_linux_read_lock(switch_linux_rwlock *lock)
     _disable_preemption();
     uint32_t seen = __atomic_load_n(&lock->state, __ATOMIC_RELAXED);
     if ((seen & SWITCH_LINUX_RW_WRITER) ||
-        !__atomic_compare_exchange_n(&lock->state, &seen, seen + 1, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+        !__atomic_compare_exchange_n(&lock->state, &seen, seen + 1, true, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
         switch_linux_read_contended(lock);
 }
 
@@ -131,7 +131,7 @@ static inline void switch_linux_write_lock(switch_linux_rwlock *lock)
 {
     _disable_preemption();
     uint32_t idle = 0;
-    if (!__atomic_compare_exchange_n(&lock->state, &idle, SWITCH_LINUX_RW_WRITER, false, __ATOMIC_ACQUIRE,
+    if (!__atomic_compare_exchange_n(&lock->state, &idle, SWITCH_LINUX_RW_WRITER, true, __ATOMIC_ACQUIRE,
                                      __ATOMIC_RELAXED))
         switch_linux_write_contended(lock);
 }

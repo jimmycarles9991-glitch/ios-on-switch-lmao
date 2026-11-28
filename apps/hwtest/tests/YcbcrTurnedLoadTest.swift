@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// Passes that load and store a YCbCr 4:2:0 (500) target turned by rotation 1, 2 or 3 over plane 0 of a '420v' 128x64

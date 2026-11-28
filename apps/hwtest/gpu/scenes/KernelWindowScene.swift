@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Kernels whose buffers are bound at addresses off 16 bytes, by element: floats at 4, float2s at 8, packed float3s at

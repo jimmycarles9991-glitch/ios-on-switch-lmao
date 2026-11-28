@@ -95,6 +95,26 @@ class ApfsTest(unittest.TestCase):
             finally:
                 os.close(fd)
 
+    def test_sets_volume_feature_flags_idempotently(self):
+        system, data, preboot = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        want_ro = apfs.APFS_ROCOMPAT_CLONE_MAPPING | apfs.APFS_ROCOMPAT_ATTRIBUTION_TAGS
+        want_incompat = apfs.APFS_INCOMPAT_EXPANDED_RECORDS
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'c.img')
+            container(path, [(system, 1), (data, 0x40), (preboot, 0x10)])
+            fd = os.open(path, os.O_RDWR)
+            try:
+                c = apfs.Container(fd)
+                patched = c.set_volume_features({data: (want_ro, want_incompat)})
+                self.assertEqual(patched, [(21, data, want_ro, want_incompat)])
+                for paddr, expected in ((20, (0, 0)), (21, (want_ro, want_incompat)), (22, (0, 0))):
+                    blk = c.read(paddr)
+                    self.assertTrue(apfs.checksum_ok(blk))
+                    self.assertEqual(struct.unpack_from('<QQ', blk, apfs.VOL_ROCOMPAT_OFFSET), expected)
+                self.assertEqual(c.set_volume_features({data: (want_ro, want_incompat)}), [])
+            finally:
+                os.close(fd)
+
 
 if __name__ == '__main__':
     unittest.main()

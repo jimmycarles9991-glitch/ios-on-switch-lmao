@@ -24,9 +24,16 @@ py_library(
         "memory.py",
         "morning.py",
         "motion.py",
+        "owed.py",
+        "owed_all.py",
+        "owed_gpu.py",
+        "owed_system.py",
+        "pack_image.py",
+        "pretranslated.py",
         "protection.py",
         "reports.py",
         "rules.py",
+        "shared_cache.py",
         "springboard.py",
         "stutter.py",
         "textures.py",
@@ -73,6 +80,14 @@ py_binary(
     deps = [":lib"],
 )
 
+# owed_*.py: every owed check against a line made from its format string, and the per-lane rows.
+py_test(
+    name = "owed_test",
+    size = "small",
+    srcs = ["owed_test.py"],
+    deps = [":lib"],
+)
+
 py_test(
     name = "devicerun_test",
     size = "small",
@@ -116,6 +131,14 @@ py_test(
     name = "motion_test",
     size = "small",
     srcs = ["motion_test.py"],
+    deps = [":lib"],
+)
+
+# pretranslated.py's checks over the kernel's deploy-update lines.
+py_test(
+    name = "pretranslated_test",
+    size = "small",
+    srcs = ["pretranslated_test.py"],
     deps = [":lib"],
 )
 
@@ -191,11 +214,27 @@ py_test(
     deps = [":lib"],
 )
 
+# pack_image.py: the pack image's build, open and stream, backboardd's wait at its open and the boot time, in uptime.
+py_test(
+    name = "pack_image_test",
+    size = "small",
+    srcs = ["pack_image_test.py"],
+    deps = [":lib"],
+)
+
 # memory.py's kill and small-daemon rows over lines in the Metal driver's and XNU's formats.
 py_test(
     name = "memory_test",
     size = "small",
     srcs = ["memory_test.py"],
+    deps = [":lib"],
+)
+
+# shared_cache.py's per-boot judgement of each pinned dyld cache over lines in the kernel's formats.
+py_test(
+    name = "shared_cache_test",
+    size = "small",
+    srcs = ["shared_cache_test.py"],
     deps = [":lib"],
 )
 
@@ -222,6 +261,7 @@ py_test(
     srcs = ["joycon_test.py"],
     deps = [":lib"],
 )
+
 # bazel run //tools/devicerun:frame_weights -- <absolute .logarchive> --pack <pack.bin>: the frame-weights capture's table
 # (drivers/TegraGM20BMetal/draw_times.h, tools/devicerun/README.md)
 py_library(

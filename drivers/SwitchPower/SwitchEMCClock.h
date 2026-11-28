@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_POWER
 namespace {
 constexpr uint32_t kMcLatencyAllowanceDc = 0x2e8, kMcDisPtsaRate = 0x41c;
 }
@@ -40,7 +40,7 @@ bool SwitchEMC::moveTo(unsigned asked, switch_emc_reason reason)
         index = floor;
     index = memoryFloor(index);
     if (index >= count || !programMemory(khz[cur], khz[index])) {
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_POWER
         refusals++;
 #endif
         if (!planRefusalLogged) {
@@ -54,14 +54,14 @@ bool SwitchEMC::moveTo(unsigned asked, switch_emc_reason reason)
     if (index == cur)
         return true;
     unsigned now = 0;
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_POWER
     const bool watch = !bpmpChangeLogged && __atomic_load_n(&memoryQualified, __ATOMIC_ACQUIRE);
     const uint32_t laBefore = watch ? uint32_t(mcRegs[kMcLatencyAllowanceDc / 4]) : 0;
     const uint32_t ptsaBefore = watch ? uint32_t(mcRegs[kMcDisPtsaRate / 4]) : 0;
 #endif
     const int err = tegra_bpmp_emc_set(khz[index], &now);
     if (err) {
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_POWER
         refusals++;
 #endif
         if (!refusalLogged) {
@@ -72,12 +72,12 @@ bool SwitchEMC::moveTo(unsigned asked, switch_emc_reason reason)
         (void)programMemory(khz[cur], khz[cur], true);
         return false;
     }
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_POWER
     if (watch)
         bpmpChangeLogged = logBpmpChange(khz[index], now, laBefore, ptsaBefore);
 #endif
     const unsigned actual = reconcileRate(now);
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_POWER
     account(mach_absolute_time());
     moves++;
     logMove(cur, actual, asked, reason);
@@ -89,7 +89,7 @@ bool SwitchEMC::moveTo(unsigned asked, switch_emc_reason reason)
     return cur >= index;
 }
 
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_POWER
 void SwitchEMC::logMove(unsigned from, unsigned to, unsigned asked, switch_emc_reason reason) const
 {
     static const char *const kReasons[] = {"ACTMON",         "a hint or submit", "display bandwidth",
@@ -130,7 +130,7 @@ IOReturn SwitchEMC::governAction(OSObject *owner, void *resume, void *, void *, 
         now = 0;
     }
     self->cur = self->reconcileRate(now, resume != nullptr);
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_POWER
     self->since = mach_absolute_time();
     self->busyMark = __atomic_load_n(&self->busyTotal, __ATOMIC_RELAXED);
 #endif

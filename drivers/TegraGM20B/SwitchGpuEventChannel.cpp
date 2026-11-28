@@ -54,14 +54,21 @@ int SwitchGpuEventChannel::adopt(switch_gpu_event_waits *waits, Record **record)
 		--count_;
 		if (status < 0 && !failure_) {
 			failedSeq_ = head->seqno;
-			failure_ = status;
+			__atomic_store_n(&failure_, status, __ATOMIC_RELEASE);
 		}
 	}
-	if (!records_)
+	if (!records_) {
 		last_ = &records_;
+		__atomic_store_n(&active_, 0u, __ATOMIC_RELEASE);
+	}
+	switch_gpu_event_waits *previous = nullptr;
 	const bool full = count_ >= kRecords;
-	if (!full)
+	if (!full) {
 		++count_;
+		previous = tail_;
+		if (previous)
+			switch_gpu_event_waits_retain(previous);
+	}
 	IOLockUnlock(lock_);
 	while (retired) {
 		auto *head = retired;
@@ -73,7 +80,6 @@ int SwitchGpuEventChannel::adopt(switch_gpu_event_waits *waits, Record **record)
 		return -28;
 	auto *made = IONew(Record, 1);
 	int result = made ? 0 : -12;
-	auto *previous = tail();
 	if (!result && previous)
 		result = switch_gpu_event_waits_inherit(waits, previous);
 	switch_gpu_event_waits_release(&previous);
@@ -98,6 +104,7 @@ void SwitchGpuEventChannel::bind(Record *record, uint32_t seqno)
 		record->linked = true;
 		*last_ = record;
 		last_ = &record->next;
+		__atomic_store_n(&active_, 1u, __ATOMIC_RELEASE);
 	}
 	IOLockUnlock(lock_);
 }
@@ -132,6 +139,8 @@ void SwitchGpuEventChannel::abort(Record **owned)
 			if (last_ == &record->next)
 				last_ = at;
 		}
+		if (!records_)
+			__atomic_store_n(&active_, 0u, __ATOMIC_RELEASE);
 	}
 	--count_;
 	IOLockUnlock(lock_);
@@ -141,16 +150,19 @@ void SwitchGpuEventChannel::abort(Record **owned)
 
 uint64_t SwitchGpuEventChannel::generation()
 {
-	IOLockLock(lock_);
-	const uint64_t result = generation_;
-	IOLockUnlock(lock_);
-	return result;
+	return __atomic_load_n(&generation_, __ATOMIC_ACQUIRE);
 }
 
 int SwitchGpuEventChannel::wait(uint32_t seqno, uint64_t deadline, uint64_t generation)
 {
 	if (!generation)
 		generation = this->generation();
+	const uint32_t active = __atomic_load_n(&active_, __ATOMIC_ACQUIRE);
+	const int fail = __atomic_load_n(&failure_, __ATOMIC_ACQUIRE);
+	if (__atomic_load_n(&generation_, __ATOMIC_ACQUIRE) != generation)
+		return -19;
+	if (!active && !fail)
+		return 1;
 	for (;;) {
 		IOLockLock(lock_);
 		if (generation_ != generation) {
@@ -177,8 +189,10 @@ int SwitchGpuEventChannel::wait(uint32_t seqno, uint64_t deadline, uint64_t gene
 			--count_;
 			if (result < 0 && !failure_) {
 				failedSeq_ = record->seqno;
-				failure_ = result;
+				__atomic_store_n(&failure_, result, __ATOMIC_RELEASE);
 			}
+			if (!records_)
+				__atomic_store_n(&active_, 0u, __ATOMIC_RELEASE);
 			retired = record;
 		}
 		IOLockUnlock(lock_);
@@ -203,9 +217,10 @@ void SwitchGpuEventChannel::reset()
 	last_ = &records_;
 	tail_ = nullptr;
 	count_ = 0;
-	failure_ = 0;
 	failedSeq_ = 0;
-	++generation_;
+	__atomic_store_n(&failure_, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&active_, 0u, __ATOMIC_RELEASE);
+	__atomic_store_n(&generation_, generation_ + 1, __ATOMIC_RELEASE);
 	IOLockUnlock(lock_);
 	while (records) {
 		auto *record = records;

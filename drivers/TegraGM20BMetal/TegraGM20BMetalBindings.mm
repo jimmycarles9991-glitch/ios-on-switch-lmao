@@ -6,8 +6,9 @@
 
 @implementation SwitchMetalRenderEncoder (Bindings)
 
-// Room for `padded` bytes in the command buffer's setBytes chunks (SwitchMetalBytes): false when only heap memory had it
-static bool bytesRoom(SwitchMetalBytes &s, uint32_t padded, uint32_t &chunk, uint32_t &offset)
+// Room for `padded` bytes in the command buffer's setBytes chunks (SwitchMetalBytes): ok=false when only heap memory had it
+__attribute__((noinline)) static uint8_t *bytesRoomSlow(SwitchMetalBytes &s, uint32_t padded, uint32_t &chunk,
+                                                        uint32_t &offset, bool &ok)
 {
     while (s.at < s.chunks.size() && s.used + padded > s.chunks.own(s.at).length) {
         s.at++;
@@ -26,7 +27,36 @@ static bool bytesRoom(SwitchMetalBytes &s, uint32_t padded, uint32_t &chunk, uin
     chunk = uint32_t(s.at);
     offset = s.used;
     s.used += padded;
-    return s.chunks.own(s.at).va != 0;
+    const gm20b::Buffer &cur = s.chunks.own(s.at);
+    s.curCpu = cur.cpu;
+    s.curLen = uint32_t(std::min<uint64_t>(cur.length, UINT32_MAX));
+    s.curOk = cur.va != 0;
+    ok = s.curOk;
+    return s.curCpu + offset;
+}
+
+static inline uint8_t *bytesRoom(SwitchMetalBytes &s, uint32_t padded, uint32_t &chunk, uint32_t &offset, bool &ok)
+{
+    if (padded <= s.curLen - s.used) {
+        chunk = uint32_t(s.at);
+        offset = s.used;
+        s.used += padded;
+        ok = s.curOk;
+        return s.curCpu + offset;
+    }
+    return bytesRoomSlow(s, padded, chunk, offset, ok);
+}
+
+__attribute__((noinline)) static void reportBytesOom(__unsafe_unretained SwitchMetalCommandBuffer *cb,
+                                                     NSUInteger length)
+{
+    static std::atomic<bool> said{false};
+    if (!said.exchange(true, std::memory_order_relaxed))
+        os_log_error(gm20bLog(),
+                     "SwitchMetal: setBytes of %lu bytes: no GPU memory for its chunk (%{public}s): its command "
+                     "buffer fails out of memory; later ones not logged",
+                     (unsigned long)length, gRM->raw->kernel().error().c_str());
+    failCommandBuffer(cb, @"no GPU memory for setBytes", MTLCommandBufferErrorOutOfMemory);
 }
 
 void recordBytes(__unsafe_unretained SwitchMetalCommandBuffer *cb, Cmd m, const void *bytes, NSUInteger length,
@@ -35,24 +65,22 @@ void recordBytes(__unsafe_unretained SwitchMetalCommandBuffer *cb, Cmd m, const 
     constexpr NSUInteger kShadowed = 1024;  // a Core Animation draw's vertices and its transform
     if (shadow && length <= kShadowed) {
         m.shadow = uint32_t(cb->_shadow.size() + 1);
-        cb->_shadow.append(static_cast<const uint8_t *>(bytes), static_cast<const uint8_t *>(bytes) + length);
+        cb->_shadow.appendBytes(static_cast<const uint8_t *>(bytes), length);
     }
     const uint32_t padded = std::max<uint32_t>((uint32_t(length) + 255) & ~255u, 256);
     uint32_t chunk, offset;
+    bool ok = false;
     // Out of memory as Metal reports it: the command buffer fails (its bytes go to the heap meanwhile, so recording goes
     // on), never another backend
-    if (!bytesRoom(cb->_bytes, padded, chunk, offset)) {
-        static std::atomic<bool> said{false};
-        if (!said.exchange(true))
-            os_log_error(gm20bLog(),
-                         "SwitchMetal: setBytes of %lu bytes: no GPU memory for its chunk (%{public}s): its command "
-                         "buffer fails out of memory; later ones not logged",
-                         (unsigned long)length, gRM->raw->kernel().error().c_str());
-        failCommandBuffer(cb, @"no GPU memory for setBytes", MTLCommandBufferErrorOutOfMemory);
-    }
-    uint8_t *to = cb->_bytes.chunks.own(chunk).cpu + offset;
-    memcpy(to, bytes, length);
-    memset(to + length, 0, padded - length);
+    uint8_t *to = bytesRoom(cb->_bytes, padded, chunk, offset, ok);
+    if (!ok)
+        reportBytesOom(cb, length);
+    if (length)
+        memcpy(to, bytes, length);
+    if (padded > length)
+        memset(to + length, 0, padded - length);
+    if (gm20b::Buffer &buf = cb->_bytes.chunks.own(chunk); !buf.gpuVolatile)
+        buf.markCpuDirty();
     m.a = offset;
     m.b = uint32_t(length);
     m.c = chunk;
@@ -63,11 +91,32 @@ static void bindBytes(__unsafe_unretained SwitchMetalRenderEncoder *e, int stage
                       NSUInteger index)
 {
     SWITCH_API(ApiBind);
-    if (stage >= 1 && stage <= 2 && index < 31) {
-        e->_bufVa[stage][index] = 0;  // its own 256-byte-aligned upload chunk
-        e->_buf[stage][index] = nil;
+    if (stage >= 1 && stage <= 2 && index < 31)
+        e->_bufBound[stage - 1] &= ~(1u << index);
+    __unsafe_unretained SwitchMetalCommandBuffer *cb = e->_cb;
+    if (!cb->_commandLog && (stage == 1 || stage == 2) && index < 31) {
+        uint32_t shadowOff = 0;
+        constexpr NSUInteger kShadowed = 1024;
+        if (stage == 1 && (!e->_drew || index <= 2) && length <= kShadowed) {
+            shadowOff = uint32_t(cb->_shadow.size() + 1);
+            cb->_shadow.appendBytes(static_cast<const uint8_t *>(bytes), length);
+        }
+        const uint32_t padded = std::max<uint32_t>((uint32_t(length) + 255) & ~255u, 256);
+        uint32_t chunk, offset;
+        bool ok = false;
+        uint8_t *to = bytesRoom(cb->_bytes, padded, chunk, offset, ok);
+        if (!ok)
+            reportBytesOom(cb, length);
+        if (length)
+            memcpy(to, bytes, length);
+        if (padded > length)
+            memset(to + length, 0, padded - length);
+        if (gm20b::Buffer &buf = cb->_bytes.chunks.own(chunk); !buf.gpuVolatile)
+            buf.markCpuDirty();
+        cb->_plan.bindBytes(uint32_t(stage - 1), uint32_t(index), chunk, offset, uint32_t(length), shadowOff);
+        return;
     }
-    recordBytes(e->_cb, cmd(OpBytes, uint8_t(stage), uint16_t(index)), bytes, length,
+    recordBytes(cb, cmd(OpBytes, uint8_t(stage), uint16_t(index)), bytes, length,
                 stage == 1 && (!e->_drew || index <= 2));
 }
 
@@ -81,55 +130,57 @@ static void bindBytes(__unsafe_unretained SwitchMetalRenderEncoder *e, int stage
     bindBytes(self, 2, bytes, length, index);
 }
 
-- (void)buffer:(int)stage object:(id<MTLBuffer>)b offset:(NSUInteger)offset index:(NSUInteger)index
+static inline void bindBuffer(__unsafe_unretained SwitchMetalRenderEncoder *e, int stage,
+                              __unsafe_unretained id<MTLBuffer> b, NSUInteger offset, NSUInteger index)
 {
     SWITCH_API(ApiBind);
-    if (b && ![(id)b isKindOfClass:[SwitchMetalBuffer class]])
-        return gm20bCallInvalid(_cb, PredCallBufForeign, uint64_t(stage) << 8 | index, b.length,
+    __unsafe_unretained SwitchMetalBuffer *x = gm20bAsBuffer(b);
+    if (b && !x)
+        return gm20bCallInvalid(e->_cb, PredCallBufForeign, uint64_t(stage) << 8 | index, b.length,
                                 "a buffer not made by this device");
     if (stage >= 1 && stage <= 2 && index < 31) {
-        __unsafe_unretained SwitchMetalBuffer *x = (SwitchMetalBuffer *)b;
-        _buf[stage][index] = x;
-        _bufVa[stage][index] = x ? x->_raw.va + offset : 0;
-        _eligibility++;
+        if (b)
+            e->_bufBound[stage - 1] |= 1u << index;
+        else
+            e->_bufBound[stage - 1] &= ~(1u << index);
+        e->_eligibility++;
     }
-    setBinding(_cb, OpBuffer, stage, index, b, offset);
+    setBinding(e->_cb, OpBuffer, stage, index, b, offset);
 }
 
 - (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)offset atIndex:(NSUInteger)index
 {
-    [self buffer:1 object:b offset:offset index:index];
+    bindBuffer(self, 1, b, offset, index);
 }
 
 - (void)setFragmentBuffer:(id<MTLBuffer>)b offset:(NSUInteger)offset atIndex:(NSUInteger)index
 {
-    [self buffer:2 object:b offset:offset index:index];
+    bindBuffer(self, 2, b, offset, index);
 }
 
-- (void)bufferOffset:(int)stage offset:(NSUInteger)offset index:(NSUInteger)index
+static inline void bindBufferOffset(__unsafe_unretained SwitchMetalRenderEncoder *e, int stage, NSUInteger offset,
+                                    NSUInteger index)
 {
     SWITCH_API(ApiBind);
-    if (index < 31 && _buf[stage][index]) {
-        _bufVa[stage][index] = _buf[stage][index]->_raw.va + offset;
-        _eligibility++;
-    }
-    setBinding(_cb, OpBufferOffset, stage, index, nil, offset);
+    if (stage >= 1 && stage <= 2 && index < 31 && (e->_bufBound[stage - 1] & (1u << index)))
+        e->_eligibility++;
+    setBinding(e->_cb, OpBufferOffset, stage, index, nil, offset);
 }
 
 - (void)setVertexBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index
 {
-    [self bufferOffset:1 offset:offset index:index];
+    bindBufferOffset(self, 1, offset, index);
 }
 
 - (void)setFragmentBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index
 {
-    [self bufferOffset:2 offset:offset index:index];
+    bindBufferOffset(self, 2, offset, index);
 }
 
 - (void)setVertexBuffers:(const id<MTLBuffer> __unsafe_unretained[])b offsets:(const NSUInteger[])o withRange:(NSRange)r
 {
     for (NSUInteger k = 0; k < r.length; k++)
-        [self buffer:1 object:b[k] offset:o[k] index:r.location + k];
+        bindBuffer(self, 1, b[k], o[k], r.location + k);
 }
 
 - (void)setFragmentBuffers:(const id<MTLBuffer> __unsafe_unretained[])b
@@ -137,7 +188,7 @@ static void bindBytes(__unsafe_unretained SwitchMetalRenderEncoder *e, int stage
                  withRange:(NSRange)r
 {
     for (NSUInteger k = 0; k < r.length; k++)
-        [self buffer:2 object:b[k] offset:o[k] index:r.location + k];
+        bindBuffer(self, 2, b[k], o[k], r.location + k);
 }
 
 static gm20b::CheckedTexture checkedTexture(__unsafe_unretained SwitchMetalTexture *t)
@@ -149,8 +200,7 @@ bool gm20bBindTexture(__unsafe_unretained SwitchMetalRenderEncoder *e, int stage
                       NSUInteger index)
 {
     SWITCH_API(ApiBind);
-    __unsafe_unretained SwitchMetalTexture *x =
-        [(id)t isKindOfClass:[SwitchMetalTexture class]] ? (SwitchMetalTexture *)t : nil;
+    __unsafe_unretained SwitchMetalTexture *x = gm20bAsTexture(t);
     if (x && x->_gm20bOk && x->_raw.rotation)
         SWITCH_REFUSE("gm20b", "tex.turned_bound",
                       "a %ux%u plane of rotation %u bound as a texture argument, read as it lies (MTLTexture.h "
@@ -165,10 +215,12 @@ bool gm20bBindTexture(__unsafe_unretained SwitchMetalRenderEncoder *e, int stage
                           MTLCommandBufferErrorInternal, PredTexForeign);
         return false;
     }
+    __unsafe_unretained SwitchMetalCommandBuffer *cb = e->_cb;
     bool formsChanged = false;
     if ((stage == 1 || stage == 2) && index < gm20b::kStageTextures) {
         const gm20b::Pipeline *pl = e->_pipe ? e->_pipe->_raw : nullptr;
-        __unsafe_unretained SwitchMetalTexture *old = e->_tex[stage - 1][index];
+        SwitchMetalRenderSlots &slots = cb->_renderSlots;
+        __unsafe_unretained SwitchMetalTexture *old = slots.tex[stage - 1][index];
         const bool oldPlanes = old && old->_raw.xrPlanes && !old->_raw.memoryless;
         const bool nextPlanes = x && x->_raw.xrPlanes && !x->_raw.memoryless;
         formsChanged = oldPlanes != nextPlanes;
@@ -177,19 +229,26 @@ bool gm20bBindTexture(__unsafe_unretained SwitchMetalRenderEncoder *e, int stage
             formsChanged |= (old ? old->_descriptor.pixelFormat : 0) != (x ? x->_descriptor.pixelFormat : 0);
         if (formsChanged || gm20b::textureBindChecks(checkedTexture(old), checkedTexture(x), false, false))
             e->_eligibility++;
-        e->_tex[stage - 1][index] = x;
+        slots.tex[stage - 1][index] = x;
+        gm20b::addSlot(slots.texTouched[stage - 1], uint32_t(index));
     }
     if (x && (x->_raw.sampled || gm20b::xrPlanesPooled(x->_raw) || x->_raw.texelRows)) {
-        gm20bPipelineStop(e->_cb, VetoShadows);
-        e->_cb->_sampledShadows = true;
+        gm20bPipelineStop(cb, VetoShadows);
+        cb->_sampledShadows = true;
     }
     if (x && x->_raw.standIn) {
-        gm20bPipelineStop(e->_cb, VetoShadows);
-        e->_cb->_standIns = true;
+        gm20bPipelineStop(cb, VetoShadows);
+        cb->_standIns = true;
     }
     if (x && x->_raw.xrPlanes)
-        e->_cb->_passes[e->_passAt].xrPlaneBinds = true;
-    setBinding(e->_cb, OpTexture, stage, index, t, 0);
+        cb->_passes.own(e->_passAt).xrPlaneBinds = true;
+    if (!cb->_commandLog && (stage == 1 || stage == 2)) {
+        if (t)
+            gm20bRetain(cb, t);
+        cb->_plan.bindTexture(uint32_t(stage - 1), uint32_t(index), (__bridge void *)t);
+        return formsChanged;
+    }
+    setBinding(cb, OpTexture, stage, index, t, 0);
     return formsChanged;
 }
 
@@ -239,42 +298,50 @@ bool gm20bBindSampler(__unsafe_unretained SwitchMetalRenderEncoder *e, int stage
                       __unsafe_unretained id<MTLSamplerState> s, NSUInteger index)
 {
     SWITCH_API(ApiBind);
-    __unsafe_unretained SwitchMetalSampler *r =
-        [(id)s isKindOfClass:[SwitchMetalSampler class]] ? (SwitchMetalSampler *)s : nil;
+    __unsafe_unretained SwitchMetalSampler *r = gm20bAsSampler(s);
+    __unsafe_unretained SwitchMetalCommandBuffer *cb = e->_cb;
+    SwitchMetalRenderSlots &slots = cb->_renderSlots;
     const uint16_t bit = uint16_t(index < 16 ? 1u << index : 0);
     const bool tracked = (stage == 1 || stage == 2) && bit;
     if (tracked) {
         // Core Animation binds the same sampler with each texture: the plan holds it bound already, and the
         // command buffer retained it
-        if (const uint64_t epoch = e->_cb->_plan.stateEpoch(); e->_sampEpoch != epoch) {
+        if (const uint64_t epoch = cb->_plan.stateEpoch(); e->_sampEpoch != epoch) {
             e->_sampEpoch = epoch;
             e->_sampRecorded[0] = e->_sampRecorded[1] = 0;
         }
-        if (r && e->_samp[stage - 1][index] == r && (e->_sampRecorded[stage - 1] & bit))
+        if (r && slots.samp[stage - 1][index] == r && (e->_sampRecorded[stage - 1] & bit))
             return false;
     }
     if (s && !r) {
-        hit(e->_cb, PredCallSamplerForeign, index, 0, "a sampler state of another device: Metal's validation error");
-        failCommandBuffer(e->_cb, @"A sampler state not made by this device was bound: Metal's validation error",
+        hit(cb, PredCallSamplerForeign, index, 0, "a sampler state of another device: Metal's validation error");
+        failCommandBuffer(cb, @"A sampler state not made by this device was bound: Metal's validation error",
                           MTLCommandBufferErrorInternal, PredCallSamplerForeign);
         return false;
     }
     if (r && r->_raw.desc.border)
-        e->_cb->_borderSamplers = true;
+        cb->_borderSamplers = true;
     bool formsChanged = false;
     if (tracked) {
-        formsChanged = !sameCubicSampler(e->_samp[stage - 1][index], r) &&
+        formsChanged = !sameCubicSampler(slots.samp[stage - 1][index], r) &&
                        ((e->_formSamplers[stage - 1] & bit) ||
                         !(e->_cubicMask[0] | e->_cubicMask[1] | e->_formSamplers[0] | e->_formSamplers[1]));
         if (formsChanged)
             e->_eligibility++;
-        e->_samp[stage - 1][index] = r;
+        slots.samp[stage - 1][index] = r;
+        slots.sampTouched[stage - 1] |= bit;
         auto &mask = e->_cubicMask[stage - 1];
         mask = uint16_t(r && r->_raw.desc.cubic ? mask | bit : mask & ~bit);
         auto &recorded = e->_sampRecorded[stage - 1];
         recorded = uint16_t(r ? recorded | bit : recorded & ~bit);
     }
-    setBinding(e->_cb, OpSampler, stage, index, s, 0);
+    if (!cb->_commandLog && (stage == 1 || stage == 2)) {
+        if (s)
+            gm20bRetain(cb, s);
+        cb->_plan.bindSampler(uint32_t(stage - 1), uint32_t(index), (__bridge void *)s);
+        return formsChanged;
+    }
+    setBinding(cb, OpSampler, stage, index, s, 0);
     return formsChanged;
 }
 
@@ -312,24 +379,44 @@ bool gm20bBindSampler(__unsafe_unretained SwitchMetalRenderEncoder *e, int stage
 // clamps, bound as any state is (the frontend's the same)
 id<MTLSamplerState> clampedSampler(id<MTLSamplerState> s, float lodMin, float lodMax)
 {
-    if (![(id)s isKindOfClass:[SwitchMetalSampler class]])
+    SwitchMetalSampler *base = gm20bAsSampler(s);
+    if (!base)
         return s;
-    SwitchMetalSampler *base = (SwitchMetalSampler *)s;
-    const float clamps[2] = {lodMin, lodMax};
-    NSValue *key = [NSValue valueWithBytes:clamps objCType:@encode(float[2])];
-    @synchronized(base) {
-        if (!base->_clamped)
-            base->_clamped = [NSMutableDictionary dictionary];
-        if (id<MTLSamplerState> made = base->_clamped[key])
-            return made;
-        MTLSamplerDescriptor *d = [base->_descriptor copy];
-        d.lodMinClamp = lodMin;
-        d.lodMaxClamp = lodMax;
-        id<MTLSamplerState> made = [(id<MTLDevice>)base->_device newSamplerStateWithDescriptor:d];
-        if (made)
-            base->_clamped[key] = made;
+    uint32_t minBits = 0, maxBits = 0;
+    memcpy(&minBits, &lodMin, sizeof minBits);
+    memcpy(&maxBits, &lodMax, sizeof maxBits);
+    auto findLocked = [&]() -> id<MTLSamplerState> {
+        for (uint8_t i = 0; i < base->_clampedInlineCount; ++i)
+            if (base->_clampedInline[i].lodMinBits == minBits && base->_clampedInline[i].lodMaxBits == maxBits)
+                return base->_clampedInline[i].sampler;
+        for (const SwitchMetalClampedSampler &entry : base->_clampedOverflow)
+            if (entry.lodMinBits == minBits && entry.lodMaxBits == maxBits)
+                return entry.sampler;
+        return nil;
+    };
+    os_unfair_lock_lock(&base->_clampedLock);
+    if (id<MTLSamplerState> made = findLocked()) {
+        os_unfair_lock_unlock(&base->_clampedLock);
         return made;
     }
+    os_unfair_lock_unlock(&base->_clampedLock);
+    MTLSamplerDescriptor *d = [base->_descriptor copy];
+    d.lodMinClamp = lodMin;
+    d.lodMaxClamp = lodMax;
+    id<MTLSamplerState> made = [(id<MTLDevice>)base->_device newSamplerStateWithDescriptor:d];
+    if (!made)
+        return nil;
+    os_unfair_lock_lock(&base->_clampedLock);
+    if (id<MTLSamplerState> existing = findLocked()) {
+        os_unfair_lock_unlock(&base->_clampedLock);
+        return existing;
+    }
+    if (base->_clampedInlineCount < base->_clampedInline.size())
+        base->_clampedInline[base->_clampedInlineCount++] = {minBits, maxBits, made};
+    else
+        base->_clampedOverflow.push_back({minBits, maxBits, made});
+    os_unfair_lock_unlock(&base->_clampedLock);
+    return made;
 }
 
 - (void)setVertexSamplerState:(id<MTLSamplerState>)s

@@ -25,7 +25,6 @@ struct PlaneCompositeJob {
     uint64_t bytes;
     ComposedPlane value;
     SwitchNativeScanout output;
-    TegraVICJob check;
 };
 
 // Allocated at the first set that may need it: the display's instance is at the 16 KiB a kalloc_type class may have.
@@ -201,6 +200,12 @@ int planeCompositeSlot(const switch_display::Overlay wanted[2], const int select
         if (!wanted[index].on)
             continue;
         const auto &layer = planeLayers[selected[index]].layer;
+        // VIC turns a job's whole output, never one compose slot: a turned overlay stays the window's turn or the
+        // conversion job's.
+        if (layer.transform) {
+            planeCompositeRefuse("a turned overlay");
+            return -95;
+        }
         const auto *native = planeSlots[wanted[index].slot].native;
         if (!native || !native->lease || !switch_display::compositePart(layer, width, height, parts[count]))
             return -95;
@@ -293,21 +298,39 @@ int planeCompositeSlot(const switch_display::Overlay wanted[2], const int select
     return -115;
 }
 
-// The job tegra_vic_compose_build makes of these slots at stand-in addresses: whether VIC takes them at all.
+// Validate slots and destination against tegra_vic_compose_build's preconditions without building the job twice.
 const char *planeCompositeCheck(const SwitchVICComposeSource *compose, unsigned count, const TegraVICImage &layout,
                                 const TegraVICRect &target)
 {
+    const TegraVICTraits *t = tegra_vic_traits();
+    if (!count || count > TEGRA_VIC_COMPOSE_MAX_SLOTS)
+        return "slot count outside 1..8";
+    if (count > 1 && !t->multiSlot)
+        return "multi-slot composition this engine has not proven";
+    if (!layout.format || layout.format->kind != TEGRA_VIC_KIND_RGB)
+        return "composition into a format other than RGB";
+    if (layout.blockLinear && !t->blockLinearOut)
+        return "block-linear destination this engine has not proven";
     TegraVICComposeSlot slots[2];
     TegraVICImage images[2], out = layout;
     out.base[0] = 1u << 20;
+    if (const char *why = tegra_vic_check_image(&out, tegra_vic_pitch_align(t, false)))
+        return why;
+    if (!target.width || !target.height || target.x + uint64_t(target.width) > out.width ||
+        target.y + uint64_t(target.height) > out.height)
+        return "target rectangle outside the destination";
     for (unsigned i = 0; i < count; ++i) {
         images[i] = compose[i].image;
         for (unsigned p = 0; p < images[i].format->planes; ++p)
             images[i].base[p] += 2u << 20;
         slots[i] = compose[i].slot;
         slots[i].source = &images[i];
+        if (const char *why = tegra_vic_compose_check_slot(&slots[i], &out, t))
+            return why;
     }
-    return tegra_vic_compose_build(slots, count, &out, &target, tegra_vic_traits(), 0, 0, &planeComposite->job.check);
+    if (tegra_vic_compose_methods(slots, count, &out) > TEGRA_VIC_MAX_METHODS)
+        return "more surface methods than one job holds";
+    return nullptr;
 }
 
 // Off the gate: VIC gets the job.

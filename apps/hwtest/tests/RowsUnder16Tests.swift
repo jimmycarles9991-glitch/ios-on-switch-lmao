@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// RGB10A8_2P_XR10 (550) 2x8 over a 'b3a8' of rows 8 and 2 in 8 MiB + 16 KiB (gpu/XrRowsUnder16.swift), each value an

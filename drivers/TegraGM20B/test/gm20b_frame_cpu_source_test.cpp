@@ -3,7 +3,9 @@
 // GPFIFO entries with one barrier, and an interrupt pass wakes only the threads whose condition it met.
 #include <gtest/gtest.h>
 
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include "bazel/testing/source_text.h"
 
@@ -18,6 +20,36 @@ std::string unit(const char *name)
 	return SourceText(std::string("../") + name);
 }
 }  // namespace
+
+// nvxnu_kdebug is a function whose body is empty in release, so a call outside TGM_STATS still evaluates its
+// arguments there: the room wait's GP_GET read over MMIO on every full ring. Each call, and the helpers that read GP_GET
+// and the fence for one, sit inside an `#if TGM_STATS`.
+TEST(GM20BFrameCpuSource, GpuTracepointsAndTheReadsBehindThemAreDebugOnly)
+{
+	std::istringstream exec(unit("gpu_exec.c"));
+	std::vector<std::string> open;
+	std::string line;
+	int calls = 0;
+	while (std::getline(exec, line)) {
+		if (line.rfind("#if", 0) == 0)
+			open.push_back(line);
+		else if (line.rfind("#endif", 0) == 0 && !open.empty())
+			open.pop_back();
+		const bool traced =
+			line.find("nvxnu_kdebug(") != std::string::npos ||
+			line.find("static u64 chan_ring_position(") != std::string::npos ||
+			line.find("static u32 chan_done(") != std::string::npos;
+		if (!traced)
+			continue;
+		++calls;
+		bool stats = false;
+		for (const std::string &o : open)
+			stats = stats || o.find("TGM_STATS") != std::string::npos ||
+				o.find("SWITCH_FRAME_TIMELINE") != std::string::npos;
+		EXPECT_TRUE(stats) << line;
+	}
+	EXPECT_GE(calls, 6);
+}
 
 // A pass wakes a thread on the global word only while one sleeps there, and moves a sequence it alone writes.
 TEST(GM20BFrameCpuSource, ThePassWakesTheGlobalWordOnlyForASleeper)

@@ -24,6 +24,8 @@ struct IOLock {
     bool locked = false;
 };
 
+inline uint32_t switch_test_lock_acquisitions = 0;
+
 inline IOLock *IOLockAlloc()
 {
     return new IOLock;
@@ -39,6 +41,7 @@ inline void IOLockLock(IOLock *lock)
 {
     EXPECT_FALSE(lock->locked);
     lock->locked = true;
+    ++switch_test_lock_acquisitions;
 }
 
 inline void IOLockUnlock(IOLock *lock)

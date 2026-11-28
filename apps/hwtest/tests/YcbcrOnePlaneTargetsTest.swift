@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// One-plane YCbCr render targets (gpu/YcbcrOnePlaneTargets.swift), each against the whole allocation as an M4 Max

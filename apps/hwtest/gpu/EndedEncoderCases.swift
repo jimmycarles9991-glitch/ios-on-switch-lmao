@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Commands recorded on an encoder after its endEncoding (gpu.gm20b.ended_encoder), each case one command buffer over a

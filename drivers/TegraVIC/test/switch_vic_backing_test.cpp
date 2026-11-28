@@ -9,6 +9,7 @@
 
 namespace {
 unsigned registrations = 0, preparations = 0, completions = 0, destroyed = 0;
+uint32_t lastRegisteredPages = 0;
 std::atomic<unsigned> adoptions{0};
 std::atomic<int> adoptionError{0};
 std::atomic<void *> adoptedDescriptor{nullptr};
@@ -22,10 +23,11 @@ extern "C" int switch_gpu_surface_adopt(void *descriptor, switch_gpu_backing *ba
     return adoptionError;
 }
 
-extern "C" switch_gpu_backing *switch_gpu_backing_register(const uint64_t *, uint32_t, uint32_t, void *owner,
+extern "C" switch_gpu_backing *switch_gpu_backing_register(const uint64_t *, uint32_t count, uint32_t, void *owner,
                                                            void (*release)(void *))
 {
     ++registrations;
+    lastRegisteredPages = count;
     auto *backing = new switch_gpu_backing;
     backing->owner = owner;
     backing->release = release;
@@ -85,6 +87,7 @@ class SwitchVICBacking : public testing::Test {
     void SetUp() override
     {
         registrations = preparations = completions = destroyed = 0;
+        lastRegisteredPages = 0;
         adoptions = 0;
         adoptionError = 0;
         adoptedDescriptor = nullptr;
@@ -237,4 +240,45 @@ TEST_F(SwitchVICBacking, LargerThanTheCacheStillPinsTheDestinationForItsCaller)
     switch_gpu_backing_release(backing);
     EXPECT_EQ(completions, 1u);
     EXPECT_EQ(surface.object.refs, 1u);
+}
+
+TEST_F(SwitchVICBacking, SoleOwnerRegistersFullVmPageRoundedDescriptorLength)
+{
+    Surface owned;
+    owned.value.desc.length = 532480;
+    owned.memory.length = 540672;
+    auto *backing = switch_vic_surface_backing(&owned.value);
+    ASSERT_NE(backing, nullptr);
+    EXPECT_EQ(lastRegisteredPages, 132u);
+    EXPECT_EQ(gBytes, 540672u);
+    auto *again = switch_vic_surface_backing(&owned.value);
+    ASSERT_EQ(again, backing);
+    EXPECT_EQ(registrations, 1u);
+    switch_gpu_backing_release(again);
+    switch_gpu_backing_release(backing);
+
+    Surface subrange;
+    subrange.memory.address = 0x300000;
+    subrange.value.desc.length = 4096;
+    subrange.memory.length = 65536;
+    auto *sub = switch_vic_surface_backing(&subrange.value);
+    ASSERT_NE(sub, nullptr);
+    EXPECT_EQ(lastRegisteredPages, 1u);
+    switch_gpu_backing_release(sub);
+
+    Surface offset;
+    offset.memory.address = 0x400000;
+    offset.value.baseOffset = 4096;
+    offset.value.desc.length = 4096;
+    offset.memory.length = 16384;
+    auto *off = switch_vic_surface_backing(&offset.value);
+    ASSERT_NE(off, nullptr);
+    EXPECT_EQ(lastRegisteredPages, 1u);
+    switch_gpu_backing_release(off);
+
+    for (auto &entry : gSurfaces)
+        evict(entry);
+    EXPECT_EQ(owned.object.refs, 1u);
+    EXPECT_EQ(subrange.object.refs, 1u);
+    EXPECT_EQ(offset.object.refs, 1u);
 }

@@ -289,4 +289,88 @@ TEST(UnderflowDisplay, WindowAColumnScanningTheVideoNamesItsWordsAtTheFirstUnder
     d.frameEnd(3, 0, 0);
     ASSERT_EQ(gLines.size(), 2u) << "the episode's end, then window A's next one in portrait alone";
 }
+
+struct TrackingDc {
+    std::map<uint32_t, uint32_t> regs;
+    std::map<uint32_t, unsigned> reads;
+
+    struct Ref {
+        TrackingDc *self;
+        uint32_t reg;
+
+        operator uint32_t() const
+        {
+            ++self->reads[reg];
+            return self->regs[reg];
+        }
+
+        Ref &operator=(uint32_t value)
+        {
+            self->regs[reg] = value;
+            return *this;
+        }
+    };
+
+    Ref operator[](uint32_t reg)
+    {
+        return {this, reg};
+    }
+};
+
+struct TrackingDisplay {
+    struct Window {
+        bool on = false;
+    };
+
+    struct PlaneSet {
+        Window window[2];
+    };
+
+    struct {
+        int active = -1;
+    } planeLatch;
+
+    PlaneSet sets[2];
+    TrackingDc dc;
+    static constexpr bool stats = false;
+    bool rotationLatched = true, scanoutStopped = false, planesAttached = true, landscape = false;
+    uint64_t frameEnds = 0;
+
+    const PlaneSet &planeSetOf(int set) const
+    {
+        return sets[set >= 0 ? 1 : 0];
+    }
+
+    bool landscapeOn() const
+    {
+        return landscape;
+    }
+
+#include "../SwitchUnderflowDisplay.h"
+};
+
+TEST(UnderflowDisplay, DisabledWindowsSkipUflowStatusReadsAfterFirstFrameEnd)
+{
+    TrackingDisplay d;
+    d.dc.regs[0xbca] = 1;
+    d.dc.regs[0xdca] = 2;
+    d.dc.regs[0xfca] = 3;
+    d.underflowRead();
+    EXPECT_EQ(d.dc.reads[0xbca], 1u);
+    EXPECT_EQ(d.dc.reads[0xdca], 1u);
+    EXPECT_EQ(d.dc.reads[0xfca], 1u);
+
+    for (int i = 0; i < 5; ++i)
+        d.underflowRead();
+    EXPECT_EQ(d.dc.reads[0xbca], 6u);
+    EXPECT_EQ(d.dc.reads[0xdca], 1u);
+    EXPECT_EQ(d.dc.reads[0xfca], 1u);
+
+    d.planeLatch.active = 0;
+    d.sets[1].window[0].on = true;
+    d.underflowRead();
+    EXPECT_EQ(d.dc.reads[0xbca], 7u);
+    EXPECT_EQ(d.dc.reads[0xdca], 2u);
+    EXPECT_EQ(d.dc.reads[0xfca], 1u);
+}
 }  // namespace

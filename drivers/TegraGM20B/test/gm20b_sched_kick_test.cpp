@@ -278,3 +278,13 @@ TEST_F(SchedKick, HighWorkInFlightReadsNothing)
 	EXPECT_EQ(kick(&read), TGM_KICK_CLEAR);
 	EXPECT_EQ(read, 0u);
 }
+
+TEST_F(SchedKick, SwitchingReusesEngStatusWithoutExtraRead)
+{
+	unsigned read = 0;
+	switch_gpu_busy_kick(&tgm_busy, kApp, 1);
+	regs[PFIFO_ENG_STATUS(0)] = PFIFO_ENG_BUSY | (PFIFO_ENG_CTX_SWITCH << 13) | kCompositor |
+				    (kCompositor << 16);
+	EXPECT_EQ(kick(&read), TGM_KICK_SWITCHING);
+	EXPECT_EQ(read, 3u);
+}

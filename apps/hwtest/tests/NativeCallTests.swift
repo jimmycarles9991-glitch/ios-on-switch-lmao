@@ -1,4 +1,6 @@
+import HWTestCommon
 import HWTestCore
+import HWTestKit
 
 /// Metal calls the facade answers itself where they were answered zero before: each runs on the driver, or its
 /// feature answers NO wherever Metal lets a caller ask.
@@ -7,8 +9,9 @@ enum NativeCallTests {
         NativeUnsupportedTest(), NativeVertexSamplerTest(), NativeParallelEncoderTest(), NativeIndirectCommandsTest(),
         NativeComputeCommandsTest(), NativeSharedTextureTest(), NativeSharedTexturePeerTest(), NativeCountersTest(),
         NativeCounterObjectsTest(), NativeTessellationTest(), NativeAmplificationTest(), NativeAmplificationCountTest(),
-        NativeAmplificationMappingsTest(), NativeDynamicStrideTest(), NativeStageInTest(), NativeVertexStreamsTest(),
-        NativeWideStrideTest(), NativeTargetPartsTest(), NativeLayeredClearTest(),
+        NativeAmplificationFetchTest(), NativeAmplificationMappingsTest(), NativeDynamicStrideTest(),
+        NativeStageInTest(), NativeVertexStreamsTest(), NativeWideStrideTest(), NativeTargetPartsTest(),
+        NativeLayeredClearTest(),
         NativeLayeredMemorylessTest(), NativeLayeredVertexTest(), NativeLayeredFetchTest(), NativeViewportsTest(),
         NativeViewportIndexTest(), NativeBlockTexturesTest(), NativeDepthSlicesTest(), NativeWideTargetsTest(),
         NativeInterpolantsTest(), NativeThreadgroupMemoryTest(), NativeArgumentTier2Test(), NativeErrorBufferCopyTest(),

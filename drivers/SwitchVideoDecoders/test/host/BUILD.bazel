@@ -432,3 +432,71 @@ host_test(
         "//drivers/SwitchVideoDecoders:AVD/HEVCSetup.c",
     ],
 )
+
+EMITTER_HARNESS_SRCS = [
+    "avd_emitter_harness.c",
+    "avd_emitter_harness.h",
+    "//drivers/SwitchVideoDecoders:AVD/AVDDecoder.h",
+    "//drivers/SwitchVideoDecoders:AVD/AVDEmitter.h",
+    "//drivers/SwitchVideoDecoders:AVD/AVDFrameTiming.h",
+    "//drivers/SwitchVideoDecoders:AVD/H264DPB.h",
+    "//drivers/SwitchVideoDecoders:AVD/H264NVDEC.h",
+    "//drivers/SwitchVideoDecoders:AVD/H264Syntax.h",
+    "//drivers/SwitchVideoDecoders:AVD/HEVCDisplayProbe.h",
+    "//drivers/SwitchVideoDecoders:AVD/HEVCNVDEC.h",
+    "//drivers/SwitchVideoDecoders:AVD/HEVCSyntax.h",
+    "//drivers/SwitchVideoDecoders:AVD/MPEG2NVDEC.h",
+    "//drivers/SwitchVideoDecoders:AVD/MPEG2Syntax.h",
+    "//drivers/SwitchVideoDecoders:AVD/MPEG4NVDEC.h",
+    "//drivers/SwitchVideoDecoders:AVD/MPEG4Syntax.h",
+    "//drivers/SwitchVideoDecoders:AVD/NVDECClient.h",
+    "//drivers/SwitchVideoDecoders:AVD/VP9NVDEC.h",
+    "//drivers/SwitchVideoDecoders:AVD/VP9Probs.h",
+    "//drivers/SwitchVideoDecoders:AVD/VP9Syntax.h",
+    "//drivers/SwitchVideoDecoders:AVD/VTDecoderSPI.h",
+    "//drivers/TegraNVDEC:nvidia/clc5b0.h",
+    "//drivers/TegraNVDEC:nvidia/nvdec_drv.h",
+    "//kits/SwitchRefusal:SwitchRefusal.h",
+]
+
+host_library(
+    name = "avd_emitter_harness",
+    srcs = EMITTER_HARNESS_SRCS,
+    hdrs = ["avd_emitter_harness.h"],
+    textual_hdrs = ["//drivers/SwitchVideoDecoders:AVD/AVDEmitter.c"],
+    deps = [":nvdec_check"],
+)
+
+host_test(
+    name = "avd_emitter_test",
+    srcs = ["avd_emitter_test.cpp"],
+    data = [
+        "//drivers/SwitchVideoDecoders:AVD/AVDDecoder.c",
+        "//drivers/SwitchVideoDecoders:AVD/NVDECClient.c",
+    ],
+    linkopts = FRAMEWORKS,
+    deps = [":avd_emitter_harness"],
+)
+
+host_library(
+    name = "avd_emitter_tsan_harness",
+    srcs = EMITTER_HARNESS_SRCS,
+    hdrs = ["avd_emitter_harness.h"],
+    copts = ["-fsanitize=thread"],
+    sanitize = False,
+    textual_hdrs = ["//drivers/SwitchVideoDecoders:AVD/AVDEmitter.c"],
+    deps = [":nvdec_check"],
+)
+
+host_test(
+    name = "avd_emitter_tsan_test",
+    srcs = ["avd_emitter_test.cpp"],
+    copts = ["-fsanitize=thread"],
+    data = [
+        "//drivers/SwitchVideoDecoders:AVD/AVDDecoder.c",
+        "//drivers/SwitchVideoDecoders:AVD/NVDECClient.c",
+    ],
+    linkopts = FRAMEWORKS + ["-fsanitize=thread"],
+    sanitize = False,
+    deps = [":avd_emitter_tsan_harness"],
+)

@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// 32-bit float filtering (kits/SwitchGM20B/caps/features.tsv 3D-H9, probe d7): the device answers

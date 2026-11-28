@@ -353,16 +353,19 @@ TEST(SwitchMemoryAttachment, GpuRecordHasItsOwnSlotAndEndsWithTheDescriptor)
     auto *memory = new IOMemoryDescriptor;
     auto *representation = new OSObject;
     auto *record = new OSObject([&] {
-        EXPECT_EQ(SwitchMemoryAttachment::copyGpu(memory), nullptr);
+        EXPECT_EQ(SwitchMemoryAttachment::borrowGpu(memory), nullptr);
         ++freed;
     });
+    EXPECT_EQ(SwitchMemoryAttachment::borrowGpu(memory), nullptr);
     ASSERT_TRUE(SwitchMemoryAttachment::replace(memory, nullptr, representation));
-    ASSERT_TRUE(SwitchMemoryAttachment::replaceGpu(memory, nullptr, record));
-    EXPECT_FALSE(SwitchMemoryAttachment::replaceGpu(memory, nullptr, representation));
+    ASSERT_TRUE(SwitchMemoryAttachment::publishGpu(memory, record));
+    EXPECT_FALSE(SwitchMemoryAttachment::publishGpu(memory, representation));
+    EXPECT_FALSE(SwitchMemoryAttachment::publishGpu(memory, nullptr));
     record->release();
-    auto *copy = SwitchMemoryAttachment::copyGpu(memory);
-    EXPECT_EQ(copy, record);
-    copy->release();
+    EXPECT_EQ(record->refs, 1u);
+    auto *borrowed = SwitchMemoryAttachment::borrowGpu(memory);
+    EXPECT_EQ(borrowed, record);
+    EXPECT_EQ(record->refs, 1u);
     auto *other = SwitchMemoryAttachment::copy(memory);
     EXPECT_EQ(other, representation);
     other->release();
@@ -371,4 +374,41 @@ TEST(SwitchMemoryAttachment, GpuRecordHasItsOwnSlotAndEndsWithTheDescriptor)
     EXPECT_EQ(freed, 1u);
     EXPECT_EQ(representation->refs, 1u);
     representation->release();
+}
+
+TEST(SwitchMemoryAttachment, ConcurrentPublishGpuSelectsSingleWinner)
+{
+    auto *memory = new IOMemoryDescriptor;
+    std::atomic<unsigned> wins{0};
+    std::atomic<unsigned> freed{0};
+    std::vector<std::thread> workers;
+    for (unsigned t = 0; t != 8; ++t)
+        workers.emplace_back([&] {
+            auto *candidate = new OSObject([&] { freed.fetch_add(1, std::memory_order_relaxed); });
+            if (SwitchMemoryAttachment::publishGpu(memory, candidate))
+                wins.fetch_add(1, std::memory_order_relaxed);
+            candidate->release();
+            EXPECT_NE(SwitchMemoryAttachment::borrowGpu(memory), nullptr);
+        });
+    for (auto &worker : workers)
+        worker.join();
+    EXPECT_EQ(wins.load(), 1u);
+    EXPECT_EQ(freed.load(), 7u);
+    delete memory;
+    EXPECT_EQ(freed.load(), 8u);
+}
+
+TEST(SwitchMemoryAttachment, UncontendedReservationsSkipWakeups)
+{
+    IOMemoryDescriptor memory;
+    const unsigned before = switchWakeups.load();
+    for (unsigned i = 0; i != 64; ++i) {
+        ASSERT_EQ(SwitchMemoryAttachment::enterCpu(&memory, false), 0);
+        EXPECT_EQ(SwitchMemoryAttachment::cpuUsers(&memory), 1u);
+        SwitchMemoryAttachment::leaveCpu(&memory);
+        EXPECT_EQ(SwitchMemoryAttachment::cpuUsers(&memory), 0u);
+        ASSERT_EQ(SwitchMemoryAttachment::enterExclusive(&memory, false), 0);
+        SwitchMemoryAttachment::leaveExclusive(&memory);
+    }
+    EXPECT_EQ(switchWakeups.load(), before);
 }

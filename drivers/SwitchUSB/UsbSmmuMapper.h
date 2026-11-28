@@ -21,7 +21,7 @@ bool switch_usb_smmu_map(IOMemoryDescriptor *memory, uint64_t offset, uint64_t l
 // undo.
 uint64_t switch_usb_smmu_fixed(uint64_t pa, uint64_t length);
 bool switch_usb_smmu_owns(uint64_t address);
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
 // A window address's page table entry (0: none); for the development probe.
 uint32_t switch_usb_smmu_entry(uint64_t address);
 #endif

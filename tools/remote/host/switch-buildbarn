@@ -56,6 +56,13 @@ xcode_env() {
     export SWITCH_WORKER_XCODE_BUILD SWITCH_WORKER_XCODE_VERSION
 }
 
+# The host's GPU as Metal names it on Apple silicon ("Apple M4"), the worker's GPU runner's `gpu` property; empty: no
+# GPU runner.
+gpu_env() {
+    SWITCH_WORKER_GPU=$(/usr/sbin/sysctl -n machdep.cpu.brand_string 2>/dev/null || true)
+    export SWITCH_WORKER_GPU
+}
+
 # exec, so that launchd stops the process it started.
 case ${1:-} in
     storage) exec "$here/bb_storage" "$here/storage.jsonnet" ;;
@@ -69,6 +76,7 @@ case ${1:-} in
     worker)
         worker_dirs
         xcode_env
+        gpu_env
         exec "$here/bb_worker" "$here/worker.jsonnet"
         ;;
     *)

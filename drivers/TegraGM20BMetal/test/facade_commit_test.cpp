@@ -236,6 +236,95 @@ void compositorWaitUntilScheduledReturnsBeforeLongRangeSubmits()
     EXPECT_EQ(m.promiseCalls.size(), 1u);
 }
 
+// An app's command buffers whose submission sits in the kernel, as SubmitJob does while the app's channel has no room
+// (gpu_exec.c tgm_chan_wait_ready): waitUntilScheduled returns for the one in the kernel and for the next committed on
+// its queue, as Metal's does while the GPU is behind (25 Nov: Maps' main thread hung 603 ms in endFrame's
+// waitUntilScheduled behind the submit worker's room wait). Both complete once the kernel takes the job.
+void appWaitUntilScheduledReturnsWhileItsSubmissionWaitsInTheKernel()
+{
+    const std::string pack = harness::writePack(harness::packKey(MTLPixelFormatBGRA8Unorm));
+    const std::string metallib = harness::writeMetallib();
+    id<MTLDevice> device = harness::open(pack);
+    ASSERT_NE(device, nil);
+    NSError *error = nil;
+    id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:@(metallib.c_str())] error:&error];
+    ASSERT_NE(library, nil);
+    id<MTLRenderPipelineState> state =
+        [device newRenderPipelineStateWithDescriptor:harness::descriptor(library, MTLPixelFormatBGRA8Unorm)
+                                               error:&error];
+    ASSERT_NE(state, nil);
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    const scale_frames::Shape shape{2, 12, 1, 64, 64};
+    const auto into = scale_frames::targets(device, shape);
+    id<MTLCommandBuffer> warm = scale_frames::record(queue, state, into, shape, 0);
+    [warm commit];
+    [warm waitUntilCompleted];
+    ASSERT_EQ(warm.status, MTLCommandBufferStatusCompleted);
+
+    kernel_model::Model &m = kernel_model::model;
+    dispatch_semaphore_t inJob = dispatch_semaphore_create(0);
+    dispatch_semaphore_t releaseJob = dispatch_semaphore_create(0);
+    std::atomic<bool> held{false};
+    const kernel_model::HooksCleared cleared;
+
+    struct ReleaseGuard {
+        dispatch_semaphore_t sem;
+        bool released = false;
+
+        ~ReleaseGuard()
+        {
+            if (!released)
+                dispatch_semaphore_signal(sem);
+        }
+    } guard{releaseJob};
+
+    {
+        std::lock_guard<std::mutex> l(kernel_model::callLock);
+        m.jobAdded = [&m, &held, inJob, releaseJob] {
+            const auto &j = m.jobs.back();
+            __atomic_store_n(&m.fence(j.channel - 1).completed, j.seqno, __ATOMIC_RELEASE);
+            if (!held.exchange(true, std::memory_order_acq_rel)) {
+                dispatch_semaphore_signal(inJob);
+                dispatch_semaphore_wait(releaseJob, DISPATCH_TIME_FOREVER);
+            }
+        };
+    }
+
+    const auto scheduledWithin = [](id<MTLCommandBuffer> cb) {
+        auto done = std::make_shared<std::promise<void>>();
+        std::future<void> waited = done->get_future();
+        std::thread waiter([cb, done] {
+            [cb waitUntilScheduled];
+            done->set_value();
+        });
+        waiter.detach();
+        return waited.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    };
+    // both recorded before the kernel holds the first job: the model holds its call lock while it does, and a recording
+    // may call the kernel (a chunk's allocation)
+    id<MTLCommandBuffer> first = scale_frames::record(queue, state, into, shape, 1);
+    id<MTLCommandBuffer> second = scale_frames::record(queue, state, into, shape, 2);
+    [first enqueue];
+    [first commit];
+    ASSERT_FALSE(dispatch_semaphore_wait(inJob, dispatch_time(DISPATCH_TIME_NOW, 10 * int64_t(NSEC_PER_SEC))))
+        << "the first command buffer's job never entered SubmitJob";
+    EXPECT_TRUE(scheduledWithin(first)) << "waitUntilScheduled waited for the kernel to take the job";
+    [second commit];
+    EXPECT_TRUE(scheduledWithin(second)) << "the next command buffer on the queue waited behind the submit worker";
+    EXPECT_EQ(second.status, MTLCommandBufferStatusScheduled);
+
+    guard.released = true;
+    dispatch_semaphore_signal(releaseJob);
+    [second waitUntilCompleted];
+    EXPECT_EQ(first.status, MTLCommandBufferStatusCompleted);
+    EXPECT_EQ(second.status, MTLCommandBufferStatusCompleted);
+}
+
+TEST(GM20BFacadeCommit, AppWaitUntilScheduledReturnsWhileItsSubmissionWaitsInTheKernel)
+{
+    switch_ios::test::ExpectPassesInFreshProcess(appWaitUntilScheduledReturnsWhileItsSubmissionWaitsInTheKernel);
+}
+
 TEST(GM20BFacadeCommit, CompositorWaitUntilScheduledReturnsBeforeLongRangeSubmits)
 {
     switch_ios::test::ExpectPassesInFreshProcess(compositorWaitUntilScheduledReturnsBeforeLongRangeSubmits);
@@ -325,9 +414,6 @@ TEST(GM20BFacadeCommit, EncodersEndedBeforeTheCommitAreEncodedAhead)
 TEST(GM20BFacadeCommit, AWaitForTheEncodeAheadWakesASleepingWorker)
 {
     ASSERT_TRUE(opened().device != nil);
-    // Let any pending 1 s idle release (which calls schedule.wake()) finish before recording so nothing else wakes it.
-    for (int i = 0; i < 400 && gRM->idle.due(0); i++)
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     id<MTLCommandQueue> queue = [opened().device newCommandQueue];
     const scale_frames::Shape shape{15, 90, 4};

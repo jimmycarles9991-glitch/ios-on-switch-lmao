@@ -13,7 +13,10 @@ constexpr uint64_t kPage = 4096, kGrain = 64 << 10;
 
 IOLock *gLock;
 switch_scratch *gKept;
-uint64_t gKeptBytes, gHeld, gPeak, gHandouts;
+uint64_t gKeptBytes, gHandouts;
+#if DEVELOPMENT || DEBUG
+uint64_t gHeld, gPeak;
+#endif
 
 // The one place a scratch's memory is charged: to `owner`'s graphics footprint. On a thread of a task without
 // com.apple.private.memory.ownership_transfer XNU lets the memory be charged to that task alone
@@ -105,6 +108,10 @@ switch_scratch *switch_scratch_get(uint64_t bytes, task_t owner)
             found = *p;
             *p = found->next;
             gKeptBytes -= found->bytes;
+#if DEVELOPMENT || DEBUG
+            gHeld += found->bytes;
+            gPeak = gHeld > gPeak ? gHeld : gPeak;
+#endif
             break;
         }
     }
@@ -121,15 +128,17 @@ switch_scratch *switch_scratch_get(uint64_t bytes, task_t owner)
         found->memory->setPurgeable(kIOMemoryPurgeableNonVolatile, &was);
     } else {
         found = create(bytes);
+        if (!found)
+            return nullptr;
+#if DEVELOPMENT || DEBUG
+        IOLockLock(gLock);
+        gHeld += found->bytes;
+        gPeak = gHeld > gPeak ? gHeld : gPeak;
+        IOLockUnlock(gLock);
+#endif
     }
-    if (!found)
-        return nullptr;
     charge(found->memory, owner);
-    IOLockLock(gLock);
-    gHeld += found->bytes;
-    gPeak = gHeld > gPeak ? gHeld : gPeak;
-    found->handout = ++gHandouts;
-    IOLockUnlock(gLock);
+    found->handout = __atomic_add_fetch(&gHandouts, 1, __ATOMIC_RELAXED);
     return found;
 }
 
@@ -144,6 +153,10 @@ switch_scratch *switch_scratch_reclaim(switch_scratch *s, uint64_t handout, task
         if (*p == s && s->handout == handout) {
             *p = s->next;
             gKeptBytes -= s->bytes;
+#if DEVELOPMENT || DEBUG
+            gHeld += s->bytes;
+            gPeak = gHeld > gPeak ? gHeld : gPeak;
+#endif
             kept = true;
             break;
         }
@@ -156,11 +169,7 @@ switch_scratch *switch_scratch_reclaim(switch_scratch *s, uint64_t handout, task
     s->memory->setPurgeable(kIOMemoryPurgeableNonVolatile, &was);
     *intact = was != kIOMemoryPurgeableEmpty;
     charge(s->memory, owner);
-    IOLockLock(gLock);
-    gHeld += s->bytes;
-    gPeak = gHeld > gPeak ? gHeld : gPeak;
-    s->handout = ++gHandouts;
-    IOLockUnlock(gLock);
+    s->handout = __atomic_add_fetch(&gHandouts, 1, __ATOMIC_RELAXED);
     return s;
 }
 
@@ -172,7 +181,9 @@ void switch_scratch_put(switch_scratch *s)
     IOOptionBits was = 0;
     s->memory->setPurgeable(kIOMemoryPurgeableVolatile, &was);
     IOLockLock(gLock);
+#if DEVELOPMENT || DEBUG
     gHeld -= s->bytes;
+#endif
     s->idleSince = switch_now_ns();
     s->next = gKept;
     gKept = s;
@@ -190,19 +201,23 @@ void switch_scratch_discard(switch_scratch *s)
 {
     if (!s)
         return;
+#if DEVELOPMENT || DEBUG
     IOLockLock(gLock);
     gHeld -= s->bytes;
     IOLockUnlock(gLock);
+#endif
     destroy(s);
 }
 
 void switch_scratch_stats(uint64_t *held, uint64_t *peak)
 {
     *held = *peak = 0;
+#if DEVELOPMENT || DEBUG
     if (!gLock)
         return;
     IOLockLock(gLock);
     *held = gHeld;
     *peak = gPeak;
     IOLockUnlock(gLock);
+#endif
 }

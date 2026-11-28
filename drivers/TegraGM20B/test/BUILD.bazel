@@ -9,6 +9,8 @@
 #                            pointing FECS at it (nvgpu's separate buffer mode), released at teardown
 #   gm20b_tiled_cache_test   TegraGM20BTiledCache.h: the tile coalescer's table in the golden context is deko3d's masked
 #                            writes folded over sw_ctx's zero
+#   gm20b_nvn_golden_test    TegraGM20BNvnGolden.h: NVN's three golden-context bits over the netlist's values, written
+#                            after sw_ctx; only a debug kernel's boot-arg leaves one out
 #   gm20b_coherency_test     TegraGM20BCoherency.cpp: which IOSurface lock/unlock traps clean or invalidate an import,
 #                            across imports of one surface and their release, and traps racing a release; each surface's
 #                            layout decision (TegraGM20BTiled.cpp) and its contents tiled in place; CPU locks of a
@@ -36,7 +38,8 @@
 #   gm20b_target_peaks_test  SwitchGpuTargetPeaks.h: each process's largest target image since boot, and its line
 #   gm20b_span_notes_test    SwitchGpuSpanNotes.h: the render server's long spans and the compositor's longest job
 #   gm20b_preempt_landing_test SwitchGpuPreemptLanding.h: where a kick's preempt landed (a band's release, a job's end)
-#   gm20b_compositor_sync_test SwitchGpuCompositorSync.h: the compositor's sync pushes, kicks behind an app apart
+#   gm20b_inheritor_sleep_test SwitchGpuInheritorSleep.h's kernel branch: an owner is pushed, no owner is a plain sleep,
+#                            and a wake reaches both
 #   gm20b_cost_hist_test     TegraGM20BCostHist.h: the debug lines' buckets, and a p95 a single slow frame leaves alone
 #   switch_gpu_owner_memory_test SwitchGpuOwnerMemory.h: a connection's BO counts, the debug line summing them by process
 #   gm20b_sched_test         TegraGM20BSchedPolicy.h and tgm_hang_blame over deploy-2045's hang registers: what a
@@ -91,6 +94,8 @@
 #                            kernel log's lines carry every value once, in order, under a count and sum
 #   switch_gpu_async_rights_test     an asynchronous call's wake port right on every return of EventObserve and
 #                                    ResourceObserve: MIG releases it after an error, the notification after a success
+#   switch_gpu_probe_gate_test       HW Test's paths op 7 (host1x syncpoints) and the facade's raw 3D-class methods: debug
+#                                    builds alone, and only for a process holding SWITCH_GPU_PROBES_ENTITLEMENT
 #   switch_gpu_refusal_sites_test    SwitchGpuRefusalSites.h: a SubmitJob or ResourceSetCreate refusal's line (process,
 #                                    channel, site, values) from the call's one exit, silent only for an ended set and a
 #                                    held admission, four then every 256th per connection and site
@@ -142,6 +147,7 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BBindHistory.h",
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
         "//drivers/TegraGM20B:SwitchGpuSubmitGate.h",
+        "//drivers/TegraGM20B:SwitchGpuInheritorSleep.h",
         "//drivers/TegraGM20B:TegraGM20BABI.h",
         "gm20b_gpu_memory.h",
     ],
@@ -163,6 +169,7 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BBindHistory.h",
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
         "//drivers/TegraGM20B:SwitchGpuSubmitGate.h",
+        "//drivers/TegraGM20B:SwitchGpuInheritorSleep.h",
         "//drivers/TegraGM20B:TegraGM20BABI.h",
         "gm20b_gpu_memory.h",
     ],
@@ -184,6 +191,7 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BBindHistory.h",
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
         "//drivers/TegraGM20B:SwitchGpuSubmitGate.h",
+        "//drivers/TegraGM20B:SwitchGpuInheritorSleep.h",
         "//drivers/TegraGM20B:TegraGM20BABI.h",
         "gm20b_gpu_memory.h",
     ],
@@ -358,6 +366,19 @@ host_test(
 )
 
 host_test(
+    name = "gm20b_nvn_golden_test",
+    srcs = [
+        "gm20b_nvn_golden_test.cpp",
+        "//drivers/TegraGM20B:TegraGM20BNvnGolden.h",
+    ],
+    cxx_std = "c++17",
+    data = [
+        "//drivers/TegraGM20B:TegraGM20B.cpp",
+        "//drivers/TegraGM20B:nouveau/nvkm/engine/gr/ctxgm20b.c",
+    ],
+)
+
+host_test(
     name = "gm20b_pool_policy_test",
     srcs = [
         "gm20b_pool_policy_test.cpp",
@@ -413,13 +434,23 @@ host_test(
     cxx_std = "c++17",
 )
 
-host_test(
-    name = "gm20b_compositor_sync_test",
-    srcs = [
-        "gm20b_compositor_sync_test.cpp",
-        "//drivers/TegraGM20B:SwitchGpuCompositorSync.h",
+host_shims(
+    name = "inheritor_sleep_kernel",
+    headers = [
+        "IOKit/IOLocks.h",
+        "kern/thread.h",
     ],
-    cxx_std = "c++17",
+    stubs = "gm20b_inheritor_sleep_stubs.h",
+)
+
+host_test(
+    name = "gm20b_inheritor_sleep_test",
+    srcs = [
+        "gm20b_inheritor_sleep_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuInheritorSleep.h",
+    ],
+    defines = ["KERNEL"],
+    deps = [":inheritor_sleep_kernel"],
 )
 
 host_test(
@@ -480,6 +511,7 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BJobABI.h",
         "//drivers/TegraGM20B:TegraGM20BReadbackABI.h",
         "//drivers/TegraGM20B:TegraGM20BRegDumpABI.h",
+        "//drivers/TegraGM20B:TegraGM20BSchedABI.h",
         "//drivers/TegraGM20B:TegraGM20BVolatileABI.h",
     ],
     data = [
@@ -496,7 +528,36 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BABI.h",
         "//drivers/TegraGM20B:TegraGM20BFencePageABI.h",
         "//drivers/TegraGM20B:TegraGM20BJobABI.h",
+        "//drivers/TegraGM20B:TegraGM20BSchedABI.h",
         "//drivers/TegraGM20B:TegraGM20BVolatileABI.h",
+    ],
+)
+
+host_test(
+    name = "switch_gpu_use_cache_test",
+    srcs = [
+        "switch_gpu_use_cache_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuBindingTable.h",
+        "//drivers/TegraGM20B:SwitchGpuBindings.h",
+        "//drivers/TegraGM20B:SwitchGpuBoIndex.h",
+        "//drivers/TegraGM20B:SwitchGpuSurfaceRefresh.h",
+        "//drivers/TegraGM20B:SwitchGpuUseCache.h",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20B:TegraGM20BFencePageABI.h",
+        "//drivers/TegraGM20B:TegraGM20BGpu.h",
+        "//drivers/TegraGM20B:TegraGM20BJobABI.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraGM20B:TegraGM20BSchedABI.h",
+        "//drivers/TegraGM20B:TegraGM20BTiled.h",
+        "//drivers/TegraGM20B:TegraGM20BViews.h",
+    ],
+    data = [
+        "//drivers/TegraGM20B:SwitchGpuClientRetirement.h",
+        "//drivers/TegraGM20B:TegraGM20BUserClientBo.cpp",
+        "//drivers/TegraGM20B:TegraGM20BUserClientJob.cpp",
+        "//drivers/TegraGM20B:TegraGM20BUserClientJobSubmit.cpp",
+        "//drivers/TegraGM20B:TegraGM20BUserClientPark.cpp",
     ],
 )
 
@@ -927,6 +988,26 @@ host_test(
 )
 
 host_test(
+    name = "switch_gpu_spare_books_test",
+    srcs = [
+        "switch_gpu_spare_books_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuSpareBooks.h",
+        "//drivers/TegraGM20B:SwitchGpuSpareRecord.h",
+        "//drivers/TegraGM20B:SwitchGpuSpares.h",
+    ],
+)
+
+host_test(
+    name = "switch_gpu_spare_record_test",
+    srcs = [
+        "switch_gpu_spare_record_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuSpareBooks.h",
+        "//drivers/TegraGM20B:SwitchGpuSpareRecord.h",
+        "//drivers/TegraGM20B:SwitchGpuSpares.h",
+    ],
+)
+
+host_test(
     name = "switch_gpu_parked_test",
     srcs = [
         "switch_gpu_parked_test.cpp",
@@ -1168,10 +1249,18 @@ host_test(
         "//drivers/TegraGM20BMetal:pack.cpp",
         "//drivers/TegraGM20B:TegraGM20BCopy.cpp",
         "//drivers/TegraGM20B:SwitchGpuKqueue.h",
+        "//drivers/TegraGM20B:SwitchGpuCachedBuffer.cpp",
         "//drivers/TegraGM20B:SwitchGpuCachedZero.cpp",
         "//drivers/TegraGM20B:SwitchGpuBacking.cpp",
         "//drivers/TegraGM20B:SwitchGpuBridge.cpp",
+        "//drivers/TegraGM20B:SwitchGpuBridgeGate.cpp",
+        "//drivers/TegraGM20B:SwitchGpuBridgeRetire.cpp",
+        "//drivers/TegraGM20B:SwitchGpuTimelineSyncpt.cpp",
+        "//drivers/TegraGM20B:SwitchGpuWriterPromise.h",
+        "//drivers/TegraGM20B:TegraGM20B.cpp",
+        "//drivers/TegraGM20B:TegraGM20BAccelerator.cpp",
         "//drivers/TegraGM20B:TegraGM20BDeviceClient.cpp",
+        "//drivers/TegraHost1x:TegraHost1x.cpp",
         "//drivers/TegraGM20B:TegraGM20BGpu.h",
         "//drivers/TegraGM20B:TegraGM20BReadback.cpp",
         "//drivers/TegraGM20B:TegraGM20BRelayout.cpp",
@@ -1182,6 +1271,7 @@ host_test(
         "//drivers/TegraGM20B:SwitchGpuParkedPool.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClientImport.cpp",
         "//kernel/switch:iokit/park_mapping.cpp",
+        "//kernel/switch:iokit/fresh_memory.cpp",
         "//kernel/switch:vm/park_vm.c",
         "//drivers/TegraGM20B:TegraGM20BPushScan.h",
         "//drivers/TegraGM20B:TegraGM20BPushScanRun.cpp",
@@ -1190,6 +1280,8 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BUserClientInternal.h",
         "//drivers/TegraGM20B:TegraGM20BUserClientPool.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClientSpares.cpp",
+        "//drivers/TegraGM20B:TegraGM20BUserClientSpareStats.cpp",
+        "//drivers/TegraGM20B:TegraGM20BUserClientSpareRecord.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClientPresent.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClientSubmit.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClientJob.cpp",
@@ -1217,6 +1309,18 @@ host_test(
         "//drivers/TegraGM20B:shim/include/nvxnu.h",
         "//drivers/TegraGM20B:shim/linux.c",
         "//drivers/TegraGM20B:shim/xnu_glue.cpp",
+    ],
+)
+
+host_test(
+    name = "switch_gpu_probe_gate_test",
+    srcs = ["switch_gpu_probe_gate_test.cpp"],
+    data = [
+        "//apps/hwtest:SwitchHWTest.entitlements",
+        "//apps/hwtest:SwitchHWTest27.entitlements",
+        "//drivers/TegraGM20B:TegraGM20BPathsABI.h",
+        "//drivers/TegraGM20B:TegraGM20BUserClientDispatch.cpp",
+        "//drivers/TegraGM20BMetal:TegraGM20BMetalProbe.mm",
     ],
 )
 
@@ -1398,6 +1502,17 @@ host_library(
     ],
 )
 
+host_library(
+    name = "backing_stats",
+    srcs = ["switch_gpu_backing_completion_stub.cpp"] + BACKING_SRCS,
+    hdrs = BACKING_HDRS,
+    defines = ["SWITCH_STATS_GPU=1"],
+    deps = [
+        ":dependency_trace",
+        ":coherency_kernel",
+    ],
+)
+
 host_test(
     name = "switch_gpu_backing_test",
     srcs = [
@@ -1478,7 +1593,6 @@ host_library(
     name = "path_stats",
     srcs = [
         "//drivers/TegraGM20B:SwitchGpuCompositorRound.h",
-        "//drivers/TegraGM20B:SwitchGpuCompositorSync.h",
         "//drivers/TegraGM20B:SwitchGpuPathStats.cpp",
         "//drivers/TegraGM20B:SwitchGpuPreemptLanding.h",
         "//drivers/TegraGM20B:SwitchGpuSpanNotes.h",
@@ -1487,11 +1601,15 @@ host_library(
     hdrs = [
         "//drivers/TegraGM20B:SwitchGpuPathStats.h",
         "//drivers/TegraGM20B:TegraGM20BGpu.h",
+        "//drivers/TegraGM20B:TegraGM20BPathsABI.h",
         "//drivers/TegraGM20B:TegraGM20BSched.h",
         "//drivers/TegraGM20B:SwitchGpuBusy.h",
         "//drivers/TegraGM20B:deadline_stats.h",
     ],
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_GPU=1",
+    ],
     deps = [":path_stats_kernel"],
 )
 
@@ -1499,7 +1617,10 @@ host_library(
 host_test(
     name = "switch_gpu_path_stats_test",
     srcs = ["switch_gpu_path_stats_test.cpp"],
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_GPU=1",
+    ],
     deps = [
         ":path_stats",
         ":path_stats_kernel",
@@ -1518,7 +1639,6 @@ host_test(
         "switch_gpu_submit_stubs.h",
         "//drivers/TegraGM20B:SwitchGpuBridge.h",
         "//drivers/TegraGM20B:SwitchGpuCompositorRound.h",
-        "//drivers/TegraGM20B:SwitchGpuCompositorSync.h",
         "//drivers/TegraGM20B:SwitchGpuPathStats.cpp",
         "//drivers/TegraGM20B:SwitchGpuPreemptLanding.h",
         "//drivers/TegraGM20B:SwitchGpuSharedEvent.h",
@@ -1533,7 +1653,10 @@ host_test(
         "//kits/SwitchSysctl:SwitchSysctl.h",
     ] + BACKING_SRCS + BACKING_HDRS,
     copts = ["-fsanitize=thread"],
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_GPU=1",
+    ],
     linkopts = ["-fsanitize=thread"],
     sanitize = False,
     deps = [
@@ -1571,6 +1694,8 @@ host_test(
     name = "gm20b_mem_source_test",
     srcs = ["gm20b_mem_source_test.cpp"],
     data = [
+        "//drivers/TegraGM20B:TegraGM20BGpu.h",
+        "//drivers/TegraGM20B:gpu_exec.c",
         "//drivers/TegraGM20B:SwitchGpuCachedBuffer.cpp",
         "//drivers/TegraGM20B:SwitchGpuClientRetirement.h",
         "//drivers/TegraGM20B:TegraGM20BPushScanRun.cpp",
@@ -1581,6 +1706,8 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BUserClientJobSubmit.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClientPool.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClientSpares.cpp",
+        "//drivers/TegraGM20B:TegraGM20BUserClientSpareStats.cpp",
+        "//drivers/TegraGM20B:TegraGM20BUserClientSpareRecord.cpp",
         "//drivers/TegraGM20B:TegraGM20BRecord.cpp",
         "//drivers/TegraGM20B:TegraGM20BSurfacePrefault.cpp",
     ],
@@ -1605,8 +1732,9 @@ host_test(
         "switch_gpu_resource_set_test.cpp",
         "switch_gpu_backing_fixture.h",
     ],
+    defines = ["SWITCH_STATS_GPU=1"],
     deps = [
-        ":backing",
+        ":backing_stats",
         ":coherency_kernel",
     ],
 )
@@ -1658,6 +1786,21 @@ host_test(
         "switch_gpu_write_ranges_test.cpp",
         "switch_gpu_backing_fixture.h",
     ],
+    deps = [
+        ":backing",
+        ":coherency_kernel",
+    ],
+)
+
+# A GPU write into a native view (SwitchGpuNativeUse.h) through the job's ownership transaction and its write ranges, as
+# runJobUses builds them: a write use with no range naming its native backing is refused.
+host_test(
+    name = "switch_gpu_native_write_test",
+    srcs = [
+        "switch_gpu_backing_fixture.h",
+        "switch_gpu_native_write_test.cpp",
+    ],
+    data = ["//drivers/TegraGM20B:TegraGM20BUserClientJobSubmit.cpp"],
     deps = [
         ":backing",
         ":coherency_kernel",
@@ -1846,12 +1989,34 @@ host_shims(
     stubs = "switch_gpu_submit_gate_stubs.h",
 )
 
+host_shims(
+    name = "submit_gate_push_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "kern/thread.h",
+    ],
+    stubs = "switch_gpu_submit_gate_push_stubs.h",
+)
+
+host_test(
+    name = "switch_gpu_submit_gate_push_test",
+    srcs = [
+        "switch_gpu_submit_gate_push_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuInheritorSleep.h",
+        "//drivers/TegraGM20B:SwitchGpuSubmitGate.h",
+    ],
+    defines = ["KERNEL"],
+    deps = [":submit_gate_push_kernel"],
+)
+
 host_test(
     name = "switch_gpu_submit_gate_test",
     srcs = [
         "switch_gpu_submit_gate_test.cpp",
         "//drivers/TegraGM20B:SwitchGpuGatedMethods.h",
         "//drivers/TegraGM20B:SwitchGpuSubmitGate.h",
+        "//drivers/TegraGM20B:SwitchGpuInheritorSleep.h",
         "//drivers/TegraGM20B:TegraGM20BABI.h",
     ],
     deps = [":submit_gate_kernel"],
@@ -1882,6 +2047,8 @@ host_library(
         "//drivers/TegraGM20B:SwitchGpuTimeline.cpp",
         "//drivers/TegraGM20B:SwitchGpuTimelineInternal.h",
         "//drivers/TegraGM20B:SwitchGpuTimelineRefs.cpp",
+        "//drivers/TegraGM20B:SwitchGpuTimelineSyncpt.cpp",
+        "//drivers/TegraGM20B:TegraGM20BSyncpt.h",
         "//drivers/TegraGM20B:SwitchGpuDependencyTrace.h",
     ],
     hdrs = [
@@ -1995,11 +2162,19 @@ host_shims(
 
 host_library(
     name = "bridge",
-    srcs = ["//drivers/TegraGM20B:SwitchGpuBridge.cpp"],
+    srcs = [
+        "//drivers/TegraGM20B:SwitchGpuBridge.cpp",
+        "//drivers/TegraGM20B:SwitchGpuBridgeProducer.cpp",
+        "//drivers/TegraGM20B:SwitchGpuBridgeGate.cpp",
+        "//drivers/TegraGM20B:SwitchGpuBridgeRetire.cpp",
+    ],
     hdrs = [
         "//drivers/TegraGM20B:SwitchGpuBridge.h",
+        "//drivers/TegraGM20B:SwitchGpuBridgeProducer.h",
+        "//drivers/TegraGM20B:SwitchGpuBridgeQueue.h",
         "//drivers/TegraGM20B:SwitchGpuKqueue.h",
         "//drivers/TegraGM20B:SwitchGpuSubmitTurn.h",
+        "//drivers/TegraGM20B:SwitchGpuInheritorSleep.h",
         "//drivers/TegraGM20B:SwitchGpuTimeline.h",
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
         "//drivers/TegraGM20B:TegraGM20BGpu.h",
@@ -2021,11 +2196,19 @@ host_test(
 # The bridge queue under ThreadSanitizer: a submission sleeping for ring room against the queue's other users
 host_library(
     name = "bridge_tsan",
-    srcs = ["//drivers/TegraGM20B:SwitchGpuBridge.cpp"],
+    srcs = [
+        "//drivers/TegraGM20B:SwitchGpuBridge.cpp",
+        "//drivers/TegraGM20B:SwitchGpuBridgeProducer.cpp",
+        "//drivers/TegraGM20B:SwitchGpuBridgeGate.cpp",
+        "//drivers/TegraGM20B:SwitchGpuBridgeRetire.cpp",
+    ],
     hdrs = [
         "//drivers/TegraGM20B:SwitchGpuBridge.h",
+        "//drivers/TegraGM20B:SwitchGpuBridgeProducer.h",
+        "//drivers/TegraGM20B:SwitchGpuBridgeQueue.h",
         "//drivers/TegraGM20B:SwitchGpuKqueue.h",
         "//drivers/TegraGM20B:SwitchGpuSubmitTurn.h",
+        "//drivers/TegraGM20B:SwitchGpuInheritorSleep.h",
         "//drivers/TegraGM20B:SwitchGpuTimeline.h",
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
         "//drivers/TegraGM20B:TegraGM20BGpu.h",
@@ -2168,6 +2351,7 @@ host_test(
         "//drivers/TegraGM20B:SwitchGpuNativeSurface.h",
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
         "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//kits/SwitchRefusal:SwitchRefusal.h",
     ],
 )
 
@@ -2387,12 +2571,14 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BABI.h",
         "//drivers/TegraGM20B:TegraGM20BTiled.h",
         "//drivers/TegraGM20B:SwitchGpuPin.h",
+        "//drivers/TegraGM20B:SwitchGpuSpares.h",
         "//drivers/TegraGM20B:SwitchGpuCachedBuffer.h",
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
         "//drivers/TegraGM20B:SwitchGpuCachedZero.h",
         "//drivers/TegraGM20B:SwitchGpuRelayoutCache.h",
         "//kits/SwitchRefusal:SwitchRefusal.h",
         "//kits/SwitchScratch:SwitchScratch.h",
+        "//drivers/TegraGM20B:SwitchGpuInheritorSleep.h",
         "//drivers/TegraGM20B:SwitchGpuKqueue.h",
     ],
     additional_compiler_inputs = ["//drivers/TegraGM20B:TegraGM20BRelayout.cpp"],
@@ -2417,12 +2603,14 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BABI.h",
         "//drivers/TegraGM20B:TegraGM20BTiled.h",
         "//drivers/TegraGM20B:SwitchGpuPin.h",
+        "//drivers/TegraGM20B:SwitchGpuSpares.h",
         "//drivers/TegraGM20B:SwitchGpuCachedBuffer.h",
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
         "//drivers/TegraGM20B:SwitchGpuCachedZero.h",
         "//drivers/TegraGM20B:SwitchGpuRelayoutCache.h",
         "//kits/SwitchRefusal:SwitchRefusal.h",
         "//kits/SwitchScratch:SwitchScratch.h",
+        "//drivers/TegraGM20B:SwitchGpuInheritorSleep.h",
         "//drivers/TegraGM20B:SwitchGpuKqueue.h",
     ],
     additional_compiler_inputs = ["//drivers/TegraGM20B:TegraGM20BRelayout.cpp"],
@@ -2449,6 +2637,7 @@ host_library(
     srcs = ["//drivers/TegraGM20B:SwitchGpuPin.cpp"],
     hdrs = [
         "//drivers/TegraGM20B:SwitchGpuPin.h",
+        "//drivers/TegraGM20B:SwitchGpuSpares.h",
         "//drivers/TegraGM20B:SwitchGpuCachedBuffer.h",
         "//drivers/TegraGM20B:SwitchGpuCachedZero.h",
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
@@ -2711,6 +2900,7 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BCopy.h",
         "//drivers/TegraGM20B:SwitchGpuKqueue.h",
         "//drivers/TegraGM20B:SwitchGpuSubmitTurn.h",
+        "//drivers/TegraGM20B:SwitchGpuInheritorSleep.h",
         "//drivers/TegraGM20B:TegraGM20BCopyPush.h",
         "//drivers/TegraGM20B:TegraGM20BRelayout.h",
         "//drivers/TegraGM20B:TegraGM20BTiled.h",
@@ -2781,6 +2971,7 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BCopy.h",
         "//drivers/TegraGM20B:SwitchGpuKqueue.h",
         "//drivers/TegraGM20B:SwitchGpuSubmitTurn.h",
+        "//drivers/TegraGM20B:SwitchGpuInheritorSleep.h",
         "//drivers/TegraGM20B:TegraGM20BCopyPush.h",
         "//drivers/TegraGM20B:TegraGM20BRelayout.h",
         "//drivers/TegraGM20B:TegraGM20BTiled.h",
@@ -3048,6 +3239,7 @@ host_library(
     ],
     hdrs = [
         "//drivers/TegraGM20B:SwitchGpuAsyncReference.h",
+        "//drivers/TegraGM20B:SwitchGpuCompilerScope.h",
         "//drivers/TegraGM20B:SwitchGpuShaderCompiler.h",
         "//drivers/TegraGM20B:SwitchGpuShaderCompilerPolicy.h",
         "//drivers/TegraGM20B:SwitchGpuShaderCompilerQueue.h",
@@ -3141,7 +3333,10 @@ host_library(
         "//drivers/TegraGM20B:deadline_stats.h",
     ],
     c_std = "gnu11",
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_GPU=1",
+    ],
 )
 
 # deadline_lines.c: the deadline's stats lines at every count's widest, and many channels' latencies, each line whole
@@ -3150,7 +3345,10 @@ host_test(
     name = "gm20b_deadline_lines_test",
     srcs = ["gm20b_deadline_lines_test.cpp"],
     cxx_std = "c++17",
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_GPU=1",
+    ],
     deps = [":deadline_lines_unit"],
 )
 
@@ -3178,7 +3376,10 @@ host_library(
     hdrs = SCHED_UNIT_HDRS,
     c_std = "gnu11",
     copts = ["-Wno-unused-function"],
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_GPU=1",
+    ],
 )
 
 DEADLINE_UNIT_SRCS = [
@@ -3198,7 +3399,10 @@ host_library(
     hdrs = DEADLINE_UNIT_HDRS,
     c_std = "gnu11",
     copts = ["-Wno-unused-function"],
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_GPU=1",
+    ],
     deps = [":deadline_lines_unit"],
 )
 
@@ -3206,7 +3410,10 @@ host_test(
     name = "gm20b_sched_kick_test",
     srcs = ["gm20b_sched_kick_test.cpp"],
     cxx_std = "c++17",
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_GPU=1",
+    ],
     deps = [":sched_unit"],
 )
 
@@ -3214,7 +3421,10 @@ host_test(
     name = "gm20b_deadline_window_test",
     srcs = ["gm20b_deadline_window_test.cpp"],
     cxx_std = "c++17",
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_GPU=1",
+    ],
     deps = [":deadline_unit"],
 )
 
@@ -3262,7 +3472,10 @@ host_library(
     hdrs = HOLD_UNIT_HDRS,
     c_std = "gnu11",
     copts = ["-Wno-unused-function"],
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_GPU=1",
+    ],
     deps = [":deadline_lines_unit"],
 )
 
@@ -3272,7 +3485,10 @@ host_test(
     name = "gm20b_period_test",
     srcs = ["gm20b_period_test.cpp"],
     cxx_std = "c++17",
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_GPU=1",
+    ],
     deps = [
         ":deadline_unit",
         ":hold_unit",
@@ -3292,7 +3508,10 @@ host_library(
     ],
     c_std = "gnu11",
     copts = ["-fsanitize=thread"],
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_GPU=1",
+    ],
     sanitize = False,
 )
 
@@ -3305,7 +3524,10 @@ host_library(
         "-Wno-unused-function",
         "-fsanitize=thread",
     ],
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_GPU=1",
+    ],
     sanitize = False,
     deps = [":deadline_lines_unit_tsan"],
 )
@@ -3319,7 +3541,10 @@ host_library(
         "-Wno-unused-function",
         "-fsanitize=thread",
     ],
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_GPU=1",
+    ],
     sanitize = False,
     deps = [":deadline_lines_unit_tsan"],
 )
@@ -3331,7 +3556,10 @@ host_test(
     srcs = ["gm20b_period_tsan_test.cpp"],
     copts = ["-fsanitize=thread"],
     cxx_std = "c++17",
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_GPU=1",
+    ],
     linkopts = ["-fsanitize=thread"],
     sanitize = False,
     deps = [
@@ -3442,6 +3670,7 @@ host_test(
     srcs = [
         "switch_gpu_chan_table_test.cpp",
         "//drivers/TegraGM20B:SwitchGpuChanTable.h",
+        "//drivers/TegraGM20B:SwitchGpuLiveDir.h",
     ],
 )
 
@@ -3450,6 +3679,7 @@ host_test(
     srcs = [
         "switch_gpu_chan_table_test.cpp",
         "//drivers/TegraGM20B:SwitchGpuChanTable.h",
+        "//drivers/TegraGM20B:SwitchGpuLiveDir.h",
     ],
     copts = ["-fsanitize=thread"],
     linkopts = ["-fsanitize=thread"],
@@ -3469,6 +3699,8 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BUserClientBo.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClientImport.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClientSpares.cpp",
+        "//drivers/TegraGM20B:TegraGM20BUserClientSpareStats.cpp",
+        "//drivers/TegraGM20B:TegraGM20BUserClientSpareRecord.cpp",
     ],
 )
 
@@ -3516,14 +3748,54 @@ host_library(
 )
 
 host_test(
+    name = "gm20b_pack_image_boot_test",
+    srcs = [
+        "gm20b_pack_image_boot_test.cpp",
+        "gm20b_pack_image_model.h",
+        "//drivers/TegraGM20BMetal:pack.h",
+    ],
+    copts = ["-DSWITCH_GPU_PACK_IMAGE_HOST_TEST=1"],
+    data = [
+        "//drivers/TegraGM20B:TegraGM20B.cpp",
+        "//kernel/xnu-10063.141.1/bsd:kern/kern_exec.c",
+        "//kernel/xnu-12377.121.6/bsd:kern/kern_exec.c",
+    ],
+    deps = [
+        ":pack_image",
+        ":pack_image_kernel",
+    ],
+)
+
+host_test(
+    name = "gm20b_pack_image_stream_test",
+    srcs = [
+        "gm20b_pack_image_model.h",
+        "gm20b_pack_image_stream_test.cpp",
+        "//drivers/TegraGM20BMetal:pack.h",
+    ],
+    copts = ["-DSWITCH_GPU_PACK_IMAGE_HOST_TEST=1"],
+    data = [
+        "//drivers/TegraGM20B:TegraGM20BUserClientJobSubmit.cpp",
+        "//drivers/TegraGM20B:gpu_acquire.c",
+        "//drivers/TegraGM20B:gpu_exec.c",
+    ],
+    deps = [
+        ":pack_image",
+        ":pack_image_kernel",
+    ],
+)
+
+host_test(
     name = "gm20b_pack_image_test",
     srcs = [
+        "gm20b_pack_image_model.h",
         "gm20b_pack_image_test.cpp",
         "//drivers/TegraGM20BMetal:pack.h",
     ],
     copts = ["-DSWITCH_GPU_PACK_IMAGE_HOST_TEST=1"],
     data = [
         "//drivers/TegraGM20B:TegraGM20BUserClient.cpp",
+        "//drivers/TegraGM20BMetal/test:pack_v34_fixture",
         "//kernel/switch:shutdown/shutdown.c",
         "//kernel/xnu-10063.141.1/iokit:Kernel/IOPMrootDomain.cpp",
         "//kernel/xnu-12377.121.6/iokit:Kernel/IOPMrootDomain.cpp",
@@ -3550,7 +3822,7 @@ genrule(
     outs = ["switch_gpu_mem_smmu_source.h"],
     cmd = """
 set -e
-awk '/^static int mem_new\\(/ { on = 1 } on { print } on && /^}$$/ { count++; if (count == 8) on = 0 } END { if (count != 8) exit 1 }' $< > $@
+awk '/^static int mem_smmu_pages_unique\\(/ { on = 1 } on { print } on && /^}$$/ { count++; if (count == 17) on = 0 } END { if (count != 17) exit 1 }' $< > $@
 """,
 )
 
@@ -3562,4 +3834,26 @@ host_test(
         "//drivers/TegraGM20B:SwitchGpuSmmu.h",
         "//drivers/TegraGM20B:TegraGM20BComp.h",
     ],
+)
+
+genrule(
+    name = "timer_wait_source",
+    testonly = True,
+    srcs = ["//drivers/TegraGM20B:nouveau/nvkm/subdev/timer/base.c"],
+    outs = ["timer_wait_source.h"],
+    cmd = """
+set -e
+awk '/^#define NVKM_WAIT_SPIN_NS / { on = 1 } on { print } on && /^}$$/ { count++; if (count == 2) on = 0 } END { if (count != 2) exit 1 }' $< > $@
+grep -q 'nvkm_timer_wait_test(' $@
+grep -q 'usleep_range(' $@
+""",
+)
+
+host_test(
+    name = "gm20b_timer_wait_test",
+    srcs = [
+        "gm20b_timer_wait_test.cpp",
+        ":timer_wait_source",
+    ],
+    cxx_std = "c++17",
 )

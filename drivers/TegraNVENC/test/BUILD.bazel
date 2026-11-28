@@ -26,10 +26,53 @@ host_test(
     name = "tegra_nvenc_inputs_source_test",
     srcs = ["tegra_nvenc_inputs_source_test.cpp"],
     data = [
+        "//drivers/TegraNVENC:SwitchNVENCFlight.h",
         "//drivers/TegraNVENC:TegraNVENC.cpp",
         "//drivers/TegraNVENC:TegraNVENCDirect.cpp",
         "//drivers/TegraNVENC:TegraNVENCSource.cpp",
         "//drivers/TegraNVENC:TegraNVENCUserClient.cpp",
+    ],
+)
+
+host_shims(
+    name = "completions_kernel",
+    headers = [
+        "IOKit/IOBufferMemoryDescriptor.h",
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "IOKit/IOUserClient.h",
+        "kern/task.h",
+    ],
+    stubs = "switch_nvenc_completions_stubs.h",
+)
+
+host_test(
+    name = "switch_nvenc_completions_test",
+    srcs = [
+        "switch_nvenc_completions_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraHost1x:SwitchHost1xFence.h",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+        "//drivers/TegraNVENC:SwitchNVENCCompletions.h",
+        "//drivers/TegraNVENC:SwitchNVENCFlight.h",
+        "//drivers/TegraNVENC:TegraNVENC.h",
+        "//drivers/TegraNVENC:TegraNVENCABI.h",
+        "//drivers/TegraNVENC:nvidia/clc5b7.h",
+        "//drivers/TegraNVENC:nvidia/nvenc_drv.h",
+        "//kits/SwitchDMA:SwitchDMAPages.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraNVENC:SwitchNVENCCompletions.cpp"],
+    deps = [":completions_kernel"],
+)
+
+host_test(
+    name = "switch_nvenc_flight_test",
+    srcs = [
+        "switch_nvenc_flight_test.cpp",
+        "//drivers/TegraHost1x:SwitchHost1xFence.h",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+        "//drivers/TegraNVENC:SwitchNVENCFlight.h",
     ],
 )
 

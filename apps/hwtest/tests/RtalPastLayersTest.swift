@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// renderTargetArrayLength past the texture's layers: a 16x16 BGRA8Unorm array of two slices, every byte 0x11, a pass

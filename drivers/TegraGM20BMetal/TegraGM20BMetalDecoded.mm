@@ -3,6 +3,7 @@
 #import "TegraGM20BMetalDecoded.h"
 #import "TegraGM20BMetalBlitRules.h"
 #include <algorithm>
+#include <atomic>
 #include <vector>
 #include "decode_pass.h"
 
@@ -61,15 +62,23 @@ bool gm20bEncodeDecodedCopy(gm20b::CommandBuffer *rc, SwitchMetalBuffer *b, Swit
     return true;
 }
 
+// Not dispatch_once: a queue that could not be made (no handler thread) is asked for again at the next upload, never
+// kept as nil for the process's life. Two first uploads at once may both make one; the loser's goes.
 id<MTLCommandQueue> gm20bDecodeQueue(id<MTLDevice> device)
 {
-    static id<MTLCommandQueue> queue;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        queue = [device newCommandQueue];
-        queue.label = @"gm20b.decode";
-    });
-    return queue;
+    static std::atomic<void *> kept{nullptr};
+    if (void *q = kept.load(std::memory_order_acquire))
+        return (__bridge id<MTLCommandQueue>)q;
+    id<MTLCommandQueue> made = [device newCommandQueue];
+    if (!made)
+        return nil;
+    made.label = @"gm20b.decode";
+    void *expected = nullptr;
+    void *retained = (__bridge_retained void *)made;
+    if (kept.compare_exchange_strong(expected, retained, std::memory_order_acq_rel))
+        return made;
+    CFRelease(retained);
+    return (__bridge id<MTLCommandQueue>)expected;
 }
 
 bool gm20bDecodedReplace(SwitchMetalTexture *t, MTLRegion r, NSUInteger level, NSUInteger slice, const void *bytes,
@@ -91,6 +100,14 @@ bool gm20bDecodedReplace(SwitchMetalTexture *t, MTLRegion r, NSUInteger level, N
                        uint32_t(std::min(r.size.height, at.height - std::min(r.origin.y, at.height))), f->blockH);
     const uint64_t line = uint64_t(across) * f->blockBytes, plane = line * down;
     const uint64_t from = pvrtc || !row ? line : row, fromPlane = image ? image : from * down;
+    id<MTLCommandQueue> queue = gm20bDecodeQueue((id<MTLDevice>)t->_device);
+    if (!queue) {
+        SWITCH_REFUSE_DETAIL("gm20b", "tex.decoded_upload_queue", f->format,
+                             "replaceRegion of %lux%lu of a format %u texture: no command queue for the driver's own "
+                             "uploads (its handler thread could not be made): nothing written",
+                             (unsigned long)r.size.width, (unsigned long)r.size.height, f->format);
+        return true;
+    }
     id<MTLBuffer> staging = [(id<MTLDevice>)t->_device newBufferWithLength:NSUInteger(plane * r.size.depth)
                                                                    options:MTLResourceStorageModeShared];
     if (!staging) {
@@ -109,7 +126,7 @@ bool gm20bDecodedReplace(SwitchMetalTexture *t, MTLRegion r, NSUInteger level, N
             for (uint32_t y = 0; y < down; y++)
                 memcpy(to + z * plane + y * line, static_cast<const uint8_t *>(bytes) + z * fromPlane + y * from, line);
     }
-    id<MTLCommandBuffer> cb = [gm20bDecodeQueue((id<MTLDevice>)t->_device) commandBuffer];
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
     [blit copyFromBuffer:staging
                sourceOffset:0

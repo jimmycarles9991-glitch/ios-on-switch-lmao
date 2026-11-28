@@ -22,6 +22,7 @@ from tools.benchloop import (
     twod,
     units,
 )
+from tools.benchloop.sm53 import interlock_spin
 
 
 def per_draw(result: dict) -> tuple[float | None, float | None, float | None]:
@@ -106,6 +107,7 @@ def analysis(command: str, planned: list[dict], results: dict[str, dict], inputs
         'qmdchain': qmdchain.analyse,
         'cbufsize': cbufsize.analyse,
         'interlock_section': interlock_section.analyse,
+        'interlock_clock': interlock_spin.analyse_clock_probe,
     }
     return {command: sweep[command](planned, results)} if command in sweep else {}
 

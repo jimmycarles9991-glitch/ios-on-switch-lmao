@@ -50,6 +50,100 @@ void SwitchExternalScreen::releaseRead(unsigned index)
     switch_native_scanout_release(&slot.source);
 }
 
+void SwitchExternalScreen::publishSlotPa(unsigned index, const IOMemoryDescriptor *memory, addr64_t firstPa)
+{
+    auto &entry = slotPaCache[index];
+    const uint32_t seq = __atomic_load_n(&entry.seq, __ATOMIC_RELAXED);
+    __atomic_store_n(&entry.seq, seq + 1u, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    __atomic_store_n(&entry.memory, memory, __ATOMIC_RELAXED);
+    __atomic_store_n(&entry.firstPa, firstPa, __ATOMIC_RELAXED);
+    __atomic_store_n(&entry.seq, seq + 2u, __ATOMIC_RELEASE);
+}
+
+addr64_t SwitchExternalScreen::cachedFirstPa(const IOMemoryDescriptor *memory) const
+{
+    for (unsigned i = 0; i < kSlots; ++i) {
+        const auto &entry = slotPaCache[i];
+        for (unsigned tries = 0; tries < 2; ++tries) {
+            const uint32_t s1 = __atomic_load_n(&entry.seq, __ATOMIC_ACQUIRE);
+            if (s1 & 1u)
+                continue;
+            const IOMemoryDescriptor *cachedMem = __atomic_load_n(&entry.memory, __ATOMIC_RELAXED);
+            const addr64_t pa = __atomic_load_n(&entry.firstPa, __ATOMIC_RELAXED);
+            __atomic_thread_fence(__ATOMIC_ACQUIRE);
+            if (__atomic_load_n(&entry.seq, __ATOMIC_RELAXED) != s1)
+                continue;
+            if (cachedMem == memory && pa)
+                return pa;
+            break;
+        }
+    }
+    return 0;
+}
+
+void SwitchExternalScreen::cacheValidatedLayers(const OriginalLegacySwapRequest *request, uint32_t id, uint32_t updated,
+                                                const bool hasSurface[], OSObject *const surfaces[],
+                                                const native_planes::Layer layers[])
+{
+    if (!validatedCache)
+        return;
+    const unsigned idx = static_cast<unsigned>((reinterpret_cast<uintptr_t>(request) >> 6) % kValidatedCache);
+    auto &entry = validatedCache[idx];
+    uint32_t seq = __atomic_load_n(&entry.seq, __ATOMIC_RELAXED);
+    for (unsigned tries = 0; tries < 8; ++tries) {
+        if (seq & 1u) {
+            seq = __atomic_load_n(&entry.seq, __ATOMIC_RELAXED);
+            continue;
+        }
+        if (__atomic_compare_exchange_n(&entry.seq, &seq, seq + 1u, true, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+            entry.request = request;
+            entry.swapIdValue = id;
+            entry.updated = updated;
+            for (unsigned i = 0; i < kLayers; ++i) {
+                entry.surfaces[i] = hasSurface[i] ? surfaces[i] : nullptr;
+                if (hasSurface[i])
+                    entry.layers[i] = layers[i];
+            }
+            __atomic_store_n(&entry.seq, seq + 2u, __ATOMIC_RELEASE);
+            return;
+        }
+    }
+}
+
+bool SwitchExternalScreen::lookupValidatedLayers(const OriginalLegacySwapRequest *request, uint32_t id,
+                                                 uint32_t updated, OSObject *surfaces[],
+                                                 native_planes::Layer layers[]) const
+{
+    if (!validatedCache)
+        return false;
+    const unsigned idx = static_cast<unsigned>((reinterpret_cast<uintptr_t>(request) >> 6) % kValidatedCache);
+    const auto &entry = validatedCache[idx];
+    for (unsigned tries = 0; tries < 2; ++tries) {
+        const uint32_t s1 = __atomic_load_n(&entry.seq, __ATOMIC_ACQUIRE);
+        if (s1 & 1u)
+            continue;
+        const auto *req = entry.request;
+        const uint32_t entryId = entry.swapIdValue;
+        const uint32_t entryUpdated = entry.updated;
+        if (req != request || entryId != id || entryUpdated != updated) {
+            __atomic_thread_fence(__ATOMIC_ACQUIRE);
+            if (__atomic_load_n(&entry.seq, __ATOMIC_RELAXED) == s1)
+                return false;
+            continue;
+        }
+        for (unsigned i = 0; i < kLayers; ++i) {
+            surfaces[i] = entry.surfaces[i];
+            if (surfaces[i])
+                layers[i] = entry.layers[i];
+        }
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&entry.seq, __ATOMIC_RELAXED) == s1)
+            return true;
+    }
+    return false;
+}
+
 void SwitchExternalScreen::releaseSlot(unsigned index)
 {
     auto &slot = slots[index];
@@ -66,6 +160,7 @@ void SwitchExternalScreen::releaseSlot(unsigned index)
         cleanDomain();
     }
     if (slot.memory) {
+        publishSlotPa(index, nullptr, 0);
         slot.memory->complete(kIODirectionOut);
         slot.memory->release();
     }
@@ -86,7 +181,6 @@ bool SwitchExternalScreen::applyLayout(Slot &slot, uint64_t firstPage, uint64_t 
 {
     int tiled = 0;
     void *held = tegra_gm20b_surface_hold(firstPage, &tiled);
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
     slot.block = {};
     if (tegra_gm20b_surface_compressed(firstPage) ||
         (tiled && (tegra_gm20b_surface_layout(firstPage, &slot.block) != 1 || slot.block.bytes > bytes))) {
@@ -139,7 +233,6 @@ int SwitchExternalScreen::prepareSlot(OSObject *surface, uint32_t building)
         if (slot.memory == memory && slot.surface == surface && slot.pages == pages && slot.offset == offset &&
             slot.allocationId == allocation.allocation_id && slot.generation == allocation.allocation_generation) {
             const uint64_t firstPage = allocation.pages[offset / 4096] & ~0xfffULL;
-            __atomic_thread_fence(__ATOMIC_SEQ_CST);
             if (tegra_gm20b_surface_compressed(firstPage)) {
                 switch_native_scanout_release(&snapshot);
                 if (free)
@@ -213,6 +306,12 @@ int SwitchExternalScreen::prepareSlot(OSObject *surface, uint32_t building)
         releaseSlot(index);
         return -1;
     }
+    addr64_t firstPa = offset == 0 ? allocation.pages[offset / 4096] : 0;
+    if (!firstPa) {
+        IOByteCount segLen = 0;
+        firstPa = memory->getPhysicalSegment(0, &segLen, kIOMemoryMapperNone);
+    }
+    publishSlotPa(index, memory, firstPa);
     cleanDomain();
     return victim;
 }
@@ -236,13 +335,16 @@ native_planes::Layer SwitchExternalScreen::layerOf(const uint8_t *request, unsig
     f.allocation = native_legacy_surface_allocation(surface);
     const IOMemoryDescriptor *memory = native_legacy_surface_descriptor(surface);
     f.descriptorBytes = memory && memory->metaCast("IOMemoryDescriptor") ? memory->getLength() : 0;
-    TegraVICSurfaceDesc color = {};
-    switch_vic_surface_color(surface, &color);
-    f.colorMatrix = color.colorMatrix;
-    f.transfer = color.transfer;
-    f.primaries = color.primaries;
-    f.chromaTop = color.chromaTop;
-    f.chromaBottom = color.chromaBottom;
+    l.kind = native_planes::kindOf(f.format, f.planes);
+    if (native_planes::isYuv(l.kind)) {
+        TegraVICSurfaceDesc color = {};
+        switch_vic_surface_color(surface, &color);
+        f.colorMatrix = color.colorMatrix;
+        f.transfer = color.transfer;
+        f.primaries = color.primaries;
+        f.chromaTop = color.chromaTop;
+        f.chromaBottom = color.chromaBottom;
+    }
     if (f.planes >= 2) {
         for (uint32_t p = 0; p < 2; ++p) {
             f.offset[p] = native_planes_surface_plane_offset(surface, p);
@@ -253,7 +355,6 @@ native_planes::Layer SwitchExternalScreen::layerOf(const uint8_t *request, unsig
         f.stride[0] = narrow(native_legacy_surface_stride(surface));
         f.planeHeight[0] = f.height;
     }
-    l.kind = native_planes::kindOf(f.format, f.planes);
     l.src = native_planes::rectAt(request, swapSourceRects, layer);
     l.dst = native_planes::rectAt(request, swapDestinationRects, layer);
     l.transform = native_planes::wordAt(request, swapTransforms + 4u * layer) & 7u;
@@ -267,6 +368,12 @@ void SwitchExternalScreen::recordLayers(const uint8_t *request)
     const uint32_t updated = native_planes::wordAt(request, swapUpdated);
     OSObject *effective[kLayers] = {};
     memcpy(effective, request + swapEffectiveSurfaces, sizeof(effective));
+    uint32_t id = 0;
+    memcpy(&id, request + swapId, sizeof(id));
+    OSObject *cachedSurfaces[kLayers] = {};
+    native_planes::Layer cachedLayers[kLayers];
+    const bool cached = lookupValidatedLayers(reinterpret_cast<const OriginalLegacySwapRequest *>(request), id, updated,
+                                              cachedSurfaces, cachedLayers);
     for (unsigned i = 0; i < kLayers; ++i) {
         if (!(updated & (1u << i)))
             continue;
@@ -279,7 +386,7 @@ void SwitchExternalScreen::recordLayers(const uint8_t *request)
             record.surface = surface;
         }
         if (surface)
-            record.layer = layerOf(request, i, surface);
+            record.layer = cached && cachedSurfaces[i] == surface ? cachedLayers[i] : layerOf(request, i, surface);
     }
 }
 
@@ -321,8 +428,11 @@ void SwitchExternalScreen::requestFrame()
         return;
     const auto *bytes = reinterpret_cast<const uint8_t *>(request);
     if ((native_planes::wordAt(bytes, swapUpdated) & ~native_planes::wordAt(bytes, swapReady)) &
-        native_planes::kLayerBits)
+        native_planes::kLayerBits) {
+        if (dcb)
+            dcb->frameInterrupt(true);
         return;
+    }
     bool present[kLayers] = {};
     native_planes::Layer layers[kLayers];
     OSObject *surfaces[kLayers] = {};

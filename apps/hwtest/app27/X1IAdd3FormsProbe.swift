@@ -5,7 +5,8 @@ import HWTestKit
 /// Which of IADD3's operand negations GM20B runs (bits 49, 50 and 51 negate C, B and A in every form). The
 /// constant-buffer form with A and B negated (0x4ccc000800270707) raised ILLEGAL_INSTR_ENCODING in pixel programs on
 /// the device, while envytools, Ryujinx and maxas decode three independent negations and plain IADD reads its two as
-/// .PO. Each form is a warp's kernel on a bench raw device of its own, so a trap kills that channel alone: R5 = ±a ± b
+/// .PO. Each form is a warp's kernel on one bench raw device, which opens a fresh channel after a kill, so a trap
+/// kills that form's channel alone: R5 = ±a ± b
 /// ± c over R5 holding a sentinel, b from R3 or c[1][0x14], stored with a marker after it. `<form>=ran:<R5>:<R5 as
 /// ±a±b±c+k>`, ran:unmarked:<R5> when the marker is missing, or trapped:e<the channel's error>. The unnegated form
 /// runs first and must store a+b+c, else the kernel is wrong and the probe fails; the forms that negate A and B
@@ -128,15 +129,9 @@ enum X1IAdd3FormsProbe {
         let exact: Bool
     }
 
-    /// One form on a bench raw device of its own; any status but ok or a kill while it ran (a commit the kernel refused
-    /// reads killed too) is the probe's fault and throws
-    static func measure(_ form: Form, _ experiment: BenchExperiment) throws -> Ran {
-        let runner: BenchRunner
-        do {
-            runner = try BenchRunner.open()
-        } catch {
-            throw TestFailure("the bench did not open for \(form.name): \(error)")
-        }
+    /// One form on the bench's raw device; any status but ok or a kill while it ran (a commit the kernel refused reads
+    /// killed too) is the probe's fault and throws
+    static func measure(_ form: Form, _ experiment: BenchExperiment, on runner: BenchRunner) throws -> Ran {
         let outcome = runner.run(experiment)
         switch outcome.status {
         case "ok":
@@ -162,6 +157,12 @@ enum X1IAdd3FormsProbe {
     ) { _ in
         let journal = ProbeJournal(probe: "gpu.x1.iadd3_forms")
         let batch = try experiments()
+        let runner: BenchRunner
+        do {
+            runner = try BenchRunner.open()
+        } catch {
+            throw TestFailure("the bench did not open: \(error)")
+        }
         var metrics = Metrics()
         metrics.set("inputs", String(format: "a:0x%x,b:0x%x,c:0x%x", a, b, c))
         var exact: Set<String> = []
@@ -172,7 +173,7 @@ enum X1IAdd3FormsProbe {
             journal.starting("\(form.name) word=\(String(iadd3(form), radix: 16))")
             let ran: Ran
             do {
-                ran = try measure(form, experiment)
+                ran = try measure(form, experiment, on: runner)
             } catch {
                 let before = measured.isEmpty ? "-" : measured.joined(separator: ",")
                 throw TestFailure("\(error); measured before: \(before)")

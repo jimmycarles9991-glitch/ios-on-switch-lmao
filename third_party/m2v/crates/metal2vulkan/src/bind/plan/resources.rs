@@ -998,7 +998,11 @@ impl ResourcePlanner<'_> {
         // another texture buffer's or a sparse texture's.
         let extended = match compat {
             Some(s) => match ExtendedRange::of(s.pixel_format()) {
-                form @ Some(ExtendedRange::Planes { .. }) if !s.sparse() => form,
+                form @ Some(
+                    ExtendedRange::Planes { .. }
+                    | ExtendedRange::Bgr10 { .. }
+                    | ExtendedRange::Bgra10 { .. },
+                ) if !s.sparse() => form,
                 Some(_) if matches!(s, TextureShape::Buffer { .. }) || s.sparse() => {
                     return Err(BindError::Unsupported(Unsupported::not_implemented(
                         Feature::Format,
@@ -1164,7 +1168,7 @@ impl ResourcePlanner<'_> {
                             .or_else(|| direct_format(pixel_format))
                             .ok_or_else(|| internal("a storage choice without a format"))?,
                     ),
-                    None => None,
+                    None => extended.map(ExtendedRange::raw_format),
                 };
                 let format = match view {
                     Some(view) => {

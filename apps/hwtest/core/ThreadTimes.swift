@@ -69,6 +69,12 @@ public struct ThreadTimes: Equatable {
         return times
     }
 
+    /// One thread's CPU nanoseconds by its port (pthread_mach_thread_np, which holds no reference), from any thread:
+    /// one thread_info call, cheap enough for every test boundary.
+    public static func nanoseconds(of port: thread_act_t) -> UInt64? {
+        extended(port)?.nanoseconds
+    }
+
     public static func current() -> UInt64 {
         var id: UInt64 = 0
         pthread_threadid_np(nil, &id)

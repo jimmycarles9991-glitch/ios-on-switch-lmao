@@ -239,7 +239,7 @@ void gm20bHeapForget(SwitchMetalHeap *heap, uint64_t va)
 
 - (NSUInteger)usedSize
 {
-    return NSUInteger(_used.load() + (_arena ? gRM->raw->arenaUsed(_arena - 1) : 0));
+    return NSUInteger(_used.load(std::memory_order_relaxed) + (_arena ? gRM->raw->arenaUsed(_arena - 1) : 0));
 }
 
 - (NSUInteger)currentAllocatedSize
@@ -282,14 +282,14 @@ void gm20bHeapForget(SwitchMetalHeap *heap, uint64_t va)
 // NonVolatile answers Empty when they went, its resources' contents then undefined, as Metal's are.
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state
 {
-    const int asked = _purgeable.load();
+    const int asked = _purgeable.load(std::memory_order_relaxed);
     const auto answer = [&](bool purged) {
         return purged ? MTLPurgeableStateEmpty : asked ? MTLPurgeableState(asked) : MTLPurgeableStateNonVolatile;
     };
     if (state == MTLPurgeableStateKeepCurrent)
         return answer(_arena && gRM->raw->arenaPurged(_arena - 1));
     const bool keep = state == MTLPurgeableStateNonVolatile;
-    _purgeable = keep ? MTLPurgeableStateNonVolatile : MTLPurgeableStateVolatile;
+    _purgeable.store(keep ? MTLPurgeableStateNonVolatile : MTLPurgeableStateVolatile, std::memory_order_relaxed);
     if (!_arena)
         return answer(false);
     // whether the pages had gone and the new volatility in one step: no purge falls between the answer and the promise
@@ -297,7 +297,8 @@ void gm20bHeapForget(SwitchMetalHeap *heap, uint64_t va)
     if (keep) {
         if (!resident(self) && gRM->raw->setArenaVolatileIfPurged(_arena - 1)) {
             int expected = MTLPurgeableStateNonVolatile;
-            _purgeable.compare_exchange_strong(expected, MTLPurgeableStateVolatile);
+            _purgeable.compare_exchange_strong(expected, MTLPurgeableStateVolatile, std::memory_order_acq_rel,
+                                               std::memory_order_relaxed);
         }
     } else if (state == MTLPurgeableStateEmpty) {
         gRM->raw->purgeArena(_arena - 1, gRM->committed);
@@ -307,9 +308,10 @@ void gm20bHeapForget(SwitchMetalHeap *heap, uint64_t va)
 
 - (bool)gm20bTake:(uint64_t)bytes
 {
-    if (_used.fetch_add(bytes) + bytes + (_arena ? gRM->raw->arenaUsed(_arena - 1) : 0) <= _descriptor.size)
+    if (_used.fetch_add(bytes, std::memory_order_relaxed) + bytes + (_arena ? gRM->raw->arenaUsed(_arena - 1) : 0) <=
+        _descriptor.size)
         return true;
-    _used -= bytes;
+    _used.fetch_sub(bytes, std::memory_order_relaxed);
     return false;
 }
 
@@ -323,8 +325,8 @@ void gm20bHeapForget(SwitchMetalHeap *heap, uint64_t va)
     if (![self gm20bTake:need.size])
         return nil;
     id b = [(id<MTLDevice>)_device newBufferWithLength:length options:options];
-    if (![b isKindOfClass:[SwitchMetalBuffer class]]) {
-        _used -= need.size;
+    if (!gm20bAsBuffer(b)) {
+        _used.fetch_sub(need.size, std::memory_order_relaxed);
         return (id<MTLBuffer>)b;
     }
     SwitchMetalBuffer *made = (SwitchMetalBuffer *)b;
@@ -353,8 +355,8 @@ void gm20bHeapForget(SwitchMetalHeap *heap, uint64_t va)
     if (![self gm20bTake:need.size])
         return nil;
     id t = [(id<MTLDevice>)_device newTextureWithDescriptor:d];
-    if (![t isKindOfClass:[SwitchMetalTexture class]]) {
-        _used -= need.size;
+    if (!gm20bAsTexture(t)) {
+        _used.fetch_sub(need.size, std::memory_order_relaxed);
         return (id<MTLTexture>)t;
     }
     SwitchMetalTexture *made = (SwitchMetalTexture *)t;
@@ -452,7 +454,7 @@ void gm20bHeapForget(SwitchMetalHeap *heap, uint64_t va)
 
 void restoreArenas(SwitchMetalCommandBuffer *cb)
 {
-    for (id o : cb->_owners) {
+    auto restoreObject = [](id o) {
         SwitchMetalHeap *h = nil;
         if ([o isKindOfClass:[SwitchMetalTexture class]]) {
             __unsafe_unretained SwitchMetalTexture *owner =
@@ -463,5 +465,10 @@ void restoreArenas(SwitchMetalCommandBuffer *cb)
         else if ([o isKindOfClass:[SwitchMetalHeap class]])
             h = (SwitchMetalHeap *)o;
         resident(h);
-    }
+    };
+    for (id o : cb->_owners)
+        restoreObject(o);
+    for (const auto &snapshot : cb->_residencySnapshots)
+        for (id o in snapshot->committed)
+            restoreObject(o);
 }

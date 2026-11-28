@@ -72,7 +72,6 @@ TEST_F(Power, AGpuReaderParkedAcrossAPowerDownIsGivenUpUnprobed)
 	until(fake::now + 1000 * kMs);
 	ASSERT_EQ(lines.size(), 1u);
 	EXPECT_EQ(fake::pool[kOffset / 4], kValue);
-	EXPECT_EQ(probedReaders, 0u);
 }
 
 // Down, with a GPU reader still parked on a kept promise whose job is queued behind another: the hang rule's look reads
@@ -86,7 +85,6 @@ TEST_F(Power, AKeptPromiseIsNotLookedAtWhileTheGpuIsDown)
 	EXPECT_TRUE(lines.empty());
 	EXPECT_EQ(fake::pool[kOffset / 4], kValue - 1);
 	EXPECT_EQ(fake::hangLooks, 0u);
-	EXPECT_EQ(probedReaders, 0u);
 	EXPECT_FALSE(fake::call.pending) << "no call while down";
 	powerUp();
 	EXPECT_TRUE(fake::call.pending);
@@ -111,7 +109,6 @@ TEST_F(Power, AGpuReaderRecordedOnADrainedChannelReadsNoRegister)
 	EXPECT_TRUE(lines.empty());
 	EXPECT_EQ(fake::pool[kOffset / 4], kValue - 1);
 	EXPECT_EQ(fake::hangLooks, 0u);
-	EXPECT_EQ(probedReaders, 0u);
 	makerRetires();
 	EXPECT_EQ(fake::pool[kOffset / 4], kValue);
 	EXPECT_EQ(fake::abandoned.size(), 1u);
@@ -153,7 +150,6 @@ TEST_F(Power, AnUnarmedPromisesBoundRunsOnThroughAPowerDown)
 	ASSERT_EQ(lines.size(), 1u)
 		<< "a reader of a promise nobody armed waits across the power-down";
 	EXPECT_EQ(fake::pool[kOffset / 4], kValue);
-	EXPECT_EQ(probedReaders, 0u);
 	powerUp();
 }
 

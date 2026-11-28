@@ -98,6 +98,12 @@ Launches run(const std::vector<uint32_t> &w)
             waited = true;
             referenced = false;
             break;
+        case NVB1C0_INVALIDATE_SHADER_CACHES:
+            if (v & NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES, FLUSH_DATA, TRUE)) {
+                waited = true;
+                referenced = false;
+            }
+            break;
         case NVB1C0_LINE_LENGTH_IN:
             length = v;
             break;

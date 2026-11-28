@@ -9,14 +9,20 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static NSArray<NSString *> *switch_bootstrap_core_names(void)
-{
-    return @[ @"org.coolstar.sileo", @"ellekit", @"uikittools", @"launchctl" ];
-}
-
 static NSDictionary *switch_bootstrap_core_targets(void)
 {
     return SWITCH_BOOTSTRAP_MANAGED_PACKAGES;
+}
+
+static NSArray<NSString *> *switch_bootstrap_core_names(void)
+{
+    NSArray<NSString *> *every = @[ @"org.coolstar.sileo", @"ellekit", @"uikittools", @"launchctl" ];
+    NSMutableArray<NSString *> *added = [NSMutableArray new];
+    for (NSString *name in switch_bootstrap_core_targets())
+        if (![every containsObject:name])
+            [added addObject:name];
+    [added sortUsingSelector:@selector(compare:)];
+    return [every arrayByAddingObjectsFromArray:added];
 }
 
 int switch_bootstrap_verify_sileo(NSString *root)
@@ -231,9 +237,10 @@ static int switch_bootstrap_install_core(NSString *root, NSString *candidate, NS
         for (NSString *name in switch_bootstrap_core_names())
             if (!switch_bootstrap_core_version(records[name], switch_bootstrap_core_targets()[name], YES))
                 return EIO;
-    return error ?: switch_bootstrap_update_command(@"/var/jb/usr/bin/apt-mark", @[
-        @"hold", @"org.coolstar.sileo", @"ellekit", @"uikittools", @"launchctl"
-    ]);
+    return error
+               ?: switch_bootstrap_update_command(
+                      @"/var/jb/usr/bin/apt-mark",
+                      [@[ @"hold" ] arrayByAddingObjectsFromArray:switch_bootstrap_core_names()]);
 }
 
 int switch_bootstrap_update_core(NSString *root, NSString *base, NSString *packages, NSString *hash, NSString *helper,

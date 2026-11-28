@@ -1,7 +1,7 @@
 //! The storage form's fixed-function blend run through the interpreter against a plain `f32`
 //! reference of the module docs' model, bit for bit (any NaN for a NaN).
 
-use super::{blend, Channels, RopBlend};
+use super::{blend, Assumption, Channels, RopBlend};
 use crate::metal::{BlendFactor, BlendOperation, PixelFormat};
 use crate::pipeline::lower_inputs::BlendEquation;
 use crate::pipeline::sym::{ResourceKind, ResourceSlot, Stage};
@@ -513,11 +513,28 @@ fn formats_outside_the_model_are_refused() {
     for (pf, format) in [
         (PixelFormat::RGBA8Snorm, vk::Format::R8G8B8A8_SNORM),
         (PixelFormat::RGBA8Uint, vk::Format::R8G8B8A8_UINT),
-        (
-            PixelFormat::RG11B10Float,
-            vk::Format::B10G11R11_UFLOAT_PACK32,
-        ),
+        (PixelFormat::RGB9E5Float, vk::Format::E5B9G9R9_UFLOAT_PACK32),
     ] {
         assert!(RopBlend::of(&eq, format).is_err(), "{pf:?}");
     }
+}
+
+/// `RG11B10Float` blends as a float format without alpha: nothing clamped, a destination alpha of
+/// one, the store the storage write's conversion, under the narrow float store's assumption.
+#[test]
+fn an_unsigned_packed_float_blends_unclamped_without_alpha() {
+    let eq = BlendEquation {
+        source_rgb: BlendFactor::One,
+        destination_rgb: BlendFactor::OneMinusSourceAlpha,
+        rgb_operation: BlendOperation::Add,
+        source_alpha: BlendFactor::One,
+        destination_alpha: BlendFactor::OneMinusSourceAlpha,
+        alpha_operation: BlendOperation::Add,
+    };
+    let b = RopBlend::of(&eq, vk::Format::B10G11R11_UFLOAT_PACK32).expect("RG11B10Float");
+    assert_eq!(b.channels, Channels::PackedFloat);
+    assert!(!b.alpha);
+    let assumed = b.assumptions();
+    assert_ne!(assumed & Assumption::HalfRounding as u8, 0, "{assumed:#x}");
+    assert_eq!(assumed & Assumption::UnormRounding as u8, 0, "{assumed:#x}");
 }

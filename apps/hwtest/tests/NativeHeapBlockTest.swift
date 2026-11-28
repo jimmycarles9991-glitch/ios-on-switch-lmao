@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A heap's block-compressed textures, a mip chain and a 2D array in a private heap and one level in a shared one

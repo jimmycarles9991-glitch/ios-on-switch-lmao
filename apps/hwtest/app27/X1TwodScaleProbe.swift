@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestX1
 import Metal
 
 extension X1TwodProbes {
@@ -25,6 +26,48 @@ extension X1TwodProbes {
 
         /// Metal's: no shift, exact weights, sRGB in linear light
         static func metal(srgb: Bool) -> Filter { Filter(shift: 0, weightBits: 0, linearLight: srgb) }
+    }
+
+    struct AxisTap {
+        let i0: Int
+        let w0: Double
+        let i1: Int
+        let w1: Double
+        let two: Bool
+    }
+
+    static func axisTaps(count: Int, size: Int, du: UInt64, point: Bool, _ f: Filter) -> [AxisTap] {
+        (0 ..< count).map { idx in
+            let at = Double(UInt64(idx) * du + du / 2) / 4_294_967_296
+            let p = at + f.shift
+            if point {
+                return AxisTap(i0: min(max(Int(p.rounded(.down)), 0), size - 1), w0: 1, i1: 0, w1: 0, two: false)
+            }
+            let c = p - 0.5
+            let i = Int(c.rounded(.down))
+            var w = c - Double(i)
+            if f.weightBits > 0 { w = (w * Double(1 << f.weightBits)).rounded(.down) / Double(1 << f.weightBits) }
+            return AxisTap(
+                i0: min(max(i, 0), size - 1), w0: 1 - w, i1: min(max(i + 1, 0), size - 1), w1: w, two: true
+            )
+        }
+    }
+
+    static func sourceValues(_ codes: [SIMD4<UInt32>], _ format: X1Format, linearSrgb: Bool) -> [Double] {
+        let channels = format.channels, chCount = channels.count
+        var out = [Double](repeating: 0, count: codes.count * 4)
+        out.withUnsafeMutableBufferPointer { dst in
+            let p = dst.baseAddress!
+            for i in 0 ..< codes.count {
+                let code = codes[i], base = i * 4
+                for c in 0 ..< chCount {
+                    let ch = channels[c]
+                    let v = ch.value(code[c])
+                    p[base + c] = linearSrgb && ch == .srgb8 ? X1Channel.linear(v) : v
+                }
+            }
+        }
+        return out
     }
 
     /// Source texel taps and weights along one axis at 32.32 position `at` (in source texels from the corner)
@@ -84,8 +127,12 @@ extension X1TwodProbes {
         for format in X1Format.all {
             journal.starting(format.name)
             let srgb = format.channels.contains(.srgb8)
+            let channels = format.channels, chCount = channels.count
+            let metalRule = format.metalRounding
             for (ratio, from, to) in ratios {
-                let (src, codes) = try await source(gpu, format, from, from)
+                let (src, codes) = try await sourceFlat(gpu, format, from, from)
+                let srcVal = sourceValues(codes, format, linearSrgb: false)
+                let srcLin = srgb ? sourceValues(codes, format, linearSrgb: true) : []
                 for point in [true, false] {
                     let written = try gpu.texture(format.pixelFormat, to, to, usage: [.renderTarget, .shaderRead])
                     let du = (UInt64(from) << 32) / UInt64(to)
@@ -110,16 +157,56 @@ extension X1TwodProbes {
                     let filters = Filter.all(point: point, srgb: srgb)
                     var tallies = [X1RuleTally](repeating: X1RuleTally(), count: filters.count)
                     let metal = filters.firstIndex(of: .metal(srgb: srgb && !point)) ?? 0
-                    for t in 0 ..< to * to {
-                        let (x, y) = (t % to, t / to)
-                        let px = Double(UInt64(x) * du + du / 2) / 4_294_967_296
-                        let py = Double(UInt64(y) * du + du / 2) / 4_294_967_296
-                        let got = format.codes(bytes, t)
-                        for (k, f) in filters.enumerated() {
-                            let exact = filtered(codes, from, from, format, x: px, y: py, point: point, f)
-                            tallies[k].add(
-                                got, exact: exact, channels: format.channels, metal: format.metalRounding, at: t
-                            )
+                    bytes.withUnsafeBufferPointer { bp in
+                        let byteBase = bp.baseAddress!
+                        srcVal.withUnsafeBufferPointer { vp in
+                            srcLin.withUnsafeBufferPointer { lp in
+                                let valBase = vp.baseAddress!
+                                let linBase = lp.baseAddress
+                                tallies.withUnsafeMutableBufferPointer { tp in
+                                    DispatchQueue.concurrentPerform(iterations: filters.count) { k in
+                                        let f = filters[k]
+                                        let taps = axisTaps(count: to, size: from, du: du, point: point, f)
+                                        let useLin = f.linearLight && srgb
+                                        let srcBase = useLin ? linBase! : valBase
+                                        var tally = X1RuleTally()
+                                        for y in 0 ..< to {
+                                            let ty = taps[y]
+                                            let row0 = ty.i0 * from, row1 = ty.i1 * from
+                                            let tRow = y * to
+                                            for x in 0 ..< to {
+                                                let t = tRow + x
+                                                let tx = taps[x]
+                                                let got = format.codes4(byteBase, t)
+                                                var exact = SIMD4<Double>.zero
+                                                if !ty.two {
+                                                    let o00 = (row0 + tx.i0) * 4
+                                                    for c in 0 ..< chCount { exact[c] = srcBase[o00 + c] }
+                                                } else {
+                                                    let w00 = tx.w0 * ty.w0, w10 = tx.w1 * ty.w0
+                                                    let w01 = tx.w0 * ty.w1, w11 = tx.w1 * ty.w1
+                                                    let o00 = (row0 + tx.i0) * 4, o10 = (row0 + tx.i1) * 4
+                                                    let o01 = (row1 + tx.i0) * 4, o11 = (row1 + tx.i1) * 4
+                                                    for c in 0 ..< chCount {
+                                                        var sum = 0.0
+                                                        if w00 != 0 { sum += w00 * srcBase[o00 + c] }
+                                                        if w10 != 0 { sum += w10 * srcBase[o10 + c] }
+                                                        if w01 != 0 { sum += w01 * srcBase[o01 + c] }
+                                                        if w11 != 0 { sum += w11 * srcBase[o11 + c] }
+                                                        exact[c] =
+                                                            useLin && channels[c] == .srgb8
+                                                                ? X1Channel.encoded(sum) : sum
+                                                    }
+                                                }
+                                                tally.add(
+                                                    got, exact: exact, channels: channels, metal: metalRule, at: t
+                                                )
+                                            }
+                                        }
+                                        tp[k] = tally
+                                    }
+                                }
+                            }
                         }
                     }
                     cells.append((name, tallies[metal]))

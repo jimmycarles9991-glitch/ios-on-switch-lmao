@@ -869,7 +869,8 @@ static void build_icb_bind(struct mme_builder *b, bool unused)
             hi = mme_load(b);
             lo = mme_load(b);
             struct mme_value recorded = mme_load(b);
-            mme_if(b, ine, hi, mme_zero())
+            struct mme_value any = mme_or(b, hi, lo);
+            mme_if(b, ine, any, mme_zero())
             {
                 build_i2m_head(b, hi, lo, 4);
                 mme_if(b, ieq, residual, mme_zero())
@@ -878,6 +879,7 @@ static void build_icb_bind(struct mme_builder *b, bool unused)
                 }
                 build_inline_word(b, residual);
             }
+            mme_free_reg(b, any);
             mme_free_reg(b, hi);
             mme_free_reg(b, lo);
             mme_free_reg(b, recorded);

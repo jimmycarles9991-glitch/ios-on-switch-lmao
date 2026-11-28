@@ -7,7 +7,6 @@
 #import "TegraGM20BMetalSurfaceRefusals.h"
 #import "TegraGM20BMetalXrPlanes.h"
 #include "native_plane.h"
-#include "surface_note.h"
 #include "surface_refusal.h"
 #include "texture_shape.h"
 #include "ycbcr.h"
@@ -132,17 +131,6 @@ bool makeSurfaceTexelBuffer(SwitchMetalTexture *t, IOSurfaceRef s, uint64_t offs
     return true;
 }
 
-#if SWITCH_FRAME_TIMELINE
-void noteCompositorSurface(MTLTextureDescriptor *d, IOSurfaceRef s, const void *frame)
-{
-    constexpr size_t kHalfScreen = 1280 * 720 / 2;
-    if (!producesTexture(d) || IOSurfaceGetWidth(s) * IOSurfaceGetHeight(s) < kHalfScreen || !gRM || !gRM->raw ||
-        gRM->raw->role() != gm20b::Device::Role::RenderServer || !gm20b::noteAllowed())
-        return;
-    gm20b::postSurfaceNote(s, frame);
-}
-#endif
-
 }  // namespace
 
 // A YCbCr texture's plan (ycbcr.h): Metal reads it converted by the surface's range and matrix, that through the sRGB curve,
@@ -226,7 +214,6 @@ const char *ycbcrPlan(MTLTextureDescriptor *d, IOSurfaceRef s, NSUInteger plane,
     }
 #if SWITCH_FRAME_TIMELINE
     gSurfaceTextures.fetch_add(1, std::memory_order_relaxed);
-    noteCompositorSurface(d, s, __builtin_frame_address(0));
 #endif
     SwitchMetalTexture *t = [SwitchMetalTexture new];
     t->_device = self;

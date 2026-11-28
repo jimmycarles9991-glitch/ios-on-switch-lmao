@@ -27,7 +27,7 @@
 #include <machine/machine_routines.h>
 #include <string.h>
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED
 
 _Static_assert(SWITCH_WATCH_HINT_PARKED == kThreadWaitParkedWorkQueue, "parked workqueue hint");
 #if XNU_12377_121_6
@@ -40,7 +40,7 @@ uint32_t switch_sched_watch_on;
 struct switch_slots switch_watch_table;
 struct watch_slot switch_watch_slots[SWITCH_SLOTS];
 struct switch_watch_launch switch_watch_launch;
-uint32_t switch_watch_claimed, switch_watch_refused;
+uint32_t switch_watch_claimed, switch_watch_freed, switch_watch_refused;
 static thread_call_t watch_call;
 static uint64_t burst_abs, commit_late_abs, touch_late_abs, focal_busy_abs;
 static uint64_t focal_tid; /* the focal app's main thread (stats.c's role hook writes, its threads' hooks read) */
@@ -73,8 +73,9 @@ static void watch_times(void)
  * so the writer, which never locks, never sees them go back; every ring entry carries its own owner's name, pid and
  * tid.
  */
-static struct watch_slot *slot_take(uint64_t tid, task_t task)
+static struct watch_slot *slot_take(thread_t thread, task_t task)
 {
+    const uint64_t tid = thread->thread_id;
     bool first = false;
     const int i = switch_slot_claim(&switch_watch_table, tid, &first);
     struct watch_slot *s = NULL;
@@ -91,6 +92,7 @@ static struct watch_slot *slot_take(uint64_t tid, task_t task)
     memset(&s->run, 0, sizeof(s->run));
     s->pid = task_pid(task);
     switch_task_name(task, s->name, sizeof(s->name));
+    os_atomic_or(&thread->switch_watch_mask, SWITCH_WATCH_WATCH, relaxed);
     switch_slot_publish(&switch_watch_table, (unsigned int)i, tid);
     os_atomic_inc(&switch_watch_claimed, relaxed);
     os_atomic_store(&switch_sched_watch_on, 1, relaxed);
@@ -174,7 +176,7 @@ void switch_sched_watch_dispatched(thread_t thread, uint64_t now)
     }
     s = slot_of(thread->thread_id);
     if (s == NULL && focal(thread)) {
-        s = slot_take(thread->thread_id, get_threadtask(thread));
+        s = slot_take(thread, get_threadtask(thread));
     }
     if (s != NULL) {
         switch_busy_dispatched(&s->t.busy, now, made);
@@ -182,31 +184,46 @@ void switch_sched_watch_dispatched(thread_t thread, uint64_t now)
     }
 }
 
-/* stats.c, thread context: RunningBoard made `task` (not SpringBoard) the focal app, main thread `tid`. */
-void switch_sched_watch_focal(task_t task, uint64_t tid)
+/* stats.c, thread context: RunningBoard made `task` (not SpringBoard) the focal app, main thread `thread`. */
+void switch_sched_watch_focal(task_t task, thread_t thread)
 {
     char name[SWITCH_WATCH_NAME];
 
     switch_task_name(task, name, sizeof(name));
+    os_atomic_or(&thread->switch_watch_mask, SWITCH_WATCH_WATCH, relaxed);
     if (switch_watch_launch_set(&switch_watch_launch, task_pid(task), name, mach_absolute_time())) {
-        os_atomic_store(&focal_tid, tid, relaxed);
+        os_atomic_store(&focal_tid, thread_tid(thread), relaxed);
     }
     os_atomic_store(&switch_sched_watch_on, 1, relaxed);
 }
 
 /* stats.c, thread context: backboardd named its render-server thread. */
-void switch_sched_watch_render_server(uint64_t tid)
+void switch_sched_watch_render_server(thread_t thread)
 {
     if (os_atomic_load(&watch_call, acquire) == NULL) {
-        thread_call_t call = thread_call_allocate_with_options(switch_watch_write, NULL, THREAD_CALL_PRIORITY_KERNEL,
+        thread_call_t call = thread_call_allocate_with_options(switch_watch_write, NULL, THREAD_CALL_PRIORITY_USER,
                                                                THREAD_CALL_OPTIONS_ONCE);
 
         if (call != NULL && !os_atomic_cmpxchg(&watch_call, NULL, call, release)) {
             thread_call_free(call);
         }
     }
-    switch_sched_commit_server_named(tid);
+    os_atomic_or(&thread->switch_watch_mask, SWITCH_WATCH_WATCH, relaxed);
+    switch_sched_commit_server_named(thread_tid(thread));
     os_atomic_store(&switch_sched_watch_on, 1, relaxed);
+}
+
+void switch_sched_watch_exiting(thread_t thread)
+{
+    if ((os_atomic_load(&thread->switch_watch_mask, relaxed) & SWITCH_WATCH_WATCH) == 0) {
+        return;
+    }
+    disable_preemption();
+    os_atomic_and(&thread->switch_watch_mask, (uint8_t)~SWITCH_WATCH_WATCH, relaxed);
+    if (switch_slot_free_tid(&switch_watch_table, thread->thread_id)) {
+        os_atomic_inc(&switch_watch_freed, relaxed);
+    }
+    enable_preemption();
 }
 
 static uint64_t own_cpu(void)
@@ -263,7 +280,7 @@ void switch_sched_watch_commit(uint64_t now)
     switch_sched_commit_sent(now);
     switch_watch_launch_commit(&switch_watch_launch, task_pid(current_task()), now);
     if (s == NULL) {
-        s = slot_take(self->thread_id, current_task());
+        s = slot_take(self, current_task());
     }
     if (s != NULL) {
         watch_event(s, SWITCH_WATCH_COMMIT, now, os_atomic_load(&burst_abs, relaxed), 0, 0);
@@ -277,7 +294,7 @@ void switch_sched_watch_delivered(uint64_t report, int to_pid, uint64_t now)
     struct watch_slot *s = slot_of(self->thread_id);
 
     if (s == NULL) {
-        s = slot_take(self->thread_id, current_task());
+        s = slot_take(self, current_task());
     }
     if (s != NULL) {
         watch_event(s, SWITCH_WATCH_TOUCH, now, 0, report, to_pid);

@@ -1,0 +1,144 @@
+diff --git a/hw/sd/sdhci.c b/hw/sd/sdhci.c
+index 0f65885..29750ca 100644
+--- a/hw/sd/sdhci.c
++++ b/hw/sd/sdhci.c
+@@ -288,6 +288,7 @@ static void sdhci_reset(SDHCIState *s)
+ 
+     timer_del(s->insert_timer);
+     timer_del(s->transfer_timer);
++    timer_del(s->complete_timer);
+ 
+     /*
+      * Set all registers to 0. Capabilities/Version registers are not cleared
+@@ -420,12 +421,52 @@ static void sdhci_send_command(SDHCIState *s)
+     if (!timeout && (s->blksize & BLOCK_SIZE_MASK) &&
+         (s->cmdreg & SDHC_CMD_DATA_PRESENT)) {
+         s->data_count = 0;
++        s->xfer_blocks = (s->trnmod & SDHC_TRNS_BLK_CNT_EN) ? s->blkcnt : 1;
+         sdhci_data_transfer(s);
+     }
+ }
+ 
++static void sdhci_complete_transfer(SDHCIState *s)
++{
++    s->prnsts &= ~(SDHC_DOING_READ | SDHC_DOING_WRITE |
++            SDHC_DAT_LINE_ACTIVE | SDHC_DATA_INHIBIT |
++            SDHC_SPACE_AVAILABLE | SDHC_DATA_AVAILABLE);
++
++    if (s->norintstsen & SDHC_NISEN_TRSCMP) {
++        s->norintsts |= SDHC_NIS_TRSCMP;
++    }
++
++    sdhci_update_irq(s);
++}
++
++static void sdhci_complete_timer_fired(void *opaque)
++{
++    sdhci_complete_transfer(opaque);
++}
++
++/*
++ * The card's time for the command just moved: latency-us plus us-per-kib for each KiB. The data moves at once in the
++ * model and the line stays busy until then; unlike transfer_timer, no register access cuts it short, so a guest that
++ * keeps more requests than the card serves sees them queue as on hardware.
++ */
++static uint64_t sdhci_card_time_ns(SDHCIState *s)
++{
++    const uint64_t block_size = s->blksize & BLOCK_SIZE_MASK;
++    uint64_t blocks = s->xfer_blocks;
++
++    if (!s->latency_us && !s->us_per_kib) {
++        return 0;
++    }
++    if ((s->trnmod & SDHC_TRNS_BLK_CNT_EN) && s->blkcnt <= blocks) {
++        blocks -= s->blkcnt;
++    }
++    return (uint64_t)s->latency_us * 1000 + blocks * block_size * s->us_per_kib * 1000 / 1024;
++}
++
+ static void sdhci_end_transfer(SDHCIState *s)
+ {
++    uint64_t card_ns;
++
+     /* Automatically send CMD12 to stop transfer if AutoCMD12 enabled */
+     if ((s->trnmod & SDHC_TRNS_ACMD12) != 0) {
+         SDRequest request;
+@@ -439,15 +480,12 @@ static void sdhci_end_transfer(SDHCIState *s)
+         s->rspreg[3] = ldl_be_p(response);
+     }
+ 
+-    s->prnsts &= ~(SDHC_DOING_READ | SDHC_DOING_WRITE |
+-            SDHC_DAT_LINE_ACTIVE | SDHC_DATA_INHIBIT |
+-            SDHC_SPACE_AVAILABLE | SDHC_DATA_AVAILABLE);
+-
+-    if (s->norintstsen & SDHC_NISEN_TRSCMP) {
+-        s->norintsts |= SDHC_NIS_TRSCMP;
++    card_ns = sdhci_card_time_ns(s);
++    if (card_ns) {
++        timer_mod(s->complete_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + card_ns);
++        return;
+     }
+-
+-    sdhci_update_irq(s);
++    sdhci_complete_transfer(s);
+ }
+ 
+ /*
+@@ -1193,6 +1231,7 @@ static inline void sdhci_reset_write(SDHCIState *s, uint8_t value)
+         s->norintsts &= ~SDHC_NIS_CMDCMP;
+         break;
+     case SDHC_RESET_DATA:
++        timer_del(s->complete_timer);
+         s->data_count = 0;
+         s->prnsts &= ~(SDHC_SPACE_AVAILABLE | SDHC_DATA_AVAILABLE |
+                 SDHC_DOING_READ | SDHC_DOING_WRITE |
+@@ -1476,6 +1515,8 @@ void sdhci_initfn(SDHCIState *s)
+                                    sdhci_raise_insertion_irq, s);
+     s->transfer_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                      sdhci_data_transfer, s);
++    s->complete_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
++                                     sdhci_complete_timer_fired, s);
+ 
+     s->io_ops = &sdhci_mmio_le_ops;
+ }
+@@ -1484,6 +1525,7 @@ void sdhci_uninitfn(SDHCIState *s)
+ {
+     timer_free(s->insert_timer);
+     timer_free(s->transfer_timer);
++    timer_free(s->complete_timer);
+ 
+     g_free(s->fifo_buffer);
+     s->fifo_buffer = NULL;
+@@ -1608,6 +1650,8 @@ static Property sdhci_sysbus_properties[] = {
+     DEFINE_SDHCI_COMMON_PROPERTIES(SDHCIState),
+     DEFINE_PROP_BOOL("pending-insert-quirk", SDHCIState, pending_insert_quirk,
+                      false),
++    DEFINE_PROP_UINT32("latency-us", SDHCIState, latency_us, 0),
++    DEFINE_PROP_UINT32("us-per-kib", SDHCIState, us_per_kib, 0),
+     DEFINE_PROP_LINK("dma", SDHCIState,
+                      dma_mr, TYPE_MEMORY_REGION, MemoryRegion *),
+     DEFINE_PROP_END_OF_LIST(),
+diff --git a/include/hw/sd/sdhci.h b/include/hw/sd/sdhci.h
+index 6cd2822..b433881 100644
+--- a/include/hw/sd/sdhci.h
++++ b/include/hw/sd/sdhci.h
+@@ -48,7 +48,9 @@ struct SDHCIState {
+ 
+     QEMUTimer *insert_timer;       /* timer for 'changing' sd card. */
+     QEMUTimer *transfer_timer;
++    QEMUTimer *complete_timer;     /* holds transfer complete for the card's time */
+     qemu_irq irq;
++    uint32_t xfer_blocks;          /* blocks the current data command asked for */
+ 
+     /* Registers cleared on reset */
+     uint32_t sdmasysad;    /* SDMA System Address register */
+@@ -100,6 +102,9 @@ struct SDHCIState {
+     uint8_t sd_spec_version;
+     uint8_t uhs_mode;
+     uint8_t vendor;        /* For vendor specific functionality */
++    /* A real card's time for a data command: transfer complete comes this long after the data moved */
++    uint32_t latency_us;
++    uint32_t us_per_kib;
+ };
+ typedef struct SDHCIState SDHCIState;
+ 

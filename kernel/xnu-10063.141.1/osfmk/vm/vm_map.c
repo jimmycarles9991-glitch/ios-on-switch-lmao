@@ -116,6 +116,7 @@
 #include <vm/vm_shared_region.h>
 #include <vm/vm_map_store.h>
 #include <switch/prefetch_vm.h>
+#include <switch/vm_protect.h>
 
 #include <san/kasan.h>
 
@@ -6237,15 +6238,21 @@ vm_map_protect(
 	 */
 
 	current = entry;
-	if (current != vm_map_to_entry(map)) {
-		/* clip and unnest if necessary */
-		vm_map_clip_start(map, current, start);
-	}
 
 	while ((current != vm_map_to_entry(map)) &&
 	    (current->vme_start < end)) {
 		vm_prot_t       old_prot;
 
+		if (switch_vm_protect_submap_noop(current->is_sub_map, current->use_pmap,
+		    current->protection, current->max_protection, new_prot, set_max)) {
+			current = current->vme_next;
+			continue;
+		}
+
+		if (current->vme_start < start) {
+			/* clip and unnest if necessary */
+			vm_map_clip_start(map, current, start);
+		}
 		vm_map_clip_end(map, current, end);
 
 #if DEVELOPMENT || DEBUG

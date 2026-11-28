@@ -40,11 +40,10 @@ host_test(
 host_shims(
     name = "interrupt_kernel",
     headers = [
-        "IOKit/IOFilterInterruptEventSource.h",
         "IOKit/IOLib.h",
-        "IOKit/IOLocks.h",
-        "IOKit/IOWorkLoop.h",
+        "IOKit/IOService.h",
         "kern/clock.h",
+        "kern/thread_call.h",
     ],
     stubs = "switch_falcon_interrupt_test_stubs.h",
     deps = [":switch_falcon_interrupt_stubs"],

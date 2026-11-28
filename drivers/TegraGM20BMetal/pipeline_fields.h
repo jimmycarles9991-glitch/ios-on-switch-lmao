@@ -38,6 +38,49 @@ struct PipelineFields {
     AttributeFields attributes[31];
 };
 
+// The fields a render key names, as the words the pack's fast key and the store's name fold (TegraGM20BMetalPipelineKey.h
+// fastKey, compile_request.h storeKeyOf): what pipelineKey prints, each group tagged so no two field lists give the same
+// words. Not printed and not given: a colour or attribute of no format, the tessellator without a patch, an
+// amplification of 1 or less, a rounding other than 2, alpha-to-coverage off and rasterization on; the dynamic stride
+// is given as UINT32_MAX.
+template <class Add> void keyFieldWords(const PipelineFields &f, Add &&add)
+{
+    for (const uint64_t w : {f.samples, f.topology, f.depthFormat, f.stencilFormat})
+        add(w);
+    for (unsigned i = 0; i < 8; i++) {
+        const ColorFields &c = f.color[i];
+        if (!c.format)
+            continue;
+        for (const uint64_t w : {uint64_t(0x100 + i), c.format, c.writeMask, c.blending, c.sourceRGB, c.destinationRGB,
+                                 c.operationRGB, c.sourceAlpha, c.destinationAlpha, c.operationAlpha})
+            add(w);
+    }
+    for (unsigned i = 0; i < 31; i++) {
+        const AttributeFields &a = f.attributes[i];
+        if (!a.format)
+            continue;
+        const uint64_t stride = a.stride == UINT64_MAX ? UINT32_MAX : a.stride;
+        for (const uint64_t w : {uint64_t(0x200 + i), a.format, a.offset, a.buffer, stride, a.step, a.rate})
+            add(w);
+    }
+    if (f.patchType) {
+        const TessellationFields &t = f.tessellation;
+        for (const uint64_t w : {uint64_t(0x300), t.partition, t.factorFormat, t.factorStep, t.winding,
+                                 t.controlPointIndex, t.maxFactor, t.factorScale})
+            add(w);
+    }
+    if (f.amplification > 1) {
+        add(0x400);
+        add(f.amplification);
+    }
+    if (f.textureWriteRounding == 2)
+        add(0x500);
+    if (!f.rasterization)
+        add(0x600);
+    if (f.alphaToCoverage)
+        add(0x680);
+}
+
 // A compute descriptor's stageInputDescriptor
 struct StageInFields {
     AttributeFields attributes[31];

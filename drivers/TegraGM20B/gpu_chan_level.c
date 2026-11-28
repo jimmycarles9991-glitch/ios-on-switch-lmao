@@ -5,9 +5,9 @@
 /* Compositor priority: nvkm's runlist has no priorities ("TODO: prio, interleaving",
  * fifo/nv50.c nv50_runl_update) and gives every channel RAMFC's default timeslice, 128 << 3 (fifo/gk104.c
  * gk104_chan_ramfc_write, RAMFC 0xf8 = PFIFO 0x2310: enable 28, scale 15:12, timeout 7:0), as nvgpu's default
- * (gk20a/fifo_gk20a.c gk20a_fifo_default_timeslice_us). nvgpu gives high-priority work 4x its low timeslice
- * (os/linux/driver_common.c nvgpu_init_timeslice: 5200 vs 1300 us); critical channels get scale 5, 4x, from their
- * creation (tgm_chan_ramfc_open). RAMFC_TIMESLICE: gpu_internal.h. */
+ * (gk20a/fifo_gk20a.c gk20a_fifo_default_timeslice_us). Critical channels get 50 ms (195 << 8 = 49920 us,
+ * 0x100080c3) from creation (tgm_chan_ramfc_open) so a whole compositor frame runs without timeslice expiry.
+ * RAMFC_TIMESLICE: gpu_internal.h. */
 static int compositor_timeslice_on(void)
 {
 	return 1;
@@ -87,7 +87,7 @@ int tgm_chan_ramfc_open(struct tgm_chan *chan, int critical)
 			  chan->chid, chan->owner, ret);
 		return ret;
 	}
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 	if (due.timeslice)
 		chan->timeslice = due.timeslice;
 #endif
@@ -126,7 +126,7 @@ void tgm_chan_ramfc_due(struct tgm_chan *chan)
 		}
 		return;
 	}
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 	if (due.timeslice) {
 		chan->timeslice = due.timeslice;
 		chan->timeslice_at = chan->submitted;

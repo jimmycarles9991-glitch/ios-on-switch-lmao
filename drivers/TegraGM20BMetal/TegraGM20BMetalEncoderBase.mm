@@ -91,10 +91,14 @@ static void endedTwice(SwitchMetalCommandBuffer *cb)
         return;
     }
     _ended = true;
+    __unsafe_unretained SwitchMetalCommandBuffer *cb = _cb;
     if (!_counterPending.empty())
-        gm20bPlaceCounterMarks(_cb, self, _cb->_plan.size(), false);
-    [_cb record:cmd(OpEnd)];
-    _cb->_active = nil;
+        gm20bPlaceCounterMarks(cb, self, cb->_plan.size(), false);
+    if (!cb->_commandLog)
+        gm20bEndEncoder(cb);
+    else
+        [cb record:cmd(OpEnd)];
+    cb->_active = nil;
 }
 
 - (void)pushDebugGroup:(NSString *)s
@@ -110,16 +114,16 @@ static void endedTwice(SwitchMetalCommandBuffer *cb)
     (void)s;
 }
 
-// (as the command buffer's: everything is resident)
+// (as the command buffer's, for its every range)
 - (void)useResidencySet:(id)set
 {
-    (void)set;
+    gm20bUseResidencySet(_cb, set);
 }
 
 - (void)useResidencySets:(const __unsafe_unretained id *)sets count:(NSUInteger)count
 {
-    (void)sets;
-    (void)count;
+    for (NSUInteger k = 0; k < count; k++)
+        gm20bUseResidencySet(_cb, sets[k]);
 }
 
 - (void)updateFence:(id<MTLFence>)fence
@@ -148,6 +152,6 @@ void gm20bPoolEncoders()
 {
     for (Class cls :
          {[SwitchMetalRenderEncoder class], [SwitchMetalBlitEncoder class], [SwitchMetalComputeEncoder class]})
-        if (!gm20bPoolInstances(cls, endDropped))
+        if (!gm20bPoolInstances(cls, endDropped, true))
             os_log_error(gm20bLog(), "SwitchMetal: %{public}s instances are not pooled", class_getName(cls));
 }

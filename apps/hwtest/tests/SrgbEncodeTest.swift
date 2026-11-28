@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// The output merger's own sRGB encode of an unblended write (the translator writes the value, no colour table), into

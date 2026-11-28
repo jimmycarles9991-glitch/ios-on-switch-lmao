@@ -28,6 +28,10 @@ uint32_t switch_vic_jobs_cancel(uint32_t reached);
 void switch_vic_jobs_recovered(bool ready);
 // Sleep: returns once no cancellation is under way.
 void switch_vic_jobs_settle();
+// The queued job of `fence` (switch_vic_submit_checked's) renders its background alone: slot 0 off in its staged
+// configuration. For a producer cancelled before the syncpoint the job waits on is released: VIC has not read the
+// configuration yet, and then writes no pixel of its source. False: no such job is queued.
+bool switch_vic_job_background(uint32_t fence);
 
 extern "C" int switch_vic_wait(uint32_t fence);
 // switch_gpu_backing_token_filter_status for VIC's tokens (SwitchGpuBacking.h).
@@ -52,6 +56,14 @@ struct SwitchVICOwnership {
     uint32_t leaseCount;
 };
 
+struct SwitchVICStagedJob {
+    TegraVICMethods methods;
+    uint8_t slot;
+};
+
+bool switch_vic_config_reserve(uint32_t count, uint8_t *slots, uint8_t **vas);
+void switch_vic_config_release(const uint8_t *slots, uint32_t count);
+
 int switch_vic_submit_checked(const TegraVICJob *jobs, uint32_t count, const TegraVICAcquire *acquire,
                               const SwitchVICOwnership &ownership, void (*completion)(void *, int), void *context,
                               uint32_t *fence, SwitchVICEvents *events = nullptr);
@@ -59,5 +71,9 @@ int switch_vic_submit_checked(const TegraVICJob *jobs, uint32_t count, const Teg
 int switch_vic_submit_checked(const TegraVICJob *jobs, uint32_t count, const TegraVICAcquire *acquire,
                               const SwitchVICOwnership &ownership, void (*completion)(void *, int), void *context,
                               uint32_t *fence, SwitchVICEvents *events, switch_gpu_backing_token *written);
+int switch_vic_submit_staged(const SwitchVICStagedJob *jobs, uint32_t count, const TegraVICAcquire *acquire,
+                             const SwitchVICOwnership &ownership, void (*completion)(void *, int), void *context,
+                             uint32_t *fence, SwitchVICEvents *events = nullptr,
+                             switch_gpu_backing_token *written = nullptr);
 // Debug kernels: which check of switch_vic_submit_checked refused the last job it refused.
 const char *switch_vic_last_refusal();

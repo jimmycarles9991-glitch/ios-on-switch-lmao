@@ -4,22 +4,30 @@
 // and a lookup is a probe of the slot table in memory: no system call.
 //
 //   header (kStoreHeaderBytes): magic "SWSTORE1" | version u32 | name bytes u32 | slots u32 (a power of two) | 0 u32
-//          | data offset u64 | data bytes u64 | identity [32]                                          (little endian)
-//   slots, from kStoreHeaderBytes: per slot offset u64 | length u32 | checksum u32 | name [kStoreNameBytes]
+//          | data offset u64 | data bytes u64 | identity [32] | 2 x (durable end u64, generation u64)
+//          | writer's boot [kStoreBootBytes] (little endian)
+//   slots, from kStoreHeaderBytes: per slot offset u64 | length u32 | 0 u32 | name [kStoreNameBytes]
 //   data, from data offset: the entries' bytes, each at a kStoreAlignment boundary; an entry whose length is a whole
 //          number of kStorePageBytes pages starts on such a page and has its pages to itself (a GPU client imports
 //          those pages and runs what they hold in place, so nothing is written into them once they are published)
 //
-// An entry lands in this order: its bytes, then its slot's length, checksum and name, then the slot's offset, stored with
-// release; a reader loads the offset with acquire and reads nothing of a slot whose offset is 0. No file is ever cut short
-// while it may be mapped: a store made again is made beside the old one and renamed over it. A writer that died midway
-// leaves no more than a slot whose offset is 0 (empty to readers, taken again by the next writer) and bytes past the last
-// published entry (the next writer starts past the published ones). A slot is never emptied again: one whose entry proved
-// bad (a crash wrote its slot back and not its bytes) is given kRetired, which a probe steps over. Names are hashes: their
-// first bytes pick the slot a probe starts at.
+// An entry lands in this order: its bytes, then its slot's length and name, then the slot's offset, stored with release;
+// a reader loads the offset with acquire and reads nothing of a slot whose offset is 0. No file is ever cut short while it
+// may be mapped: a store made again is made beside the old one and renamed over it. A writer that died midway leaves no
+// more than a slot whose offset is 0 (empty to readers, taken again by the next writer) and bytes past the last published
+// entry (the next writer starts past the published ones). Within one boot every mapping reads the same page cache, so a
+// published entry is whole to every reader. A panic or power cut can leave a slot on the medium without its bytes (pages
+// are written back in any order), so persist() syncs every published entry before it moves the durable end past them,
+// and a writer opening the store in a later boot retires each entry that ends past that mark. Nothing reads an entry's
+// bytes to decide it is whole, so nothing may write a page that holds bytes below the mark once it is set: data is
+// only ever appended at or past the mark rounded up to a page, and a persist moves the next append to a page of its
+// own. The mark is written into whichever of its two slots holds the older one, so a write torn inside it leaves a mark
+// no newer than the last whole one (the newer generation is read, and its end only grows). A slot is never emptied again: a retired one holds kRetired, which a probe steps over.
+// Names are hashes: their first bytes pick the slot a probe starts at.
 #pragma once
 #include "SwitchSeedPack.h"
 #include <sys/file.h>
+#include <sys/sysctl.h>
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -30,17 +38,29 @@
 namespace switch_seed_pack {
 
 constexpr char kStoreMagic[8] = {'S', 'W', 'S', 'T', 'O', 'R', 'E', '1'};
-constexpr uint32_t kStoreVersion = 1, kStoreNameBytes = 32, kStoreAlignment = 8;
+constexpr uint32_t kStoreVersion = 2, kStoreNameBytes = 32, kStoreAlignment = 8;
 constexpr uint64_t kStorePageBytes = 16384;
 constexpr size_t kStoreHeaderBytes = 4096, kStoreSlotBytes = 16 + kStoreNameBytes;
+constexpr size_t kStoreMarksAt = 72, kStoreMarkBytes = 16, kStoreBootAt = 104, kStoreBootBytes = 48;
 constexpr uint64_t kRetired = ~uint64_t(0);
 
-inline uint32_t fnv32(const uint8_t *bytes, size_t size)
+// kern.bootsessionuuid, which every boot draws anew; false where the system gives none
+inline bool currentBoot(char boot[kStoreBootBytes])
 {
-    uint32_t hash = 2166136261u;
-    for (size_t i = 0; i < size; ++i)
-        hash = (hash ^ bytes[i]) * 16777619u;
-    return hash;
+    memset(boot, 0, kStoreBootBytes);
+    size_t bytes = kStoreBootBytes - 1;
+    return sysctlbyname("kern.bootsessionuuid", boot, &bytes, nullptr, 0) == 0 && boot[0] != 0;
+}
+
+// fsync that also orders the medium: writes issued after it land after what it synced (APFS's F_BARRIERFSYNC; the kernel
+// promotes it to F_FULLFSYNC where the file system has no barrier)
+inline bool syncBarrier(int fd)
+{
+#ifdef F_BARRIERFSYNC
+    if (fcntl(fd, F_BARRIERFSYNC) == 0)
+        return true;
+#endif
+    return fsync(fd) == 0;
 }
 
 inline uint64_t loadAcquire(const uint8_t *word)
@@ -167,8 +187,11 @@ public:
     }
 
     // The store at `path` taken for writing (made at `slots` and `dataBytes` if it is not there or is not a store of
-    // `identity`), the file locked against a second writer. False with `error`.
-    bool open(const std::string &path, const uint8_t *identity, uint32_t slots, uint64_t dataBytes, std::string &error)
+    // `identity`), the file locked against a second writer. `boot` (a string, null: this boot's) names the boot
+    // the writer runs in: a store last written in another boot keeps only the entries below its durable end. False with
+    // `error`.
+    bool open(const std::string &path, const uint8_t *identity, uint32_t slots, uint64_t dataBytes, std::string &error,
+              const char *boot = nullptr)
     {
         close();
         if (!slots || (slots & (slots - 1)) || dataBytes % kStoreAlignment)
@@ -178,11 +201,77 @@ public:
         struct stat info = {};
         if (fstat(fd_, &info) || !S_ISREG(info.st_mode))
             return error = path + " is not a file", close(), false;
+        char current[kStoreBootBytes] = {};
+        bool known = false;
+        if (boot) {
+            memcpy(current, boot, strnlen(boot, kStoreBootBytes - 1));
+            known = current[0] != 0;
+        } else {
+            known = currentBoot(current);
+        }
         const StoreLayout wanted = {slots, StoreLayout::dataOffsetFor(slots), dataBytes};
         if (!mapExisting(uint64_t(info.st_size), identity) && !remake(path, wanted, identity, error))
             return close(), false;
-        recover();
+        recover(known && memcmp(base_ + kStoreBootAt, current, kStoreBootBytes) == 0);
+        memcpy(base_ + kStoreBootAt, current, kStoreBootBytes);
         return true;
+    }
+
+    // What a persist syncs: the data written since the durable end, and the slots, as they stand when it is taken
+    struct Pending {
+        uint64_t from = 0, end = 0, changes = 0;
+    };
+
+    // False: nothing was put or retired since the last persist. Every byte written since the mark lies at or past the
+    // mark's page end; the next put starts on a page of its own, so no later sync rewrites one this persist trusts.
+    bool pending(Pending &out)
+    {
+        if (!base_ || changes_ == persisted_)
+            return false;
+        out = {pageEnd(durable()), end_, changes_};
+        if (end_ > out.from)
+            end_ = pageEnd(end_);
+        return true;
+    }
+
+    // `p` synced to the medium. It reads only the mapping and the file, which open and close alone change, so a caller
+    // may run it beside put and retire, never beside those two
+    bool sync(const Pending &p) const
+    {
+        return (p.end <= p.from || msync(base_ + p.from, size_t(p.end - p.from), MS_SYNC) == 0) &&
+               msync(base_, size_t(layout_.dataOffset), MS_SYNC) == 0 && syncBarrier(fd_);
+    }
+
+    // After sync(p): the durable end moved past `p`, for syncMark to sync, in the slot of the older mark
+    void markDurable(const Pending &p)
+    {
+        if (p.end > durable()) {
+            const uint64_t generation = markGeneration() + 1;
+            uint8_t *mark = base_ + kStoreMarksAt + (generation & 1) * kStoreMarkBytes;
+            putLe64(mark, p.end);
+            putLe64(mark + 8, generation);
+        }
+        persisted_ = std::max(persisted_, p.changes);
+    }
+
+    // The header, with its durable end, synced; beside put and retire as sync() is
+    bool syncMark() const
+    {
+        return msync(base_, kStoreHeaderBytes, MS_SYNC) == 0 && syncBarrier(fd_);
+    }
+
+    // Every entry published and every slot retired so far synced to the medium, then the durable end moved past them and
+    // synced too. Readers in this boot never wait for it. False: a sync failed, and the mark stays below what it did not
+    // reach.
+    bool persist()
+    {
+        Pending p;
+        if (!pending(p))
+            return base_ != nullptr;
+        if (!sync(p))
+            return false;
+        markDurable(p);
+        return syncMark();
     }
 
     void close()
@@ -195,6 +284,7 @@ public:
         fd_ = -1;
         used_ = retired_ = 0;
         end_ = 0;
+        changes_ = persisted_ = 0;
     }
 
     // `replace`: an entry under `name` is retired once this one is in (a reader finds one or the other, never neither)
@@ -215,23 +305,14 @@ public:
         memcpy(base_ + at, bytes, length);
         uint8_t *entry = slotAt(slot);
         putLe32(entry + 8, length);
-        putLe32(entry + 12, fnv32(bytes, length));
         memcpy(entry + 16, name, kStoreNameBytes);
         __atomic_store_n(reinterpret_cast<uint64_t *>(entry), at, __ATOMIC_RELEASE);
         end_ = at + length;
+        ++changes_;
         ++used_;
         if (old >= 0)
             retireSlot(uint32_t(old));
         return Put::Added;
-    }
-
-    // Whether the entry `find` gives for `name` holds what was published (its checksum)
-    bool intact(const uint8_t *name) const
-    {
-        const int64_t slot = reader_.slotOf(name);
-        Bytes bytes;
-        return slot >= 0 && reader_.find(name, bytes) &&
-               le32(slotAt(uint32_t(slot)) + 12) == fnv32(bytes.data, bytes.size);
     }
 
     // The entry under `name` stepped over from now on, so a later put may publish it again
@@ -274,6 +355,11 @@ public:
         return end_ > layout_.dataOffset ? end_ - layout_.dataOffset : 0;
     }
 
+    uint64_t durableEnd() const
+    {
+        return base_ ? durable() : 0;
+    }
+
     const StoreLayout &layout() const
     {
         return layout_;
@@ -286,6 +372,7 @@ private:
     StoreReader reader_;
     uint32_t used_ = 0, retired_ = 0;
     uint64_t end_ = 0;
+    uint64_t changes_ = 0, persisted_ = 0;  // puts and retires, and how many of them the durable end covers
 
     static void putLe32(uint8_t *p, uint32_t value)
     {
@@ -293,9 +380,16 @@ private:
             p[i] = uint8_t(value >> (8 * i));
     }
 
+    static void putLe64(uint8_t *p, uint64_t value)
+    {
+        for (unsigned i = 0; i < 8; ++i)
+            p[i] = uint8_t(value >> (8 * i));
+    }
+
     void retireSlot(uint32_t slot)
     {
         __atomic_store_n(reinterpret_cast<uint64_t *>(slotAt(slot)), kRetired, __ATOMIC_RELEASE);
+        ++changes_;
         --used_;
         ++retired_;
     }
@@ -303,6 +397,25 @@ private:
     uint8_t *slotAt(uint32_t slot) const
     {
         return base_ + kStoreHeaderBytes + uint64_t(slot) * kStoreSlotBytes;
+    }
+
+    uint64_t pageEnd(uint64_t offset) const
+    {
+        return std::min((offset + kStorePageBytes - 1) & ~(kStorePageBytes - 1), layout_.fileBytes());
+    }
+
+    // The two marks' newer generation, 0 for a store never persisted
+    uint64_t markGeneration() const
+    {
+        return std::max(le64(base_ + kStoreMarksAt + 8), le64(base_ + kStoreMarksAt + kStoreMarkBytes + 8));
+    }
+
+    // The newer mark's end: every published entry below it is on the medium (the data offset: none is)
+    uint64_t durable() const
+    {
+        const uint8_t *first = base_ + kStoreMarksAt, *second = first + kStoreMarkBytes;
+        const uint8_t *newer = le64(second + 8) > le64(first + 8) ? second : first;
+        return std::clamp(le64(newer), layout_.dataOffset, layout_.fileBytes());
     }
 
     bool mapRange(uint64_t bytes)
@@ -358,50 +471,64 @@ private:
         putLe32(base_ + 8, kStoreVersion);
         putLe32(base_ + 12, kStoreNameBytes);
         putLe32(base_ + 16, wanted.slots);
-        for (unsigned i = 0; i < 8; ++i) {
-            base_[24 + i] = uint8_t(wanted.dataOffset >> (8 * i));
-            base_[32 + i] = uint8_t(wanted.dataBytes >> (8 * i));
-        }
+        putLe64(base_ + 24, wanted.dataOffset);
+        putLe64(base_ + 32, wanted.dataBytes);
         memcpy(base_ + 40, identity, kIdentityBytes);
         return reader_.attach(base_, size_t(wanted.fileBytes()), identity) ||
                (error = "the store made does not parse", false);
     }
 
-    void recover()
+    // `sameBoot`: the last writer ran in this boot, so every published entry is whole in the page cache; otherwise only
+    // those below the durable end are, and the rest are retired before any reader maps the store
+    void recover(bool sameBoot)
     {
+        const uint64_t durable = this->durable();
         end_ = layout_.dataOffset;
         for (uint32_t slot = 0; slot < layout_.slots; ++slot) {
-            const uint8_t *entry = slotAt(slot);
+            uint8_t *entry = slotAt(slot);
             const uint64_t offset = loadAcquire(entry);
+            if (!offset)
+                continue;
             if (offset == kRetired) {
                 ++retired_;
-            } else if (offset) {
-                ++used_;
-                const uint64_t entryEnd = offset + le32(entry + 8);
-                end_ = entryEnd > end_ && entryEnd <= layout_.fileBytes() ? entryEnd : end_;
+                continue;
             }
+            const uint64_t entryEnd = offset + le32(entry + 8);
+            if (!sameBoot && entryEnd > durable) {
+                __atomic_store_n(reinterpret_cast<uint64_t *>(entry), kRetired, __ATOMIC_RELEASE);
+                ++changes_;
+                ++retired_;
+                continue;
+            }
+            ++used_;
+            end_ = entryEnd > end_ && entryEnd <= layout_.fileBytes() ? entryEnd : end_;
         }
+        // nothing new lands in a page that holds bytes below the mark, in either case: the same boot's newest entries
+        // may have been retired below it
+        end_ = std::max(end_, pageEnd(durable));
     }
 };
 
-// The store at `path` written again with only its intact entries (made fresh at `slots` and `dataBytes`), renamed over
+// The store at `path` written again with only its live entries (made fresh at `slots` and `dataBytes`), renamed over
 // it: a reader still mapping the old file keeps reading it whole. With `keepBytes` and `keepEntries`, only the newest
 // entries within both are kept (the oldest dropped first: entries are appended in the order they were made), so a full
-// store has room again. No writer may hold `path`.
+// store has room again. No writer may hold `path`. `boot`: as StoreWriter::open takes it.
 inline bool compactStore(const std::string &path, const uint8_t *identity, uint32_t slots, uint64_t dataBytes,
-                         std::string &error, uint64_t keepBytes = UINT64_MAX, uint32_t keepEntries = UINT32_MAX)
+                         std::string &error, uint64_t keepBytes = UINT64_MAX, uint32_t keepEntries = UINT32_MAX,
+                         const char *boot = nullptr)
 {
     const std::string fresh = path + ".new";
     unlink(fresh.c_str());
     StoreWriter old, made;
-    if (!old.open(path, identity, slots, dataBytes, error) || !made.open(fresh, identity, slots, dataBytes, error))
+    if (!old.open(path, identity, slots, dataBytes, error, boot) ||
+        !made.open(fresh, identity, slots, dataBytes, error, boot))
         return false;
     const StoreLayout &layout = old.layout();
     std::vector<std::pair<uint64_t, const uint8_t *>> live;  // offset, slot
     for (uint32_t slot = 0; slot < layout.slots; ++slot) {
         const uint8_t *entry = old.base() + kStoreHeaderBytes + uint64_t(slot) * kStoreSlotBytes;
         const uint64_t offset = loadAcquire(entry);
-        if (offset && offset != kRetired && old.intact(entry + 16))
+        if (offset && offset != kRetired)
             live.emplace_back(offset, entry);
     }
     std::sort(live.begin(), live.end());
@@ -421,6 +548,8 @@ inline bool compactStore(const std::string &path, const uint8_t *identity, uint3
             made.put(name, bytes.data, uint32_t(bytes.size)) == StoreWriter::Put::Full)
             break;
     }
+    if (!made.persist())
+        return error = "cannot sync " + fresh + ": " + strerror(errno), made.close(), unlink(fresh.c_str()), false;
     made.close();
     old.close();
     if (rename(fresh.c_str(), path.c_str()))

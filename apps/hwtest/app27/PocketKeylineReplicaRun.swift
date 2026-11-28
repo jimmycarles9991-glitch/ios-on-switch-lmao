@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
 import Metal
 
 /// ui.pocket_keyline's offscreen half: the keyline's state (KeylineReplica) on the process's default device with its

@@ -19,7 +19,6 @@ namespace gm20b {
 
 template <typename T> class GrowList {
     static_assert(std::is_trivially_copyable_v<T> && std::is_trivially_destructible_v<T>);
-    static constexpr size_t kOld = 48;  // doubling from one element: more storages than a 64-bit size reaches
 
 public:
     using value_type = T;
@@ -65,13 +64,23 @@ public:
         return capacity_;
     }
 
-    // The writer's own accesses
+    // The writer's own accesses (and a single reader after commit)
     T &own(size_t i)
     {
         return mine()[i];
     }
 
+    const T &own(size_t i) const
+    {
+        return mine()[i];
+    }
+
     T *ownData()
+    {
+        return mine();
+    }
+
+    const T *ownData() const
     {
         return mine();
     }
@@ -103,9 +112,16 @@ public:
 
     void swap(GrowList &other) noexcept
     {
-        GrowList t(std::move(other));
-        other = std::move(*this);
-        *this = std::move(t);
+        T *d = mine();
+        data_.store(other.mine(), std::memory_order_relaxed);
+        other.data_.store(d, std::memory_order_relaxed);
+        const size_t s = size();
+        size_.store(other.size(), std::memory_order_relaxed);
+        other.size_.store(s, std::memory_order_relaxed);
+        std::swap(capacity_, other.capacity_);
+        std::swap(old_, other.old_);
+        std::swap(olds_, other.olds_);
+        std::swap(oldCap_, other.oldCap_);
     }
 
     void reserve(size_t n)
@@ -134,12 +150,38 @@ public:
         return *at;
     }
 
+    T *emplaceUninit()
+    {
+        const size_t n = size();
+        if (n == capacity_)
+            grow(n + 1);
+        T *at = mine() + n;
+        size_.store(n + 1, std::memory_order_relaxed);
+        return at;
+    }
+
+    void appendBytes(const T *first, size_t more)
+    {
+        if (!more)
+            return;
+        const size_t n = size();
+        if (n + more > capacity_)
+            grow(n + more);
+        memcpy(static_cast<void *>(mine() + n), first, more * sizeof(T));
+        size_.store(n + more, std::memory_order_relaxed);
+    }
+
     template <typename It> void append(It first, It last)
     {
         const size_t n = size(), more = size_t(std::distance(first, last));
         if (n + more > capacity_)
             grow(n + more);
-        std::copy(first, last, mine() + n);
+        if constexpr (std::is_pointer_v<It> && std::is_same_v<std::remove_cv_t<std::remove_pointer_t<It>>, T>) {
+            if (more)
+                memcpy(static_cast<void *>(mine() + n), first, more * sizeof(T));
+        } else {
+            std::copy(first, last, mine() + n);
+        }
         size_.store(n + more, std::memory_order_relaxed);
     }
 
@@ -163,7 +205,7 @@ public:
     void clear()
     {
         size_.store(0, std::memory_order_relaxed);
-        for (size_t i = 0; i < olds_; ++i)
+        for (uint32_t i = 0; i < olds_; ++i)
             free(old_[i]);
         olds_ = 0;
     }
@@ -220,8 +262,14 @@ private:
         if (had)
             memcpy(static_cast<void *>(larger), had, size() * sizeof(T));
         if (had) {
-            if (olds_ == kOld)
-                abort();
+            if (olds_ == oldCap_) {
+                const uint32_t nextCap = oldCap_ ? oldCap_ * 2 : 4;
+                T **next = static_cast<T **>(realloc(old_, nextCap * sizeof(T *)));
+                if (!next)
+                    abort();
+                old_ = next;
+                oldCap_ = nextCap;
+            }
             old_[olds_++] = had;
         }
         capacity_ = capacity;
@@ -231,6 +279,9 @@ private:
     void release()
     {
         clear();
+        free(old_);
+        old_ = nullptr;
+        oldCap_ = 0;
         free(mine());
         data_.store(nullptr, std::memory_order_relaxed);
         capacity_ = 0;
@@ -241,19 +292,22 @@ private:
         data_.store(other.mine(), std::memory_order_relaxed);
         size_.store(other.size(), std::memory_order_relaxed);
         capacity_ = other.capacity_;
+        old_ = other.old_;
         olds_ = other.olds_;
-        std::copy(other.old_, other.old_ + other.olds_, old_);
+        oldCap_ = other.oldCap_;
         other.data_.store(nullptr, std::memory_order_relaxed);
         other.size_.store(0, std::memory_order_relaxed);
         other.capacity_ = 0;
+        other.old_ = nullptr;
         other.olds_ = 0;
+        other.oldCap_ = 0;
     }
 
     std::atomic<T *> data_{nullptr};
     std::atomic<size_t> size_{0};
     size_t capacity_ = 0;
-    T *old_[kOld] = {};
-    size_t olds_ = 0;
+    T **old_ = nullptr;
+    uint32_t olds_ = 0, oldCap_ = 0;
 };
 
 template <typename T> void swap(GrowList<T> &a, GrowList<T> &b) noexcept

@@ -42,6 +42,72 @@ fn legalized_fadd(saturate: bool) -> OpFAdd {
     op
 }
 
+fn legalized<T: SM50Op>(mut op: T, alloc: &mut SSAValueAllocator) -> T {
+    let sm = ShaderModelInfo::new(53, 64);
+    let mut consts = ConstTracker::new();
+    let mut b = LegalizeBuilder::new(&sm, alloc, &mut consts);
+    op.legalize(&mut b);
+    op
+}
+
+/// IADD's immediate forms have no negation bit for the immediate, so none is
+/// left negated for the encoder, with a carry out or without
+#[test]
+fn iadd_keeps_no_negated_immediate() {
+    for value in [5_u32, 0x1234_5678] {
+        for carry in [false, true] {
+            let mut alloc = SSAValueAllocator::new();
+            let x = alloc.alloc(RegFile::GPR);
+            let d = alloc.alloc(RegFile::GPR);
+            let op = legalized(
+                OpIAdd2 {
+                    dst: d.into(),
+                    carry_out: if carry {
+                        RegRef::new(RegFile::Carry, 0, 1).into()
+                    } else {
+                        Dst::None
+                    },
+                    srcs: [x.into(), Src::from(value).ineg()],
+                },
+                &mut alloc,
+            );
+            let src1 = &op.srcs[1];
+            assert!(
+                !(matches!(src1.src_ref, SrcRef::Imm32(_))
+                    && src1.src_mod.is_ineg()),
+                "a negated immediate {value:#x} left for IADD (carry {carry})"
+            );
+            if !carry {
+                assert!(
+                    src1.src_ref == SrcRef::Imm32(value.wrapping_neg())
+                        && src1.src_mod.is_none()
+                );
+            }
+        }
+    }
+}
+
+/// LOP encodes only an inversion of a source: an integer or float negation or
+/// an absolute value on one goes before the encoder sees it
+#[test]
+fn lop_keeps_no_arithmetic_modifier() {
+    for modify in [Src::ineg, Src::fneg, Src::fabs] {
+        let mut alloc = SSAValueAllocator::new();
+        let [x, y, d] = std::array::from_fn(|_| alloc.alloc(RegFile::GPR));
+        let op = legalized(
+            OpLop2 {
+                dst: d.into(),
+                srcs: [x.into(), modify(Src::from(y))],
+                op: LogicOp2::And,
+            },
+            &mut alloc,
+        );
+        for src in &op.srcs {
+            assert!(src.src_mod.is_none() || src.src_mod.is_bnot(), "{src}");
+        }
+    }
+}
+
 #[test]
 fn saturated_fadd_takes_no_long_immediate() {
     assert!(legalized_fadd(true).srcs[1].as_ssa().is_some());
@@ -69,6 +135,24 @@ fn f2f_immediates_are_float_bits() {
 
 /// Two SELs of 32-bit immediates in one block, the second `gap` instructions
 /// after the first: the copies legalize put before them and their sources
+/// RRO needs no scoreboard; the MUFU it feeds still does
+#[test]
+fn rro_is_fixed_latency() {
+    let dst: Dst = RegRef::new(RegFile::GPR, 1, 1).into();
+    let rro = Op::Rro(Box::new(OpRro {
+        dst: dst.clone(),
+        op: RroOp::Exp2,
+        src: Src::ZERO,
+    }));
+    let mufu = Op::MuFu(Box::new(OpMuFu {
+        dst,
+        op: MuFuOp::Exp2,
+        src: Src::ZERO,
+        op_type: FloatType::F32,
+    }));
+    assert!(rro.has_fixed_latency(53) && !mufu.has_fixed_latency(53));
+}
+
 fn sels_of(imms: [u32; 2], gap: usize) -> (usize, [Src; 2]) {
     let sm = ShaderModelInfo::new(53, 64);
     let mut alloc = SSAValueAllocator::new();
@@ -117,4 +201,69 @@ fn a_far_or_different_immediate_gets_its_own_copy() {
         assert_eq!(copies, 2);
         assert!(first.src_ref != second.src_ref);
     }
+}
+
+fn gpr(i: u32) -> Dst {
+    RegRef::new(RegFile::GPR, i, 1).into()
+}
+
+fn ffma(dst: u32) -> Op {
+    Op::FFma(Box::new(OpFFma {
+        dst: gpr(dst),
+        srcs: [Src::ZERO, Src::ZERO, Src::ZERO],
+        saturate: false,
+        rnd_mode: FRndMode::NearestEven,
+        ftz: false,
+        dnz: false,
+    }))
+}
+
+fn mufu(op: MuFuOp) -> Op {
+    Op::MuFu(Box::new(OpMuFu {
+        dst: gpr(2),
+        op,
+        src: Src::ZERO,
+        op_type: FloatType::F32,
+    }))
+}
+
+fn ldc() -> Op {
+    Op::Ldc(Box::new(OpLdc {
+        dst: gpr(2),
+        cb: SrcRef::CBuf(CBufRef {
+            buf: CBuf::Binding(1),
+            offset: 0,
+        })
+        .into(),
+        offset: Src::ZERO,
+        mode: LdcMode::Indexed,
+        mem_type: MemType::B32,
+    }))
+}
+
+/// A fixed-latency GPR write read by MUFU issues 2 cycles before the read,
+/// by LDC 4 and by FFMA 6; an XMAD write keeps 6 for every reader, and MUFU's
+/// own result its estimate
+#[test]
+fn a_variable_latency_reader_collects_its_operand_after_issue() {
+    let sm = ShaderModel50::new(53);
+    let w = ffma(1);
+    assert_eq!(sm.raw_latency(&w, 0, &mufu(MuFuOp::Rcp), 0), 2);
+    assert_eq!(sm.raw_latency(&w, 0, &ldc(), 0), 4);
+    assert_eq!(sm.raw_latency(&w, 0, &ffma(3), 0), 6);
+    let xmad = Op::Xmad(Box::new(OpXmad {
+        dst: gpr(1),
+        srcs: [Src::ZERO, Src::ZERO, Src::ZERO],
+        hi: [false; 2],
+        psl: false,
+        mrg: false,
+        cbcc: false,
+    }));
+    assert_eq!(sm.raw_latency(&xmad, 0, &mufu(MuFuOp::Rcp), 0), 6);
+    assert_eq!(sm.raw_latency(&xmad, 0, &ldc(), 0), 6);
+    let m = mufu(MuFuOp::Rcp);
+    assert_eq!(
+        sm.raw_latency(&m, 0, &mufu(MuFuOp::Rsq), 0),
+        instr_latency(53, &m, 0)
+    );
 }

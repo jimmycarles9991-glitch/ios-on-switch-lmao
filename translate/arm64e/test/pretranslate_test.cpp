@@ -479,7 +479,7 @@ TEST(StubSplit, BranchesFollowTheWordsTheyTarget)
 {
     const uint64_t laid = 0x10000, site = 0x8000;
     uint32_t st[A64X_STUB_MAX];
-    const int n = a64x_stub_v(kCasal, site, laid, (1u << 16) | (1u << 17), 0, st, A64X_STUB_MAX);
+    const int n = a64x_stub_v(kCasal, site, laid, (1u << 16) | (1u << 17), 0, false, st, A64X_STUB_MAX);
     ASSERT_GT(n, 5);
     std::vector<uint64_t> addr(n), links;
     for (int j = 0; j < n; j++) {

@@ -35,7 +35,8 @@ def pick(states: set[int], known: set[int], logs: list[Path]) -> list[str]:
             lead = n == 0 and i == 0
             if not lead and line.startswith('R '):
                 # a variant's line (cubic binds) is its state's: its record files under the state's key
-                state = packfile.fnv(packfile.VARIANT_NAME.sub('', make_pack.state_key(line)).encode())
+                key = make_pack.state_key(line)
+                state = packfile.fnv(key[: len(key) - len(packfile.variant_name(key))].encode())
                 if state not in states and state in known:
                     continue
             elif not lead and not line.startswith('D '):

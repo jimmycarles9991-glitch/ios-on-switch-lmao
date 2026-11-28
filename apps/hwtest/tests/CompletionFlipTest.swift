@@ -1,5 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
+import HWTestKit
+import HWTestShared
 import UIKit
 
 /// A direct frame's window A flip is written by its producer's own completion (the GPU's interrupt pass for a watched
@@ -35,7 +38,7 @@ struct CompletionFlipTest: HWTest {
         guard !before.isEmpty else {
             var metrics = Metrics()
             metrics.set("sysctl", KernelSysctl.code(unread))
-            return .skip(KernelSysctl.unreadable("kern.switch_flips_*", unread), metrics)
+            return .skip(KernelSysctl.unreadable("kern.switch_flips_*", unread, flag: "--//bazel:stats_frame"), metrics)
         }
         let done = Waiter<Bool>()
         let recorder = await context.onStage(fullScreen: true) { stage -> PacingRecorder in

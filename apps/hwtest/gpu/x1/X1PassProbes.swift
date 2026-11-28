@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// METALMAP d17: visibility results. A 100 x 100 quad drawn twice under Counting at offset 0 and once under Boolean at

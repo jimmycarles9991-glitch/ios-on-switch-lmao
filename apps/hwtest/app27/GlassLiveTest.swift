@@ -2,6 +2,7 @@ import Foundation
 import HWTestCore
 import HWTestGPU
 import HWTestKit
+import HWTestShared
 import UIKit
 
 /// Liquid Glass on screen while what is behind it moves, judged on what the display was handed rather than on a
@@ -10,9 +11,10 @@ import UIKit
 /// Variants: still (only a dot far from the glass changes, the control), appear (the glass shows at the first display
 /// frame read, the dot toggling on: the frames ui.glass_first's unchanged-tree snapshot reuses the backdrop of), server
 /// (Core Animation animates the stripes in the render server), scroll (the app scrolls the stripes every display
-/// frame), glass (the glass moves over still stripes), slow (scroll every fourth frame) and plain (scroll without the
-/// read-back: the frame rate it costs). After each variant `<variant>_rest=<last>/<after>`: the glass left on screen
-/// when the motion stopped against the glass once the backdrop under it is captured again.
+/// frame), glass (the glass moves over still stripes), slow (scroll every fourth frame) and, with HWTEST_LONG=1, plain
+/// (scroll without the read-back: the frame rate it costs, reported only). After each variant
+/// `<variant>_rest=<last>/<after>`: the glass left on screen when the motion stopped against the glass once the
+/// backdrop under it is captured again.
 ///
 /// Each frame is black (R, G, B <= 2 over 90% of the band), partial (over 2%), dark or good, at its present and, with a
 /// live kernel, at the end of its time on screen (the next present reads it again); changed= counts frames whose pixels
@@ -39,7 +41,7 @@ struct UIGlassLiveTest: HWTest {
         var summaries: [LiveSummary] = []
         var pngs: [String] = []
         var stopped: String?
-        let variants = LiveVariant.allCases
+        let variants = LiveVariant.allCases.filter { $0.readsBack || LongRuns.on }
         for variant in variants where stopped == nil {
             let scene = await context.onStage(fullScreen: true) { stage in LiveScene(stage, hidden: variant.appears)
             }
@@ -50,16 +52,13 @@ struct UIGlassLiveTest: HWTest {
                     LiveDriver(scene: scene, variant: variant)
                 )
             }
-            GlassProbe.arm(lines: false)
             let start = Date()
-            let recordStart = GlassProbe.count()?.count ?? 0
-            let read = await LiveReader.run(reader, until: start.addingTimeInterval(Self.seconds), after: recordStart)
+            await LiveReader.run(reader, until: start.addingTimeInterval(Self.seconds))
             await MainActor.run { driver.stop() }
             let rest = await Self.atRest(reader, scene)
             await context.clearStage()
             var summary = LiveSummary(
-                name: variant.rawValue, frames: reader?.frames ?? [], recorded: read.recorded,
-                regenerated: read.regenerated, seconds: Date().timeIntervalSince(start)
+                name: variant.rawValue, frames: reader?.frames ?? [], seconds: Date().timeIntervalSince(start)
             )
             summary.rest = rest
             summaries.append(summary)
@@ -76,9 +75,7 @@ struct UIGlassLiveTest: HWTest {
         try? await Task.sleep(nanoseconds: 500_000_000)
         let before = reader.frames.count
         scene.scroll.contentOffset.x += 1
-        _ = await LiveReader.run(
-            reader, until: Date().addingTimeInterval(0.4), after: GlassProbe.count()?.count ?? 0
-        )
+        await LiveReader.run(reader, until: Date().addingTimeInterval(0.4))
         return "\(last)/\(reader.frames.count > before ? reader.frames[before].atPresent : "-")"
     }
 
@@ -102,14 +99,13 @@ struct UIGlassLiveTest: HWTest {
                 metrics.set(s.name + "_moved", s.coincidence)
                 metrics.set(s.name + "_first", Int(s.black[0].sequence))
             }
-            metrics.set(s.name + "_cbs", "\(Int(s.fps.rounded()))/\(s.regenerated)")
             metrics.set(s.name + "_rest", s.rest)
         }
         metrics.set("pngs", pngs.isEmpty ? "-" : String(pngs.prefix(4).joined(separator: ",").prefix(160)))
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try? encoder.encode(summaries.map(LiveSummary.Detail.init)).write(
-            to: directory.appendingPathComponent("frames.json")
+        try? encoder.encode(summaries.map(LiveSummary.Detail.init)).place(
+            at: directory.appendingPathComponent("frames.json")
         )
         guard summaries.contains(where: { !$0.frames.isEmpty }) else {
             return .skip("the read-back caught no presented frame", metrics)

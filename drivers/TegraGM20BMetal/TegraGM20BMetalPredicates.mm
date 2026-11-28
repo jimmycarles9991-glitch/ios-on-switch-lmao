@@ -93,10 +93,10 @@ void logFailure(SwitchMetalPred p, NSError *error)
 // shared cache's protocols (the frontend's forwardSignature, r14-maps)
 const char *metalTypes(SEL selector)
 {
-    static gm20b::Mutex lock;
+    static gm20b::UnfairMutex lock;
     static auto *known = new std::unordered_map<SEL, const char *>;
     {
-        std::lock_guard<gm20b::Mutex> l(lock);
+        std::lock_guard<gm20b::UnfairMutex> l(lock);
         if (const auto it = known->find(selector); it != known->end())
             return it->second;
     }
@@ -113,7 +113,7 @@ const char *metalTypes(SEL selector)
         }
     }
     free(protocols);
-    std::lock_guard<gm20b::Mutex> l(lock);
+    std::lock_guard<gm20b::UnfairMutex> l(lock);
     known->emplace(selector, types);
     return types;
 }

@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A layered pass into a 16x16 2D array of three slices of A1BGR5Unorm (41), RGB9E5Float (93) or BGRA10_XR_sRGB (553),

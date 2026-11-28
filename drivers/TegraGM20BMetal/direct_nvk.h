@@ -37,6 +37,7 @@ struct NvkStageInfo {
     bool texsF16 = false;
     bool turned = false;
     XrPlaneBindings xrPlaneBindings = {};  // nvk_switch_xr_planes.h: set-0 bindings read through a header pair
+    uint32_t unormTargets = 0;             // switch_compile.h unorm_targets
 };
 
 struct NvkStage {

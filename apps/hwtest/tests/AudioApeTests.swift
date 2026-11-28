@@ -1,6 +1,8 @@
 import AVFoundation
 import Foundation
 import HWTestCore
+import HWTestKit
+import HWTestShared
 
 struct AudioKernelSnapshot {
     let fields: [String: String]

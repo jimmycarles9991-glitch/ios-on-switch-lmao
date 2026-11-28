@@ -9,10 +9,13 @@
 //   * tegra_spi_init() resets and clocks the controller from PLLP (408 MHz / 51 = 8 MHz, the 7.1 divider 100), muxes
 //     the four pads, programs master mode 3 with the chip select under software control, and claims the controller's
 //     interrupt (INTID 125), sleeping in switch_interrupt_nub() until the GIC is up.
-//   * A transfer is one PIO block of 8-bit unpacked words (at most the 64-word FIFO), full duplex, with the chip select
-//     held low from before the first clock to after the last. The caller sleeps until the controller's RDY interrupt,
-//     whose filter (primary interrupt context) clears it and wakes the caller, which drains the RX FIFO. There is no
-//     polled mode: a wait that times out while TRANS_STATUS shows RDY panics with the controller and GIC state.
+//   * A transfer is one PIO block of 8-bit packets, full duplex, with the chip select held low from before the first
+//     clock to after the last. Longer than three bytes, the packets go four to a FIFO word (packed mode, TRM 37.1.2.4,
+//     byte 0 first, as spi-tegra114.c packs them), so the 64-word FIFO takes 256 bytes and the CPU moves a word per four
+//     bytes each way. TRM 37.1.2.2 keeps DMA mode for blocks over the FIFO's 64 words; nothing here sends one. The
+//     caller sleeps until the controller's RDY interrupt, whose filter (primary interrupt context) clears it and wakes
+//     the caller, which drains the RX FIFO. There is no polled mode: a wait that times out while TRANS_STATUS shows RDY
+//     panics with the controller and GIC state.
 // Call from thread context only. Transfers on one bus are serialized by an IOLock.
 #ifndef TEGRA_SPI_H
 #define TEGRA_SPI_H
@@ -31,8 +34,8 @@ enum {
     TEGRA_SPI_EIO = -5,        // FIFO overflow/underflow, or fewer words came back than were clocked
 };
 
-// Longest transfer: one PIO block of the controller's 64-word FIFO, one byte per word.
-#define TEGRA_SPI_MAX_TRANSFER 64
+// Longest transfer: one PIO block of the controller's 64-word FIFO, four bytes per word.
+#define TEGRA_SPI_MAX_TRANSFER 256
 
 // Maps the controller, CAR and pinmux (once), brings the bus up and claims its interrupt. Idempotent and
 // thread-safe. May sleep until the GIC is up (panics after 10 s, in switch_interrupt_nub).

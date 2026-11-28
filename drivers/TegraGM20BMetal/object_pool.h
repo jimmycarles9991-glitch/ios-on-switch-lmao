@@ -11,7 +11,7 @@
 // anyone still holds is never handed out again.
 // `cls` must not implement -dealloc or +allocWithZone: itself; its subclasses allocate and free as NSObject's do. Call
 // before its first instance. False where `cls` was taken already or its methods could not be added.
-bool gm20bPoolInstances(Class cls, void (*dropped)(void *object));
+bool gm20bPoolInstances(Class cls, void (*dropped)(void *object), bool threadCache = false);
 // An instance of `cls` as +new makes one of a class whose -init is NSObject's (+1), with no message sent
 void *gm20bPoolNew(Class cls);
 

@@ -1,6 +1,8 @@
 import Darwin
 import Foundation
 import HWTestCore
+import HWTestKit
+import HWTestShared
 import QuartzCore
 import UIKit
 

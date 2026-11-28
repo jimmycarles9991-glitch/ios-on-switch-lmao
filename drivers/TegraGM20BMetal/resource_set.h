@@ -4,12 +4,13 @@
 // instead of one use each. The kernel keeps out (and later takes out) what another process, engine or a CPU lease or
 // CpuComplete reaches; that BO stays a use of every job that touches it.
 //
-// Registration (add, promote, a member's free, renew) holds the set's lock and makes the set again with every member,
-// which ends the generation; submitters never take it while the set is unchanged: each keeps a SetView, refreshed when
-// the version moved. The set hears every free of its kernel (Kernel::free, FreeObserver), whoever frees the BO: a member
-// leaves the list and every view before its handle dies and its VA is given back, so no view names an address another BO
-// may be bound at next and no registration names a BO the kernel no longer holds. The kernel keeps the set's pending
-// jobs as its users.
+// Registration (add, promote, a member's free, renew) serializes kernel set updates through a single-owner `syncing_`
+// state while dropping `lock_` across ResourceSetCreate and ResourceSetRelease ioctls, so view(), leaving() and
+// addLater() never stall behind the kernel. Submitters never take `lock_` while the set is unchanged: each keeps a
+// SetView, refreshed when the version moved. The set hears every free of its kernel (Kernel::free, FreeObserver), whoever
+// frees the BO: a member leaves the list and every view before its handle dies and its VA is given back, so no view names
+// an address another BO may be bound at next and no registration names a BO the kernel no longer holds. The kernel keeps
+// the set's pending jobs as its users.
 #pragma once
 #include "lock.h"
 #include <atomic>
@@ -17,6 +18,7 @@
 #include <initializer_list>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 #include "kernel.h"
 #include "surfaces.h"
@@ -43,6 +45,21 @@ struct SetView {
     // Why submitInSet's job was not submitted, when it was the set: its generation had ended and the kernel refused to
     // make it again (the member and the reason). Empty otherwise; each submitInSet sets it.
     std::string refused;
+
+    struct UseCache {
+        uint32_t channel = 0, set = 0;
+        bool admitted = false, valid = false;
+        std::vector<TegraGM20BAbiSurfaceUse> uses;
+
+        void clear()
+        {
+            valid = false;
+        }
+
+        bool matches(uint32_t ch, uint32_t setId, bool isAdmitted, const TegraGM20BAbiSurfaceUse *items,
+                     uint32_t count) const;
+        void save(uint32_t ch, uint32_t setId, bool isAdmitted, const TegraGM20BAbiSurfaceUse *items, uint32_t count);
+    } useCache;
 
     // The member [va, va + bytes) lies in, else null
     const SetMember *find(uint64_t va, uint64_t bytes) const;
@@ -81,6 +98,13 @@ public:
         return add(k, {{&bo, access}}, always);
     }
 
+    // As add, made at the encoding thread's next Device::begin (addPending) instead of on the caller: a set made again on
+    // another thread mid-frame ends its generation under an open command buffer, and the ResourceSetCreate is what an
+    // unpark paid on the caller. Until then each BO is named per job by address, as any BO outside the set is.
+    void addLater(std::initializer_list<Candidate> candidates);
+    // The adds addLater kept, as one add: the encoding thread's, between command buffers
+    void addPending(Kernel &k);
+
     // A read member a job is about to write becomes a written one (the set made again). Members start as read where the CPU
     // may lease them, so a CPU read lease of a member the GPU never wrote does not wait for the set's jobs.
     void promote(Kernel &k, uint64_t handle);
@@ -115,15 +139,28 @@ public:
     }
 
 private:
-    bool registerLocked(Kernel &k, const char *when);
-    bool attempt(Kernel &k, std::vector<TegraGM20BAbiSurfaceUse> &uses, int &kr);
-    bool refusedLocked(const std::vector<TegraGM20BAbiSurfaceUse> &uses, const char *when, bool again);
-    void leaveAllLocked();
-    void insertLocked(const Bo &bo, uint32_t access, bool always);
+    class SyncGuard;
+
+    void waitSyncLocked(std::unique_lock<gm20b::Mutex> &l);
+    bool syncLocked(std::unique_lock<gm20b::Mutex> &l, Kernel &k, std::vector<SetMember> &trial, const char *when);
+    bool refusedLocked(const std::vector<TegraGM20BAbiSurfaceUse> &uses, std::vector<SetMember> &trial,
+                       const char *when, bool again);
+    void leaveAllLocked(const std::vector<SetMember> &trial);
+    static void insertInto(std::vector<SetMember> &list, const Bo &bo, uint32_t access, bool always);
     bool eraseLocked(uint64_t handle);
 
+    bool addSyncLocked(std::unique_lock<gm20b::Mutex> &l, Kernel &k, const Candidate *first, const Candidate *last,
+                       bool always, const char *when);
+    void dropPendingLocked(uint64_t handle);
+
     mutable gm20b::Mutex lock_;
-    std::vector<SetMember> members_;  // by va
+    gm20b::CondVar syncDone_;
+    bool syncing_ = false;
+    uint32_t syncWaiters_ = 0;
+    std::vector<uint64_t> leftDuringSync_;
+    std::vector<SetMember> members_;                // by va
+    std::vector<std::pair<Bo, uint32_t>> pending_;  // addLater's, under lock_
+    std::atomic<bool> hasPending_{false};
     std::vector<SetMember> outside_;
     uint32_t set_ = 0, generation_ = 0, removals_ = 0;
     const volatile uint32_t *mirror_ = nullptr;

@@ -1,15 +1,23 @@
 """Boot-entry and overlay sync, and the log pull, on plain directories (no card)."""
 
+import argparse
+import base64
+import contextlib
+import hashlib
+import io
 import json
 import os
 import plistlib
+import struct
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from tools.deploy import deploy, deployed, joycon_pairing, poster_snapshots, pull_logs
-from tools.install import card as cards, renamed
+from tools.deploy import deploy, deployed, joycon_pairing, poster_snapshots, pull_logs, ssh_keys, system_apps
+from tools.install import bootstrap, bootstrap_migration, card as cards, renamed
+from tools.trustcache.trustcache import trust_module
 
 
 class Log:
@@ -379,6 +387,81 @@ class KindTest(unittest.TestCase):
                 deploy._checked(args, Log())
             self.assertEqual(resolve.call_count, int(build == '24B119'))
 
+    def checked_with_a_translated_tree(self, offered: dict) -> tuple[argparse.Namespace, mock.Mock]:
+        """Return deploy._checked's arguments and mount mock for a card whose translated locationd is stale.
+
+        This build no longer trusts the card's locationd, and offers updates for the paths in `offered`.
+        """
+        root = self.pins.parent
+        data = root / 'data'
+        (data / 'Switch').mkdir(parents=True, exist_ok=True)
+        stale, current = 'ac' * 20, '02' * 20
+        (data / 'Switch/pretranslated.json').write_text(
+            json.dumps({'files': [{'path': '/usr/libexec/locationd', 'trust': True, 'cdhash': [stale]}]})
+        )
+        trust = root / 'os.trustcache'
+        trust.write_bytes(trust_module([bytes.fromhex(current)]))
+        carried = root / 'carried'
+        carried.mkdir(exist_ok=True)
+        (carried / 'updates.json').write_text(json.dumps(dict.fromkeys(offered, current)))
+        argv = ['disk9', '--boot-package', 'unused', '--ipsw', str(self.pins), '--spec', 'unused', '--remove-gpu']
+        argv += ['--pretranslated-trust', str(trust), '--pretranslated-updates', str(carried)]
+        args = deploy._parser().parse_args(argv)
+        target = mock.Mock(content='Apple_APFS')
+        with (
+            mock.patch.object(deploy.host, 'check_tools'),
+            mock.patch.object(pull_logs, 'load_spec', return_value={'volumes': {'data': {'uuid': 'data'}}}),
+            mock.patch.object(cards, 'resolve', return_value=self.card),
+            mock.patch.object(cards, 'check_layout_unprivileged', return_value=(mock.Mock(), target)),
+            mock.patch.object(pull_logs, 'data_volume', return_value='disk9s5'),
+            mock.patch.object(cards, 'mounted', return_value=contextlib.nullcontext(data)) as mounted,
+            mock.patch.object(deploy.data_owner, '_owner', return_value=deploy.data_owner.Owner(0, 0, 0o40755)),
+        ):
+            deploy._checked(args, Log())
+        return args, mounted
+
+    def test_a_stale_translated_file_the_build_carries_is_planned_before_anything_is_written(self):
+        args, mounted = self.checked_with_a_translated_tree({'/usr/libexec/locationd'})
+        self.assertEqual(
+            mounted.call_args_list,
+            [
+                mock.call('disk9s5', mock.ANY, read_only=True),
+                mock.call('disk9s5', mock.ANY, read_only=True, owners=True),
+            ],
+        )
+        self.assertEqual(args.pretranslated_wanted, {'/usr/libexec/locationd': '02' * 20})
+        plan = deploy._plan(args, ['switchroot/ios/bl33.bin'], [], None)
+        self.assertIn('pretranslated updates: /usr/libexec/locationd', plan)
+        self.assertTrue(any(step.startswith('Data Switch/: ') for step in plan), plan)
+        self.assertEqual(plan[-2:], ['boot entry, last: 1 to copy, 0 stale', 'unmount the iPad volumes and eject'])
+
+    def test_a_stale_translated_file_the_build_does_not_carry_refuses_in_the_dry_run(self):
+        with self.assertRaisesRegex(cards.RefusedError, '/usr/libexec/locationd.*--reinstall-container'):
+            self.checked_with_a_translated_tree(set())
+
+    def test_ios_17_plans_no_translated_tree(self):
+        self.assertIsNone(
+            deploy._parser().parse_args(['disk9', '--boot-package', 'x', '--spec', 'y']).pretranslated_trust
+        )
+
+    def test_checked_accepts_a_stage_tree_and_refuses_a_directory_without_gpu_stage(self):
+        gpu_dir = self.pins.parent / 'gpu'
+        gpu_dir.mkdir()
+        argv = ['disk9', '--boot-package', 'unused', '--spec', 'unused', '--gpu-bundle', str(gpu_dir)]
+        args = deploy._parser().parse_args(argv)
+        target = mock.Mock(content='Apple_APFS')
+        with (
+            mock.patch.object(deploy.host, 'check_tools'),
+            mock.patch.object(pull_logs, 'load_spec', return_value={'volumes': {'data': {'uuid': 'data'}}}),
+            mock.patch.object(cards, 'resolve', return_value=self.card),
+            mock.patch.object(cards, 'check_layout_unprivileged', return_value=(mock.Mock(), target)),
+            mock.patch.object(pull_logs, 'data_volume', return_value='disk9s5'),
+        ):
+            with self.assertRaisesRegex(deploy.host.HostError, 'stage tree'):
+                deploy._checked(args, Log())
+            (gpu_dir / 'gpu.stage').write_text('# gpu stage 2 tree\n')
+            deploy._checked(args, Log())
+
 
 class JoyConPairingTest(unittest.TestCase):
     def setUp(self):
@@ -489,6 +572,145 @@ class PosterSnapshotsTest(unittest.TestCase):
         root = self.data / 'empty'
         root.mkdir()
         return root
+
+
+def _bootstrap_package(root: Path, generation: str) -> Path:
+    package(root)
+    directory = root / 'bootstrap'
+    directory.mkdir(parents=True, exist_ok=True)
+    status = (
+        'Package: org.coolstar.sileo\nStatus: install ok installed\nVersion: 2.5.1\n\n'
+        'Package: ellekit\nStatus: install ok installed\nVersion: 1.1\n\n'
+        'Package: uikittools\nStatus: install ok installed\nVersion: 2.1\n\n'
+        'Package: launchctl\nStatus: install ok installed\nVersion: 1:1.1.1\n'
+    ).encode()
+    with tarfile.open(directory / bootstrap.ARCHIVE, 'w') as archive:
+        for name, data in (
+            ('.procursus_strapped', b''),
+            ('.switch-bootstrap-ready', b''),
+            ('Library/dpkg/status', status),
+        ):
+            info = tarfile.TarInfo(name)
+            info.size, info.mode = len(data), 0o644
+            archive.addfile(info, io.BytesIO(data))
+    helper = root / 'overlay/usr/libexec' / bootstrap.HELPER
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_bytes(b'helper')
+    manifest = {
+        'schema_version': 1,
+        'archive_sha256': hashlib.sha256((directory / bootstrap.ARCHIVE).read_bytes()).hexdigest(),
+        'helper_sha256': hashlib.sha256(b'helper').hexdigest(),
+        'holds': list(bootstrap.HELD),
+        'managed_generation': generation,
+    }
+    (directory / bootstrap.MANIFEST).write_text(json.dumps(manifest))
+    return root
+
+
+class InterruptedMigrationDeployTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def _run_redeploy(self, build: str, version: str) -> tuple[Path, Path, Path, Path]:
+        generation = 'a' * 64
+        pkg = _bootstrap_package(self.root / f'pkg-{build}', generation)
+        data = self.root / f'data-{build}'
+        fat = self.root / f'fat-{build}'
+        data.mkdir()
+        fat.mkdir()
+        pins_file = self.root / f'pins-{build}.json'
+        pins = {'build': build, 'version': version}
+        pins_file.write_text(json.dumps(pins))
+        bootstrap.stage(data, pkg, pins, Log())
+        base = data / bootstrap.DIRECTORY / build
+        (base / bootstrap_migration.RECEIPT).write_text(f'working {generation} native-migration\n')
+        (base / bootstrap_migration.PENDING).unlink()
+        marker = data / system_apps.MARKER
+        marker.touch()
+        sentinel = data / system_apps.SENTINEL
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.touch()
+        store = data / 'mobile/Containers/Data/InternalDaemon/1/Library/Caches/com.apple.LaunchServices-1.csstore'
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_bytes(b'store')
+        args = deploy._parser().parse_args(
+            ['disk9', '--boot-package', str(pkg), '--ipsw', str(pins_file), '--spec', 'unused']
+        )
+        with (
+            mock.patch.object(deploy.cards, 'mounted', side_effect=lambda *_, **__: contextlib.nullcontext(fat)),
+            mock.patch.object(deploy.deployed, 'record'),
+            mock.patch.object(deploy, '_stage_gpu'),
+        ):
+            not_done = deploy._write(args, data, deploy.Volumes('disk9s1', None), None, Log())
+        self.assertEqual(not_done, [])
+        return marker, sentinel, store, base / bootstrap_migration.PENDING
+
+    def test_redeploy_rearms_bootstrap_and_rebuilds_launchservices_on_ios_27(self):
+        marker, sentinel, store, pending = self._run_redeploy('24B119', '27.2')
+        self.assertFalse(marker.exists())
+        self.assertTrue(sentinel.is_file())
+        self.assertFalse(store.exists())
+        self.assertEqual(pending.read_text(), 'a' * 64 + '\n')
+
+    def test_redeploy_rearms_bootstrap_and_keeps_launchservices_store_on_ios_17(self):
+        marker, sentinel, store, pending = self._run_redeploy('21H461', '17.7.11')
+        self.assertFalse(marker.exists())
+        self.assertTrue(sentinel.is_file())
+        self.assertTrue(store.is_file())
+        self.assertEqual(pending.read_text(), 'a' * 64 + '\n')
+
+
+class SshAuthorizedKeysDeployTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def _run_write(self, pkg: Path, data: Path, extra_args: list[str]) -> list[str]:
+        fat = self.root / 'fat'
+        fat.mkdir(exist_ok=True)
+        args = deploy._parser().parse_args(
+            ['disk9', '--boot-package', str(pkg), '--spec', 'unused', '--no-joycon-pairing', *extra_args]
+        )
+        with (
+            mock.patch.object(deploy.cards, 'mounted', side_effect=lambda *_, **__: contextlib.nullcontext(fat)),
+            mock.patch.object(deploy.deployed, 'record'),
+            mock.patch.object(deploy, '_stage_gpu'),
+            mock.patch.object(deploy.bootstrap, 'stage'),
+        ):
+            return deploy._write(args, data, deploy.Volumes('disk9s1', None), None, Log())
+
+    def test_deploy_stages_keys_for_dev_and_removes_them_for_release(self):
+        dev_pkg = self.root / 'dev-pkg'
+        package(dev_pkg)
+        deb = dev_pkg / ssh_keys.OVERLAY_DEB
+        deb.parent.mkdir(parents=True)
+        deb.write_bytes(b'switch-ssh')
+
+        rel_pkg = self.root / 'rel-pkg'
+        package(rel_pkg)
+
+        key_blob = base64.b64encode(struct.pack('>I', 11) + b'ssh-ed25519' + b'\x07' * 32).decode('ascii')
+        key_line = f'ssh-ed25519 {key_blob} dev@host'
+        keys_file = self.root / 'keys.pub'
+        keys_file.write_text(key_line + '\n')
+
+        data = self.root / 'data'
+        data.mkdir()
+
+        self.assertEqual(self._run_write(dev_pkg, data, ['--ssh-authorized-keys', str(keys_file)]), [])
+        staged = data / ssh_keys.STAGED
+        self.assertEqual(staged.read_text(), key_line + '\n')
+
+        self.assertEqual(self._run_write(rel_pkg, data, ['--ssh-authorized-keys', str(keys_file)]), [])
+        self.assertFalse(staged.exists())
+
+        self.assertEqual(self._run_write(dev_pkg, data, ['--ssh-authorized-keys', str(keys_file)]), [])
+        self.assertTrue(staged.is_file())
+        self.assertEqual(self._run_write(dev_pkg, data, ['--no-ssh-authorized-keys']), [])
+        self.assertFalse(staged.exists())
 
 
 if __name__ == '__main__':

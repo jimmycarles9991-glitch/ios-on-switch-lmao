@@ -356,7 +356,7 @@ TEST(GM20BCompiler, IndependentColdKeysOverlapWhileWarmKeysRemainReady)
     warmAsync.key = "warm-async";
     EXPECT_TRUE(cache.store(warmAsync, &original, ""));
     std::atomic<bool> warmDone{false};
-    compiler.ask(warmAsync, [&](const gm20b::RuntimeRecord *record, const std::string &) {
+    compiler.ask(warmAsync, [&](std::shared_ptr<const gm20b::RuntimeRecord> record, const std::string &) {
         EXPECT_NE(record, nullptr);
         std::lock_guard<std::mutex> guard(lock);
         warmDone = true;
@@ -370,7 +370,7 @@ TEST(GM20BCompiler, IndependentColdKeysOverlapWhileWarmKeysRemainReady)
     }
     // Repeated requests share the running key, and a third cold key cannot exceed the worker bound.
     for (unsigned i = 0; i < 32; ++i)
-        compiler.ask(cold[0], [&](const gm20b::RuntimeRecord *record, const std::string &) {
+        compiler.ask(cold[0], [&](std::shared_ptr<const gm20b::RuntimeRecord> record, const std::string &) {
             EXPECT_NE(record, nullptr);
             callbacks++;
         });
@@ -603,6 +603,57 @@ TEST(GM20BCompiler, AFixedPriorityCreationDoesNotWaitForASlot)
         changed.notify_all();
     }
     compiler.drain();
+}
+
+TEST(GM20BCompiler, TrimFreesSettledEntriesAndKeepsHeldRecordsAndActiveMakersAlive)
+{
+    std::mutex lock;
+    std::condition_variable changed;
+    bool inMake = false, release = false;
+    gm20b::Compiler compiler(nullptr, [&](const gm20b::CacheKey &k, gm20b::RuntimeRecord &record, std::string &) {
+        record = madeUp(k.key == "inflight" ? 7 : 5);
+        if (k.key == "inflight") {
+            std::unique_lock<std::mutex> guard(lock);
+            inMake = true;
+            changed.notify_all();
+            changed.wait(guard, [&] {
+                return release;
+            });
+        }
+        return gm20b::Compiler::Outcome::Made;
+    });
+    gm20b::CacheKey settled, inflight;
+    settled.key = "settled";
+    inflight.key = "inflight";
+    gm20b::RuntimeRecord out;
+    std::string why;
+    ASSERT_EQ(compiler.makeNow(settled, out, why), gm20b::Compiler::State::Ready);
+    std::shared_ptr<const gm20b::RuntimeRecord> held;
+    ASSERT_EQ(compiler.ask(settled, nullptr, &held), gm20b::Compiler::State::Ready);
+    ASSERT_NE(held, nullptr);
+
+    ASSERT_EQ(compiler.ask(inflight, nullptr), gm20b::Compiler::State::Pending);
+    {
+        std::unique_lock<std::mutex> guard(lock);
+        ASSERT_TRUE(changed.wait_for(guard, std::chrono::seconds(5), [&] {
+            return inMake;
+        }));
+    }
+    // Trim frees the settled entry while leaving the in-flight entry intact and keeping `held` valid.
+    EXPECT_EQ(compiler.trim(), 1u);
+    EXPECT_EQ(held->pipeline.keyHash, madeUp(5).pipeline.keyHash);
+    EXPECT_EQ(compiler.lookup(settled, out, why), gm20b::RecordCache::Found::None);
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        release = true;
+        changed.notify_all();
+    }
+    compiler.drain();
+    std::shared_ptr<const gm20b::RuntimeRecord> made;
+    ASSERT_EQ(compiler.ask(inflight, nullptr, &made), gm20b::Compiler::State::Ready);
+    ASSERT_NE(made, nullptr);
+    EXPECT_EQ(made->pipeline.keyHash, madeUp(7).pipeline.keyHash);
+    EXPECT_EQ(compiler.trim(), 1u);
 }
 
 }  // namespace

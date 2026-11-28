@@ -239,9 +239,6 @@ TEST_F(DevicePassBarrier, APassOfStorageFormsKeepsTheDrain)
     EXPECT_EQ(std::count(m.begin(), m.end(), kPixelShaderBarrier), 0);
 }
 
-// A Core Animation scale frame (boot 21: 15 passes, each a BGRA8 target of its own and a memoryless RGBA16F c1, four of
-// 55 textures sampled a pass): the passes open with PIXEL_SHADER_BARRIER but where one samples the full-size target a pass
-// since the last drain rendered (a glass backdrop), which no held cell covers and keeps the drain
 TEST_F(DevicePassBarrier, ACompositorFrameDrainsOnlyWhereAPassReadsAnEarlierOnesTarget)
 {
     constexpr uint32_t kPasses = 15, kTextures = 55;
@@ -280,18 +277,69 @@ TEST_F(DevicePassBarrier, ACompositorFrameDrainsOnlyWhereAPassReadsAnEarlierOnes
     uint32_t seqno = 0;
     ASSERT_TRUE(cb->commit(seqno));
     const std::vector<uint32_t> m = methods(kernel_model::model.jobs.back().words);
-    EXPECT_EQ(std::count(m.begin(), m.end(), kPixelShaderBarrier), long(kPasses - 1 - 3));
-    EXPECT_EQ(std::count(m.begin(), m.end(), kWaitForIdle), 3) << "the three passes that sample a backdrop";
+    EXPECT_EQ(std::count(m.begin(), m.end(), kPixelShaderBarrier), long(kPasses - 1));
+    EXPECT_EQ(std::count(m.begin(), m.end(), kWaitForIdle), 0);
 }
 
-TEST_F(DevicePassBarrier, AFullSizeTargetKeepsTheDrain)
+TEST_F(DevicePassBarrier, AFullSizeTargetTakesPixelBarrierForFsAndDrainsForVs)
 {
     const auto read = twoPasses(big, half, &big, true);
-    EXPECT_EQ(read.first, 0u);
-    EXPECT_EQ(read.second, 1u);
+    EXPECT_EQ(read.first, 1u);
+    EXPECT_EQ(read.second, 0u);
     const auto unrelated = twoPasses(big, half, nullptr, true);
     EXPECT_EQ(unrelated.first, 0u);
     EXPECT_EQ(unrelated.second, 0u);
+
+    gm20b::CommandBuffer *cb = dev.begin();
+    ASSERT_NE(cb, nullptr);
+    gm20b::PassUses aUses;
+    aUses.known = true;
+    gm20b::RenderEncoder *a = cb->render(cleared(big));
+    a->plan(aUses);
+    a->end();
+    gm20b::PassUses bUses;
+    bUses.known = true;
+    bUses.sample(gm20b::hazardImage(big), true);
+    gm20b::RenderEncoder *b = cb->render(cleared(half));
+    b->plan(bUses);
+    b->end();
+    uint32_t seqno = 0;
+    ASSERT_TRUE(cb->commit(seqno));
+    const std::vector<uint32_t> m = methods(kernel_model::model.jobs.back().words);
+    EXPECT_EQ(std::count(m.begin(), m.end(), kPixelShaderBarrier), 0);
+    EXPECT_EQ(std::count(m.begin(), m.end(), kWaitForIdle), 1);
+}
+
+TEST_F(DevicePassBarrier, EntryGatesHeaderAndSamplerInvalidatesOnDirtyPool)
+{
+    const auto entryInvalidates = [&]() -> std::pair<size_t, size_t> {
+        gm20b::CommandBuffer *cb = dev.begin();
+        EXPECT_NE(cb, nullptr);
+        cb->render(cleared(atlas))->end();
+        uint32_t seqno = 0;
+        EXPECT_TRUE(cb->commit(seqno));
+        const std::vector<uint32_t> m = methods(kernel_model::model.jobs.back().words);
+        return {size_t(std::count(m.begin(), m.end(), kHeaderCache)),
+                size_t(std::count(m.begin(), m.end(), kSamplerCache))};
+    };
+    const auto first = entryInvalidates();
+    EXPECT_EQ(first.first, 1u);
+    EXPECT_EQ(first.second, 1u);
+    const auto clean = entryInvalidates();
+    EXPECT_EQ(clean.first, 0u);
+    EXPECT_EQ(clean.second, 0u);
+    gm20b::Texture extra;
+    ASSERT_TRUE(dev.createTexture(32, 32, kBgra8, extra));
+    const auto afterTic = entryInvalidates();
+    EXPECT_EQ(afterTic.first, 1u);
+    EXPECT_EQ(afterTic.second, 0u);
+    gm20b::Sampler sampler;
+    ASSERT_TRUE(dev.createSampler({}, sampler));
+    const auto afterTsc = entryInvalidates();
+    EXPECT_EQ(afterTsc.first, 0u);
+    EXPECT_EQ(afterTsc.second, 1u);
+    dev.destroySampler(sampler);
+    dev.destroyTexture(extra);
 }
 
 TEST_F(DevicePassBarrier, VolatilePitchBufferTextureTargetKeepsTheDrain)
@@ -345,11 +393,27 @@ TEST_F(DevicePassBarrier, FallbackDrainAvoidsDoubleWfiAndDropsConstantsOnlyAfter
         return values;
     };
 
-    const auto read = twoPasses(big, half, &big, true);
-    EXPECT_EQ(read.first, 0u);
-    EXPECT_EQ(read.second, 1u);
+    {
+        gm20b::CommandBuffer *cb = dev.begin();
+        ASSERT_NE(cb, nullptr);
+        gm20b::PassUses aUses;
+        aUses.known = true;
+        gm20b::RenderEncoder *a = cb->render(cleared(big));
+        a->plan(aUses);
+        a->end();
+        gm20b::PassUses bUses;
+        bUses.known = true;
+        bUses.sample(gm20b::hazardImage(big), true);
+        gm20b::RenderEncoder *b = cb->render(cleared(half));
+        b->plan(bUses);
+        b->end();
+        uint32_t seqno = 0;
+        ASSERT_TRUE(cb->commit(seqno));
+    }
     const std::vector<uint32_t> &ropWords = kernel_model::model.jobs.back().words;
     const std::vector<uint32_t> ropMethods = methods(ropWords);
+    EXPECT_EQ(std::count(ropMethods.begin(), ropMethods.end(), kPixelShaderBarrier), 0);
+    EXPECT_EQ(std::count(ropMethods.begin(), ropMethods.end(), kWaitForIdle), 1);
     EXPECT_EQ(std::count(ropMethods.begin(), ropMethods.end(), kShaderCaches), 0);
     const std::vector<uint32_t> ropNoWfi = shaderInvalValues(ropWords, kShaderCachesNoWfi);
     ASSERT_GE(ropNoWfi.size(), 2u);
@@ -372,7 +436,7 @@ TEST_F(DevicePassBarrier, FallbackDrainAvoidsDoubleWfiAndDropsConstantsOnlyAfter
     ASSERT_TRUE(cb->commit(seqno));
     const std::vector<uint32_t> &bufWords = kernel_model::model.jobs.back().words;
     const std::vector<uint32_t> bufMethods = methods(bufWords);
-    EXPECT_EQ(std::count(bufMethods.begin(), bufMethods.end(), kWaitForIdle), 1);
+    EXPECT_EQ(std::count(bufMethods.begin(), bufMethods.end(), kWaitForIdle), 0);
     EXPECT_EQ(std::count(bufMethods.begin(), bufMethods.end(), kShaderCaches), 1);
     const std::vector<uint32_t> bufNoWfi = shaderInvalValues(bufWords, kShaderCachesNoWfi);
     ASSERT_GE(bufNoWfi.size(), 2u);
@@ -580,9 +644,16 @@ TEST(DeviceTiledCacheSize, DynamicTileSizeTracksPassFootprintAndShadowCaches)
     EXPECT_EQ(runPass(bgra8, nullptr), (std::vector<uint32_t>{128u | (128u << 16)}));
 
     EXPECT_EQ(runPass(ms4Color, &ms4Depth), (std::vector<uint32_t>{32u | (32u << 16)}));
-    {
+    // A clear-only pass of a 64x64 area over a stored 128x128 BGRA8 and a 128x128 depth: its colour's clear by a pass of
+    // its own (the whole attachment) at the colour's tile size, then a depth kept by the pass cleared over the area at the
+    // pass's, or a stored one cleared whole by a pass of its own at the zeta's and the pass's targets then set at the
+    // pass's. The tile size and CLEAR_SURFACE's words in order.
+    const auto clearOnly = [&](bool stored) {
+        std::vector<std::pair<uint32_t, uint32_t>> events;
         gm20b::CommandBuffer *cb = dev.begin();
-        ASSERT_NE(cb, nullptr);
+        EXPECT_NE(cb, nullptr);
+        if (!cb)
+            return events;
         gm20b::PassDesc pass;
         pass.color[0].texture = &bgra8;
         pass.color[0].load = gm20b::ColorAttachment::Clear;
@@ -590,14 +661,16 @@ TEST(DeviceTiledCacheSize, DynamicTileSizeTracksPassFootprintAndShadowCaches)
         pass.count = 1;
         pass.depthStencil.texture = &depth;
         pass.depthStencil.clearDepth = true;
+        pass.depthStencil.stored = stored;
         pass.width = 64;
         pass.height = 64;
         gm20b::RenderEncoder *e = cb->render(pass);
-        ASSERT_NE(e, nullptr);
+        EXPECT_NE(e, nullptr);
+        if (!e)
+            return events;
         e->end();
         uint32_t seqno = 0;
-        ASSERT_TRUE(cb->commit(seqno));
-        std::vector<std::pair<uint32_t, uint32_t>> events;
+        EXPECT_TRUE(cb->commit(seqno));
         const std::vector<uint32_t> &words = kernel_model::model.jobs.back().words;
         for (size_t at = 0; at < words.size();) {
             const uint32_t h = words[at++], form = h >> 29, count = (h >> 16) & 0x1fff, subc = (h >> 13) & 7,
@@ -615,12 +688,19 @@ TEST(DeviceTiledCacheSize, DynamicTileSizeTracksPassFootprintAndShadowCaches)
                     events.emplace_back(m, words[at]);
             }
         }
-        ASSERT_GE(events.size(), 4u);
-        EXPECT_EQ(events[0], (std::pair<uint32_t, uint32_t>{kTileSize, 128u | (128u << 16)}));
-        EXPECT_EQ(events[1].first, uint32_t(NVB197_CLEAR_SURFACE));
-        EXPECT_EQ(events[2], (std::pair<uint32_t, uint32_t>{kTileSize, 64u | (64u << 16)}));
-        EXPECT_EQ(events[3].first, uint32_t(NVB197_CLEAR_SURFACE));
-    }
+        return events;
+    };
+    using Event = std::pair<uint32_t, uint32_t>;
+    constexpr uint32_t kClear = NVB197_CLEAR_SURFACE, kColourClear = 0x3c, kDepthClear = 1;
+    EXPECT_EQ(clearOnly(false), (std::vector<Event>{{kTileSize, 128u | (128u << 16)},
+                                                    {kClear, kColourClear},
+                                                    {kTileSize, 64u | (64u << 16)},
+                                                    {kClear, kDepthClear}}));
+    EXPECT_EQ(clearOnly(true), (std::vector<Event>{{kTileSize, 128u | (128u << 16)},
+                                                   {kClear, kColourClear},
+                                                   {kTileSize, 64u | (128u << 16)},
+                                                   {kClear, kDepthClear},
+                                                   {kTileSize, 64u | (64u << 16)}}));
 
     dev.destroyTexture(ms4Depth);
     dev.destroyTexture(ms4Color);
@@ -708,6 +788,32 @@ TEST(DeviceTiledCacheTail, TailTiledCacheFlushRunsOnlyWhenDirty)
         EXPECT_EQ(std::count(m.begin(), m.end(), kTiledCacheFlush), 1);
         dev.destroyTexture(sepStencil);
         dev.destroyTexture(sepDepth);
+    }
+
+    {
+        gm20b::Texture second;
+        ASSERT_TRUE(dev.createTexture(128, 128, kBgra8, second, false, true));
+        cb = dev.begin();
+        ASSERT_NE(cb, nullptr);
+        gm20b::PassDesc firstPass;
+        firstPass.color[0].texture = &color;
+        firstPass.color[0].load = gm20b::ColorAttachment::Clear;
+        firstPass.count = 1;
+        cb->render(firstPass)->end();
+        gm20b::PassDesc secondPass;
+        secondPass.color[0].texture = &second;
+        secondPass.color[0].load = gm20b::ColorAttachment::Clear;
+        secondPass.count = 1;
+        cb->render(secondPass)->end();
+        ASSERT_TRUE(cb->commit(seqno));
+        m = methods(kernel_model::model.jobs.back().words);
+        const auto firstFlush = std::find(m.begin(), m.end(), kTiledCacheFlush);
+        const auto drainWfi = std::find(m.begin(), m.end(), kWaitForIdle);
+        ASSERT_NE(firstFlush, m.end());
+        ASSERT_NE(drainWfi, m.end());
+        EXPECT_LT(firstFlush, drainWfi);
+        EXPECT_EQ(std::count(m.begin(), m.end(), kTiledCacheFlush), 2);
+        dev.destroyTexture(second);
     }
 
     dev.destroyTexture(color);

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
 // hw_test_app's 2D-engine probe ops through the facade (TegraGM20BMetalProbe.mm switchMetalProbeEngine:): the textures an op
 // reads and writes are uses of its blit encoder in the command buffer's plan, as a copy's are, so a new texture's first
-// contents (TegraGM20BMetalFresh.mm) are written ahead of that encoder, never over what the op wrote.
+// contents (TegraGM20BMetalFresh.mm) are written ahead of that encoder, never over what the op wrote. Its raw 3D-class
+// methods refuse a process without SWITCH_GPU_PROBES_ENTITLEMENT.
 #include "facade_harness.h"
 #include "TegraGM20BGrPreemptABI.h"
+#include "TegraGM20BPathsABI.h"
 
 namespace {
 
@@ -172,6 +174,33 @@ TEST(FacadeProbe, ComputeCtaProbeSendsGrPreemptMethodForDeviceChannel)
         NSString *errReply = toggle(YES);
         EXPECT_TRUE([errReply hasPrefix:@"error=0x"]);
         kernel_model::arriving.store(nullptr, std::memory_order_release);
+    }
+}
+
+// A host test binary holds no entitlements: both routes to raw 3D-class methods refuse it before taking one.
+TEST(FacadeProbe, RawMethodsNeedTheProbesEntitlement)
+{
+    @autoreleasepool {
+        id<MTLTexture> written = target();
+        ASSERT_NE(written, nil);
+        id<MTLCommandBuffer> cb = [[facade::device() newCommandQueue] commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        NSString *const entitlement = @(SWITCH_GPU_PROBES_ENTITLEMENT);
+        NSString *sent = engine(
+            cb, @{
+                @"kind" : @"method",
+                @"method" : @0x1234,
+                @"value" : @1,
+                @"written" : written,
+                @"unbracketed" : @1,
+            });
+        EXPECT_TRUE([sent containsString:entitlement]) << sent.UTF8String;
+        [blit endEncoding];
+        const uint32_t pair[2] = {0x1234, 1};
+        NSString *armed = ((NSString * (*)(id, SEL, NSData *, NSData *))
+                               objc_msgSend)(facade::device(), NSSelectorFromString(@"switchMetalProbeBefore:after:"),
+                                             [NSData dataWithBytes:pair length:sizeof(pair)], nil);
+        EXPECT_TRUE([armed containsString:entitlement]) << armed.UTF8String;
     }
 }
 

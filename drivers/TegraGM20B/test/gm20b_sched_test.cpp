@@ -151,7 +151,8 @@ TEST(Interleave, NoRoomForEvenThatListsEachOnce)
 	EXPECT_EQ(plan(high, entries, 2), (std::vector<uint16_t>{0, 1, 2}));
 }
 
-constexpr uint8_t kBg = TGM_LEVEL_BACKGROUND, kFg = TGM_LEVEL_FOREGROUND, kHigh = TGM_LEVEL_HIGH;
+constexpr uint8_t kBg = TGM_LEVEL_BACKGROUND, kFg = TGM_LEVEL_FOREGROUND,
+		  kAppHigh = TGM_LEVEL_APP_HIGH, kHigh = TGM_LEVEL_HIGH;
 
 // nvgpu's three levels: the compositor after every other unit, every foreground app between two background ones
 TEST(Interleave, ThreeLevelsTheNvgpuWay)
@@ -192,24 +193,53 @@ TEST(Interleave, ThreeLevelsTooBigForTheRunlistKeepTheCompositorAfterEveryApp)
 	EXPECT_EQ(order, (std::vector<uint16_t>{0, 6, 1, 6, 2, 6, 3, 6, 4, 6, 5, 6}));
 }
 
+TEST(Interleave, FourLevelsPutCompositorAfterEveryUnitAndAppHighAfterLowerApps)
+{
+	const std::vector<uint8_t> level = {kBg, kFg, kAppHigh, kHigh};
+	const std::vector<uint16_t> entries(level.size(), 1);
+	const auto order = plan(level, entries, 64);
+	EXPECT_EQ(order, (std::vector<uint16_t>{0, 3, 2, 3, 1, 3, 2, 3}));
+	for (size_t i = 0; i < order.size(); i++) {
+		const uint8_t here = level[order[i]], next = level[order[(i + 1) % order.size()]];
+		if (here != kHigh)
+			EXPECT_EQ(next, kHigh) << "after position " << i;
+	}
+	EXPECT_GT(std::count(order.begin(), order.end(), 2),
+		  std::count(order.begin(), order.end(), 1));
+	EXPECT_GT(std::count(order.begin(), order.end(), 3),
+		  std::count(order.begin(), order.end(), 2));
+}
+
+TEST(Interleave, FourLevelsTooBigMergeAllAppsBelowTheCompositor)
+{
+	const std::vector<uint8_t> level = {kBg, kFg, kAppHigh, kFg, kAppHigh, kHigh};
+	const std::vector<uint16_t> entries(level.size(), 1);
+	const auto order = plan(level, entries, 12);
+	EXPECT_LE(order.size(), 12u);
+	EXPECT_EQ(order, (std::vector<uint16_t>{0, 5, 1, 5, 2, 5, 3, 5, 4, 5}));
+}
+
 constexpr uint64_t kInterval = 16666667;  // 60 Hz
 
 // Metal's GPU priorities as Core Animation sets them (CA::OGL::new_metal_context): its window server renderer 0, the
 // asynchronous dispatcher 1, other contexts 2 and 4, background contexts' background priority 2
-TEST(Priority, OnlyTheTopMetalPriorityIsTheCompositors)
+TEST(Priority, OnlyTheCompositorsPriorityZeroReachesHigh)
 {
-	EXPECT_EQ(tgm_priority_level(0, 4, 0), TGM_LEVEL_HIGH);
-	EXPECT_EQ(tgm_priority_level(1, 4, 0), TGM_LEVEL_FOREGROUND);
-	EXPECT_EQ(tgm_priority_level(2, 4, 0), TGM_LEVEL_FOREGROUND);
-	EXPECT_EQ(tgm_priority_level(4, 4, 0), TGM_LEVEL_BACKGROUND);
+	EXPECT_EQ(tgm_priority_level(0, 4, 0, 1), TGM_LEVEL_HIGH);
+	EXPECT_EQ(tgm_priority_level(0, 4, 0, 0), TGM_LEVEL_APP_HIGH);
+	EXPECT_EQ(tgm_priority_level(1, 4, 0, 1), TGM_LEVEL_FOREGROUND);
+	EXPECT_EQ(tgm_priority_level(1, 4, 0, 0), TGM_LEVEL_FOREGROUND);
+	EXPECT_EQ(tgm_priority_level(2, 4, 0, 0), TGM_LEVEL_FOREGROUND);
+	EXPECT_EQ(tgm_priority_level(4, 4, 0, 0), TGM_LEVEL_BACKGROUND);
 }
 
 TEST(Priority, ABackgroundRoleRunsAtTheBackgroundPriority)
 {
-	EXPECT_EQ(tgm_priority_level(2, 4, 1), TGM_LEVEL_BACKGROUND);
-	EXPECT_EQ(tgm_priority_level(2, 2, 1), TGM_LEVEL_FOREGROUND);
-	// the compositor's level is never a background process's
-	EXPECT_EQ(tgm_priority_level(0, 0, 1), TGM_LEVEL_FOREGROUND);
+	EXPECT_EQ(tgm_priority_level(2, 4, 1, 0), TGM_LEVEL_BACKGROUND);
+	EXPECT_EQ(tgm_priority_level(2, 2, 1, 0), TGM_LEVEL_FOREGROUND);
+	// the compositor's and app-high levels are never a background process's
+	EXPECT_EQ(tgm_priority_level(0, 0, 1, 1), TGM_LEVEL_FOREGROUND);
+	EXPECT_EQ(tgm_priority_level(0, 0, 1, 0), TGM_LEVEL_FOREGROUND);
 }
 
 // IOGPUFamily's setter: any process may ask 0-2 and 4; RealTime (5) is High; 3 and above 5 are refused
@@ -222,15 +252,26 @@ TEST(Priority, AQueuesAskIsScheduledAsIOGPUFamilyAnswersIt)
 	EXPECT_EQ(tgm_priority_granted(6), -1);
 }
 
-// Priority 0 schedules any process high; only one holding graphics-restart-no-kill is then the compositor
+// Priority 0 without graphics-restart-no-kill lands at APP_HIGH (below HIGH); holding the marker lands at HIGH
 TEST(Priority, TheCompositorAsksForTheTopPriorityAndHoldsTheMarker)
 {
-	const enum tgm_level asked = tgm_priority_level(uint32_t(tgm_priority_granted(0)), 4, 0);
-	EXPECT_EQ(asked, TGM_LEVEL_HIGH) << "an app that asks for 0 is scheduled high";
-	EXPECT_FALSE(tgm_compositor(asked, 0)) << "and is not the compositor";
-	EXPECT_TRUE(tgm_compositor(asked, 1));
-	EXPECT_FALSE(tgm_compositor(tgm_priority_level(2, 4, 0), 1)) << "entitled, not asking";
-	EXPECT_FALSE(tgm_compositor(tgm_priority_level(0, 4, 1), 1)) << "entitled, GPU denied";
+	const uint32_t top = uint32_t(tgm_priority_granted(0));
+	const enum tgm_level appAsked = tgm_priority_level(top, 4, 0, 0);
+	const enum tgm_level compAsked = tgm_priority_level(top, 4, 0, 1);
+	EXPECT_EQ(appAsked, TGM_LEVEL_APP_HIGH);
+	EXPECT_EQ(compAsked, TGM_LEVEL_HIGH);
+	EXPECT_FALSE(tgm_compositor(appAsked, 0));
+	EXPECT_FALSE(tgm_compositor(appAsked, 1));
+	EXPECT_TRUE(tgm_compositor(compAsked, 1));
+	EXPECT_FALSE(tgm_compositor(tgm_priority_level(2, 4, 0, 1), 1)) << "entitled, not asking";
+	EXPECT_FALSE(tgm_compositor(tgm_priority_level(0, 4, 1, 1), 1)) << "entitled, GPU denied";
+}
+
+TEST(Timeslice, EncodesDefaultAndCriticalFiftyMillisecondWords)
+{
+	EXPECT_EQ(tgm_timeslice_word(1024), 0x10003080u);
+	EXPECT_EQ(tgm_timeslice_word(4096), 0x10005080u);
+	EXPECT_EQ(tgm_timeslice_word(50000), 0x100080c3u);
 }
 
 TEST(Deadline, AChannelIsHeldItsPreemptionLatencyBeforeTheCompositorsLatestStart)
@@ -311,6 +352,7 @@ TEST(Deadline, ErroredIsolatedOrRecoveringChannelsAreNeverHeldOrReleased)
 	EXPECT_FALSE(tgm_may_release(0, 1, 0));
 	EXPECT_FALSE(tgm_may_release(0, 0, 1));
 	EXPECT_FALSE(tgm_may_release(0, 0, 2));
+	EXPECT_TRUE(tgm_may_hold(kAppHigh, 1, 0, 0, 0, 0, 0));
 	EXPECT_TRUE(tgm_may_hold(kFg, 1, 0, 0, 0, 0, 0));
 	EXPECT_TRUE(tgm_may_hold(kBg, 1, 0, 0, 0, 0, 0));
 	EXPECT_FALSE(tgm_may_hold(kHigh, 1, 0, 0, 0, 0, 0));

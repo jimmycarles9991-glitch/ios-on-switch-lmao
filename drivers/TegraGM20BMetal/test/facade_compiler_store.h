@@ -8,6 +8,7 @@
 #include "../compute_record.h"
 #include "../library_entry.h"
 #include "../reflection_blob.h"
+#include "request_store_key.h"
 #include "../../../kits/SwitchSeedPack/SwitchSeedStore.h"
 #include "../../../kits/SwitchGM20B/SwitchGM20B.h"
 #include "../../../kits/SwitchGM20BEmit/SwitchGM20BPushDecode.h"
@@ -24,12 +25,33 @@ struct LibraryCompiler {
     std::vector<gm20b::CompileRequest> consumers;
     gm20b::MadeLibrary made;
     std::string log;
+    // Another program's entry already holds each request's name, so the compiler stores at the next candidate
+    bool nameTaken = false;
 
     int32_t compute(const gm20b::CompileRequest &r)
     {
-        gm20b::CacheKey key;
-        key.stack = r.stack;
-        key.key = r.key;
+        gm20b::CacheKey made;
+        made.stack = r.stack;
+        made.key = r.key;
+        const gm20b::StoreKey store = requestStoreKey(made, r);
+        const std::string entry = entryOf(store.content, r);
+        if (entry.empty())
+            return TegraGM20BCompileUnavailable;
+        consumers.push_back(r);
+        gm20b::Digest name = store.name;
+        if (nameTaken) {
+            gm20b::CacheKey other = store.content;
+            other.key += " | another program";
+            const std::string foreign = entryOf(other, r);
+            this->store.put(name.data(), reinterpret_cast<const uint8_t *>(foreign.data()), uint32_t(foreign.size()));
+            name = gm20b::candidateName(name, 1);
+        }
+        this->store.put(name.data(), reinterpret_cast<const uint8_t *>(entry.data()), uint32_t(entry.size()));
+        return TegraGM20BCompileMade;
+    }
+
+    static std::string entryOf(const gm20b::CacheKey &key, const gm20b::CompileRequest &r)
+    {
         std::string entry;
         if (r.kind == gm20b::RequestKind::Facts) {
             const uint32_t facts[] = {256, 32, 0};
@@ -54,16 +76,8 @@ struct LibraryCompiler {
             record.cbufs = 1;
             record.cbufType[0] = gm20b::CbufRoot;
             entry = gm20b::encodeKernelEntry(key, &record, "");
-        } else {
-            return TegraGM20BCompileUnavailable;
         }
-        consumers.push_back(r);
-        std::vector<gm20b::LibraryIdentity> ids;
-        for (const auto &library : r.libraries)
-            ids.push_back(gm20b::identityOf(library));
-        store.put(gm20b::storeName(key, r, ids).data(), reinterpret_cast<const uint8_t *>(entry.data()),
-                  uint32_t(entry.size()));
-        return TegraGM20BCompileMade;
+        return entry;
     }
 
     bool serve()
@@ -86,9 +100,9 @@ struct LibraryCompiler {
             const gm20b::CacheKey k = gm20b::libraryCacheKey(r.stack, r.codeGenType, r.codeGen);
             if (k.key != r.key || !gm20b::codegen::requestOk(r.codeGenType, r.codeGen))
                 return int32_t(TegraGM20BCompileUnavailable);
-            const std::string entry = gm20b::encodeLibraryEntry(k, log.empty() ? &made : nullptr, log);
-            store.put(gm20b::storeName(k, r, {}).data(), reinterpret_cast<const uint8_t *>(entry.data()),
-                      uint32_t(entry.size()), true);
+            const gm20b::StoreKey key = gm20b::storeKeyOf(k, r, {}, {});
+            const std::string entry = gm20b::encodeLibraryEntry(key.content, log.empty() ? &made : nullptr, log);
+            store.put(key.name.data(), reinterpret_cast<const uint8_t *>(entry.data()), uint32_t(entry.size()), true);
             return int32_t(log.empty() ? TegraGM20BCompileMade : TegraGM20BCompileRefused);
         };
         return true;

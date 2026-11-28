@@ -3,7 +3,9 @@
 # traffic for identify, reset, set-up, rate changes, sleep and wake; the sample path's decode, mount matrix, device
 # frame and scale; the off-with-one-line and lost-interrupt-panic paths; FIFO batching (watermark from the batch
 # interval, one status/count burst and whole-record data bursts per drain, per-sample times) and its fall-backs; the
-# orientation detector and its reports through 21H461's IOHIDEventDriver and CoreMotion (orientation_pipeline_model.h).
+# orientation detector and its reports through 21H461's IOHIDEventDriver and CoreMotion (orientation_pipeline_model.h);
+# device motion fused in the driver (switch_motion_fusion_test has the filter's maths and the report layout,
+# switch_motion_bias_test its gyroscope offset learning).
 # Plus guards on what the models cannot see (switch_motion_source_test), and the 10 s line's window
 # (switch_motion_stats_test).
 #
@@ -16,12 +18,16 @@ lint_files()
 host_shims(
     name = "kernel",
     headers = [
+        "IOKit/IOFilterInterruptEventSource.h",
         "IOKit/IOInterruptEventSource.h",
         "IOKit/IOLib.h",
         "IOKit/IOReturn.h",
         "IOKit/IOService.h",
         "IOKit/IOTimerEventSource.h",
         "IOKit/IOWorkLoop.h",
+        "libkern/c++/OSDictionary.h",
+        "libkern/c++/OSNumber.h",
+        "libkern/c++/OSSerialize.h",
         "os/log.h",
     ],
     stubs = "switch_motion_stubs.h",
@@ -34,6 +40,9 @@ host_library(
         "//drivers/ArmGIC:SwitchInterrupts.h",
         "//drivers/NativeMobileDisplay:SwitchPortrait.h",
         "//drivers/SwitchMotion:SwitchMotion.h",
+        "//drivers/SwitchMotion:SwitchMotionBias.h",
+        "//drivers/SwitchMotion:SwitchMotionFusion.h",
+        "//drivers/SwitchMotion:SwitchMotionMath.h",
         "//drivers/SwitchMotion:SwitchMotionStats.h",
         "//drivers/SwitchTouch:SwitchHID.h",
         "//drivers/TegraGPIO:TegraGPIO.h",
@@ -49,10 +58,55 @@ host_test(
     ],
     # The driver is #included by the test (one translation unit: the models reach its internals).
     additional_compiler_inputs = ["//drivers/SwitchMotion:SwitchMotion.cpp"],
-    copts = ["-Wno-unused-parameter"],
+    copts = [
+        "-DDEVELOPMENT=1",
+        "-DSWITCH_IPSW_KIND_21H461=1",
+        "-Wno-unused-parameter",
+    ],
     deps = [
         ":headers",
         ":kernel",
+    ],
+)
+
+# The same as a 24B119 kernel builds it (the kind header's SWITCH_IPSW_KIND_24B119): device motion reports of 60 bytes.
+host_test(
+    name = "switch_motion_24b119_test",
+    srcs = [
+        "orientation_pipeline_model.h",
+        "switch_motion_test.cpp",
+    ],
+    additional_compiler_inputs = ["//drivers/SwitchMotion:SwitchMotion.cpp"],
+    copts = [
+        "-DDEVELOPMENT=1",
+        "-DSWITCH_IPSW_KIND_24B119=1",
+        "-Wno-unused-parameter",
+    ],
+    deps = [
+        ":headers",
+        ":kernel",
+    ],
+)
+
+host_test(
+    name = "switch_motion_fusion_test",
+    srcs = [
+        "fusion_sim.h",
+        "switch_motion_fusion_test.cpp",
+        "//drivers/SwitchMotion:SwitchMotionBias.h",
+        "//drivers/SwitchMotion:SwitchMotionFusion.h",
+        "//drivers/SwitchMotion:SwitchMotionMath.h",
+    ],
+)
+
+host_test(
+    name = "switch_motion_bias_test",
+    srcs = [
+        "fusion_sim.h",
+        "switch_motion_bias_test.cpp",
+        "//drivers/SwitchMotion:SwitchMotionBias.h",
+        "//drivers/SwitchMotion:SwitchMotionFusion.h",
+        "//drivers/SwitchMotion:SwitchMotionMath.h",
     ],
 )
 
@@ -71,6 +125,7 @@ host_test(
         "orientation_pipeline_model.h",
         "orientation_pipeline_test.cpp",
     ],
+    defines = ["SWITCH_IPSW_KIND_21H461=1"],
     deps = [
         ":headers",
         ":kernel",
@@ -83,7 +138,10 @@ host_test(
     data = [
         "//drivers/SwitchBrightness:SwitchBacklight.cpp",
         "//drivers/SwitchMotion:SwitchMotion.cpp",
+        "//drivers/SwitchMotion:SwitchMotionTotals.cpp",
         "//drivers/SwitchMotion:SwitchOrientationClient.cpp",
         "//drivers/SwitchTouch:SwitchHIDDevice.cpp",
+        "//drivers/SwitchTouch:SwitchHIDFastPath.cpp",
+        "//drivers/SwitchTouch:SwitchHIDMotionAccess.cpp",
     ],
 )

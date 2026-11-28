@@ -89,6 +89,7 @@ py_library(
     name = "families",
     srcs = [
         "affinity.py",
+        "dualclock.py",
         "hsetp2.py",
         "icache.py",
         "int3.py",
@@ -96,6 +97,7 @@ py_library(
         "overlap.py",
         "powr_native.py",
         "powr_verdict.py",
+        "readers.py",
     ],
     deps = [
         ":encode",
@@ -128,6 +130,7 @@ py_library(
     )
     for name in [
         "affinity_test",
+        "dualclock_test",
         "hsetp2_test",
         "icache_test",
         "int3_test",
@@ -135,6 +138,7 @@ py_library(
         "intops_test",
         "overlap_test",
         "powr_native_test",
+        "readers_test",
     ]
 ]
 

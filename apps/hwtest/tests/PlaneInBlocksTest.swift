@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A pass into one plane of a one-level 3D texture laid out several planes a block: a shared 16x16x8 texture made with

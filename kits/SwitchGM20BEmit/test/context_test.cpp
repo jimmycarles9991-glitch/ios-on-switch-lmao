@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include "../../SwitchGM20B/SwitchGM20B.h"
 #include "../../SwitchGM20B/SwitchGM20BTegra.h"
 #include "SwitchGM20BContext.h"
 #include "bazel/testing/source_text.h"
@@ -35,10 +36,29 @@ std::vector<Captured> capture()
     return out;
 }
 
-// NVIDIA's userspace's CSAA_ENABLE of 0 (context.tsv), where NVK keeps the golden context's 1
+// Words our init context owns beyond NVK's capture: NVIDIA's CSAA_ENABLE of 0, plus the 8 golden-context registers a
+// probe draw may modify and restores from the context (context.tsv, probe_restores.h)
 bool gm20bOwn(const switch_gm20b_context_method &m)
 {
-    return m.subc == 0 && m.mthd == SWITCH_NVB197_SET_CSAA_ENABLE && m.data == 0;
+    if (m.subc != 0)
+        return false;
+    switch (m.mthd) {
+    case SWITCH_NVB197_SET_CSAA_ENABLE:
+    case NVB197_SET_CONSTANT_COLOR_RENDERING:
+    case NVB197_SET_CONSTANT_COLOR_RENDERING_RED:
+    case NVB197_SET_CONSTANT_COLOR_RENDERING_GREEN:
+    case NVB197_SET_CONSTANT_COLOR_RENDERING_BLUE:
+    case NVB197_SET_CONSTANT_COLOR_RENDERING_ALPHA:
+        return m.data == 0;
+    case NVB197_SET_SAMPLE_MASK:
+        return m.data == 0x1;
+    case NVB197_SET_COLOR_TARGET_SAMPLE_MASK:
+        return m.data == 0xffff;
+    case NVB197_SET_PIPELINE_SHADER(5):
+        return m.data == 0x51;
+    default:
+        return false;
+    }
 }
 
 std::vector<switch_gm20b_context_method> nvkShared()
@@ -55,7 +75,7 @@ TEST(Context, IsTheCapturedInit)
     const std::vector<Captured> captured = capture();
     const std::vector<switch_gm20b_context_method> shared = nvkShared();
     ASSERT_EQ(captured.size(), shared.size());
-    ASSERT_EQ(shared.size() + 1, SWITCH_GM20B_CONTEXT_METHODS);
+    ASSERT_EQ(shared.size() + 9, SWITCH_GM20B_CONTEXT_METHODS);
     std::map<uint32_t, uint32_t> address;
     for (size_t i = 0; i < captured.size(); i++) {
         const switch_gm20b_context_method &m = shared[i];

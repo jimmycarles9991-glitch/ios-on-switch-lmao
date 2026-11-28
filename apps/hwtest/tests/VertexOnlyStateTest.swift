@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A render state of no fragment function (RenderBox's path_edges states are of this kind): drawn by the driver with

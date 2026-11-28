@@ -1,6 +1,8 @@
 import Darwin
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 import QuartzCore
 import UIKit
@@ -16,9 +18,9 @@ import UIKit
 /// none); lead_min_ms its commit to target; hlag_* when its handler ran against its target, hc_p50_ms (and each
 /// control's <key>_hc_ms) against its commit: a presented handler within a few ms of its commit, with no
 /// presentedTime, is a drawable QuartzCore released at presentAtTime: without queueing it. d_fi_* (debug kernels)
-/// count the display's swaps: held for their time and shown or replaced unsent, let go early by the ordinary-frame
-/// clause, shown more than half a period before their requested presentation, and let go by that clause with the frame
-/// ends masked. Two phases settle why timed drawables come back with no time (QuartzCore 24B119 finishes every drawable
+/// count the display's swaps: held for their time and shown or replaced unsent, shown more than half a period before
+/// their requested presentation, and let go as the render server's ordinary frame with the frame ends masked. Two
+/// phases settle why timed drawables come back with no time (QuartzCore 24B119 finishes every drawable
 /// of a layer that had no presented report for a second, the one presented now included): alt_plain= and alt_timed=,
 /// plain and timed presents in turn on one layer (timed ones shown here: the server shows and reports them, and what
 /// fails alone is the layer's report going stale; none: the server never takes or never reports a timed image); and
@@ -29,7 +31,7 @@ struct PresentAtTimeTest: HWTest {
     let name = "presentDrawable:atTime: shows each drawable at its refresh, with its presentedTime"
     let subsystem = Subsystem.compositor
 
-    static let counters = ["shown", "unsent", "ordinary", "early", "unphased"]
+    static let counters = ["shown", "unsent", "early", "unphased"]
 
     func run(_ context: TestContext) async throws -> Outcome {
         let kernelBefore = Self.frameInfoTotals()
@@ -124,7 +126,8 @@ struct PresentAtTimeTest: HWTest {
         }
         await MainActor.run { run.start() }
         _ = await done.wait(timeout: seconds + 5)
-        try await Task.sleep(nanoseconds: 300_000_000)
+        let presented = await MainActor.run { run.everyPresented() }
+        _ = await presented.wait(timeout: 0.3)
         let flipsAfter = PlanesTest.totals(["flips"]).values["flips"]
         let (frames, size) = await MainActor.run { (run.results, run.drawableSize) }
         let flips = flipsBefore.flatMap { before in flipsAfter.map { $0 - before } } ?? -1

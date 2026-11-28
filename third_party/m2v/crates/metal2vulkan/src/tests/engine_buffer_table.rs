@@ -575,3 +575,89 @@ fn a_phi_member_with_a_null_private_pointer_is_refused() {
         }
     }
 }
+
+/// Metal 4.1 / AIR 2.9 carries `metal::array_ref<T>` element pointers in `addrspace(8)` (MPS
+/// `ndArrayIdentity` + linked `read_f`/`write_f`): entry passes a thread-space table pointer, casts
+/// it to `addrspace(8)` and stores it alongside null `addrspace(8)` texture-array pointers in a
+/// stack struct, then loads it back, indexes it dynamically, and dereferences the element buffer.
+#[test]
+fn array_ref_addrspace_8_table_through_stack_cell_lowers_and_runs() {
+    use crate::device::profile::Limits;
+    use crate::device::requirements::ApiVersion;
+    let ir = format!(
+        r#"{HEADER}%array_ref = type {{ ptr addrspace(8), i64 }}
+%inout = type {{ %array_ref, %array_ref }}
+
+define void @mps_array_ref(ptr addrspace(1) noundef "air-buffer-no-alias" %0, ptr noundef %1) {{
+entry:
+  %box = alloca %inout, align 8
+  %cast = addrspacecast ptr %1 to ptr addrspace(8)
+  %f0 = getelementptr inbounds %inout, ptr %box, i64 0, i32 0, i32 0
+  store ptr addrspace(8) %cast, ptr %f0, align 8
+  %f0len = getelementptr inbounds %inout, ptr %box, i64 0, i32 0, i32 1
+  store i64 3, ptr %f0len, align 8
+  %f1 = getelementptr inbounds %inout, ptr %box, i64 0, i32 1, i32 0
+  store ptr addrspace(8) null, ptr %f1, align 8
+  %f1len = getelementptr inbounds %inout, ptr %box, i64 0, i32 1, i32 1
+  store i64 0, ptr %f1len, align 8
+  %k = load i32, ptr addrspace(1) %0, align 4
+  %idx = zext i32 %k to i64
+  %tab = load ptr addrspace(8), ptr %f0, align 8
+  %slot = getelementptr inbounds ptr addrspace(1), ptr addrspace(8) %tab, i64 %idx
+  %buf = load ptr addrspace(1), ptr addrspace(8) %slot, align 8
+  %val = load i32, ptr addrspace(1) %buf, align 4
+  %len = load i64, ptr %f0len, align 8
+  %len32 = trunc i64 %len to i32
+  %o1 = getelementptr inbounds i32, ptr addrspace(1) %0, i64 1
+  store i32 %val, ptr addrspace(1) %o1, align 4
+  %o2 = getelementptr inbounds i32, ptr addrspace(1) %0, i64 2
+  store i32 %len32, ptr addrspace(1) %o2, align 4
+  ret void
+}}
+
+!air.kernel = !{{!9}}
+!air.version = !{{!17}}
+!air.language_version = !{{!18}}
+!9 = !{{ptr @mps_array_ref, !10, !11}}
+!10 = !{{}}
+!11 = !{{!12, !13}}
+!12 = !{{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint", !"air.arg_name", !"out"}}
+!13 = !{{i32 1, !"air.buffer", !"air.location_index", i32 {FIRST}, i32 {COUNT}, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"array_ref<void>", !"air.arg_name", !"buffers"}}
+!17 = !{{i32 2, i32 9, i32 0}}
+!18 = !{{!"Metal", i32 4, i32 1, i32 0}}
+"#
+    );
+    let Some(bc) = assemble_text("mps_array_ref", &ir) else {
+        return;
+    };
+    let mut desc = DeviceDescription::new(ApiVersion::V1_3);
+    desc.limits = Limits {
+        max_compute_work_group_size: [1024, 1024, 64],
+        max_compute_work_group_count: [65535; 3],
+        max_compute_work_group_invocations: 1024,
+        max_push_constants_size: 128,
+        max_bound_descriptor_sets: 4,
+        max_per_stage_descriptor_storage_buffers: 16,
+        max_per_stage_resources: 64,
+        max_descriptor_set_storage_buffers: 32,
+        max_storage_buffer_range: 1 << 27,
+        min_storage_buffer_offset_alignment: 16,
+        ..Limits::default()
+    };
+    let dev = Device::new(desc, DevicePolicy::default()).expect("device");
+    let p = dev.profile();
+    let a = compile(&bc, "mps_array_ref", p).expect("compile");
+    link_and_validate(&a, p).expect("spirv-val");
+    let (plan, m) = typed_module(&bc, "mps_array_ref", p).expect("module");
+    for (input, element) in [(0u32, 0u32), (1, 1), (2, 2), (9, 2)] {
+        let res = Resources {
+            buffers: buffers(input),
+            push: push_bytes(&plan),
+            spec: Default::default(),
+        };
+        let out = run(&m, &Config::default(), res).expect("interpret");
+        let e = element_bytes(element);
+        assert_eq!(word(&out.buffers[0], 4), word(&e, 0), "input {input}");
+        assert_eq!(word(&out.buffers[0], 8), 3, "input {input}");
+    }
+}

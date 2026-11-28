@@ -243,7 +243,8 @@ def alu(name: str, w: int, lane: Lane, inputs: Inputs) -> None:  # noqa: C901, P
     elif base == 'TXD':
         texture.txd(name, w, lane, inputs, d)
     elif name == 'TXQ_b':
-        result = inputs.texture(('txq', lane.r(bits(w, 8, 8)), bits(w, 22, 6)))
+        ra = bits(w, 8, 8)
+        result = inputs.texture(('txq', lane.r(ra), bits(w, 22, 6), lane.r(ra + 1) if ra != 255 else 0))
         mask = bits(w, 31, 4)
         for k, c in enumerate(c for c in range(4) if mask >> c & 1):
             lane.w(d + k, result[c])

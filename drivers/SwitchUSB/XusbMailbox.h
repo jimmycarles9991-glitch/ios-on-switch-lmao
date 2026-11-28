@@ -17,6 +17,7 @@
 #define XUSB_MBOX_REPLY_ACK       128u
 #define XUSB_MBOX_REPLY_NAK       129u
 #define XUSB_MBOX_OWNER_SW        2u
+#define XUSB_MBOX_LFPS_SETTLE_MS  1u
 
 // A command we send is taken one of two ways on 24B119's firmware. RESET_SSPI is answered with an ACK or NAK message,
 // which raises the mailbox interrupt, and the owner stays ours until the handler has taken that answer
@@ -75,6 +76,43 @@ static inline enum xusb_mbox_outcome xusb_mbox_wait_end(struct xusb_mbox_wait *w
 {
     w->cmd = 0;
     return w->outcome;
+}
+
+// A falcon mailbox reply deferred behind a one-shot timer (T210 LFPS settle on U3 entry) so the mailbox IRQ handler
+// never sleeps on its work loop.
+struct xusb_mbox_deferred {
+    bool pending;
+    uint32_t request_cmd;
+    uint32_t reply_cmd;
+    uint32_t data;
+    uint32_t delay_ms;
+};
+
+static inline void xusb_mbox_deferred_set(struct xusb_mbox_deferred *d, uint32_t request_cmd, uint32_t reply_cmd,
+                                          uint32_t data, uint32_t delay_ms)
+{
+    d->pending = true;
+    d->request_cmd = request_cmd;
+    d->reply_cmd = reply_cmd;
+    d->data = data;
+    d->delay_ms = delay_ms;
+}
+
+static inline bool xusb_mbox_deferred_take(struct xusb_mbox_deferred *d, struct xusb_mbox_deferred *out)
+{
+    if (!d->pending)
+        return false;
+    *out = *d;
+    d->pending = false;
+    return true;
+}
+
+static inline bool xusb_mbox_deferred_cancel(struct xusb_mbox_deferred *d)
+{
+    if (!d->pending)
+        return false;
+    d->pending = false;
+    return true;
 }
 
 struct xusb_mbox_reply {

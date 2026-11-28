@@ -174,7 +174,7 @@ TEST(GM20BPoolPolicy, CompressedTargetsLeaveTheFloor)
 	p.used = 54 * MiB;
 	Client compositor{true};
 	unsigned made = 0;
-	while (!tgm_pool::compressibleRefusal(7296 * KiB, p.avail(), kLimits)) {
+	while (!tgm_pool::compressibleRefusal(7296 * KiB, p.avail(), kLimits, true)) {
 		p.used += 7296 * KiB;
 		compositor.held += 7296 * KiB;
 		made++;
@@ -186,14 +186,18 @@ TEST(GM20BPoolPolicy, CompressedTargetsLeaveTheFloor)
 	alloc(p, compositor, 16 * MiB, false, r);
 	check(r.fromSystem == 1 && r.failed == 0,
 	      "the compositor's coherent block comes from system memory, the floor stays nvkm's");
-	while (!tgm_pool::compressibleRefusal(128 * KiB, p.avail(), kLimits))
+	while (!tgm_pool::compressibleRefusal(128 * KiB, p.avail(), kLimits, true))
 		p.used += 128 * KiB;
 	check(p.avail() >= kLimits.floorBytes && p.avail() < kLimits.floorBytes + 128 * KiB,
-	      "an app's compressed asks stop within one comptag line of the floor");
+	      "the compositor's compressed asks stop within one comptag line of the floor");
 	Pool fresh;
-	check(tgm_pool::compressibleRefusal(fresh.size - kLimits.floorBytes, fresh.avail(),
-					    kLimits) == nullptr,
-	      "no client share: one app may take the pool down to its floor");
+	const uint64_t appMost =
+		fresh.size - kLimits.floorBytes - tgm_pool::CompositorCompressedBytes;
+	check(tgm_pool::compressibleRefusal(appMost, fresh.avail(), kLimits) == nullptr &&
+		      tgm_pool::compressibleRefusal(appMost + 128 * KiB, fresh.avail(), kLimits) !=
+			      nullptr,
+	      "no client share: one app may take the pool down to the floor and the compositor's "
+	      "reserve");
 }
 
 // Boot 21, an app opening: backboardd held 60 MiB of the pool (12 coherent, 48 compressed) with 55 MiB free, and
@@ -204,12 +208,12 @@ TEST(GM20BPoolPolicy, Boot21CompositorTargetsTakeTheReserve)
 	p.used = p.size - 55 * MiB;
 	for (uint64_t bytes : {12 * MiB, 24 * MiB}) {
 		const uint64_t avail = p.avail();
-		EXPECT_EQ(tgm_pool::compressibleRefusal(bytes, avail, kLimits), nullptr)
+		EXPECT_EQ(tgm_pool::compressibleRefusal(bytes, avail, kLimits, true), nullptr)
 			<< bytes / MiB << " MiB at " << avail / MiB << " MiB free";
 		p.used += bytes;
 	}
 	EXPECT_EQ(p.avail(), 19 * MiB);
-	EXPECT_STREQ(tgm_pool::compressibleRefusal(4 * MiB, p.avail(), kLimits),
+	EXPECT_STREQ(tgm_pool::compressibleRefusal(4 * MiB, p.avail(), kLimits, true),
 		     "the pool's last 16 MiB stay for nvkm");
 }
 
@@ -252,7 +256,7 @@ TEST(GM20BPoolPolicy, Boot22InOrderTheCompositorIsStillServed)
 	}
 	EXPECT_EQ(iconBytes, 21120 * KiB);
 	p.used += 2 * MiB;
-	EXPECT_EQ(tgm_pool::compressibleRefusal(3200 * KiB, p.avail(), kLimits), nullptr)
+	EXPECT_EQ(tgm_pool::compressibleRefusal(3200 * KiB, p.avail(), kLimits, true), nullptr)
 		<< "backboardd's target at " << p.avail() / KiB << " KiB ready";
 	p.used += 3200 * KiB;
 	EXPECT_GE(p.avail(), kLimits.floorBytes);
@@ -305,4 +309,40 @@ TEST(GM20BPoolPolicy, SmmuCompressibleBudgetEnforcesGlobalClientAndHeadroomCaps)
 		  nullptr);
 	EXPECT_EQ(tgm_pool::smmuCompressibleRefusal(16 * MiB, 0, 0, 80 * MiB, limits, true),
 		  nullptr);
+}
+
+// 25 Nov 19:47: an app's compressed memory had filled the pool to its floor, and backboardd's next 7488 KiB target was
+// refused. An app now stops at the compositor's reserve, and the compositor's next screen-sized target is made.
+TEST(GM20BPoolPolicy, AnAppLeavesTheCompositorsNextCompressedTarget)
+{
+	Pool p;
+	p.used = 120 * MiB;
+	while (!tgm_pool::compressibleRefusal(3840 * KiB, p.avail(), kLimits))
+		p.used += 3840 * KiB;
+	EXPECT_STREQ(tgm_pool::compressibleRefusal(3840 * KiB, p.avail(), kLimits),
+		     "the compositor's compressed reserve stays free");
+	EXPECT_EQ(tgm_pool::compressibleRefusal(7488 * KiB, p.avail(), kLimits, true), nullptr);
+}
+
+// 25 Nov 19:59 (20261125-201323): the compositor's refused full-screen target (24576 KiB) grows the reserve apps leave
+// to its size, so the compositor's retry of it is made once the apps stop; its next made target puts it back at 8 MiB.
+// Beyond CompositorCompressedMost the reserve does not grow: that burst asked 272 MiB against a 256 MiB pool.
+TEST(GM20BPoolPolicy, ARefusedCompositorTargetGrowsTheReserveUntilItsNextIsMade)
+{
+	EXPECT_EQ(tgm_pool::compositorReserve(0), tgm_pool::CompositorCompressedBytes);
+	EXPECT_EQ(tgm_pool::compositorReserve(4928 * KiB), tgm_pool::CompositorCompressedBytes);
+	EXPECT_EQ(tgm_pool::compositorReserve(24576 * KiB), 24576 * KiB);
+	EXPECT_EQ(tgm_pool::compositorReserve(272 * MiB), tgm_pool::CompositorCompressedMost);
+
+	Pool p;
+	p.used = 120 * MiB;
+	const uint64_t grown = tgm_pool::compositorReserve(24576 * KiB);
+	while (!tgm_pool::compressibleRefusal(3840 * KiB, p.avail(), kLimits, false, grown))
+		p.used += 3840 * KiB;
+	EXPECT_STREQ(tgm_pool::compressibleRefusal(3840 * KiB, p.avail(), kLimits, false, grown),
+		     "the compositor's compressed reserve stays free");
+	EXPECT_EQ(tgm_pool::compressibleRefusal(24576 * KiB, p.avail(), kLimits, true), nullptr)
+		<< "the compositor's retry of its refused target";
+	EXPECT_EQ(tgm_pool::compressibleRefusal(3840 * KiB, p.avail(), kLimits), nullptr)
+		<< "back at 8 MiB once the compositor's target was made, an app's ask fits again";
 }

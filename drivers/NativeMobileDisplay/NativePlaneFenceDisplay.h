@@ -60,6 +60,7 @@ bool planeFence(const PlaneSet &p)
     gpuScanout = true;
     gpuDeadline->setTimeoutMS(kGpuCopyDeadlineMS);
     if (!planeMediaFence(p)) {
+        planeBridgeArm(p);
         planeFenceQueued = true;
         copySource->interruptOccurred(nullptr, nullptr, 0);
     }

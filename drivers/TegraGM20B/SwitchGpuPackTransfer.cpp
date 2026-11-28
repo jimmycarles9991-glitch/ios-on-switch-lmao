@@ -33,7 +33,6 @@ boolean_t upl_page_present(upl_page_info_t *upl, int index);
 boolean_t upl_valid_page(upl_page_info_t *upl, int index);
 // NOLINTNEXTLINE(readability-redundant-declaration)
 vfs_context_t vfs_context_kernel(void);
-extern int memorystatus_vm_pressure_level;
 }
 
 namespace
@@ -42,11 +41,6 @@ constexpr uint64_t kGpuPageBytes = 4096;
 constexpr uint64_t kDmaMask34 = 0x3ffffffffULL;
 constexpr uint64_t kContigMask = kDmaMask34 & ~(kSwitchGpuPackTierAlign - 1);
 constexpr uint32_t kMaxUplAttempts = 4;
-
-bool pressureActive()
-{
-	return __atomic_load_n(&memorystatus_vm_pressure_level, __ATOMIC_RELAXED) != 0;
-}
 
 bool collectDescriptorPages(IOMemoryDescriptor *md, uint64_t bytes, uint64_t *pas)
 {
@@ -186,8 +180,10 @@ bool switch_gpu_pack_alloc_tier0(uint64_t tier0Bytes, IOMemoryDescriptor **multi
 
 bool switch_gpu_pack_stream_tier0(vnode_t vp, uint64_t heapOff, uint64_t tier0Bytes,
 				  uint64_t *dstPas, void **chunkCpu, const char **whyOut,
-				  int *errOut, SwitchGpuPackStreamStats *stats)
+				  int *errOut, SwitchGpuPackStreamStats *stats,
+				  volatile uint32_t *frontier)
 {
+	uint32_t landed = 0;
 	constexpr uint32_t kMaxChunkGpuPages = uint32_t(kSwitchGpuPackTransferBytes >> 12);
 	auto *srcPas = IONew(uint64_t, kMaxChunkGpuPages);
 	if (!srcPas) {
@@ -312,6 +308,8 @@ bool switch_gpu_pack_stream_tier0(vnode_t vp, uint64_t heapOff, uint64_t tier0By
 			if (!ok)
 				break;
 			off += chunkBytes;
+			if (frontier)
+				switch_gpu_pack_raise(frontier, ++landed);
 			continue;
 		}
 		// Flush any APFS CPU-decrypted or CPU-decompressed page-cache lines to DRAM.
@@ -334,74 +332,65 @@ bool switch_gpu_pack_stream_tier0(vnode_t vp, uint64_t heapOff, uint64_t tier0By
 			switch_dcache_invalidate(chunkCpu[firstChunk + c],
 						 size_t(kSwitchGpuPackTierAlign));
 		off += chunkBytes;
+		if (frontier)
+			switch_gpu_pack_raise(frontier, ++landed);
 	}
 	IODelete(srcPas, uint64_t, kMaxChunkGpuPages);
 	return ok;
 }
 
-void switch_gpu_pack_warm_tier1(const SwitchGpuPackHeader *hdr, uint64_t fileSize,
-				SwitchGpuPackWarmStats *stats)
+namespace
 {
-	SwitchGpuPackByteRange ranges[4] = {};
-	const uint32_t rangeCount =
-		switch_gpu_pack_warm_ranges(hdr, fileSize, PAGE_SIZE, ranges, 4);
-	if (!rangeCount || switch_gpu_pack_shutdown_requested() || pressureActive())
-		return;
-	vfs_context_t ctx = vfs_context_kernel();
-	vnode_t vp = nullptr;
-	if (vnode_open(TGM_PACK_PATH, FREAD | O_NOFOLLOW_ANY, 0, 0, &vp, ctx) != 0 || !vp)
-		return;
-	struct vnode_attr va;
-	VATTR_INIT(&va);
-	VATTR_WANTED(&va, va_data_size);
-	bool keepGoing = vnode_isreg(vp) && vnode_getattr(vp, &va, ctx) == 0 &&
-			 VATTR_IS_SUPPORTED(&va, va_data_size) && va.va_data_size >= fileSize;
-	for (uint32_t r = 0; keepGoing && r < rangeCount; ++r) {
-		const uint64_t end = ranges[r].offset + ranges[r].bytes;
-		for (uint64_t off = ranges[r].offset; keepGoing && off < end;) {
-			if (switch_gpu_pack_shutdown_requested() || pressureActive()) {
-				keepGoing = false;
-				break;
-			}
-			const uint64_t len = end - off < kSwitchGpuPackTransferBytes
-						     ? end - off
-						     : kSwitchGpuPackTransferBytes;
-#if TGM_STATS
-			upl_t probeUpl = nullptr;
-			upl_page_info_t *probePl = nullptr;
-			uint64_t chunkResident = 0;
-			if (ubc_create_upl_external(vp, off_t(off), int(len), &probeUpl, &probePl,
-						    UPL_COPYOUT_FROM | UPL_SET_LITE |
-							    UPL_NOBLOCK) == KERN_SUCCESS &&
-			    probeUpl) {
-				const uint32_t vmPages = uint32_t(len / PAGE_SIZE);
-				for (uint32_t p = 0; probePl && p < vmPages; ++p)
-					if (upl_page_present(probePl, int(p)))
-						chunkResident += PAGE_SIZE;
-				ubc_upl_commit_range(probeUpl, 0, upl_size_t(len),
-						     UPL_COMMIT_FREE_ON_EMPTY |
-							     UPL_COMMIT_CLEAR_PRECIOUS);
-			}
-			stats->residentBytes += chunkResident;
-			if (chunkResident < len) {
-				int pagerErr = 0;
-				const int rc = vnode_pagein(vp, nullptr, 0, off, upl_size_t(len),
-							    UPL_IOSYNC, &pagerErr);
-				if (rc != 0 || pagerErr != 0)
-					keepGoing = false;
-				else
-					stats->readBytes += len - chunkResident;
-			}
-#else
-			(void)stats;
-			int pagerErr = 0;
-			const int rc = vnode_pagein(vp, nullptr, 0, off, upl_size_t(len),
-						    UPL_IOSYNC, &pagerErr);
-			if (rc != 0 || pagerErr != 0)
-				keepGoing = false;
-#endif
-			off += len;
-		}
+bool prefetchRange(vnode_t vp, uint64_t offset, uint64_t bytes, uint64_t fileSize)
+{
+	if (!bytes || offset >= fileSize)
+		return true;
+	uint64_t at = offset & ~uint64_t(PAGE_SIZE - 1);
+	const uint64_t end = (offset + bytes + PAGE_SIZE - 1) & ~uint64_t(PAGE_SIZE - 1);
+	for (; at < end && at < fileSize; at += kSwitchGpuPackTransferBytes) {
+		if (switch_gpu_pack_shutdown_requested())
+			return false;
+		const uint64_t length = end - at < kSwitchGpuPackTransferBytes
+						? end - at
+						: kSwitchGpuPackTransferBytes;
+		int pagerErr = 0;
+		if (vnode_pagein(vp, nullptr, 0, at, upl_size_t(length), UPL_IOSYNC, &pagerErr) !=
+			    0 ||
+		    pagerErr != 0)
+			return false;
 	}
-	vnode_close(vp, FREAD, ctx);
+	return true;
+}
+}  // namespace
+
+bool switch_gpu_pack_prefetch_tables(vnode_t vp, const SwitchGpuPackHeader &hdr, vfs_context_t ctx)
+{
+	static constexpr uint32_t kTables[] = {
+		kSwitchGpuPackFastKeys, kSwitchGpuPackPipelines, kSwitchGpuPackPrograms,
+		kSwitchGpuPackSegments, kSwitchGpuPackVariants,  kSwitchGpuPackBlob,
+		kSwitchGpuPackStrings,  kSwitchGpuPackSplits,    kSwitchGpuPackIterated,
+		kSwitchGpuPackInit,     kSwitchGpuPackBaseline,  kSwitchGpuPackSamplers,
+	};
+	uint64_t fileSize = 0;
+	for (const SwitchGpuPackSection &s : hdr.section)
+		if (s.offset <= UINT64_MAX - s.bytes && s.offset + s.bytes > fileSize)
+			fileSize = s.offset + s.bytes;
+	bool ok = true;
+	for (const uint32_t id : kTables) {
+		const SwitchGpuPackSection &s = hdr.section[id];
+		const uint64_t bytes = id == kSwitchGpuPackFastKeys ? s.bytes
+				       : hdr.tier0[id] < s.bytes    ? hdr.tier0[id]
+								    : s.bytes;
+		ok = prefetchRange(vp, s.offset, bytes, fileSize) && ok;
+	}
+	// PackSegmentTable: pipelineCount, variantComboCount, wordsOffset, wordsBytes (the words in the heap's tier 0)
+	uint32_t table[4] = {};
+	const SwitchGpuPackSection &segments = hdr.section[kSwitchGpuPackSegments];
+	if (segments.bytes >= sizeof table && !switch_gpu_pack_shutdown_requested() &&
+	    switch_gpu_pack_read_exact(vp, table, sizeof table, off_t(segments.offset), ctx) == 0 &&
+	    table[3] && uint64_t(table[2]) + table[3] <= hdr.tier0[kSwitchGpuPackHeap])
+		ok = prefetchRange(vp, hdr.section[kSwitchGpuPackHeap].offset + table[2], table[3],
+				   fileSize) &&
+		     ok;
+	return ok;
 }

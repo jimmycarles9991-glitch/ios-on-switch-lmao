@@ -351,3 +351,21 @@ TEST(ScanoutRing, OneLateFrame)
     CHECK(late2 > 20, "two buffers should stay a frame behind after a slip (%u)", late2);
     CHECK(late3 == 0, "three buffers should recover at the next boundary (%u)", late3);
 }
+
+TEST(ScanoutRing, HoldsWhenSupersededSlotOccupied)
+{
+    TegraScanoutRing ring;
+    ring.reset(3);
+    EXPECT_EQ(ring.ready(3, true), TegraScanoutRing::kFlip);
+    EXPECT_EQ(ring.pending, 3);
+    EXPECT_EQ(ring.superseded, TegraScanoutRing::kNone);
+
+    EXPECT_EQ(ring.ready(4, true), TegraScanoutRing::kReplace);
+    EXPECT_EQ(ring.pending, 4);
+    EXPECT_EQ(ring.superseded, 3);
+
+    EXPECT_EQ(ring.ready(5, true), TegraScanoutRing::kHold);
+    EXPECT_EQ(ring.superseded, 3);
+    EXPECT_EQ(ring.pending, 4);
+    EXPECT_EQ(ring.held, 5);
+}

@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 #include <dispatch/dispatch.h>
+#include <mach/mach_time.h>
 #include <atomic>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <utility>
+
+extern "C" int __ulock_wait(uint32_t operation, void *addr, uint64_t value, uint32_t timeout_us);
+extern "C" int __ulock_wake(uint32_t operation, void *addr, uint64_t wake_value);
 
 namespace gm20b {
 
@@ -12,11 +18,12 @@ namespace gm20b {
 // moves into a spare node of the queue's own (nodes are made only while the queue grows to the most ever in flight, in
 // chunks that never move or free), the node goes onto a stack the taker exchanges whole and appends to its own list. The
 // spare stack's head is a node index and a count its compare-and-swap moves with it: a node one giver takes and the
-// taker gives back between another giver's load and its swap fails that swap. The wake counts: a hand-off that wakes
-// signals once after its push, as does wake(), and the taker sleeps only after a look found its condition false, so no
-// wake is slept through; a wake whose change the taker saw with an earlier one costs it one more look.
+// taker gives back between another giver's load and its swap fails that swap. Wakes ride a 3-state ulock word
+// (0 clear, 1 signaled, 2 sleeping) with zero heap allocations and without semaphore_timedwait_trap (Mach trap 38,
+// denied by Autobox sandboxes).
 template <typename T> class HandoffQueue {
     static constexpr uint32_t kNone = ~0u, kFirstChunk = 8, kChunks = 24;
+    static constexpr uint32_t kCompareAndWait = 1, kWakeAll = 0x100, kNoErrno = 0x1000000;
 
     struct Node {
         T item{};
@@ -26,16 +33,12 @@ template <typename T> class HandoffQueue {
     };
 
 public:
-    HandoffQueue() : wake_(dispatch_semaphore_create(0))
-    {}
+    HandoffQueue() = default;
 
     ~HandoffQueue()
     {
         for (std::atomic<Node *> &chunk : chunks_)
-            delete[] chunk.load();
-#if !__has_feature(objc_arc)
-        dispatch_release(wake_);
-#endif
+            delete[] chunk.load(std::memory_order_relaxed);
     }
 
     HandoffQueue(const HandoffQueue &) = delete;
@@ -51,13 +54,13 @@ public:
         while (!given_.compare_exchange_weak(node->next, node, std::memory_order_seq_cst, std::memory_order_relaxed))
             ;
         if (wake)
-            dispatch_semaphore_signal(wake_);
+            signal();
     }
 
     // Any thread's, after it changed what the taker's condition reads
     void wake()
     {
-        dispatch_semaphore_signal(wake_);
+        signal();
     }
 
     // The taking thread's: every item given so far appended to its own list, until `ready(*this)` holds of them
@@ -65,7 +68,7 @@ public:
     {
         take();
         while (!ready(static_cast<const HandoffQueue &>(*this))) {
-            dispatch_semaphore_wait(wake_, DISPATCH_TIME_FOREVER);
+            wait(DISPATCH_TIME_FOREVER);
             take();
         }
     }
@@ -89,7 +92,7 @@ public:
     // The taking thread's: asleep until the next hand-off that wakes, a wake(), or `until`
     void sleep(dispatch_time_t until)
     {
-        dispatch_semaphore_wait(wake_, until);
+        wait(until);
     }
 
     // The taking thread's, once it is done with front(): the item counts as given no more
@@ -237,13 +240,62 @@ private:
         tail_ = last;
     }
 
+    static uint32_t ticksToUs(uint64_t ticks)
+    {
+        static const mach_timebase_info_data_t tb = [] {
+            mach_timebase_info_data_t info{};
+            mach_timebase_info(&info);
+            return info;
+        }();
+        const uint64_t ns = uint64_t((__uint128_t(ticks) * tb.numer) / tb.denom);
+        const uint64_t us = (ns + 999) / 1000;
+        if (us == 0)
+            return 1;
+        return us > std::numeric_limits<uint32_t>::max() ? std::numeric_limits<uint32_t>::max() : uint32_t(us);
+    }
+
+    void signal()
+    {
+        if (wakeState_.exchange(1, std::memory_order_seq_cst) == 2)
+            __ulock_wake(kCompareAndWait | kWakeAll | kNoErrno, &wakeState_, 0);
+    }
+
+    void wait(dispatch_time_t until)
+    {
+        uint32_t expected = 1;
+        if (wakeState_.compare_exchange_strong(expected, 0, std::memory_order_seq_cst, std::memory_order_relaxed))
+            return;
+        if (until == DISPATCH_TIME_NOW)
+            return;
+        for (;;) {
+            uint32_t timeoutUs = 0;
+            if (until != DISPATCH_TIME_FOREVER) {
+                const uint64_t now = mach_absolute_time();
+                if (until <= now)
+                    return;
+                timeoutUs = ticksToUs(until - now);
+            }
+            expected = 0;
+            if (!wakeState_.compare_exchange_strong(expected, 2, std::memory_order_seq_cst,
+                                                    std::memory_order_relaxed)) {
+                wakeState_.store(0, std::memory_order_seq_cst);
+                return;
+            }
+            (void)__ulock_wait(kCompareAndWait | kNoErrno, &wakeState_, 2, timeoutUs);
+            if (wakeState_.exchange(0, std::memory_order_seq_cst) == 1)
+                return;
+            if (until != DISPATCH_TIME_FOREVER && mach_absolute_time() >= until)
+                return;
+        }
+    }
+
     std::atomic<Node *> given_{nullptr};
     std::atomic<uint64_t> spare_{pack(kNone, 0)};
     std::atomic<uint32_t> made_{0};
     std::atomic<Node *> chunks_[kChunks]{};
     std::atomic<size_t> count_{0};
     Node *head_ = nullptr, *tail_ = nullptr;  // the taker's own list, oldest first
-    dispatch_semaphore_t wake_;
+    std::atomic<uint32_t> wakeState_{0};
 };
 
 }  // namespace gm20b

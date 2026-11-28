@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
-// GpuMemoryRelease.h: the idle release waits for the caller's command buffers in flight and comes at the deadline its drain
-// sets, a second after it (after the last of a stream of drains), in every process; without a count (m2v's) it comes at
-// the deadline; a release asked for, memory pressure's, runs with work in flight.
+// GpuMemoryRelease.h: a device's GPU memory goes back on memory pressure and when its app goes to the background, never
+// because the GPU was idle. Each test replays one sequence of a client's life: frames, pauses, background and
+// foreground transitions, a pressure event (the pressure source's handler is release(); a test cannot raise the
+// kernel's memorystatus level).
 #include <gtest/gtest.h>
-#include <stdlib.h>
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -13,139 +13,71 @@
 namespace {
 
 using namespace std::chrono_literals;
-using Clock = std::chrono::steady_clock;
 
 struct Released {
     std::atomic<int> count{0};
-    std::atomic<Clock::rep> at{0};
 
     static void release(void *self)
     {
-        auto *released = static_cast<Released *>(self);
-        released->at = Clock::now().time_since_epoch().count();
-        released->count++;
+        static_cast<Released *>(self)->count++;
     }
 };
 
-// GpuMemoryRelease's idle time, the timer's 100 ms leeway and a margin
-constexpr auto kPastDeadline = 1000ms + 100ms + 250ms;
+enum class Event {
+    Pause,
+    Background,
+    Foreground,
+    Pressure
+};
 
-bool releasedWithin(const Released &released, std::chrono::milliseconds most)
-{
-    const auto until = std::chrono::steady_clock::now() + most;
-    while (!released.count && std::chrono::steady_clock::now() < until)
-        std::this_thread::sleep_for(5ms);
-    return released.count != 0;
-}
-
-class GpuMemoryReleaseTest : public testing::Test {};
-
-// Its dispatch sources keep firing into `released`: each test's release and count live for the process
-TEST_F(GpuMemoryReleaseTest, ACommandBufferInFlightHoldsTheIdleReleaseUntilItsDrain)
+// The process's release and its dispatch sources live for the process, as a device's do
+int replay(const std::vector<Event> &events)
 {
     auto *released = new Released;
-    auto *inFlight = new std::atomic<uint32_t>{1};
     auto *release = new GpuMemoryRelease;
-    release->start(&Released::release, released, inFlight);
-    std::this_thread::sleep_for(kPastDeadline);
-    EXPECT_EQ(released->count, 0) << "the deadline passed with a command buffer in flight";
-    inFlight->store(0);
-    std::this_thread::sleep_for(kPastDeadline);
-    EXPECT_EQ(released->count, 0) << "the deadline is the drain's to set again";
-    release->drained();
-    EXPECT_TRUE(releasedWithin(*released, 3000ms));
-    EXPECT_EQ(released->count, 1);
-}
-
-// Drains every 50 ms, past the first one's deadline: the deadline that releases is the last drain's before it
-TEST_F(GpuMemoryReleaseTest, AStreamOfDrainsReleasesASecondAfterItsLast)
-{
-    struct Drain {
-        Clock::time_point before, after;
-    };
-
-    auto *released = new Released;
-    auto *inFlight = new std::atomic<uint32_t>{0};
-    auto *release = new GpuMemoryRelease;
-    std::vector<Drain> drains;
-    drains.reserve(64);
-    drains.push_back({Clock::now(), {}});
-    release->start(&Released::release, released, inFlight);
-    drains.back().after = Clock::now();
-    const Clock::time_point until = drains.front().before + 1600ms;
-    while (Clock::now() < until && !released->count) {
-        std::this_thread::sleep_for(50ms);
-        drains.push_back({Clock::now(), {}});
-        release->drained();
-        drains.back().after = Clock::now();
+    release->start(&Released::release, released);
+    for (const Event e : events) {
+        switch (e) {
+        case Event::Pause:
+            std::this_thread::sleep_for(1500ms);  // past the second the idle timer used to give back after
+            break;
+        case Event::Background:
+            release->backgrounded();
+            break;
+        case Event::Foreground:
+            release->foregrounded();
+            break;
+        case Event::Pressure:
+            release->release();
+            break;
+        }
     }
-    ASSERT_TRUE(releasedWithin(*released, 3000ms));
-    const Clock::time_point at{Clock::duration(released->at.load())};
-    Clock::time_point last = drains.front().before;
-    for (const Drain &d : drains)
-        if (d.after <= at)
-            last = d.before;
-    EXPECT_GE(at - last, 990ms) << "released "
-                                << std::chrono::duration_cast<std::chrono::milliseconds>(at - last).count()
-                                << " ms after the last drain before it";
+    return released->count.load();
 }
 
-constexpr uint64_t kIdle = uint64_t(GpuMemoryRelease::kIdleNs);
-
-// The deadline a thread's own wait carries: a second after the last drain, given back once
-TEST_F(GpuMemoryReleaseTest, AWaitsIdleDeadlineIsTheLastDrainsAndClaimedOnce)
+// 25 Nov: a client's 1 s idle give-back parked its chunks and dropped its kept imports at every pause, and its next
+// frame paid for unparks and imports (gpu.path.parked_bo, ui.scale_pacing's zoom imports)
+TEST(GpuMemoryRelease, AForegroundAppThatPausesKeepsItsMemory)
 {
-    IdleDeadline idle;
-    EXPECT_EQ(idle.due(0), 0u) << "a deadline with no drain";
-    idle.drained(100);
-    const uint64_t first = idle.due(0);
-    EXPECT_EQ(first, 100 + kIdle);
-    idle.drained(700);
-    EXPECT_EQ(idle.due(0), 700 + kIdle);
-    EXPECT_FALSE(idle.claim(first)) << "claimed a deadline a later drain moved";
-    EXPECT_TRUE(idle.claim(700 + kIdle));
-    EXPECT_EQ(idle.due(0), 0u) << "due again with no drain since its release";
-    EXPECT_FALSE(idle.claim(700 + kIdle));
+    EXPECT_EQ(replay({Event::Pause, Event::Pause}), 0);
 }
 
-TEST_F(GpuMemoryReleaseTest, WorkInFlightHoldsAWaitsIdleDeadlineUntilTheNextDrain)
+TEST(GpuMemoryRelease, GoingToTheBackgroundGivesBackBeforeTheCallReturns)
 {
-    IdleDeadline idle;
-    idle.drained(100);
-    EXPECT_EQ(idle.due(1), 0u);
-    idle.drained(5000);
-    EXPECT_EQ(idle.due(0), 5000 + kIdle);
+    EXPECT_EQ(replay({Event::Background}), 1);
 }
 
-TEST_F(GpuMemoryReleaseTest, WithoutAnInFlightCountTheDeadlineReleases)
+TEST(GpuMemoryRelease, EachBackgroundTransitionGivesBackOnce)
 {
-    auto *released = new Released;
-    auto *release = new GpuMemoryRelease;
-    release->start(&Released::release, released);
-    EXPECT_TRUE(releasedWithin(*released, 3000ms));
+    EXPECT_EQ(replay({Event::Background, Event::Background, Event::Pause}), 1)
+        << "a second post before the app came back";
+    EXPECT_EQ(replay({Event::Background, Event::Foreground, Event::Pause, Event::Background}), 2);
 }
 
-// The render server's old setting: the environment no longer turns the idle release off
-TEST_F(GpuMemoryReleaseTest, NoEnvironmentTurnsTheIdleReleaseOff)
+TEST(GpuMemoryRelease, MemoryPressureGivesBackInTheForeground)
 {
-    setenv("NMB_IDLE_RELEASE_MS", "0", 1);
-    auto *released = new Released;
-    auto *release = new GpuMemoryRelease;
-    release->start(&Released::release, released);
-    unsetenv("NMB_IDLE_RELEASE_MS");
-    EXPECT_TRUE(releasedWithin(*released, 3000ms));
-}
-
-// The memory pressure source's handler is release(): a pressure event (the kernel's memorystatus, which a test cannot
-// raise) gives back at once with a command buffer in flight
-TEST_F(GpuMemoryReleaseTest, AReleaseAskedForRunsWithACommandBufferInFlight)
-{
-    auto *released = new Released;
-    auto *inFlight = new std::atomic<uint32_t>{1};
-    auto *release = new GpuMemoryRelease;
-    release->start(&Released::release, released, inFlight);
-    release->release();
-    EXPECT_EQ(released->count, 1);
+    EXPECT_EQ(replay({Event::Pause, Event::Pressure}), 1);
+    EXPECT_EQ(replay({Event::Foreground, Event::Pressure, Event::Pressure}), 2);
 }
 
 }  // namespace

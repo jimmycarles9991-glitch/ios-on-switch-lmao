@@ -17,36 +17,7 @@
 
 namespace gm20b {
 
-#if SWITCH_METAL_DIAGNOSTICS
-// What this pass reached of each colour target it stores into (a shadow target's own image, not its pool image): its
-// load, the box of its draws' pixels (the render area where they were not counted), its render area and its clears'
-// extent from the origin
-void RenderEncoder::glassMemReached(const std::vector<Clear> &cl)
-{
-    uint32_t box[4] = {0, 0, areaW_, areaH_};
-    if (drew_ && !whole_ && !rects_.empty()) {
-        box[0] = box[1] = UINT32_MAX;
-        box[2] = box[3] = 0;
-        for (const auto &r : rects_)
-            for (int k = 0; k < 4; k++)
-                box[k] = k < 2 ? std::min(box[k], r[k]) : std::max(box[k], r[k]);
-    }
-    for (uint32_t j = 0; j < pass_.count && j < 8; j++) {
-        const Texture *t = shadowOf_[j] ? shadowOf_[j] : pass_.color[j].texture;
-        if (!t || memoryless_[j] || !pass_.color[j].store)
-            continue;
-        GlassMemReach reach{"dlc"[pass_.color[j].load], box[0], box[1], box[2], box[3], areaW_, areaH_, 0, 0};
-        for (const Clear &c : cl)
-            if (c.target == j && !c.x0 && !c.y0) {
-                reach.clearW = std::max(reach.clearW, c.x1);
-                reach.clearH = std::max(reach.clearH, c.y1);
-            }
-        dev_->glassMem->reached(t->va, reach, dev_->commitCount_);
-    }
-}
-#endif
-
-void RenderEncoder::continuePass(uint8_t stores)
+void RenderEncoder::continuePass(uint8_t stores, uint8_t discards)
 {
     // Clear reach is a Metal encoder property, including its empty-draw behavior.
     // Later encoders must not enlarge or elide the first encoder's clear.
@@ -54,16 +25,12 @@ void RenderEncoder::continuePass(uint8_t stores)
         clears(initialClears_, true);
         clearsSealed_ = true;
     }
-    for (uint32_t i = 0; i < 8; ++i)
+    for (uint32_t i = 0; i < 8; ++i) {
         pass_.color[i].store = stores & (1u << i);
+        pass_.color[i].discard = discards & (1u << i);
+    }
     pipeline_ = nullptr;
-    for (auto &stage : bufs_)
-        for (auto &binding : stage)
-            binding = {};
-    for (auto &stage : textures_)
-        std::fill(std::begin(stage), std::end(stage), nullptr);
-    for (auto &stage : samplers_)
-        std::fill(std::begin(stage), std::end(stage), nullptr);
+    clearTouchedBindings();
     invalidateDescriptors();
     setDepthStencil(nullptr);
     setStencilReference(0, 0);
@@ -71,6 +38,7 @@ void RenderEncoder::continuePass(uint8_t stores)
     setScissor(0, 0, areaW_, areaH_);
     raster_ = {};
     depthClamp_ = false;
+    clipDirty_ = true;
     setDepthBias(0, 0, 0);
     const float blend[4] = {};
     setBlendColor(blend);
@@ -88,64 +56,6 @@ bool RenderEncoder::takeStorage(uint8_t storage, uint8_t arrayed)
     pass_.arrayedStorageMask |= arrayed;
     return true;
 }
-
-#if SWITCH_METAL_DIAGNOSTICS
-// The pass's stored colours that it leaves a row or two of (logEdgeMiss): outside its render area, or outside every one of its
-// draws' scissors within their viewports; a Clear load reaches past both
-void RenderEncoder::probeEdges() const
-{
-    PixelBox drawn{areaW_, areaH_, 0, 0};
-    for (const auto &r : rects_)
-        drawn = {std::min(drawn.x0, r[0]), std::min(drawn.y0, r[1]), std::max(drawn.x1, r[2]),
-                 std::max(drawn.y1, r[3])};
-    const bool drawnKnown = drew_ && !whole_ && !rects_.empty();
-    for (uint32_t j = 0; j < pass_.count && j < 8; j++) {
-        const ColorAttachment &a = pass_.color[j];
-        if (!a.texture || !a.store || memoryless_[j] || a.load == ColorAttachment::Clear)
-            continue;
-        char detail[96];
-        snprintf(detail, sizeof detail, " c%u of %u load %c area %ux%u drew %d", j, pass_.count, "dlc"[a.load], areaW_,
-                 areaH_, int(drew_));
-        logEdgeMiss("pass.area", *a.texture, {0, 0, areaW_, areaH_}, detail);
-        if (drawnKnown)
-            logEdgeMiss("pass.draws", *a.texture, drawn, detail);
-    }
-    noteLargePass(drawn, drawnKnown);
-}
-
-// A pass over a colour target of more pixels than the panel's (boot 21: Core Animation's 1792x1472 on every app open):
-// its render area and the box its draws reached, so a boot names what was drawn there; 20 lines a second a thread at most
-void RenderEncoder::noteLargePass(const PixelBox &drawn, bool drawnKnown) const
-{
-    constexpr uint64_t kPanelPixels = 1280 * 720;
-    const Texture *t = shadowOf_[0] ? shadowOf_[0] : pass_.color[0].texture;
-    if (!t || uint64_t(t->width) * t->height <= kPanelPixels)
-        return;
-    thread_local int64_t second = -1;
-    thread_local uint32_t inSecond = 0;
-    const int64_t now =
-        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    if (now != second) {
-        second = now;
-        inSecond = 0;
-    }
-    if (inSecond++ >= 20)
-        return;
-    const Texture *c1 = pass_.count > 1 ? pass_.color[1].texture : nullptr;
-    uint64_t cleared[2] = {};
-    for (const Clear &c : initialClears_)
-        if (c.target < 2)
-            cleared[c.target] += uint64_t(c.x1 - c.x0) * (c.y1 - c.y0);
-    os_log(
-        os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "gm20b"),
-        "SwitchMetal: large target pass %ux%u f%u%{public}s area %ux%u box %{public}s%u,%u-%u,%u rects %zu load %c c1 "
-        "%u%{public}s%{public}s cleared c0 %llu c1 %llu px",
-        t->width, t->height, t->format, t->comptags ? " comp" : "", areaW_, areaH_, drawnKnown ? "" : "unknown ",
-        drawn.x0, drawn.y0, drawn.x1, drawn.y1, rects_.size(), "dlc"[pass_.color[0].load], c1 ? c1->format : 0u,
-        c1 && memoryless_[1] ? "+ml" : "", c1 && c1->comptags ? " comp" : "", (unsigned long long)cleared[0],
-        (unsigned long long)cleared[1]);
-}
-#endif
 
 // The pass's clears, before its draws: each Clear load, and each DontCare load m2v answers with a clear (metal2vulkan
 // clear_reach.rs, from Metal's measured behaviour). The pass reaches no tile without a draw call, every tile with one and a
@@ -176,21 +86,28 @@ void RenderEncoder::clears(std::vector<Clear> &out, bool fused)
     std::vector<bool> &tiles = tiles_;
     tiles.clear();
     if (reach == Draws && !whole_ && perRow && rows) {
-        bool every = false;
-        for (const auto &r : rects_)
-            every |= r[0] < kTile && r[1] < kTile && (r[2] + kTile - 1) / kTile >= perRow &&
-                     (r[3] + kTile - 1) / kTile >= rows;
-        if (!every) {
-            tiles.assign(size_t(perRow) * rows, false);
-            for (const auto &r : rects_)
-                for (uint32_t ty = r[1] / kTile; ty < std::min(rows, (r[3] + kTile - 1) / kTile); ty++)
-                    for (uint32_t tx = r[0] / kTile; tx < std::min(perRow, (r[2] + kTile - 1) / kTile); tx++)
-                        tiles[size_t(ty) * perRow + tx] = true;
-            if (std::find(tiles.begin(), tiles.end(), false) == tiles.end())
-                tiles.clear();  // every tile after all
-            else if (std::find(tiles.begin(), tiles.end(), true) == tiles.end())
+        if (!trackRects_) {
+            if (reached_.empty())
                 reach = Nothing;
+        } else {
+            bool every = false;
+            for (const auto &r : rects_)
+                every |= r[0] < kTile && r[1] < kTile && (r[2] + kTile - 1) / kTile >= perRow &&
+                         (r[3] + kTile - 1) / kTile >= rows;
+            if (!every) {
+                tiles.assign(size_t(perRow) * rows, false);
+                for (const auto &r : rects_)
+                    for (uint32_t ty = r[1] / kTile; ty < std::min(rows, (r[3] + kTile - 1) / kTile); ty++)
+                        for (uint32_t tx = r[0] / kTile; tx < std::min(perRow, (r[2] + kTile - 1) / kTile); tx++)
+                            tiles[size_t(ty) * perRow + tx] = true;
+                if (std::find(tiles.begin(), tiles.end(), false) == tiles.end())
+                    tiles.clear();  // every tile after all
+                else if (std::find(tiles.begin(), tiles.end(), true) == tiles.end())
+                    reach = Nothing;
+            }
         }
+    } else if (reach == Draws && !whole_ && reached_.empty()) {
+        reach = Nothing;
     }
     static const float zero[4] = {};
     for (uint32_t j = 0; j < pass_.count && j < 8; j++) {

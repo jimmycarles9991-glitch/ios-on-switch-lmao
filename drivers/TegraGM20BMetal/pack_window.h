@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <utility>
 #include <vector>
 
@@ -40,6 +41,12 @@ inline bool packWindowContainsProgram(const PackProgram &p, uint64_t packWindowB
            uint64_t(p.bytes) + kProgramPrefetchBytes <= packWindowBytes - p.heapOffset;
 }
 
+inline bool packWindowContainsSegment(const PackSegment &s, uint64_t packWindowBytes)
+{
+    return packWindowBytes != 0 && s.words != 0 && (s.heapOffset & 15u) == 0 &&
+           uint64_t(s.heapOffset) <= packWindowBytes && uint64_t(s.words) * 4 <= packWindowBytes - s.heapOffset;
+}
+
 inline uint32_t packWindowCollectCpuRanges(const uint8_t *packBase, const PackHeader &h, uint64_t vmPageBytes,
                                            TegraGM20BAbiPackCpuRange *out, uint32_t maxRanges = kPackWindowMaxCpuRanges,
                                            uint64_t maxBytes = kPackWindowMaxCpuWireBytes)
@@ -58,24 +65,33 @@ inline uint32_t packWindowCollectCpuRanges(const uint8_t *packBase, const PackHe
         return 0;
 
     static constexpr PackSectionId kPriority[] = {
-        PackFastKeys, PackPipelines, PackPrograms, PackVariants, PackBlob,     PackStrings,
-        PackSplits,   PackIterated,  PackInit,     PackBaseline, PackSamplers,
+        PackFastKeys, PackPipelines, PackPrograms, PackSegments, PackVariants, PackBlob,
+        PackStrings,  PackSplits,    PackIterated, PackInit,     PackBaseline, PackSamplers,
     };
+
+    std::vector<std::pair<uint64_t, uint64_t>> wanted;
+    for (PackSectionId id : kPriority) {
+        // every creation the pack lacks searches the fast keys of both tiers before it is known to miss
+        const uint64_t clamped = id == PackFastKeys ? h.section[id].bytes : std::min(h.tier0[id], h.section[id].bytes);
+        if (clamped && h.section[id].offset <= UINT64_MAX - clamped)
+            wanted.emplace_back(h.section[id].offset, clamped);
+        PackSegmentTable table = {};
+        if (id == PackSegments && h.section[id].bytes >= sizeof table &&
+            h.section[id].offset <= fileBytes - sizeof table) {
+            memcpy(&table, packBase + h.section[id].offset, sizeof table);
+            const uint64_t heapEnd = h.section[PackHeap].offset + h.tier0[PackHeap];
+            const uint64_t at = h.section[PackHeap].offset + table.wordsOffset;
+            if (table.wordsBytes && at + table.wordsBytes <= heapEnd)
+                wanted.emplace_back(at, table.wordsBytes);
+        }
+    }
 
     std::vector<std::pair<uint64_t, uint64_t>> intervals;
     intervals.reserve(cap + 1);
 
-    for (PackSectionId id : kPriority) {
-        const uint64_t tier0 = h.tier0[id];
-        if (!tier0)
-            continue;
-        const uint64_t secOff = h.section[id].offset;
-        const uint64_t secBytes = h.section[id].bytes;
-        const uint64_t clamped = std::min(tier0, secBytes);
-        if (!clamped || secOff > UINT64_MAX - clamped)
-            continue;
-        const uint64_t start = secOff & ~pageMask;
-        uint64_t end = (secOff + clamped + pageMask) & ~pageMask;
+    for (const auto &[from, bytesWanted] : wanted) {
+        const uint64_t start = from & ~pageMask;
+        uint64_t end = (from + bytesWanted + pageMask) & ~pageMask;
         if (end > mappedEnd)
             end = mappedEnd;
         if (end <= start)

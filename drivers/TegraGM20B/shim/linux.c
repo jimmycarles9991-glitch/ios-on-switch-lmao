@@ -10,6 +10,7 @@
 
 #include "../TegraGM20BComp.h"
 #include "../SwitchGpuChannelEpoch.h"
+#include "../../../kits/SwitchDMA/SwitchDMAOrder.h"
 
 struct task_struct nvxnu_task = {0, "kernel"};
 struct tegra_sku_info tegra_sku_info;
@@ -32,7 +33,7 @@ bool refcount_dec_and_mutex_lock(refcount_t *r, struct mutex *lock)
 	int old = atomic_read(&r->refs);
 	while (old > 1) {
 		if (__atomic_compare_exchange_n(&r->refs.counter, &old, old - 1, false,
-						__ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+						__ATOMIC_RELEASE, __ATOMIC_RELAXED))
 			return false;
 	}
 	mutex_lock(lock);
@@ -307,39 +308,92 @@ void list_sort(void *priv, struct list_head *head,
 
 unsigned long find_next_bit(const unsigned long *a, unsigned long size, unsigned long off)
 {
-	for (; off < size; off++) {
-		if (test_bit(off, a))
-			return off;
+	unsigned long idx = 0;
+	unsigned long word = 0;
+
+	if (off >= size)
+		return size;
+	idx = off / BITS_PER_LONG;
+	word = a[idx] & (~0UL << (off % BITS_PER_LONG));
+	while (!word) {
+		idx++;
+		if (idx * BITS_PER_LONG >= size)
+			return size;
+		word = a[idx];
 	}
-	return size;
+	off = idx * BITS_PER_LONG + (unsigned long)__builtin_ctzl(word);
+	return off < size ? off : size;
 }
 
 unsigned long find_next_zero_bit(const unsigned long *a, unsigned long size, unsigned long off)
 {
-	for (; off < size; off++) {
-		if (!test_bit(off, a))
-			return off;
+	unsigned long idx = 0;
+	unsigned long word = 0;
+
+	if (off >= size)
+		return size;
+	idx = off / BITS_PER_LONG;
+	word = (~a[idx]) & (~0UL << (off % BITS_PER_LONG));
+	while (!word) {
+		idx++;
+		if (idx * BITS_PER_LONG >= size)
+			return size;
+		word = ~a[idx];
 	}
-	return size;
+	off = idx * BITS_PER_LONG + (unsigned long)__builtin_ctzl(word);
+	return off < size ? off : size;
 }
 
 void bitmap_set(unsigned long *map, unsigned int start, unsigned int n)
 {
-	while (n--)
-		__set_bit(start++, map);
+	unsigned long *p = map + start / BITS_PER_LONG;
+	const unsigned int size = start + n;
+	unsigned int bits_to_set = BITS_PER_LONG - (start % BITS_PER_LONG);
+	unsigned long mask_to_set = ~0UL << (start % BITS_PER_LONG);
+
+	while (n >= bits_to_set) {
+		*p |= mask_to_set;
+		n -= bits_to_set;
+		bits_to_set = BITS_PER_LONG;
+		mask_to_set = ~0UL;
+		p++;
+	}
+	if (n) {
+		mask_to_set &= ~0UL >> (BITS_PER_LONG - (size % BITS_PER_LONG));
+		*p |= mask_to_set;
+	}
 }
 
 void bitmap_clear(unsigned long *map, unsigned int start, unsigned int n)
 {
-	while (n--)
-		__clear_bit(start++, map);
+	unsigned long *p = map + start / BITS_PER_LONG;
+	const unsigned int size = start + n;
+	unsigned int bits_to_clear = BITS_PER_LONG - (start % BITS_PER_LONG);
+	unsigned long mask_to_clear = ~0UL << (start % BITS_PER_LONG);
+
+	while (n >= bits_to_clear) {
+		*p &= ~mask_to_clear;
+		n -= bits_to_clear;
+		bits_to_clear = BITS_PER_LONG;
+		mask_to_clear = ~0UL;
+		p++;
+	}
+	if (n) {
+		mask_to_clear &= ~0UL >> (BITS_PER_LONG - (size % BITS_PER_LONG));
+		*p &= ~mask_to_clear;
+	}
 }
 
 unsigned int bitmap_weight(const unsigned long *map, unsigned int bits)
 {
 	unsigned int w = 0;
-	for (unsigned int i = 0; i < bits; i++)
-		w += (unsigned int)test_bit(i, map);
+	const unsigned int words = bits / BITS_PER_LONG;
+	const unsigned int rem = bits % BITS_PER_LONG;
+
+	for (unsigned int i = 0; i < words; i++)
+		w += (unsigned int)__builtin_popcountl(map[i]);
+	if (rem)
+		w += (unsigned int)__builtin_popcountl(map[words] & (~0UL >> (BITS_PER_LONG - rem)));
 	return w;
 }
 
@@ -953,27 +1007,24 @@ void dma_unmap_page(struct device *dev, dma_addr_t a, size_t s, enum dma_data_di
 	(void)dir;
 }
 
-/* pool memory is mapped write-combined, so there is nothing to clean; kept for the fallback pool */
+/* Both primary and fallback GPU pools are mapped write-combined (kIOMapWriteCombineCache). */
 void dma_sync_single_for_device(struct device *dev, dma_addr_t a, size_t s,
 				enum dma_data_direction dir)
 {
-	long i = pool_index(a);
 	(void)dev;
+	(void)s;
 	(void)dir;
-	if (i >= 0)
-		nvxnu_dcache_clean((char *)page_address(&pool_pages[i]) + (a & ~PAGE_MASK), s);
+	if (pool_index(a) >= 0)
+		switch_dma_publish();
 }
 
 void dma_sync_single_for_cpu(struct device *dev, dma_addr_t a, size_t s,
 			     enum dma_data_direction dir)
 {
-	long i = pool_index(a);
 	(void)dev;
+	(void)a;
+	(void)s;
 	(void)dir;
-	if (i >= 0) {
-		nvxnu_dcache_clean_inval((char *)page_address(&pool_pages[i]) + (a & ~PAGE_MASK),
-					 s);
-	}
 }
 
 void *vmap(struct page **pages, unsigned int count, unsigned long flags, pgprot_t prot)

@@ -246,6 +246,9 @@ void noteSource(switch_sensor_source source, bool ok)
     if (!__atomic_load_n(&gVerdictLogged, __ATOMIC_ACQUIRE))
         return;
     const uint32_t bit = 1u << source;
+    const uint32_t down = __atomic_load_n(&gSourceDown, __ATOMIC_RELAXED);
+    if (ok == ((down & bit) == 0u))
+        return;
     const uint32_t before = ok ? __atomic_fetch_and(&gSourceDown, ~bit, __ATOMIC_RELAXED)
                                : __atomic_fetch_or(&gSourceDown, bit, __ATOMIC_RELAXED);
     if (ok && (before & bit))
@@ -270,8 +273,10 @@ OSObject *answer(void *context)
     OSObject *event = ok ? switch_hid_temperature_event(at, switch_sensor_fixed(milliC)) : nullptr;
     if (event) {
         const uint64_t bit = 1ULL << index;
-        if (!(__atomic_fetch_or(&gServed, bit, __ATOMIC_ACQ_REL) & bit))
+        if (!(__atomic_load_n(&gServed, __ATOMIC_RELAXED) & bit) &&
+            !(__atomic_fetch_or(&gServed, bit, __ATOMIC_ACQ_REL) & bit)) {
             switch_sensors_note();
+        }
     }
     return event;
 }

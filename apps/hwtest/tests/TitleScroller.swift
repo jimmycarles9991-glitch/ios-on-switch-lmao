@@ -1,3 +1,4 @@
+import HWTestKit
 import QuartzCore
 import UIKit
 

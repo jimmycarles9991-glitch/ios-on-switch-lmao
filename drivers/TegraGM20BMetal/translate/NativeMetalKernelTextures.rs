@@ -71,9 +71,19 @@ pub fn kernel_texture(pf: PixelFormat, planes: u32) -> KernelTexture {
     let codes = stated.is_some_and(|m| m & address_maps::CLAMPS != 0);
     let (format, stores) = match pf {
         PixelFormat::R10UnormPACKED | PixelFormat::RG10UnormPACKED => (PixelFormat::RGB10A2Unorm, false),
-        PixelFormat::YCBCR84221P if !codes => (PixelFormat::YCBCR84222P, false),
+        PixelFormat::YCBCR84221P | PixelFormat::YCBCR84221PREV if !codes => (PixelFormat::YCBCR84222P, false),
         PixelFormat::YCBCR84221PSRGB if !codes => (PixelFormat::YCBCR84222PSRGB, false),
-        PixelFormat::YCBCR84221P | PixelFormat::YCBCR84221PSRGB => (PixelFormat::RGB84222P, false),
+        PixelFormat::YCBCR84221P | PixelFormat::YCBCR84221PSRGB | PixelFormat::YCBCR84221PREV => {
+            (PixelFormat::RGB84222P, false)
+        }
+        PixelFormat::YCBCR104441P if !codes => (PixelFormat::YCBCR104442P, false),
+        PixelFormat::YCBCR104441PSRGB if !codes => (PixelFormat::YCBCR104442PSRGB, false),
+        PixelFormat::YCBCR104441P | PixelFormat::YCBCR104441PSRGB => (PixelFormat::RGB104442P, false),
+        // GM20B samples BGRA4Unorm via A4R4G4B4 (restored in NativeMetalDirectComputeWrites.rs), which m2v
+        // does not hold. m2v holds ARGB8Unorm_sRGB read-only: its codes through ARGB8Unorm's rotated view, decoded
+        // in the shader.
+        PixelFormat::BGRA4Unorm => (PixelFormat::ABGR4Unorm, false),
+        PixelFormat::ARGB8UnormSRGB => (PixelFormat::ARGB8UnormSRGB, false),
         _ if codes => (codes_format(pf).unwrap_or(pf), true),
         _ => (pf, true),
     };
@@ -236,5 +246,16 @@ mod tests {
         assert_eq!((t.format, t.map), (PixelFormat::RGB84442P, CLAMPS));
         let t = kernel_texture(PixelFormat::YCBCR84202P, stating(0));
         assert_eq!((t.format, t.map), (PixelFormat::YCBCR84202P, 0));
+    }
+
+    #[test]
+    fn bgra4_maps_to_its_read_only_twin_and_argb8_srgb_stays_itself() {
+        let f44 = kernel_texture(PixelFormat::BGRA4Unorm, 0);
+        assert_eq!((f44.format, f44.map, f44.stores), (PixelFormat::ABGR4Unorm, 0, false));
+        let f85 = kernel_texture(PixelFormat::ARGB8UnormSRGB, 0);
+        assert_eq!(
+            (f85.format, f85.map, f85.stores),
+            (PixelFormat::ARGB8UnormSRGB, 0, false)
+        );
     }
 }

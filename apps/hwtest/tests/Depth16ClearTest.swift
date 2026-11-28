@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Depth16Unorm clears: Metal stores code floor(f x 65535) of the clear depth as a float f, the product exact (an M4 Max,

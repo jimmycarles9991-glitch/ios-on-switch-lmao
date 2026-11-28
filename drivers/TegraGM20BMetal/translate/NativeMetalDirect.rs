@@ -196,6 +196,20 @@ pub fn translate(
         0 => PixelFormat::BGRA8Unorm,
         f => raw::<PixelFormat>(f, "texture format")?,
     };
+    // Depth-only passes with active stencil render through a Depth32Float_Stencil8 scratch (zeta.h testedZeta).
+    let mut tested_descriptor;
+    let descriptor = if binds.fragment_tests == 4
+        && descriptor.stencil_format.is_none()
+        && matches!(
+            descriptor.depth_format,
+            Some(PixelFormat::Depth16Unorm | PixelFormat::Depth32Float)
+        ) {
+        tested_descriptor = descriptor.clone();
+        tested_descriptor.stencil_format = Some(PixelFormat::Stencil8);
+        &tested_descriptor
+    } else {
+        descriptor
+    };
     let amplification = descriptor.max_vertex_amplification_count.max(1);
     let budget = crate::compile_budget();
     let base = compile

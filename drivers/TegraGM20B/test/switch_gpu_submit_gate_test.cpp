@@ -293,3 +293,28 @@ TEST(SubmitGate, ASubmitJobRunsWhileAnImportWires)
 	import.get();
 	EXPECT_TRUE(job.get());
 }
+
+TEST(SubmitGate, PerSlotFastPathDrainsAndPublishesMutations)
+{
+	IOLock lock;
+	SwitchGpuSubmitGate gate;
+	uint64_t published = 0;
+
+	ASSERT_TRUE(gate.enterFast(0));
+	auto mutator = std::async(std::launch::async, [&] {
+		IOLockLock(&lock);
+		ASSERT_TRUE(gate.beginMutation(&lock));
+		published = 0xfeedfacecafebeefull;
+		gate.endMutation(&lock);
+		IOLockUnlock(&lock);
+	});
+	EXPECT_EQ(mutator.wait_for(20ms), std::future_status::timeout);
+	EXPECT_FALSE(gate.enterFast(1));
+	gate.leaveFast(0, &lock);
+	ASSERT_EQ(mutator.wait_for(2s), std::future_status::ready);
+	mutator.get();
+
+	ASSERT_TRUE(gate.enterFast(1));
+	EXPECT_EQ(published, 0xfeedfacecafebeefull);
+	gate.leaveFast(1, &lock);
+}

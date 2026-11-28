@@ -1,3 +1,4 @@
+load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_flag")
 load("//bazel/lint:defs.bzl", "lint_files")
 load(":profile_test.bzl", "profile_tests")
@@ -45,6 +46,70 @@ config_setting(
     name = "diagnostics_off",
     flag_values = {":diagnostics": "false"},
 )
+
+# Whether SwitchHWTest (apps/hwtest) and its texture peer are staged into //boot:package:
+#   auto   (default) included in debug builds, omitted in release builds
+#   true   included in either profile (--config=hwtest in .bazelrc)
+#   false  omitted in either profile
+string_flag(
+    name = "hwtest",
+    build_setting_default = "auto",
+    scope = "target",
+    values = [
+        "auto",
+        "true",
+        "false",
+    ],
+)
+
+config_setting(
+    name = "hwtest_force_on",
+    flag_values = {":hwtest": "true"},
+)
+
+config_setting(
+    name = "hwtest_auto_debug",
+    flag_values = {
+        ":hwtest": "auto",
+        ":profile": "debug",
+    },
+)
+
+selects.config_setting_group(
+    name = "hwtest_on",
+    match_any = [
+        ":hwtest_force_on",
+        ":hwtest_auto_debug",
+    ],
+)
+
+# Opt-in periodic telemetry and profiling categories: OFF by default in both debug and release so default debug builds
+# match release performance. All require debug profile + diagnostics=true (forced off in release).
+[
+    (
+        bool_flag(
+            name = flag,
+            build_setting_default = False,
+            scope = "target",
+        ),
+        config_setting(
+            name = flag + "_on",
+            flag_values = {
+                ":profile": "debug",
+                ":diagnostics": "true",
+                ":" + flag: "true",
+            },
+        ),
+    )
+    for flag in [
+        "stats_sched",
+        "stats_power",
+        "stats_frame",
+        "stats_gpu",
+        "prof_gpu",
+        "stats_io",
+    ]
+]
 
 profile_tests(
     name = "profile_test",

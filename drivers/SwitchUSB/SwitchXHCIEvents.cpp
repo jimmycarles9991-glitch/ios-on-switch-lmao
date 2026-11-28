@@ -35,6 +35,10 @@ IOReturn SwitchXHCI::systemSleep(bool entering)
 {
     if (entering) {
         mailbox->disable();
+        if (mboxReplyTimer)
+            mboxReplyTimer->cancelTimeout();
+        if (xusb_mbox_deferred_cancel(&deferredReply))
+            commandGate->commandWakeup(&deferredReply, false);
         if (xusb_mbox_wait_abandon(&commandWait))
             commandGate->commandWakeup(&commandWait);
         gHost.lostPower();
@@ -102,7 +106,8 @@ bool SwitchXHCI::mailboxFilter(OSObject *owner, IOFilterInterruptEventSource *)
     auto *self = static_cast<SwitchXHCI *>(owner);
     if (gHost.takeMailboxInterrupt()) {
         self->unclaimed = 0;
-        __atomic_fetch_add(&self->mailboxInterrupts, 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&self->mailboxInterrupts, __atomic_load_n(&self->mailboxInterrupts, __ATOMIC_RELAXED) + 1u,
+                         __ATOMIC_RELAXED);
         return true;
     }
     if (++self->unclaimed < kUnclaimedLimit)
@@ -122,10 +127,20 @@ void SwitchXHCI::mailboxAction(OSObject *owner, IOInterruptEventSource *, int)
     }
     uint32_t answer = 0;
     uint32_t data = 0;
-    if (!gHost.serviceMailbox(answer, data)) {
+    xusb_mbox_deferred deferred = {};
+    if (!gHost.serviceMailbox(answer, data, deferred)) {
         char state[200];
         gHost.describe(state, sizeof(state));
         panic("SwitchUSB: XUSB falcon firmware hang (mailbox SMI FW_HANG): %s", state);
+    }
+    if (deferred.pending) {
+        self->deferredReply = deferred;
+        self->mboxReplyTimer->setTimeoutMS(deferred.delay_ms);
+        return;
+    }
+    if (xusb_mbox_deferred_cancel(&self->deferredReply)) {
+        self->mboxReplyTimer->cancelTimeout();
+        self->commandGate->commandWakeup(&self->deferredReply, false);
     }
     if (!answer)
         return;
@@ -137,6 +152,17 @@ void SwitchXHCI::mailboxAction(OSObject *owner, IOInterruptEventSource *, int)
     }
 }
 
+void SwitchXHCI::mboxReplyFired(OSObject *owner, IOTimerEventSource *)
+{
+    auto *self = static_cast<SwitchXHCI *>(owner);
+    xusb_mbox_deferred reply = {};
+    if (!xusb_mbox_deferred_take(&self->deferredReply, &reply))
+        return;
+    if (gHost.powered())
+        gHost.finishMailboxReply(reply.request_cmd, reply.reply_cmd, reply.data);
+    self->commandGate->commandWakeup(&self->deferredReply, false);
+}
+
 // tegraLoop's gate held (runAction). The firmware takes a command either by an answer (ACK or NAK, by mailboxAction) or by
 // releasing the mailbox, which raises nothing (XusbMailbox.h): the sender sleeps on the answer with the gate open to
 // mailboxAction, and looks at the owner after 1 ms and at tegra_xusb_mbox_send's 250 ms deadline, an error path only.
@@ -144,6 +170,14 @@ bool SwitchXHCI::sendCommand(uint32_t cmd, uint32_t data)
 {
     constexpr uint32_t kFirstLookMs = 1;
     constexpr uint32_t kAnswerMs = 250;
+    if (deferredReply.pending) {
+        constexpr uint32_t kDeferredWaitMs = 5;
+        uint64_t waitDeadline = 0;
+        clock_interval_to_deadline(kDeferredWaitMs, kMillisecondScale, &waitDeadline);
+        while (deferredReply.pending &&
+               commandGate->commandSleep(&deferredReply, waitDeadline, THREAD_UNINT) != THREAD_TIMED_OUT) {
+        }
+    }
     xusb_mbox_wait_begin(&commandWait, cmd);
     if (!gHost.sendMailbox(cmd, data)) {
         (void)xusb_mbox_wait_end(&commandWait);

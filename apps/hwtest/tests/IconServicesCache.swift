@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
 
 /// gpu.gm20b.icon_corners' IconServices arms: Settings' icon as iconservicesagent draws it at the App Library's 27 and
 /// 68 points, scale 2, and the agent's rendered-icon cache; and the requests the icon_* cases make.
@@ -21,22 +22,22 @@ import HWTestGPU
 /// `icon27_cached_corner_beyond`: the uncached and cached small icon's corners against the uncached large one reduced
 /// to its size. FAIL: the uncached small icon's corners beyond RenderBoxCorner.tolerance, a cached image that is not
 /// this build's, a placeholder, or IconServices' calls absent (`icon_api=`).
-enum IconServicesCache {
-    static let group = "systemgroup.com.apple.lsd.iconscache"
-    static let cache = "Library/Caches/com.apple.IconsCache"
-    static let info = "__cache_info__"
-    static let codes = 2
-    static let iconRadius = 0.2237
-    static let settings = IconSource.bundle("com.apple.Preferences")
-    static let missingApp = IconSource.bundle("com.brunostjohn.switch.no-such-app")
-    static let missingType = IconSource.type("com.brunostjohn.switch.no-such-type")
+public enum IconServicesCache {
+    public static let group = "systemgroup.com.apple.lsd.iconscache"
+    public static let cache = "Library/Caches/com.apple.IconsCache"
+    public static let info = "__cache_info__"
+    public static let codes = 2
+    public static let iconRadius = 0.2237
+    public static let settings = IconSource.bundle("com.apple.Preferences")
+    public static let missingApp = IconSource.bundle("com.brunostjohn.switch.no-such-app")
+    public static let missingType = IconSource.type("com.brunostjohn.switch.no-such-type")
 
-    enum IconSource {
+    public enum IconSource {
         case bundle(String)
         case type(String)
 
         /// What IconServices draws for a request of this kind it cannot or will not serve
-        var missing: IconSource {
+        public var missing: IconSource {
             switch self {
             case .bundle: IconServicesCache.missingApp
             case .type: IconServicesCache.missingType
@@ -44,20 +45,20 @@ enum IconServicesCache {
         }
     }
 
-    struct Image {
-        let rgba: [UInt8]
-        let side: Int
+    public struct Image {
+        public let rgba: [UInt8]
+        public let side: Int
 
-        var alpha: [Double] { stride(from: 3, to: rgba.count, by: 4).map { Double(rgba[$0]) / 255 } }
+        public var alpha: [Double] { stride(from: 3, to: rgba.count, by: 4).map { Double(rgba[$0]) / 255 } }
     }
 
-    struct CacheInfo {
-        var build = "absent", at = "none", container = "", resetThisBoot: Bool?
-        var folders: [String] = []
-        var store: URL?
+    public struct CacheInfo {
+        public var build = "absent", at = "none", container = "", resetThisBoot: Bool?
+        public var folders: [String] = []
+        public var store: URL?
     }
 
-    static func measure(_ metrics: inout Metrics, _ wrong: inout [String]) {
+    public static func measure(_ metrics: inout Metrics, _ wrong: inout [String]) {
         metrics.set("icon_cache_build", systemBuild() ?? "unreadable")
         let found = cacheInfo()
         metrics.set("icon_cache_info_build", found.build)
@@ -103,14 +104,14 @@ enum IconServicesCache {
         }
     }
 
-    static func differing(_ a: Image, _ b: Image) -> Int {
+    public static func differing(_ a: Image, _ b: Image) -> Int {
         guard a.side == b.side else { return a.side * a.side }
         return (0 ..< (a.rgba.count / 4)).filter { p in
             (0 ..< 4).contains { abs(Int(a.rgba[p * 4 + $0]) - Int(b.rgba[p * 4 + $0])) > codes }
         }.count
     }
 
-    static func judge(_ small: Image, against large: Image) -> RenderBoxCorner.Cell {
+    public static func judge(_ small: Image, against large: Image) -> RenderBoxCorner.Cell {
         let reference = RenderBoxCorner.reduce(large.alpha, from: large.side, to: small.side)
         let toCodes = { (alpha: [Double]) in alpha.map { UInt8(($0 * 255).rounded()) } }
         return RenderBoxCorner.judge(
@@ -118,7 +119,7 @@ enum IconServicesCache {
         )
     }
 
-    static func systemBuild() -> String? {
+    public static func systemBuild() -> String? {
         let plist = NSDictionary(contentsOfFile: "/System/Library/CoreServices/SystemVersion.plist")
         return plist?["ProductBuildVersion"] as? String
     }
@@ -128,7 +129,7 @@ enum IconServicesCache {
         UnsafeMutablePointer<CChar>?
 
     /// The cache folder in the group container, or why the app cannot name it
-    static func cacheDirectory() -> (URL?, String) {
+    public static func cacheDirectory() -> (URL?, String) {
         guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "container_system_group_path_for_identifier")
         else { return (nil, "unreadable:no_container_lookup") }
         var error: UInt64 = 1
@@ -142,7 +143,7 @@ enum IconServicesCache {
     /// __cache_info__'s ProductBuildVersion ("absent" without one), where it is, whether it was written since this boot,
     /// the container's folder name, the cache's subfolders and the store index beside the info, or why the app cannot
     /// read them
-    static func cacheInfo() -> CacheInfo {
+    public static func cacheInfo() -> CacheInfo {
         var found = CacheInfo()
         let (located, why) = cacheDirectory()
         guard let directory = located else {
@@ -186,7 +187,7 @@ enum IconServicesCache {
     }
 
     /// The number of files under `folder` and their bytes, which a stored render changes
-    static func stamp(_ folder: URL) -> [Int]? {
+    public static func stamp(_ folder: URL) -> [Int]? {
         guard
             let files = FileManager.default.enumerator(
                 at: folder, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey]
@@ -208,7 +209,7 @@ enum IconServicesCache {
     typealias ImageFor = @convention(c) (AnyObject, Selector, AnyObject) -> Unmanaged<CGImage>?
 
     /// `source`'s icon as iconservicesagent draws it at `points` and `scale`, nil where IconServices lacks what this asks
-    static func icon(_ source: IconSource, points: CGFloat, scale: CGFloat, ignoreCache: Bool) -> Image? {
+    public static func icon(_ source: IconSource, points: CGFloat, scale: CGFloat, ignoreCache: Bool) -> Image? {
         guard let iconType = NSClassFromString("ISIcon") as? NSObject.Type,
               let descriptorType = NSClassFromString("ISImageDescriptor") as? NSObject.Type
         else { return nil }
@@ -241,7 +242,7 @@ enum IconServicesCache {
         return Image(rgba: rgba(of: image), side: image.width)
     }
 
-    static func rgba(of image: CGImage) -> [UInt8] {
+    public static func rgba(of image: CGImage) -> [UInt8] {
         let w = image.width, h = image.height
         var bytes = [UInt8](repeating: 0, count: w * h * 4)
         bytes.withUnsafeMutableBytes { raw in

@@ -72,7 +72,8 @@ void Device::layImage(const fx::MipChain &c, const FormatInfo *f, uint8_t type, 
     t.chain->fmt2d = volume ? 0 : fx::twodChainFormat(t.format);
     uint32_t w[8];
     fx::mipChainTic(c, t.va, f->tic0, f->srgb, 0, c.levels, w, type);
-    memcpy(tic_.cpu + 32 * t.tic, w, 32);  // visible at the next submission's header invalidate
+    memcpy(tic_.cpu + 32 * t.tic, w, 32);
+    noteTicWrite();
     SWITCH_METAL_DIAGNOSTIC(stats.chains++);
     SWITCH_METAL_DIAGNOSTIC(stats.chainBytes += c.bytes);
 }
@@ -174,6 +175,7 @@ void Device::layBlocks(const fx::MipChain &layout, const FormatInfo *f, uint32_t
     setField(w, 143, 128, width - 1);  // WIDTH_MINUS_ONE in texels (NIL's extent_px)
     setField(w, 175, 160, height - 1);
     memcpy(tic_.cpu + 32 * t.tic, w, 32);
+    noteTicWrite();
     if (layout.levels > 1) {
         t.chain = new Texture::Chain;
         t.chain->layout = layout;

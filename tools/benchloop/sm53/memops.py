@@ -12,6 +12,8 @@ SR_VIRTID = 0x03
 SR_ORDERING_TICKET = 0x0F
 SR_THREAD_KILL = 0x13
 SR_AFFINITY = 0x1C
+SR_CLOCKLO = 0x50
+SR_CLOCKHI = 0x51
 LD_CACHE = {'ca': 0, 'cg': 1, 'ci': 2, 'cv': 3}
 B32 = 4
 MEMBAR_GPU = 1
@@ -19,6 +21,10 @@ MEMBAR_GPU = 1
 
 def s2r(d: int, sr: int) -> Instr:
     return _Word('S2R').reg(0, d).put(20, 8, sr).instr()
+
+
+def cs2r(d: int, sr: int) -> Instr:
+    return _Word('CS2R').reg(0, d).put(20, 8, sr).instr()
 
 
 def _pair(addr: int) -> int:

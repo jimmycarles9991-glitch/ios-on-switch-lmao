@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "TegraGM20BFences.h"
+#include "SwitchGpuInheritorSleep.h"
 #include "SwitchGpuKqueue.h"
 #include "SwitchGpuPin.h"
 #include "SwitchGpuRelayoutCache.h"
@@ -33,6 +34,7 @@ struct Relayout {
 	bool unavailable;  // the last open failed (logged once until one succeeds)
 	// push pages a move still owns: a page is rewritten only once its move was waited for
 	uint32_t slots;
+	SwitchGpuThreadRef slotOwner[kSlots];
 	// moves and flushes waiting on the channel without the lock: a failed channel is replaced only at 0
 	uint32_t users;
 	SwitchGpuRelayoutCache mappings;
@@ -42,25 +44,24 @@ uint32_t claimSlot()
 {
 	Relayout &r = gRelayout;
 	while (r.slots == (1u << kSlots) - 1)
-		IOLockSleep(r.lock, &r.slots, THREAD_UNINT);
+		switch_gpu_sleep_inheritor(r.lock, &r.slots, r.slotOwner[0]);
 	const uint32_t slot = uint32_t(__builtin_ctz(~r.slots));
 	r.slots |= 1u << slot;
+	r.slotOwner[slot] = switch_gpu_current_thread();
 	return slot;
 }
 
 void releaseSlot(uint32_t slot)
 {
 	gRelayout.slots &= ~(1u << slot);
-	IOLockWakeup(gRelayout.lock, &gRelayout.slots, false);
+	gRelayout.slotOwner[slot] = nullptr;
+	switch_gpu_wakeup_inheritor(gRelayout.lock, &gRelayout.slots);
 }
 
 // gRelayout.lock held on entry and on return, not while `wait` runs; the channel stays until every waiter is back
 template <typename Wait> void waitUnlocked(Wait wait)
 {
 	Relayout &r = gRelayout;
-#if TGM_STATS
-	tgm_stats_unlocked(TGM_UNLOCKED_RELAYOUT, 0);
-#endif
 	++r.users;
 	IOLockUnlock(r.lock);
 	wait();
@@ -187,10 +188,6 @@ int move(const tgm_relayout_pages &surface, const tgm_relayout_pages &rows, cons
 		const tgm_push push = {
 			pushVa, tgm_relayout_push(words, &l, &m, waits, nwaits), 0, 0, 0, 0};
 		uint32_t seqno = 0;
-#if TGM_STATS
-		if (r.users)
-			tgm_stats_unlocked(TGM_UNLOCKED_RELAYOUT_BESIDE, 0);
-#endif
 		const uint64_t started = TGM_STATS ? tgm_timestamp_ns() : 0;
 		ret = tgm_chan_exec(chan, &push, 1, &seqno, nullptr);
 		if (!ret) {
@@ -340,6 +337,11 @@ extern "C" int tgm_relayout(const struct tgm_relayout_pages *surface,
 {
 	if (!gRelayout.lock || !surface || !rows || !layout)
 		return -22;
+	// Wait for this surface's own GPU writers before entering the shared relayout channel so a slow writer cannot
+	// head-of-line block unrelated surfaces' CPU locks.
+	for (uint32_t i = 0; i < nwriters; ++i)
+		if (!tgm_writer_done(writers[i].uid, writers[i].seqno))
+			tgm_writer_wait(writers[i].uid, writers[i].seqno);
 	IOLockLock(gRelayout.lock);
 	const int ret = move(*surface, *rows, *layout, bytes_per_row, tgm_relayout_op(op), writers,
 			     nwriters);

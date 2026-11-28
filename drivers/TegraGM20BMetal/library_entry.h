@@ -30,11 +30,10 @@ inline std::string encodeLibraryEntry(const CacheKey &k, const MadeLibrary *made
     } else {
         w.text(refusal);
     }
-    w.value(Pack::fnv(w.out.data(), w.out.size()));
     return w.out;
 }
 
-inline RecordCache::Found decodeLibraryEntry(const std::string &bytes, const CacheKey &k, MadeLibrary &made,
+inline RecordCache::Found decodeLibraryEntry(std::string_view bytes, const CacheKey &k, MadeLibrary &made,
                                              std::string &refusal)
 {
     Reader r(bytes);
@@ -43,14 +42,14 @@ inline RecordCache::Found decodeLibraryEntry(const std::string &bytes, const Cac
         return RecordCache::Found::None;
     if (kind == kKindLibraryRefusal) {
         refusal = r.text();
-        return r.ok() && r.at() == bytes.size() - 8 ? RecordCache::Found::Refusal : RecordCache::Found::None;
+        return r.ok() && r.at() == bytes.size() ? RecordCache::Found::Refusal : RecordCache::Found::None;
     }
     if (kind != kKindLibrary)
         return RecordCache::Found::None;
     MadeLibrary read;
     read.warnings = r.text();
     read.metallib = r.text();
-    if (!r.ok() || r.at() != bytes.size() - 8 || read.metallib.empty())
+    if (!r.ok() || r.at() != bytes.size() || read.metallib.empty())
         return RecordCache::Found::None;
     made = std::move(read);
     return RecordCache::Found::Record;

@@ -51,8 +51,22 @@ struct Display {
         *h = 1280;
     }
 
+    unsigned planeLayerCalls = 0;
+    const OriginalLegacySwapRequest *cachedRequest = nullptr;
+    OSObject *cachedSurfaces[4] = {};
+    native_planes::Layer cachedLayers[4] = {};
+
+    const native_planes::Layer *validatedLayerOf(const OriginalLegacySwapRequest *request, unsigned i,
+                                                 OSObject *surface) const
+    {
+        if (request == cachedRequest && cachedSurfaces[i] == surface)
+            return &cachedLayers[i];
+        return nullptr;
+    }
+
     native_planes::Layer planeLayerOf(const unsigned char *, unsigned i, OSObject *)
     {
+        ++planeLayerCalls;
         return planeLayers[i].layer;
     }
 
@@ -328,5 +342,19 @@ TEST(PlaneSelection, FractionalSamplingChangeIsNotMistakenForStaticContent)
     other = decision.set;
     other.window[1].image.vInitial = 1;
     EXPECT_FALSE(Display::planeSame(decision.set, other));
+}
+
+TEST(PlaneSelection, CachedValidatedLayerSkipsDuplicatePlaneLayerOf)
+{
+    Display display;
+    auto request = frame(display);
+    request.updated = request.ready = 1u << 1;
+    display.cachedRequest = &request;
+    display.cachedSurfaces[1] = &surfaces[1];
+    display.cachedLayers[1] = display.planeLayers[1].layer;
+    Display::PlaneDecision decision;
+    display.planeDecide(&request, decision);
+    EXPECT_EQ(display.planeLayerCalls, 0u);
+    EXPECT_EQ(decision.ui, &surfaces[1]);
 }
 }  // namespace

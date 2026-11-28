@@ -124,6 +124,8 @@ fn direct_formats_round_trip() {
             FormatEmulation::Direct => back.entry(candidates[0].format).or_default().push(pf),
             FormatEmulation::ExtendedRange => {}
             FormatEmulation::RotatedView => assert_eq!(pf, PixelFormat::ARGB8Unorm),
+            // `ARGB8Unorm_sRGB`'s bytes: sampled through its raw twin's view alone.
+            FormatEmulation::RotatedRawSrgb => assert_eq!(pf, PixelFormat::ARGB8UnormSRGB),
             FormatEmulation::YCbCr => assert!(ycbcr_format(pf).is_some(), "{pf:?}"),
             // An RGBX format's bytes are its RGBA twin's, which converts in the shader.
             FormatEmulation::XChannel => assert!(x_channel(pf), "{pf:?}"),
@@ -869,19 +871,20 @@ fn formats_metal_names_are_named_and_refused_typed() {
     // (`padded_only_over_memory`).
     // And the eleven RGBX formats, held in their RGBA twins (`x_channel`).
     // And the three bfloat formats, held raw (`ExtendedRange::bfloat`).
+    // And `ARGB8Unorm_sRGB`, held through its raw twin (`FormatEmulation::RotatedRawSrgb`).
     let bfloat = |pf| ExtendedRange::of(pf).is_some_and(ExtendedRange::bfloat);
     assert_eq!(
         PixelFormat::ALL
             .iter()
             .filter(|&&pf| matches!(pf, formats_named_not_held!()))
             .count(),
-        named.len() - 4 - 11 - 3
+        named.len() - 4 - 11 - 3 - 1
     );
     for (raw, name) in named {
         let pf = PixelFormat::try_from(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
         assert_eq!(pf.name(), name);
         assert_eq!(PixelFormat::from_name(name), Some(pf));
-        if padded_only_over_memory(pf) || x_channel(pf) || bfloat(pf) {
+        if padded_only_over_memory(pf) || x_channel(pf) || bfloat(pf) || pf == PixelFormat::ARGB8UnormSRGB {
             continue;
         }
         assert!(matches!(pf, formats_named_not_held!()), "{name}");
@@ -2497,5 +2500,36 @@ fn the_format_table_holds_each_format_s_entry() {
     };
     for &pf in PixelFormat::ALL {
         assert_eq!(summary(repr(pf)), summary(&make_repr(pf)), "{pf:?}");
+    }
+}
+
+/// `ARGB8Unorm_sRGB` is held read through its raw twin alone: a device decodes `R8G8B8A8_SRGB`'s first three channels
+/// before the view's rotation, which are Metal's alpha, red and green, so no usage takes its own image directly, and its
+/// codes come through `ARGB8Unorm`'s rotated view (Argb8SrgbFormTests on an M4: 85 is `RGBA8Unorm_sRGB` rotated).
+#[test]
+fn argb8_srgb_is_read_through_its_raw_twin_alone() {
+    use FormatUsage as U;
+    let pf = PixelFormat::ARGB8UnormSRGB;
+    assert!(crate::metal::texel_format::srgb_raw(pf));
+    assert_eq!(srgb_raw_twin(pf), Some(PixelFormat::ARGB8Unorm));
+    let Repr::Candidates(_, candidates) = make_repr(pf) else {
+        panic!("{pf:?} is held");
+    };
+    assert_eq!(candidates[0].emulation, FormatEmulation::RotatedRawSrgb);
+    assert_eq!(
+        candidates[0].components,
+        match make_repr(PixelFormat::ARGB8Unorm) {
+            Repr::Candidates(_, twin) => twin[0].components,
+            _ => panic!("ARGB8Unorm is held"),
+        }
+    );
+    for usage in [
+        U::SampledImage,
+        U::SampledImageFilterLinear,
+        U::StorageImage,
+        U::ColorAttachment,
+        U::ColorAttachmentBlend,
+    ] {
+        assert!(!FormatEmulation::RotatedRawSrgb.admits(usage), "{usage:?}");
     }
 }

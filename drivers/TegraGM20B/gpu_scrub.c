@@ -19,7 +19,10 @@ static int scrub_submit(u64 pa, u64 bytes)
 	u64 rest = bytes % SCRUB_LINE;
 	u32 slot = 0;
 	u32 seqno = 0;
-	int ret = chan_wait_room(chan, 4, 32 + CHAN_FENCE_DWORDS);
+	int ret = 0;
+
+	idle_wake();
+	ret = chan_wait_room(chan, 4, 32 + CHAN_FENCE_DWORDS);
 
 	if (ret)
 		return ret;
@@ -200,7 +203,7 @@ int tgm_pool_scrub(uint64_t pa, uint64_t bytes)
 	    pa + bytes > nvxnu_pool_base_pa() + nvxnu_pool_size())
 		return -EINVAL;
 	if (!gate_try()) {
-		if (TGM_STATS && READ_ONCE(tgm_gpu.railed))
+		if (TGM_DEBUG_PROBES && READ_ONCE(tgm_gpu.railed))
 			__atomic_fetch_add(&tgm_rail_ups.cpu_zeroed, bytes, __ATOMIC_RELAXED);
 		return -EBUSY; /* the caller zeroes it on the CPU */
 	}

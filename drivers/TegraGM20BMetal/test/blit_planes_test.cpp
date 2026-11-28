@@ -106,6 +106,89 @@ TEST(BlitPlanes, ABlockLinearWordPlaneIsItsTexelsInItsLayout)
     EXPECT_FALSE(gm20b::planeBytes(xr.t, 16, out)) << "its first texel off a 16-byte unit";
 }
 
+struct Piece {
+    uint32_t x, row, w, at;
+
+    bool operator==(const Piece &o) const
+    {
+        return x == o.x && row == o.row && w == o.w && at == o.at;
+    }
+};
+
+std::vector<Piece> pieces(const gm20b::Texture &plane, uint32_t x, uint32_t y, uint32_t w, uint32_t h, bool &fits)
+{
+    std::vector<Piece> out;
+    fits = gm20b::planeRunPieces(plane, x, y, w, h, [&](const gm20b::PlaneRunPiece &p) {
+        out.push_back({p.x, p.row, p.w, p.at});
+    });
+    return out;
+}
+
+// A one-plane 4:4:4 'v410' (504) over a surface the kernel laid out block-linear, its rows of exactly 16 words, copied
+// into a plain RGBA16Uint and RGBA32Uint texture (HW Test gpu.gm20b.planes_blits c_504_exact_*): an M4 Max reads each
+// row of the region as one run of bytes along the surface's rows, so the run goes on into the next rows
+TEST(BlitPlanes, ABlockLinearPlaneRunsOnIntoItsNextRows)
+{
+    Planes v410;
+    v410.t.ycbcr = 1;
+    v410.t.luma = &v410.luma;
+    v410.luma.format = 90;  // RGB10A2Unorm: plane 0's words
+    v410.luma.width = 16;
+    v410.luma.bpp = 4;
+    v410.luma.blockLinear = true;
+    v410.luma.rowsPitch = 64;
+    gm20b::Texture out;
+    bool fits = false;
+
+    ASSERT_TRUE(gm20b::planeBytes(v410.t, 8, out));
+    EXPECT_EQ(out.width, 8u);
+    EXPECT_EQ(out.rowsPitch, 64u);
+    EXPECT_EQ(pieces(out, 2, 2, 8, 4, fits), (std::vector<Piece>{{2, 0, 6, 0}, {0, 1, 2, 6}}));
+    EXPECT_TRUE(fits) << "bytes 16-79 of rows 2-5: the last ends 16 bytes into row 6";
+    EXPECT_TRUE(gm20b::planeRegionReadable(out, 2, 2, 8, 4));
+
+    ASSERT_TRUE(gm20b::planeBytes(v410.t, 16, out));
+    EXPECT_EQ(pieces(out, 2, 2, 8, 4, fits), (std::vector<Piece>{{2, 0, 2, 0}, {0, 1, 4, 2}, {0, 2, 2, 6}}));
+    EXPECT_TRUE(fits) << "bytes 32-159 of rows 2-5: the last ends in row 7";
+    EXPECT_EQ(pieces(out, 1, 1, 2, 7, fits), (std::vector<Piece>{{1, 0, 2, 0}}));
+    EXPECT_TRUE(fits) << "inside each row: one piece";
+    EXPECT_TRUE(pieces(out, 2, 3, 8, 4, fits).empty());
+    EXPECT_FALSE(fits) << "row 6's run ends in row 9, past the plane's 8";
+    EXPECT_FALSE(gm20b::planeRegionReadable(out, 2, 3, 8, 4));
+}
+
+// The run wraps at the surface's rows as the CPU holds them, never at the layout's GOB-wide row: 24 words a row are 96
+// bytes, laid out 128 apart; a row's padding past its texels is no byte of the layout
+TEST(BlitPlanes, ABlockLinearRunWrapsAtTheSurfacesRows)
+{
+    Planes wide;
+    wide.t.ycbcr = 1;
+    wide.t.luma = &wide.luma;
+    wide.luma.format = 90;
+    wide.luma.width = 24;
+    wide.luma.bpp = 4;
+    wide.luma.pitch = 128;
+    wide.luma.blockLinear = true;
+    wide.luma.rowsPitch = 96;
+    gm20b::Texture out;
+    bool fits = false;
+    ASSERT_TRUE(gm20b::planeBytes(wide.t, 16, out));
+    EXPECT_EQ(out.width, 6u);
+    EXPECT_EQ(pieces(out, 4, 0, 4, 2, fits), (std::vector<Piece>{{4, 0, 2, 0}, {0, 1, 2, 2}}));
+    EXPECT_TRUE(fits);
+
+    wide.luma.rowsPitch = 128;  // rows padded past their 96 bytes
+    ASSERT_TRUE(gm20b::planeBytes(wide.t, 16, out));
+    EXPECT_TRUE(pieces(out, 4, 0, 4, 2, fits).empty());
+    EXPECT_FALSE(fits) << "bytes 96-127 of row 0 are its padding";
+
+    wide.luma.rowsPitch = 96;
+    wide.luma.surfaceY = 2;
+    ASSERT_TRUE(gm20b::planeBytes(wide.t, 16, out));
+    EXPECT_FALSE(gm20b::planeRegionReadable(out, 4, 0, 4, 2)) << "a crop's runs reach rows outside it";
+    EXPECT_TRUE(gm20b::planeRegionReadable(out, 0, 0, 4, 2));
+}
+
 // Plane 1 as a blit between two textures held through planes moves it: its bytes from its first at the rows of plane 0
 // the caller names, to the end of its surface's last page; none for a one-plane format or a plane alone's alpha
 TEST(BlitPlanes, PlaneOneIsItsBytesAtPlaneZerosRows)

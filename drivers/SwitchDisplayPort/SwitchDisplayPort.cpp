@@ -7,6 +7,7 @@
 #include <kern/sched_prim.h>
 #include <kern/thread_call.h>
 #include <libkern/OSKextLib.h>
+#include <mach/mach_time.h>
 
 #include "../ArmGIC/SwitchInterrupts.h"
 #include "SwitchDisplayPortService.h"
@@ -152,7 +153,9 @@ bool SwitchDisplayPort::begin()
     IOService *auxNub = switch_interrupt_nub(TEGRA_DPAUX1_INTID, false);
     IOService *dcNub = switch_interrupt_nub(TEGRA_DISPLAY_B_INTID, false);
     auxSource = auxNub ? IOInterruptEventSource::interruptEventSource(this, &auxInterrupt, auxNub, 0) : nullptr;
-    dcSource = dcNub ? IOInterruptEventSource::interruptEventSource(this, &dcInterrupt, dcNub, 0) : nullptr;
+    dcSource = dcNub
+                   ? IOFilterInterruptEventSource::filterInterruptEventSource(this, &dcInterrupt, &dcFilter, dcNub, 0)
+                   : nullptr;
     auxTimer = IOTimerEventSource::timerEventSource(this, &auxTimerFired);
     stepTimer = IOTimerEventSource::timerEventSource(this, &stepTimerFired);
     cecTimer = IOTimerEventSource::timerEventSource(this, &cecTimerFired);
@@ -242,14 +245,35 @@ void SwitchDisplayPort::auxInterrupt(OSObject *owner, IOInterruptEventSource *, 
     }
 }
 
+// Primary interrupt context: clear and read back DC_CMD_INT_STATUS so the level line drops before EOI, then wake the
+// work loop only on FRAME_END without GIC mask/unmask per frame.
+bool SwitchDisplayPort::dcFilter(OSObject *owner, IOFilterInterruptEventSource *source)
+{
+    auto *self = static_cast<SwitchDisplayPort *>(owner);
+    if (!__atomic_load_n(&self->dcbUp, __ATOMIC_ACQUIRE))
+        return false;
+    const uint32_t cause = self->dcb.takeInterrupt();
+    if (!(cause & (1u << 1)))
+        return false;
+    __atomic_store_n(&self->dcFeTime, mach_absolute_time(), __ATOMIC_RELAXED);
+    __atomic_store_n(&self->dcFeContinuous, mach_continuous_time(), __ATOMIC_RELAXED);
+    __atomic_store_n(&self->dcFeTaken, __atomic_load_n(&self->dcFeTaken, __ATOMIC_RELAXED) + 1u, __ATOMIC_RELEASE);
+    source->signalInterrupt();
+    return false;
+}
+
 void SwitchDisplayPort::dcInterrupt(OSObject *owner, IOInterruptEventSource *, int)
 {
     auto *self = static_cast<SwitchDisplayPort *>(owner);
+    const uint32_t taken = __atomic_load_n(&self->dcFeTaken, __ATOMIC_ACQUIRE);
+    if (taken == self->dcFeHandled)
+        return;
+    self->dcFeHandled = taken;
     if (!self->dcbUp)
         return;
-    const uint32_t cause = self->dcb.takeInterrupt();
-    if (cause & (1u << 1))
-        (void)self->screen->frameEnd();
+    const uint64_t stamp = __atomic_load_n(&self->dcFeTime, __ATOMIC_RELAXED);
+    const uint64_t continuous = __atomic_load_n(&self->dcFeContinuous, __ATOMIC_RELAXED);
+    (void)self->screen->frameEnd(stamp, continuous);
 }
 
 void SwitchDisplayPort::auxStart(const struct switch_dp_aux_request &transaction, Next then)
@@ -377,19 +401,20 @@ void SwitchDisplayPort::teardownLink()
         sor.audioPresence(nullptr, 0, false);
         switch_displayport_audio_sink(nullptr, 0, false);
     }
-    if (dcbUp) {
+    const bool wasDcbUp = dcbUp;
+    if (wasDcbUp) {
         dcSource->disable();
+        __atomic_store_n(&dcbUp, false, __ATOMIC_RELEASE);
         dcb.windowsOff();
     }
     if (sorUp)
         sor.detachHead();
-    if (dcbUp) {
+    if (wasDcbUp) {
         dcb.enableSor(false);
     }
     // DCB's DISP2 clock is muxed to PLL_D2; power DCB down before SOR1 disables PLL_D2.
-    if (dcbUp) {
+    if (wasDcbUp) {
         dcb.powerDown();
-        dcbUp = false;
     }
     if (sorUp) {
         sor.powerDown();

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <vector>
 #include "grow_list.h"
@@ -88,6 +89,21 @@ public:
         return View(chunks_.data(), headers_[index]);
     }
 
+    const Chunk *chunksData(bool own) const
+    {
+        return own ? chunks_.ownData() : chunks_.data();
+    }
+
+    const Header *headersData(bool own) const
+    {
+        return own ? headers_.ownData() : headers_.data();
+    }
+
+    bool hasEdits() const
+    {
+        return anySlot(edited_);
+    }
+
     uint64_t generation() const
     {
         return generation_;
@@ -125,6 +141,15 @@ public:
         return true;
     }
 
+    template <typename Edit> void setUnchecked(uint32_t slot, Edit edit)
+    {
+        edit(current_[slot]);
+        ++generation_;
+        const Mask bit = slot < kMaskSlots<Mask> ? oneSlot<Mask>(slot) : everySlot<Mask>();
+        pending_ |= bit;
+        edited_ |= bit;
+    }
+
     uint32_t capture()
     {
         if (captured_ == generation_)
@@ -138,9 +163,12 @@ public:
         for (; chunks; chunks &= chunks - 1) {
             const size_t c = size_t(__builtin_ctz(chunks));
             header[c] = static_cast<uint32_t>(chunks_.size());
-            Chunk &chunk = chunks_.emplace_back();
-            for (size_t k = 0; k < K; ++k)
-                chunk[k] = c * K + k < N ? current_[c * K + k] : Slot{};
+            Chunk *chunk = chunks_.emplaceUninit();
+            const size_t base = c * K;
+            const size_t take = base + K <= N ? K : N - base;
+            std::memcpy(static_cast<void *>(chunk->data()), current_.data() + base, take * sizeof(Slot));
+            for (size_t k = take; k < K; ++k)
+                (*chunk)[k] = Slot{};
         }
         index_ = static_cast<uint32_t>(headers_.size());
         headers_.push_back(header);
@@ -152,15 +180,19 @@ public:
 
     // The slots in which value `index` may differ from value `from`: exactly the edited ones where `index` was captured
     // next after `from`, every slot otherwise
-    Mask changedFrom(uint32_t from, uint32_t index) const
+    Mask changedFrom(uint32_t from, uint32_t index, bool own = false) const
     {
-        return index == from + 1 ? changed_[index] : everySlot<Mask>();
+        return index == from + 1 ? (own ? changed_.own(index) : changed_[index]) : everySlot<Mask>();
     }
 
     // Only the slots edited since the last reset differ from the empty table
     void resetCurrent()
     {
-        current_ = {};
+        if (!anySlot(edited_))
+            return;
+        forEachSlot(edited_, [&](uint32_t slot) {
+            current_[slot] = Slot{};
+        });
         ++generation_;
         pending_ |= edited_;
         edited_ = Mask{};
@@ -173,10 +205,19 @@ public:
         changed_.clear();
         pending_ = everySlot<Mask>();
         edited_ = Mask{};
-        current_ = {};
+        if (generation_)
+            current_ = {};
         generation_ = 0;
         captured_ = std::numeric_limits<uint64_t>::max();
         index_ = std::numeric_limits<uint32_t>::max();
+    }
+
+    // Both snapshots must be freshly constructed or cleared (generation_ == 0, current_ zeroed).
+    void swapClean(SlotSnapshots &other) noexcept
+    {
+        headers_.swap(other.headers_);
+        chunks_.swap(other.chunks_);
+        changed_.swap(other.changed_);
     }
 
 private:
@@ -252,6 +293,21 @@ public:
         return {objects_[index], sets_[index]};
     }
 
+    const typename Objects::Chunk *chunksData(bool own) const
+    {
+        return objects_.chunksData(own);
+    }
+
+    const typename Objects::Header *headersData(bool own) const
+    {
+        return objects_.headersData(own);
+    }
+
+    const Mask *setsData(bool own) const
+    {
+        return own ? sets_.ownData() : sets_.data();
+    }
+
     uint64_t generation() const
     {
         return objects_.generation();
@@ -289,13 +345,15 @@ public:
         return index;
     }
 
-    Mask changedFrom(uint32_t from, uint32_t index) const
+    Mask changedFrom(uint32_t from, uint32_t index, bool own = false) const
     {
-        return objects_.changedFrom(from, index);
+        return objects_.changedFrom(from, index, own);
     }
 
     void resetCurrent()
     {
+        if (!anySlot(set_) && !objects_.hasEdits())
+            return;
         objects_.resetCurrent();
         set_ = Mask{};
     }
@@ -305,6 +363,12 @@ public:
         objects_.clear();
         sets_.clear();
         set_ = Mask{};
+    }
+
+    void swapClean(ObjectSnapshots &other) noexcept
+    {
+        objects_.swapClean(other.objects_);
+        sets_.swap(other.sets_);
     }
 
 private:

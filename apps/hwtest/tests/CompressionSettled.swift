@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// The facade's compression thread, waited for by its own event (drivers/TegraGM20BMetal/
@@ -8,8 +9,8 @@ import Metal
 /// and ZBC entry asked of the thread so far is made or refused, at once on the caller's thread when none is asked. Past
 /// `bound` the event is taken as lost (a FAIL naming it), never waited for again.
 public enum CompressionSettled {
-    static let selector = NSSelectorFromString("switchMetalProbeCompressionSettled:")
-    static let factsSelector = NSSelectorFromString("switchMetalProbeFacts:")
+    public static let selector = NSSelectorFromString("switchMetalProbeCompressionSettled:")
+    public static let factsSelector = NSSelectorFromString("switchMetalProbeFacts:")
     public static let bound: TimeInterval = 5
 
     public enum Wait: Equatable, Sendable {
@@ -33,7 +34,7 @@ public enum CompressionSettled {
     /// Asks the facade for the event, `settled` the block it calls: nil where it took the ask, else its answer. The block
     /// goes as an object the facade may keep until the thread settles; lent as a closure to a cast of the method's IMP it
     /// would be non-escaping, and Swift traps once the call returns with the facade still holding it.
-    static func ask(_ facade: NSObject, _ settled: @escaping () -> Void) -> String? {
+    public static func ask(_ facade: NSObject, _ settled: @escaping () -> Void) -> String? {
         let block: @convention(block) () -> Void = settled
         guard let answer = facade.perform(selector, with: unsafeBitCast(block, to: AnyObject.self)) else { return nil }
         let object = answer.takeUnretainedValue()

@@ -10,7 +10,7 @@
 #include "TegraGM20BGpu.h"
 #include "TegraGM20BNapll.h"
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 namespace
 {
 constexpr int kRailCyclesMax = 16;

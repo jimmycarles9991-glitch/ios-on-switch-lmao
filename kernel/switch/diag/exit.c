@@ -9,6 +9,7 @@
 #include <switch/sched.h>
 
 #include <libkern/libkern.h>
+#include <mach/task_policy.h>
 #include <sys/codesign.h>
 #include <sys/proc_internal.h>
 #include <sys/reason.h>
@@ -24,6 +25,9 @@ void switch_diag_proc_exit(proc_t p, int rv)
     const uint64_t flags = reason != OS_REASON_NULL ? reason->osr_flags : 0;
 
     switch_sched_cpu_exited(proc_task(p));
+    /* An app that exits while focal, with no role change, would keep its place in each focal watcher (and its main
+     * thread's reference) until another evicts it: the longest focal first, in a test run HW Test. */
+    switch_sched_role(proc_task(p), TASK_UNSPECIFIED);
     if ((flags & OS_REASON_FLAG_NO_CRASH_REPORT) ||
         !(hassigprop(WTERMSIG(rv), SA_CORE) || (proc_getcsflags(p) & CS_KILLED) ||
           (flags & OS_REASON_FLAG_GENERATE_CRASH_REPORT))) {

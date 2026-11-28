@@ -137,7 +137,7 @@ TEST(GM20BAlphaKey, FetchingStateWithAlphaToCoverageGetsNoStorageFormThroughComp
         bool own = false;
         req.key = gm20b::requestPackKey(req, own);
         const std::string wire = gm20b::encodeRequest(req);
-        EXPECT_EQ(wire.substr(0, 8), "SWCREQ07");
+        EXPECT_EQ(wire.substr(0, 8), "SWCREQ08");
         gm20b::CompileRequest back;
         ASSERT_TRUE(gm20b::decodeRequest(wire, back));
 

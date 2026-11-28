@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// A kernel's stores into RGB10A8_2P_XR10 over a two-plane surface, which Apple's Metal makes with ShaderWrite (the

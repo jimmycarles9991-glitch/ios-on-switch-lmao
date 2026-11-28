@@ -75,6 +75,8 @@ bool a64x_class_is_baseline(enum a64x_class c);
 
 /* One-word ARMv8.0 replacement (PAC identity, LDAPR->LDAR, LDLAR/STLLR, DC CVAP, encodable LDRA). */
 bool a64x_rewrite1(uint32_t w, uint32_t *out);
+void a64x_decode_ldra(uint32_t w, int32_t *out_imm, bool *out_wb);
+bool a64x_eval_jscvt(uint64_t bits, uint32_t *out_w);
 /* GPRs read/written by w (false if not decoded); and the X registers dead at a site given the words after it. */
 bool a64x_regs(uint32_t w, uint32_t *rd_mask, uint32_t *wr_mask);
 /*
@@ -84,7 +86,6 @@ bool a64x_regs(uint32_t w, uint32_t *rd_mask, uint32_t *wr_mask);
 uint32_t a64x_stub_gprs(uint32_t w);
 /* false for a site translated as BL whose original instruction names x30 */
 bool a64x_bl_site_ok(uint32_t orig, uint32_t site_word);
-uint32_t a64x_dead_regs(const uint32_t *next, int n);
 /* path-sensitive: window[0..n) is the page, site is the index of the instruction being replaced */
 uint32_t a64x_dead_regs_window(const uint32_t *window, int n, int site);
 uint32_t a64x_dead_regs_window_lr(const uint32_t *window, int n, int site);
@@ -127,13 +128,24 @@ static inline bool a64x_class_uses_vtemps(enum a64x_class c)
 
 /*
  * Out-of-line ARMv8.0 code for w (LSE, far LDRA): written to out[0..] for execution at stub_pc, ending in a branch to
- * site_pc + 4. `dead` = registers free at the site (a64x_dead_regs), others are spilled below the red zone.
+ * site_pc + 4 (or RET when shared is true). `dead` = registers free at the site, others are spilled below the red zone.
  * Returns the number of words (may exceed max: then nothing past max was written) or -1 if w has no stub.
  */
 int a64x_stub(uint32_t w, uint64_t site_pc, uint64_t stub_pc, uint32_t dead, uint32_t *out, int max);
-/* same, with the SIMD&FP registers dead at the site (a64x_dead_vregs_flow): FP stubs use them instead of spilling */
-int a64x_stub_v(uint32_t w, uint64_t site_pc, uint64_t stub_pc, uint32_t dead, uint32_t vdead, uint32_t *out, int max);
+/* same, with SIMD&FP registers dead at the site and shared (RET vs B site_pc+4) exit selection */
+int a64x_stub_v(uint32_t w, uint64_t site_pc, uint64_t stub_pc, uint32_t dead, uint32_t vdead, bool shared,
+                uint32_t *out, int max);
 #define A64X_STUB_MAX 64
+
+static inline bool a64x_stub_spills(const uint32_t *st, int n)
+{
+    if (n <= 0 || !st) {
+        return false;
+    }
+    uint32_t w = st[0];
+    return (w & 0xFFE003E0u) == 0xA9A003E0u || (w & 0xFFF00FE0u) == 0xF8100FE0u ||
+           (w & 0xFFE003E0u) == 0xADA003E0u || (w & 0xFFF00FE0u) == 0x3C900FE0u;
+}
 /* B from -> to, or 0 if out of range. */
 uint32_t a64x_branch(uint64_t from, uint64_t to);
 
@@ -230,5 +242,63 @@ bool a64x_ends_code(uint32_t w);
 void a64x_islands_page(struct a64x_islands *is, const uint32_t *w, uint32_t n, uint64_t first, uint64_t va,
                        const struct a64x_code_map *code);
 void a64x_islands_end(struct a64x_islands *is, uint64_t end);
+
+enum a64x_sect_kind {
+    A64X_SECT_DATA = 0,
+    A64X_SECT_CANDIDATE,
+    A64X_SECT_CODE,
+};
+
+static inline bool a64x_sectname_eq(const char sectname[16], const char *name)
+{
+    size_t i = 0;
+    for (; i < 16 && name[i] != '\0'; i++) {
+        if (sectname[i] != name[i]) {
+            return false;
+        }
+    }
+    return i == 16 ? name[i] == '\0' : sectname[i] == '\0';
+}
+
+static inline bool a64x_sectname_prefix(const char sectname[16], const char *prefix)
+{
+    for (size_t i = 0; i < 16 && prefix[i] != '\0'; i++) {
+        if (sectname[i] != prefix[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * Classify a section inside a VM_PROT_EXECUTE segment. Some code sections (such as Metal's __TEXT,text_env) are
+ * emitted as plain S_REGULAR without S_ATTR_PURE_INSTRUCTIONS / S_ATTR_SOME_INSTRUCTIONS; other flagless S_REGULAR
+ * non-data sections return A64X_SECT_CANDIDATE and are treated as code only when LC_FUNCTION_STARTS enters them.
+ */
+static inline enum a64x_sect_kind a64x_classify_exec_section(const char sectname[16], uint64_t addr, uint64_t size,
+                                                             uint32_t flags)
+{
+    if (!size) {
+        return A64X_SECT_DATA;
+    }
+    if (flags & (0x80000000u | 0x00000400u)) {
+        return A64X_SECT_CODE;
+    }
+    if ((flags & 0xFFu) != 0u || (flags & 0x02000000u) != 0u || (addr & 3u) != 0u || size < 4u) {
+        return A64X_SECT_DATA;
+    }
+    if (a64x_sectname_eq(sectname, "__text") || a64x_sectname_eq(sectname, "text_env")) {
+        return A64X_SECT_CODE;
+    }
+    if (a64x_sectname_eq(sectname, "__const") || a64x_sectname_eq(sectname, "__cstring") ||
+        a64x_sectname_eq(sectname, "__unwind_info") || a64x_sectname_eq(sectname, "__eh_frame") ||
+        a64x_sectname_eq(sectname, "__gcc_except_tab") || a64x_sectname_eq(sectname, "__ustring") ||
+        a64x_sectname_eq(sectname, "__info_plist") || a64x_sectname_eq(sectname, "__fips_hmacs") ||
+        a64x_sectname_eq(sectname, "__a64x_target") || a64x_sectname_prefix(sectname, "__objc_") ||
+        a64x_sectname_prefix(sectname, "__swift5_") || a64x_sectname_prefix(sectname, "__swift_as_")) {
+        return A64X_SECT_DATA;
+    }
+    return A64X_SECT_CANDIDATE;
+}
 
 #endif /* A64X_H */

@@ -26,10 +26,10 @@ void describe(FILE *out)
 {
     const GM20BState &r = *gRM;
     fprintf(out,
-            "watchdog: submitAsleep %d committed %u rangesInFlight %u waitingCommitted %u schedule %zu inflight %zu "
+            "watchdog: submitAsleep %d committed %u waitingCommitted %u schedule %zu inflight %zu "
             "completionWaiters %u submitPromised %d\n",
-            int(r.submitAsleep.load()), r.committed.load(), r.rangesInFlight.load(), r.waitingCommitted.load(),
-            r.schedule.size(), r.inflight.size(), r.completionWaiters.load(), int(r.submitPromised.load()));
+            int(r.submitAsleep.load()), r.committed.load(), r.waitingCommitted.load(), r.schedule.size(),
+            r.inflight.size(), r.completionWaiters.load(), int(r.submitPromised.load()));
     for (size_t i = 0; i < gRound.size(); i++) {
         SwitchMetalCommandBuffer *cb = (SwitchMetalCommandBuffer *)gRound[i];
         const uint64_t published = cb->_published.load();

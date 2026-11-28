@@ -14,6 +14,7 @@
 #include "../../kits/SwitchDMA/SwitchDMAPages.h"
 
 struct switch_dma_buffer;
+struct SwitchNVENCCompletion;
 struct TegraNVENCPitchPlan;
 
 // One buffer NVENC reads or writes: any RAM pages, mapped at `iova` in NVENC's address space, 64 KiB granular, zeroed
@@ -77,7 +78,8 @@ int tegra_nvenc_check_submit(const TegraNVENCSubmit *submit, TegraNVENCResolve r
 // of features it leaves off and queues it on host1x channel 0, after `after` and `order`'s producers when given.
 // Returns 0 and the job's fence, or a negative errno-style value.
 int tegra_nvenc_run(const TegraNVENCSubmit *submit, TegraNVENCResolve resolve, void *context,
-                    const TegraNVENCAfter *after, const TegraNVENCOrder *order, uint32_t *fence, const char **why);
+                    const TegraNVENCAfter *after, const TegraNVENCOrder *order, const SwitchNVENCCompletion *completion,
+                    uint32_t *fence, const char **why);
 uint32_t tegra_nvenc_syncpt(void);  // the job fences' syncpoint
 // Sleeps until the fence is reached (syncpoint interrupt), bounded per queued job. Past that bound the jobs in flight
 // are cancelled (-5) and the engine is reset for the next one.

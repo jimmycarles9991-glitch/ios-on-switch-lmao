@@ -74,6 +74,18 @@ inline ScissorBox scissorBox(const uint32_t r[4], uint32_t areaW, uint32_t areaH
 inline void viewportPixels(const double vp[4], const ScissorBox &sc, uint32_t areaW, uint32_t areaH, uint32_t x[2],
                            uint32_t y[2])
 {
+    if (vp[0] == 0.0 && vp[1] == 0.0 && vp[2] == double(areaW) && vp[3] == double(areaH)) {
+        if (areaW == 0 || areaH == 0) {
+            x[0] = x[1] = sc.x0;
+            y[0] = y[1] = sc.y0;
+        } else {
+            x[0] = sc.x0;
+            x[1] = std::max(sc.x0, std::min(sc.x1, areaW));
+            y[0] = sc.y0;
+            y[1] = std::max(sc.y0, std::min(sc.y1, areaH));
+        }
+        return;
+    }
     auto axis = [](double origin, double size, uint32_t limit, uint32_t lo, uint32_t hi, uint32_t out[2]) {
         const double a = size < 0 ? origin + size : origin, b = size < 0 ? origin : origin + size;
         const int64_t first = int64_t(std::clamp(std::floor(a), 0.0, double(limit)));
@@ -96,6 +108,13 @@ struct ViewportArray {
     ScissorBox scissor[kMaxViewports];
     uint32_t dirtyViewports = 0, dirtyScissors = 0;
     uint32_t swizzled = 1;  // a turned pass: the indices whose clip-space swizzle is the turn (index 0 at its start)
+
+    void reset()
+    {
+        viewports = scissors = 1;
+        dirtyViewports = dirtyScissors = 0;
+        swizzled = 1;
+    }
 };
 
 }  // namespace gm20b

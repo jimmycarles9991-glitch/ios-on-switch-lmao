@@ -193,6 +193,20 @@ inline void xbarRouteCapture(volatile uint8_t *ahub, bool useSfc)
     }
 }
 
+#ifdef SWITCH_MMIO_HOST_MODEL
+inline bool waitReg(const volatile uint8_t *ahub, uint32_t offset, uint32_t mask, uint32_t value, uint32_t timeoutUs)
+{
+    const uint32_t limit = timeoutUs < 1024u ? timeoutUs : 1024u;
+    for (uint32_t i = 0; i < limit; ++i) {
+        if ((switch_mmio_read32(ahub, offset) & mask) == value)
+            return true;
+    }
+    return (switch_mmio_read32(ahub, offset) & mask) == value;
+}
+#else
+bool waitReg(const volatile uint8_t *ahub, uint32_t offset, uint32_t mask, uint32_t value, uint32_t timeoutUs);
+#endif
+
 // SFC (SwitchAudioSfc.cpp): returns false if rate pair is unsupported or reset times out.
 bool sfcSupportsPair(uint32_t inRate, uint32_t outRate);
 const uint32_t *sfcCoefficients(uint32_t inRate, uint32_t outRate);

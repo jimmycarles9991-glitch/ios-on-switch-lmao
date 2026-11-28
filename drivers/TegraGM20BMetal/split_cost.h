@@ -85,6 +85,8 @@ class SplitPassPlan {
 public:
     void clear()
     {
+        if (candidates_.empty())
+            return;
         candidates_.clear();
         std::fill(index_.begin(), index_.end(), SIZE_MAX);
         lastKey_ = nullptr;
@@ -112,6 +114,8 @@ public:
 
     void finish()
     {
+        if (candidates_.empty())
+            return;
         lastKey_ = nullptr;
         lastIndex_ = SIZE_MAX;
         // Static instruction counts and clipped raster extents estimate work; launch/drain and

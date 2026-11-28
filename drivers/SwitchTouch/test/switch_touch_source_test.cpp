@@ -77,3 +77,113 @@ TEST(SwitchTouchSource, TimedPostsTakeTheTablesCallOnEveryBuild)
         EXPECT_THAT(table, Not(HasSubstr("\"handleReportWithTime\": \"0x0\""))) << kind;
     }
 }
+
+TEST(SwitchTouchSource, DirectTouchEventContainsBuildOffsetsAndNoHotPathLogs)
+{
+    const std::string source = SourceText("../SwitchHIDTouchEvent.cpp");
+    EXPECT_THAT(source, HasSubstr("SWITCH_IPSW_KIND_21H461"));
+    EXPECT_THAT(source, HasSubstr("SWITCH_IPSW_KIND_24B119"));
+    EXPECT_THAT(source, HasSubstr("#error"));
+    const std::string alloc = Body(source, "OSObject *allocDigitizerEvent(");
+    ASSERT_FALSE(alloc.empty());
+    EXPECT_THAT(alloc, Not(HasSubstr("os_log")));
+    EXPECT_THAT(alloc, Not(HasSubstr("kprintf")));
+    const std::string direct = Between(SourceText("../SwitchHIDDevice.cpp"), "    bool postTouchDirect(", "\n    }\n");
+    ASSERT_FALSE(direct.empty());
+    EXPECT_THAT(direct, Not(HasSubstr("runAction")));
+    EXPECT_THAT(direct, Not(HasSubstr("IOLog")));
+}
+
+TEST(SwitchTouchSource, PostAtCopiesReportInsideWorkLoopAction)
+{
+    const std::string source = SourceText("../SwitchHIDDevice.cpp");
+    const std::string post =
+        Between(source, "    IOReturn postAt(const void *report, size_t length, uint64_t timestamp)", "\n    }\n");
+    ASSERT_FALSE(post.empty());
+    const size_t runAction = post.find("loop->runAction(");
+    const size_t copy = post.find("memcpy(");
+    ASSERT_NE(runAction, std::string::npos);
+    ASSERT_NE(copy, std::string::npos);
+    EXPECT_GT(copy, runAction);
+    EXPECT_EQ(post.find("memcpy(", copy + 1), std::string::npos);
+}
+
+TEST(SwitchTouchSource, IdentityGettersAndLocationIDSlot192)
+{
+    const std::string source = SourceText("../SwitchHIDDevice.cpp");
+    for (const char *method :
+         {"OSString *newManufacturerString() const override", "OSNumber *newVendorIDNumber() const override",
+          "OSNumber *newProductIDNumber() const override", "OSNumber *newLocationIDNumber() const override"}) {
+        EXPECT_THAT(source, HasSubstr(method)) << method;
+    }
+    const std::string iface = SourceText("../../../kits/SwitchABI/interface/IOHIDDevice.json");
+    EXPECT_THAT(iface, HasSubstr("\"newLocationIDNumber\""));
+    EXPECT_THAT(iface, HasSubstr("\"__ZNK11IOHIDDevice19newLocationIDNumberEv\""));
+    for (const char *kind : {"21H461", "24B119"}) {
+        const std::string table =
+            SourceText(std::string("../../../kits/SwitchABI/kinds/") + kind + "/IOHIDDevice.json");
+        EXPECT_THAT(table, HasSubstr("\"192\": \"newLocationIDNumber\"")) << kind;
+        EXPECT_THAT(table, HasSubstr("\"newLocationIDNumber\": \"0xfffffff0")) << kind;
+        EXPECT_THAT(table, Not(HasSubstr("\"opaque192\""))) << kind;
+    }
+}
+
+TEST(SwitchTouchSource, LightSensorPropertiesCopyEventAndSharedWorkLoop)
+{
+    const std::string source = SourceText("../SwitchHIDDevice.cpp");
+    const std::string lightProps = Body(source, "void addLightProperties(");
+    ASSERT_FALSE(lightProps.empty());
+    EXPECT_THAT(lightProps, HasSubstr("{\"ALSSensorType\", 0}"));
+    EXPECT_THAT(lightProps, HasSubstr("{\"ReportInterval\", kSwitchLightReportIntervalUs}"));
+
+    const std::string start = Between(source, "    bool start(IOService *provider) override", "\n    }\n");
+    ASSERT_FALSE(start.empty());
+    EXPECT_THAT(start, HasSubstr("kSwitchLightReportIntervalUs"));
+    EXPECT_THAT(start, HasSubstr("sharedLoop->retain();"));
+
+    const std::string copyEvent = Body(source, "OSObject *copyEvent(");
+    ASSERT_FALSE(copyEvent.empty());
+    EXPECT_THAT(copyEvent, HasSubstr("kAmbientLightType"));
+    EXPECT_THAT(copyEvent, HasSubstr("entries[i].eventType == type"));
+
+    const std::string deliver = Between(source, "    IOReturn deliver(OSObject *event)", "\n    }\n");
+    ASSERT_FALSE(deliver.empty());
+    EXPECT_THAT(deliver, HasSubstr("cacheEvent(event);"));
+    EXPECT_THAT(deliver, HasSubstr("temperature::ensureLightHooked(eventDriver, this);"));
+
+    const std::string create = Body(source, "IOService *switch_hid_create(");
+    ASSERT_FALSE(create.empty());
+    EXPECT_THAT(create, HasSubstr("temperature::prepare();"));
+    EXPECT_THAT(create, HasSubstr("initWithProfile(&profile, sharedLoop)"));
+    EXPECT_THAT(source, HasSubstr("IOService *switch_hid_create(SwitchHIDKind kind)"));
+    EXPECT_THAT(source, HasSubstr("void switch_hid_set_light_copy_handler("));
+}
+
+TEST(SwitchTouchSource, JoyConTouchTimestampHookOnLiveDispatchOnly)
+{
+    const std::string touch = SourceText("../SwitchTouch.cpp");
+    EXPECT_THAT(touch, HasSubstr("#include \"../SwitchJoyCon/SwitchJoyConTouch.h\""));
+    EXPECT_THAT(touch, HasSubstr("extern \"C\" __attribute__((weak)) void switch_joycon_note_touch_ms(uint64_t)"));
+    const std::string flush = Body(touch, "void SwitchTouch::flush(");
+    ASSERT_FALSE(flush.empty());
+    EXPECT_THAT(flush, HasSubstr("if (live && activeCount)"));
+    EXPECT_THAT(flush, HasSubstr("switch_joycon_note_touch_ms(stampUs / 1000);"));
+    const std::string release = Body(touch, "void SwitchTouch::releaseAll(");
+    ASSERT_FALSE(release.empty());
+    EXPECT_THAT(release, HasSubstr("flush(true, 0, false);"));
+}
+
+TEST(SwitchTouchSource, SharesWorkLoopWithHidDevice)
+{
+    const std::string start = Body(SourceText("../SwitchTouch.cpp"), "bool SwitchTouch::start(");
+    ASSERT_FALSE(start.empty());
+    const size_t loopAt = start.find("loop = IOWorkLoop::workLoop();");
+    const size_t createAt = start.find("switch_hid_create(kSwitchHIDTouch, loop)");
+    const size_t armAt = start.find("timer->setTimeoutMS(1);");
+    ASSERT_NE(loopAt, std::string::npos);
+    ASSERT_NE(createAt, std::string::npos);
+    ASSERT_NE(armAt, std::string::npos);
+    EXPECT_EQ(switch_ios::test::Count(start, "switch_hid_create("), 1u);
+    EXPECT_GT(createAt, loopAt);
+    EXPECT_LT(createAt, armAt);
+}

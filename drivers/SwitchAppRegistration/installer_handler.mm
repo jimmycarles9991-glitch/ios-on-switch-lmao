@@ -15,7 +15,13 @@ struct SwitchLSVersionNumber {
 @protocol SwitchContainerRecord <NSObject>
 - (instancetype)initWithURL:(NSURL *)url allowPlaceholder:(BOOL)placeholder error:(NSError **)error;
 - (NSString *)bundleIdentifier;
+- (NSURL *)URL;
 - (struct SwitchLSVersionNumber)_bundleVersion;
+@end
+
+@protocol SwitchClaimBinding <NSObject>
+- (instancetype)initWithTypeIdentifier:(NSString *)identifier error:(NSError **)error;
+- (id<SwitchContainerRecord>)bundleRecord;
 @end
 
 @protocol SwitchContainerType <NSObject>
@@ -104,14 +110,43 @@ id switch_installed_record(NSString *path, NSString *identifier, NSError **error
     return record;
 }
 
-BOOL switch_register_installer_handler(NSError **error)
+static BOOL switch_ipa_handler_matches(NSString *path, NSString *identifier)
 {
-    NSString *path = @"/Applications/SwitchInstaller.app";
-    NSString *identifier = @"com.brunostjohn.switch.installer";
+    Class bindingClass = NSClassFromString(@"LSClaimBinding");
+    if (!bindingClass || ![bindingClass instancesRespondToSelector:@selector(initWithTypeIdentifier:error:)])
+        return NO;
+    NSError *error = nil;
+    id<SwitchClaimBinding> binding = [(id<SwitchClaimBinding>)[bindingClass alloc]
+        initWithTypeIdentifier:@"com.apple.itunes.ipa"
+                         error:&error];
+    id<SwitchContainerRecord> bundle =
+        [binding respondsToSelector:@selector(bundleRecord)] ? [binding bundleRecord] : nil;
+    if (![bundle respondsToSelector:@selector(bundleIdentifier)] ||
+        ![bundle.bundleIdentifier isEqualToString:identifier])
+        return NO;
+    if ([bundle respondsToSelector:@selector(URL)] && bundle.URL.isFileURL) {
+        NSString *actual = bundle.URL.URLByResolvingSymlinksInPath.path;
+        NSString *expected = [NSURL fileURLWithPath:path isDirectory:YES].URLByResolvingSymlinksInPath.path;
+        if (![actual isEqualToString:expected])
+            return NO;
+    }
+    return YES;
+}
+
+static BOOL switch_register_installer_handler_at(NSString *path, NSString *identifier, NSError **error)
+{
     if (![[NSFileManager defaultManager] fileExistsAtPath:path])
         return YES;
     if (!switch_app_registered_at_path(path, identifier))
         return switch_container_failure(error, @"Installer's saved record does not point to its built-in bundle");
+    if (switch_ipa_handler_matches(path, identifier))
+        return YES;
     id record = switch_installed_record(path, identifier, error);
     return record && switch_set_ipa_handler(record, error);
+}
+
+BOOL switch_register_installer_handler(NSError **error)
+{
+    return switch_register_installer_handler_at(@"/Applications/SwitchInstaller.app",
+                                                @"com.brunostjohn.switch.installer", error);
 }

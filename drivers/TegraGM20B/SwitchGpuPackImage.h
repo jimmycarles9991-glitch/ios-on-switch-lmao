@@ -16,7 +16,7 @@ struct tgm_vm;
 struct switch_gpu_mapping;
 
 inline constexpr char kSwitchGpuPackMagic[8] = {'G', 'M', '2', '0', 'B', 'P', 'K', '1'};
-inline constexpr uint32_t kSwitchGpuPackVersion = 33u;
+inline constexpr uint32_t kSwitchGpuPackVersion = 37u;
 inline constexpr uint64_t kSwitchGpuPackTierAlign = 128ULL << 10;
 inline constexpr uint32_t kSwitchGpuPackChunkPages = uint32_t(kSwitchGpuPackTierAlign >> 12);
 inline constexpr uint64_t kSwitchGpuPackTransferBytes = 1ULL << 20;
@@ -40,7 +40,8 @@ enum SwitchGpuPackSectionId : uint32_t {
 	kSwitchGpuPackComputeStates = 13,
 	kSwitchGpuPackReflections = 14,
 	kSwitchGpuPackFastKeys = 15,
-	kSwitchGpuPackSectionCount = 16,
+	kSwitchGpuPackSegments = 16,
+	kSwitchGpuPackSectionCount = 17,
 };
 
 struct __attribute__((packed)) SwitchGpuPackSection {
@@ -57,22 +58,18 @@ struct __attribute__((packed)) SwitchGpuPackHeader {
 	SwitchGpuPackSection section[kSwitchGpuPackSectionCount];
 	uint64_t stack;
 	uint32_t chipFacts;
-	uint32_t reserved;
+	uint32_t tier0SlmPerWarp;
 	uint64_t tier0[kSwitchGpuPackSectionCount];
+	uint8_t rules[16];
 };
 
-static_assert(sizeof(SwitchGpuPackHeader) == 424, "v33 PackHeader size");
+static_assert(sizeof(SwitchGpuPackHeader) == 464, "v37 PackHeader size");
 
 enum class SwitchGpuPackState : uint32_t {
 	None = 0,
 	Building = 1,
 	Ready = 2,
 	Refused = 3,
-};
-
-struct SwitchGpuPackByteRange {
-	uint64_t offset;
-	uint64_t bytes;
 };
 
 inline bool switch_gpu_pack_validate_header(const SwitchGpuPackHeader *hdr, uint64_t fileSize,
@@ -148,47 +145,13 @@ inline bool switch_gpu_pack_validate_cpu_ranges(const TegraGM20BAbiPackCpuRange 
 	return true;
 }
 
-inline uint32_t switch_gpu_pack_warm_ranges(const SwitchGpuPackHeader *hdr, uint64_t fileSize,
-					    uint64_t vmPageBytes, SwitchGpuPackByteRange *out,
-					    uint32_t cap)
-{
-	if (!hdr || !out || !cap || !vmPageBytes || (vmPageBytes & (vmPageBytes - 1)) != 0)
-		return 0;
-	static constexpr uint32_t kSections[4] = {
-		kSwitchGpuPackHeap,
-		kSwitchGpuPackFastKeys,
-		kSwitchGpuPackPrograms,
-		kSwitchGpuPackVariants,
-	};
-	const uint64_t pageMask = vmPageBytes - 1;
-	const uint64_t fileEndAligned = (fileSize + pageMask) & ~pageMask;
-	uint32_t count = 0;
-	for (uint32_t s : kSections) {
-		if (count >= cap)
-			break;
-		const uint64_t secOff = hdr->section[s].offset;
-		const uint64_t secBytes = hdr->section[s].bytes;
-		const uint64_t t0 = hdr->tier0[s];
-		if (t0 >= secBytes)
-			continue;
-		const uint64_t rawStart = secOff + t0;
-		const uint64_t rawEnd = secOff + secBytes;
-		const uint64_t pageStart = rawStart & ~pageMask;
-		uint64_t pageEnd = (rawEnd + pageMask) & ~pageMask;
-		if (pageEnd > fileEndAligned)
-			pageEnd = fileEndAligned;
-		if (pageEnd > pageStart && pageStart < fileSize)
-			out[count++] = {pageStart, pageEnd - pageStart};
-	}
-	return count;
-}
-
 #if defined(KERNEL) || defined(SWITCH_GPU_PACK_IMAGE_HOST_TEST)
 struct SwitchGpuPackClient {
 	switch_gpu_mapping *gpuMapping;
 	uint64_t gpuBytes;
 	IOMemoryDescriptor *cpuWired[TegraGM20BMaxPackCpuRanges];
 	uint32_t cpuWiredCount;
+	uint64_t cpuWiredBytes;
 };
 
 struct SwitchGpuPackImageView {
@@ -208,14 +171,29 @@ IOReturn switch_gpu_pack_client_wire_cpu(task_t task, const TegraGM20BAbiPackCpu
 void switch_gpu_pack_client_release_cpu(SwitchGpuPackClient *client);
 void switch_gpu_pack_client_unmap_gpu(tgm_vm *vm, SwitchGpuPackClient *client);
 
+// The tier-0 image is built once both have happened, whichever is second: the kernel has mounted Data and its owner
+// overlay (kern_exec.c, before launchd: pack.bin is reachable), and the GPU's bring-up has published the accelerator
+// (the copy engine can run)
+void switch_gpu_pack_gpu_usable(void);
 extern "C" {
-void switch_gpu_boot_complete(void);
+void switch_gpu_pack_shutdown_request(void);
 void switch_gpu_pack_shutdown(void);
+void switch_gpu_pack_volumes_mounted(void);
+}
+#endif
+
+/* A job of a connection that mapped the image, at its submission: 1, it acquires on the GPU (ACQ_GEQ) the fence-pool word
+ * at *pool until it holds *payload, the image's last chunk, while the image streams in; 0, nothing to wait for; -1, the
+ * stream stopped before its end, and the job is refused (the GPU never runs a page it did not write). */
+#ifdef __cplusplus
+extern "C" {
+#endif
+int switch_gpu_pack_job_wait(uint32_t *pool, uint32_t *payload);
+#ifdef __cplusplus
 }
 #endif
 
 #ifdef SWITCH_GPU_PACK_IMAGE_HOST_TEST
 void switch_gpu_pack_image_reset_for_test(void);
 uint32_t switch_gpu_pack_image_refused_count_for_test(void);
-void switch_gpu_pack_image_wait_warm_for_test(void);
 #endif

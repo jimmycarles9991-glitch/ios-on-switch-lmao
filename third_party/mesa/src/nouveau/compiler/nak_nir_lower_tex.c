@@ -801,30 +801,50 @@ lower_msaa_image_access(nir_builder *b, nir_intrinsic_instr *intrin,
    nir_def *px_w_log2 = nir_channel(b, px_size_sa_log2, 0);
    nir_def *px_h_log2 = nir_channel(b, px_size_sa_log2, 1);
 
-   /* Compute the x/y offsets
-    *
-    * txq.sampler_pos gives us the sample coordinates as a signed 4.12 fixed
-    * point with x in the bottom 16 bits and y in the top 16 bits.
-    */
-   nir_def *spos_sf = build_txq(b, nir_texop_sample_pos_nv, img_h, s,
-                                can_speculate, nak);
-   spos_sf = nir_trim_vector(b, spos_sf, 2);
+   nir_def *sx, *sy;
+   if (nak->sm >= 50 && nak->sm < 70) {
+      /* ios-on-switch-lmao: the cell is NIL's layout for the image's sample
+       * count (nil/image.rs choose_sample_layout and sa_offset), which no
+       * sample position changes: 2X1_D3D puts sample s at (1 - s, 0), 2X2 at
+       * (s & 1, s >> 1), and 4X2_D3D at x two bits a sample from 0xe076, y one
+       * from 0x56. A few ALU ops where the TXQ below is a texture-pipe round
+       * trip, which the storage forms pay inside their pixel interlock.
+       */
+      nir_def *is_2x = nir_ieq_imm(b, samples, 2);
+      nir_def *is_8x = nir_ieq_imm(b, samples, 8);
+      nir_def *x_8x = nir_iand_imm(
+         b, nir_ushr(b, nir_imm_int(b, 0xe076), nir_ishl_imm(b, s, 1)), 3);
+      nir_def *y_8x = nir_iand_imm(b, nir_ushr(b, nir_imm_int(b, 0x56), s), 1);
+      sx = nir_bcsel(b, is_8x, x_8x,
+                     nir_bcsel(b, is_2x, nir_ixor(b, s, nir_imm_int(b, 1)),
+                               nir_iand_imm(b, s, 1)));
+      sy = nir_bcsel(b, is_8x, y_8x, nir_ushr_imm(b, s, 1));
+   } else {
+      /* Compute the x/y offsets
+       *
+       * txq.sampler_pos gives us the sample coordinates as a signed 4.12 fixed
+       * point with x in the bottom 16 bits and y in the top 16 bits.
+       */
+      nir_def *spos_sf = build_txq(b, nir_texop_sample_pos_nv, img_h, s,
+                                   can_speculate, nak);
+      spos_sf = nir_trim_vector(b, spos_sf, 2);
 
-   /* Fortunately, the samples are laid out in the supersampled image the same
-    * as the sample locations, rounded to an integer sample offset.  So we
-    * just have to figure out which samples each of those hits in the 2D grid.
-    *
-    * Add 0x0800 to convert from signed 4.12 fixed-point centered around 0 to
-    * unsigned 4.12 fixed point.  Then shift by 12 - px_sz_log2 to divide off
-    * the extra, leaving an integer offset.  It's safe to do it all in one add
-    * because we know a priori that the low 8 bits of each sample position are
-    * zero so any overflow in the low 16 bits will just set a 1 in bit 16
-    * which will get shifted away.
-    */
-   nir_def *spos_uf = nir_iadd_imm(b, spos_sf, 0x08000800);
-   nir_def *sx = nir_ushr(b, nir_iand_imm(b, spos_uf, 0xffff),
-                             nir_isub_imm(b, 12, px_w_log2));
-   nir_def *sy = nir_ushr(b, spos_uf, nir_isub_imm(b, 28, px_h_log2));
+      /* Fortunately, the samples are laid out in the supersampled image the same
+       * as the sample locations, rounded to an integer sample offset.  So we
+       * just have to figure out which samples each of those hits in the 2D grid.
+       *
+       * Add 0x0800 to convert from signed 4.12 fixed-point centered around 0 to
+       * unsigned 4.12 fixed point.  Then shift by 12 - px_sz_log2 to divide off
+       * the extra, leaving an integer offset.  It's safe to do it all in one add
+       * because we know a priori that the low 8 bits of each sample position are
+       * zero so any overflow in the low 16 bits will just set a 1 in bit 16
+       * which will get shifted away.
+       */
+      nir_def *spos_uf = nir_iadd_imm(b, spos_sf, 0x08000800);
+      sx = nir_ushr(b, nir_iand_imm(b, spos_uf, 0xffff),
+                       nir_isub_imm(b, 12, px_w_log2));
+      sy = nir_ushr(b, spos_uf, nir_isub_imm(b, 28, px_h_log2));
+   }
 
    /* Add in the sample offsets */
    x = nir_iadd(b, nir_ishl(b, x, px_w_log2), sx);

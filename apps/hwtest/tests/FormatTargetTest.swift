@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Render passes into R8Unorm_sRGB, A1BGR5Unorm, ABGR4Unorm and RGB9E5Float targets, formats the GM20B renders none of
@@ -12,8 +13,9 @@ import Metal
 /// miporacle.mm: RGB9E5 exact, A1BGR5 and ABGR4 within one code at odd steps, R8Unorm_sRGB within one code at 1.8% of
 /// texels). off_<format>_<pass> counts texels past the pass's bound (0 to pass): none for clears, draws and
 /// loads, one code a channel for blends (for RGB9E5, which Metal truncates between draws, a mantissa unit a draw and one
-/// for the clear), one code for every R8Unorm_sRGB pass (the GM20B's own sRGB encoder); paths every command buffer's path
-/// (raw/N to pass).
+/// for the clear), one code for every R8Unorm_sRGB pass and one a draw for its blends (the GM20B's own sRGB encoder, within
+/// one code of Metal's and encoding after every draw: accepted 26 Nov over a fetch blend's frame time); max_<format>_<pass>
+/// the largest distance where any; paths every command buffer's path (raw/N to pass).
 struct FormatTargetTest: HWTest {
     let id = "gpu.gm20b.format_targets"
     let name = "Passes into R8Unorm_sRGB, A1BGR5Unorm, ABGR4Unorm and RGB9E5Float targets on the driver"
@@ -35,8 +37,9 @@ struct FormatTargetTest: HWTest {
             for pass in Self.passes {
                 let key = "\(format)_\(pass)"
                 do {
-                    let off = try await exercise(gpu, format, pass)
+                    let (off, worst) = try await exercise(gpu, format, pass)
                     metrics.set("off_" + key, off)
+                    if worst > 0 { metrics.set("max_" + key, worst) }
                     checks.append(("\(key): every texel within its bound of Metal's", off == 0))
                 } catch {
                     metrics.set("off_" + key, "failed")
@@ -51,9 +54,10 @@ struct FormatTargetTest: HWTest {
     }
 
     /// The texels of one pass of `kind` into a target of `format` past the pass's bound of Metal's rule.
-    func exercise(_ gpu: GPU, _ format: UInt, _ kind: String) async throws -> Int {
+    /// With the largest distance from Metal's rule (FormatTargetTest.apart).
+    func exercise(_ gpu: GPU, _ format: UInt, _ kind: String) async throws -> (Int, Int) {
         guard let pixelFormat = MTLPixelFormat(rawValue: format) else { throw TestFailure("no format \(format)") }
-        if kind == "mips" { return try await mips(gpu, format, pixelFormat) }
+        if kind == "mips" { return (try await mips(gpu, format, pixelFormat), -1) }
         let (w, h) = (Self.width, Self.height)
         let bytes = format == 11 ? 1 : format == 93 ? 4 : 2
         let texture = try gpu.texture(pixelFormat, w, h, usage: [.renderTarget, .shaderRead], storage: .shared)
@@ -104,7 +108,7 @@ struct FormatTargetTest: HWTest {
             texture.getBytes($0.baseAddress!, bytesPerRow: w * bytes, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
         }
         let clearHeld = SIMD4<Float>(Float(clear.red), Float(clear.green), Float(clear.blue), Float(clear.alpha))
-        var off = 0
+        var off = 0, worst = 0
         for i in 0 ..< (w * h) {
             var stored: UInt32 = 0
             for k in 0 ..< bytes { stored |= UInt32(got[i * bytes + k]) << (8 * k) }
@@ -116,14 +120,16 @@ struct FormatTargetTest: HWTest {
                 bound = format == 11 ? 1 : 0
             } else if format == 11 {
                 want = Self.srgbCode(drawn ? draws.map { $0[i] } : [], clear: clearHeld)
-                bound = 1
+                bound = Swift.max(1, drawn ? draws.count : 0)
             } else {
                 want = Self.word(format, draws.map { $0[i] }, clear: clearHeld, drawn: drawn)
                 bound = blended ? (format == 93 ? draws.count + 1 : 1) : 0
             }
-            off += Self.apart(format, stored, want) > bound ? 1 : 0
+            let apart = Self.apart(format, stored, want)
+            off += apart > bound ? 1 : 0
+            worst = Swift.max(worst, apart)
         }
-        return off
+        return (off, worst)
     }
 
     /// The texels of each level generateMipmapsForTexture: made past one code of Metal's step from the level above (RGB9E5

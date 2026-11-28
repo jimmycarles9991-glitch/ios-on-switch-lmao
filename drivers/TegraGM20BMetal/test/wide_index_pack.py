@@ -38,7 +38,7 @@ def pack() -> packfile.Pack:
         'key': STATE_KEY,
         'vs': VERTEX,
         'fs': FRAGMENT,
-        'variants': [{'stage': 1, 'assume': 1, 'program': VARIANT}],
+        'variants': [{'stage': 1, 'assume': 1, 'program': VARIANT, 'memory': 0}],
         'blob': [],
         'entries': [],
         'push': [],

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // The display's present: scanout copies and fences on the GPU.
 #include "TegraGM20BUserClientInternal.h"
+#include "SwitchGpuSmmu.h"
 #include "SwitchGpuSurfaceComp.h"
 #include "TegraGM20BComp.h"
 
@@ -145,13 +146,19 @@ uint64_t presentSurface(IOMemoryDescriptor *memory, uint64_t bytes, bool blockLi
 			switch_gpu_backing **backing)
 {
 	bytes = (bytes + 0xfff) & ~0xfffULL;
-	const uint32_t compKind = blockLinear ? presentCompressedKind(memory) : 0u;
-	bool compressed = compKind != 0u;
-	uint32_t kind = compressed ? compKind : (blockLinear ? TGM_LAYOUT_KIND : 0);
 	unsigned slot = 0;
 	bool replaceSlot = false;
 	for (unsigned i = 0; i < kPresentSurfaces; i++) {
 		if (gSurfaces[i].memory == memory) {
+			const uint32_t rawKind =
+				blockLinear && gSurfaces[i].pas
+					? tegra_gm20b_surface_kind(gSurfaces[i].pas[0] & ~0xfffULL)
+					: 0u;
+			const uint32_t cachedCompKind =
+				switch_gpu_surface_kind_compressed(rawKind) ? rawKind : 0u;
+			const uint32_t cachedKind =
+				cachedCompKind ? cachedCompKind
+					       : (blockLinear ? TGM_LAYOUT_KIND : 0u);
 			bool staleAlias = false;
 			if (gSurfaces[i].ownsMemory && gSurfaces[i].backing) {
 				tgm_mem *canonical = nullptr;
@@ -159,7 +166,7 @@ uint64_t presentSurface(IOMemoryDescriptor *memory, uint64_t bytes, bool blockLi
 					gSurfaces[i].backing, gSurfaces[i].npages, &canonical);
 				staleAlias = found == 0 && canonical != gSurfaces[i].mem;
 			}
-			if (gSurfaces[i].bytes >= bytes && gSurfaces[i].kind == kind &&
+			if (gSurfaces[i].bytes >= bytes && gSurfaces[i].kind == cachedKind &&
 			    !staleAlias) {
 				gSurfaces[i].used = ++gSurfaceUses;
 				*pa = gSurfaces[i].pas[0];
@@ -177,6 +184,9 @@ uint64_t presentSurface(IOMemoryDescriptor *memory, uint64_t bytes, bool blockLi
 	const uint64_t fullBytes = (memory->getLength() + 0xfff) & ~0xfffULL;
 	if (bytes > kPresentSurfaceSpan || bytes > fullBytes)
 		return 0;
+	const uint32_t compKind = blockLinear ? presentCompressedKind(memory) : 0u;
+	bool compressed = compKind != 0u;
+	uint32_t kind = compressed ? compKind : (blockLinear ? TGM_LAYOUT_KIND : 0);
 	PresentSurface &s = gSurfaces[slot];
 	dropSurface(s);
 	if (memory->prepare(kIODirectionOut) != kIOReturnSuccess)
@@ -277,8 +287,18 @@ uint64_t presentSurface(IOMemoryDescriptor *memory, uint64_t bytes, bool blockLi
 		mapped = switch_gpu_vm_map(vm, va, mapBytes, s.mem, 0, static_cast<uint8_t>(kind),
 					   0, &s.mapping);
 	} else {
-		if (switch_gpu_backing_tgm_mem_existing_or_direct(s.backing, s.npages, &s.mem) ==
-		    0) {
+		bool gotCanonical =
+			switch_gpu_backing_tgm_mem_existing(s.backing, s.npages, &s.mem) == 0;
+		if (!gotCanonical && mapBytes == fullBytes &&
+		    s.npages >= SWITCH_GPU_SMMU_GRANULE_PAGES &&
+		    ((s.npages % TGM_COMP_PAGES) != 0u || !switch_gpu_compression_on()) &&
+		    switch_gpu_smmu_ready())
+			gotCanonical =
+				switch_gpu_backing_tgm_mem_big(s.backing, s.npages, &s.mem) == 0;
+		if (!gotCanonical)
+			gotCanonical = switch_gpu_backing_tgm_mem_existing_or_direct(
+					       s.backing, s.npages, &s.mem) == 0;
+		if (gotCanonical) {
 			s.ownsMemory = false;
 		} else {
 			s.ownsMemory = true;
@@ -533,7 +553,7 @@ extern "C" int tegra_gm20b_scanout_copy(const struct TegraScanoutCopy *copy)
 		gPresentSnapshot.display = copy->display;
 		tgm_present_set_owner(copy->display);
 		tgm_present_set_filter_display(copy->display);
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 		tgm_present_read reads[TGM_PRESENT_READS] = {};
 		const uint32_t nreads = tgm_readback_take(copy, source, blockLog2, target, reads);
 		gPresentSnapshot.done = nreads ? tgm_readback_done : presentDone;
@@ -572,7 +592,7 @@ extern "C" int tegra_gm20b_scanout_copy(const struct TegraScanoutCopy *copy)
 	return offerStatus(ret);
 }
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 extern "C" void tegra_gm20b_scanout_bypassed(void)
 {
 	if (!presentLock())

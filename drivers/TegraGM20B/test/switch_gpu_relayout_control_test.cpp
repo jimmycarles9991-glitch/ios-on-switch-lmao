@@ -64,10 +64,6 @@ extern "C" int tgm_vm_new(tgm_vm **out)
 	return 0;
 }
 
-extern "C" void tgm_stats_unlocked(enum tgm_unlocked, uint64_t)
-{
-}
-
 // Each read 1.5 ms after the one before
 extern "C" uint64_t tgm_timestamp_ns(void)
 {

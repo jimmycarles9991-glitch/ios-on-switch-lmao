@@ -5,7 +5,7 @@
 // does this: a slot is claimed and freed by compare-and-swap on its state.
 #include "UsbDmaProbe.h"
 
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
 #include <IOKit/IOLib.h>
 #include <libkern/c++/OSMetaClass.h>
 #include <libkern/c++/OSSymbol.h>

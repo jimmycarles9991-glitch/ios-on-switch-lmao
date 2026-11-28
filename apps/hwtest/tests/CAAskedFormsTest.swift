@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// The Core Animation states the pack holds by deduction (ca_asked.log): those this device's QuartzCore asks for where

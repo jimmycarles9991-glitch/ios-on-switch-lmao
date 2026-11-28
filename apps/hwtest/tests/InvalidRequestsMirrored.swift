@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
 import Metal
 
 /// gpu.gm20b.invalid_requests's arms of requests Metal's validation stops (gpu/MirroredRequests.swift), each in a counter

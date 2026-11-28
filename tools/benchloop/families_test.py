@@ -1,6 +1,6 @@
 import unittest
 
-from tools.benchloop import families, nakbatches, protocol, texels
+from tools.benchloop import families, generators, nakbatches, protocol, report, texels
 from tools.benchloop.sm53 import interlock_spin
 
 
@@ -11,7 +11,16 @@ class FamiliesTest(unittest.TestCase):
         found = families.analyse(planned, {})
         self.assertEqual(found['clock_hz'], families.MEASURED_CLOCK_HZ)
         heads = {line.split()[0] for line in found['summary']}
-        for head in ('clock', 'stall', 'stall-wide', 'xmad-mul', 'icache', 'store2fma'):
+        for head in (
+            'clock',
+            'stall',
+            'stall-wide',
+            'xmad-mul',
+            'icache',
+            'store2fma',
+            'reader',
+            'reader-wide',
+        ):
             self.assertIn(head, heads)
         self.assertTrue(all(v['missing'] for v in found['store2fma'].values()))
 
@@ -21,6 +30,15 @@ class FamiliesTest(unittest.TestCase):
         self.assertIn(
             'interlock.atom.64x64.check-compete missing lost - ns/draw - competitor None buffers', found['summary']
         )
+
+    def test_interlock_clock_probe_wiring(self):
+        planned = generators.GENERATORS['interlock_clock']()
+        self.assertTrue(families.asked(planned))
+        found = families.analyse(planned, {})
+        self.assertIn('interlock_clock', found)
+        self.assertIn('interlock_clock safety s2r_bar missing dt - monotonic False', found['summary'])
+        self.assertIn('interlock_clock safety cs2r_bar missing dt - monotonic False', found['summary'])
+        self.assertIn('interlock_clock', report.analysis('interlock_clock', planned, {}, []))
 
     def test_a_run_of_other_batches_is_not_theirs(self):
         planned = [{'id': 'plain', 'kind': 'noop'}, {'id': 'other', 'kind': 'noop', 'meta': {'family': 'twod'}}]

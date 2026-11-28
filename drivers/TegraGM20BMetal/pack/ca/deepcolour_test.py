@@ -16,7 +16,7 @@ from make_pack import state_key
 from packfile import fnv
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-STAGER = Path(HERE).parents[1] / 'stage-tegra-gm20b-metal.py'
+PREFERENCES = Path(HERE).parents[3] / 'tools/gpu/stage_format.py'
 # A state iOS 27's backboardd drew on the device, with its key (T1 18:06:13 "keyline draw"); the manifest names it
 # PBGRABsovXmw_A3Xhfc
 DRAWN_27 = ('PBGRABsovXmw_A3Xhf', 0x72A38B147949318A)
@@ -27,8 +27,8 @@ def key_hash(tables: caspec.Tables, name: str) -> int:
 
 
 class Preferences(unittest.TestCase):
-    def test_the_stager_turns_deep_colour_off(self):
-        self.assertIs(deepcolour.cif10(STAGER), False)
+    def test_the_staged_preferences_turn_deep_colour_off(self):
+        self.assertIs(deepcolour.cif10(PREFERENCES), False)
 
     def stager(self, text: str) -> Path:
         path = Path(tempfile.mkdtemp()) / 'stager.py'

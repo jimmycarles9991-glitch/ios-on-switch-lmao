@@ -1,4 +1,5 @@
 load("//bazel/lint:defs.bzl", "lint_files")
+load("//kernel/rules:driver_flags.bzl", "IPSW_KIND_FLAGS")
 
 # drivers/SwitchBattery: moved from out/native-a57/root-v1/tree/drivers/SwitchBattery by the layout move.
 load("//kernel/rules:kernel.bzl", "kernel_driver", "kernel_headers")
@@ -29,6 +30,7 @@ kernel_headers()
 
 kernel_driver(
     name = "SwitchBattery",
+    copts = IPSW_KIND_FLAGS,
     hdr_deps = [
         "drivers/SwitchPower",
         "drivers/SwitchSuspend",

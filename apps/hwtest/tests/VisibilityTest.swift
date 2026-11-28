@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Visibility results on the driver (drivers/TegraGM20BMetal/visibility.h): Counting offsets are the

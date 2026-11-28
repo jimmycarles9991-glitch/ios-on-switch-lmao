@@ -164,9 +164,9 @@ TEST(SwitchVICPackedProbe, TheCodeEngineReadsAsBoot21UnderTheCodesItRan)
         EXPECT_EQ(r.mismatches, b.wrong) << b.index;
     }
     EXPECT_EQ(under(13).mismatches, 1024u);
-    EXPECT_EQ(under(13).maxError, 250u);
+    EXPECT_EQ(under(13).maxError, 249u);
     EXPECT_EQ(under(14).mismatches, 1024u);
-    EXPECT_EQ(under(14).maxError, 228u);
+    EXPECT_EQ(under(14).maxError, 226u);
 }
 
 TEST(SwitchVICPackedProbe, TheShippedRowsAreCleanOnTheCodeEngine)

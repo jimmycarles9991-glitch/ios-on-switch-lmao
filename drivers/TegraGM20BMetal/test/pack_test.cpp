@@ -32,7 +32,7 @@ std::string writePack(uint32_t version, uint32_t variants, const char *name)
     pp.variantCount[1] = uint8_t(variants);
     memcpy(file.data() + 0x200, &pp, sizeof pp);
     for (uint32_t i = 0; i < variants; i++) {
-        const gm20b::PackVariant v = {gm20b::AssumeUniformAligned << i, 70000 + i};
+        const gm20b::PackVariant v = {gm20b::AssumeUniformAligned << i, 70000 + i, 0};
         memcpy(file.data() + 0x500 + i * sizeof v, &v, sizeof v);
     }
     const std::string path = std::string(getenv("TEST_TMPDIR") ?: "/tmp") + "/" + name;
@@ -311,8 +311,8 @@ TEST(GM20BPack, RefusesVariantsPastTheirSection)
 
 TEST(GM20BVariants, TheFirstVariantWhoseAssumptionsHoldIsDrawn)
 {
-    const gm20b::PackVariant v[2] = {{gm20b::AssumeUniformAligned | gm20b::AssumeTexsF16, 1},
-                                     {gm20b::AssumeUniformAligned, 2}};
+    const gm20b::PackVariant v[2] = {{gm20b::AssumeUniformAligned | gm20b::AssumeTexsF16, 1, 0},
+                                     {gm20b::AssumeUniformAligned, 2, 0}};
     EXPECT_EQ(gm20b::chooseVariant(v, 2, gm20b::AssumeUniformAligned | gm20b::AssumeTexsF16), 0u);
     EXPECT_EQ(gm20b::chooseVariant(v, 2, gm20b::AssumeUniformAligned | gm20b::AssumeUniformAligned << 1), 1u);
     EXPECT_EQ(gm20b::chooseVariant(v, 2, gm20b::AssumeUniformAligned << 1), 2u);

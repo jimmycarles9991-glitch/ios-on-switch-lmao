@@ -3,6 +3,7 @@
 #include <IOKit/IOInterruptEventSource.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOWorkLoop.h>
+#include <kern/thread_call.h>
 #include "OriginalLegacyFramebufferABI.h"
 #include "SwitchDPModes.h"
 #include "SwitchExternalPlanes.h"
@@ -26,7 +27,7 @@ public:
     void linkDown();
     void modeFailed();
     void detach();
-    bool frameEnd();
+    bool frameEnd(uint64_t stamp = 0, uint64_t continuous = 0);
     void gpuComplete(int status);
 
     bool requested() const
@@ -130,6 +131,25 @@ private:
 
     Slot *slots = nullptr;  // kSlots of them, allocated at begin: the object stays within the kernel's 16 KiB
 
+    struct SlotPaCache {
+        uint32_t seq;
+        const IOMemoryDescriptor *memory;
+        addr64_t firstPa;
+    } slotPaCache[kSlots] = {};
+
+    static constexpr unsigned kValidatedCache = 4;
+
+    struct ValidatedCacheEntry {
+        uint32_t seq;
+        uint32_t swapIdValue;
+        const OriginalLegacySwapRequest *request;
+        uint32_t updated;
+        OSObject *surfaces[kLayers];
+        native_planes::Layer layers[kLayers];
+    };
+
+    ValidatedCacheEntry *validatedCache = nullptr;
+
     // Each layer as the swaps handed over so far gave it (a layer a swap does not update keeps its surface, retained, and
     // geometry); kept across a link drop, cleared at a detach or a change of geometry.
     struct LayerRecord {
@@ -138,9 +158,11 @@ private:
     } layerRecords[kLayers] = {};
 
     SwitchDisplayPort *transport = nullptr;
-    IOWorkLoop *loop = nullptr, *fenceLoop = nullptr;
+    IOWorkLoop *loop = nullptr;
     IOLock *colorLock = nullptr;
-    IOInterruptEventSource *completion = nullptr, *readySource = nullptr, *fenceSource = nullptr;
+    IOInterruptEventSource *completion = nullptr, *readySource = nullptr;
+    thread_call_t fenceCall = nullptr;
+    bool fenceStopping = false;
     switch_gpu_ready_watch *ready = nullptr;
     TegraDisplayB *dcb = nullptr;
     switch_dma_buffer tables = {};
@@ -157,7 +179,6 @@ private:
     int front[kWindows] = {-1, -1, -1}, drawing[kWindows] = {-1, -1, -1};
     int64_t harmonyMatrix[9] = {};
     int64_t accessibilityMatrix[9] = {};
-    uint32_t accessibilityScale = 0x10000u;
     uint64_t slotUses = 0, refreshPeriod = 0, interval = 0, linkGeneration = 0, gpuGeneration = 0;
     uint64_t activeGeometry = 0, selectionGeneration = 0;
     int selectedMode = -1;
@@ -175,8 +196,15 @@ private:
 #endif
     void noteUnshown(unsigned layer, int why);
     static void completionFired(OSObject *owner, IOInterruptEventSource *, int);
-    static void fenceFired(OSObject *owner, IOInterruptEventSource *, int);
+    void fenceWork();
+    void failFence(int result);
     static native_planes::Layer layerOf(const uint8_t *request, unsigned layer, OSObject *surface);
+    void publishSlotPa(unsigned index, const IOMemoryDescriptor *memory, addr64_t firstPa);
+    addr64_t cachedFirstPa(const IOMemoryDescriptor *memory) const;
+    void cacheValidatedLayers(const OriginalLegacySwapRequest *request, uint32_t id, uint32_t updated,
+                              const bool hasSurface[], OSObject *const surfaces[], const native_planes::Layer layers[]);
+    bool lookupValidatedLayers(const OriginalLegacySwapRequest *request, uint32_t id, uint32_t updated,
+                               OSObject *surfaces[], native_planes::Layer layers[]) const;
     void releaseEventSources();
     void publishActiveGeometry();
     void drainSwapQueue();

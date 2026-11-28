@@ -11,6 +11,7 @@ std::vector<std::string> gSwitchLinuxCalls;
 boolean_t switch_linux_stub_interrupts = TRUE;
 int switch_linux_stub_preemption;
 uint64_t switch_linux_stub_now = 5000;
+uint64_t switch_linux_stub_tick = 0;
 wait_result_t switch_linux_stub_wait_result = THREAD_AWAKENED;
 
 namespace {
@@ -78,7 +79,9 @@ void IOFree(void *address, vm_size_t size)
 
 uint64_t mach_absolute_time(void)
 {
-    return switch_linux_stub_now;
+    const uint64_t now = switch_linux_stub_now;
+    switch_linux_stub_now += switch_linux_stub_tick;
+    return now;
 }
 
 void absolutetime_to_nanoseconds(uint64_t abs, uint64_t *ns)
@@ -239,6 +242,16 @@ boolean_t thread_call_enter(thread_call_t call)
 boolean_t thread_call_enter_delayed(thread_call_t call, uint64_t deadline)
 {
     switch_linux_record("thread_call_enter_delayed %llu", static_cast<unsigned long long>(deadline));
+    const bool was = call->pending;
+    call->pending = true;
+    return was ? TRUE : FALSE;
+}
+
+boolean_t thread_call_enter_delayed_with_leeway(thread_call_t call, thread_call_param_t, uint64_t deadline,
+                                                uint64_t leeway, uint32_t flags)
+{
+    switch_linux_record("thread_call_enter_delayed_with_leeway %llu %llu %#x",
+                        static_cast<unsigned long long>(deadline), static_cast<unsigned long long>(leeway), flags);
     const bool was = call->pending;
     call->pending = true;
     return was ? TRUE : FALSE;

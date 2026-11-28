@@ -2903,14 +2903,30 @@ fn apply(m: &mut TypedModule, plan: &Plan) -> Result<(), Error> {
         }
         let mut splits: Vec<((BlockId, usize), Split<'_>)> = splits.into_iter().collect();
         loads.sort_unstable();
-        for (b, i) in loads.iter().rev() {
-            let node = block_mut(m, *b)?.insts.remove(*i);
-            removed(m, node.result.into_iter());
-            for ((ub, ui), _) in &mut splits {
-                if *ub == *b && *ui > *i {
-                    *ui -= 1;
+        loads.dedup();
+        let mut gone_results = Vec::with_capacity(loads.len());
+        for group in loads.chunk_by(|a, b| a.0 == b.0) {
+            let Some(&(b, _)) = group.first() else {
+                continue;
+            };
+            let mut gone = group.iter().map(|&(_, i)| i).peekable();
+            let mut index = 0usize;
+            block_mut(m, b)?.insts.retain(|node| {
+                let drop = gone.next_if_eq(&index).is_some();
+                index = index.wrapping_add(1);
+                if drop {
+                    if let Some(r) = node.result {
+                        gone_results.push(r);
+                    }
                 }
-            }
+                !drop
+            });
+        }
+        removed(m, gone_results.into_iter());
+        for ((ub, ui), _) in &mut splits {
+            let start = loads.partition_point(|&(b, _)| b < *ub);
+            let end = loads.partition_point(|&(b, i)| (b, i) < (*ub, *ui));
+            *ui = ui.saturating_sub(end.saturating_sub(start));
         }
         splits.sort_unstable_by_key(|(at, _)| *at);
         let mut sampled = Vec::new();

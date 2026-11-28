@@ -30,7 +30,7 @@ public:
     // buffer before left open was abandoned: the device encodes one at a time.
     TimedBuffer *begin(uint32_t stamp)
     {
-        std::lock_guard<gm20b::Mutex> l(lock_);
+        std::lock_guard<gm20b::UnfairMutex> l(lock_);
         if (open_) {
             open_->state = TimedBuffer::State::Dropped;
             open_ = nullptr;
@@ -57,7 +57,7 @@ public:
     // The encoder: the ask taken with no capture made of it
     void cancel()
     {
-        std::lock_guard<gm20b::Mutex> l(lock_);
+        std::lock_guard<gm20b::UnfairMutex> l(lock_);
         begun_ = askSerial_.load(std::memory_order_acquire);
         left_ = 0;
     }
@@ -110,7 +110,7 @@ public:
     // The encoder, once the command buffer was submitted as `seqno` on the channel of `generation`
     void commit(TimedBuffer &b, uint32_t seqno, uint64_t generation)
     {
-        std::lock_guard<gm20b::Mutex> l(lock_);
+        std::lock_guard<gm20b::UnfairMutex> l(lock_);
         if (open_ != &b)
             return;
         b.seqno = seqno;
@@ -133,7 +133,7 @@ public:
     std::vector<std::string> report(const volatile TimedMark *marks, const char *process, Ran &&ran, Stamps &&stamps,
                                     GpuNs &&gpuNs)
     {
-        std::lock_guard<gm20b::Mutex> l(lock_);
+        std::lock_guard<gm20b::UnfairMutex> l(lock_);
         TimedLog log{serial_, lines_, {}};
         for (uint32_t i = 0; i < taken_; i++) {
             TimedBuffer &b = buffers_[i];
@@ -162,7 +162,7 @@ public:
 
     DrawTimesTaken taken()
     {
-        std::lock_guard<gm20b::Mutex> l(lock_);
+        std::lock_guard<gm20b::UnfairMutex> l(lock_);
         return result_;
     }
 
@@ -257,7 +257,7 @@ private:
         ended_ = result_.ended = true;
     }
 
-    gm20b::Mutex lock_;
+    gm20b::UnfairMutex lock_;
     std::atomic<uint32_t> askSerial_{0}, asked_{0}, committed_{0};
     uint32_t begun_ = 0, left_ = 0, serial_ = 0, askedCount_ = 0, superseded_ = 0, firstStamp_ = 0;
     uint32_t taken_ = 0, marks_ = 0, passes_ = 0, states_ = 0, lines_ = 0;

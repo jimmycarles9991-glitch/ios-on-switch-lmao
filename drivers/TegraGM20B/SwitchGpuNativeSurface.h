@@ -15,7 +15,10 @@ struct switch_gpu_native_surface_view {
 extern "C" {
 #endif
 int switch_native_surface_gpu_acquire(void *surface, struct switch_gpu_native_surface_view *view);
+int switch_native_surface_gpu_acquire_write(void *surface,
+					    struct switch_gpu_native_surface_view *view);
 void switch_native_surface_gpu_release(struct switch_gpu_native_surface_view *view);
+void switch_native_surface_gpu_written(void *owner);
 #ifdef __cplusplus
 }
 #endif

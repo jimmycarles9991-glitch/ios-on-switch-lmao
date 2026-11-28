@@ -44,6 +44,7 @@ enum {
 	TegraGM20BMethodBoPark = 35,
 	TegraGM20BMethodBoUnpark = 36,
 	TegraGM20BMethodPackImageMap = 41,
+	TegraGM20BMethodSparesGiveBack = 43,
 
 	TegraGM20BMaxBindOps = 100,
 	TegraGM20BMaxPushes = 255,
@@ -154,8 +155,13 @@ struct TegraGM20BAbiSubmitEvents {
 	uint64_t reserved;
 };
 
-/* Returns an immutable read-only representation of an attested IOSurface BO. handle=0 means this format has no representation view.
- * A native view's generation mismatch at SubmitJob returns kIOReturnNotReady before publication. */
+enum {
+	TegraGM20BNativeSurfaceWrite = 1u << 0,
+};
+
+/* Returns a representation of an attested IOSurface BO. handle=0 means this format has no representation view.
+ * Without TegraGM20BNativeSurfaceWrite the BO is read-only; with it, an unwritten 8-bit 4:2:0 surface may publish
+ * a writable block-linear native picture. A native view's generation mismatch at SubmitJob returns kIOReturnNotReady. */
 struct TegraGM20BAbiNativeSurfaceView {
 	uint64_t source_handle;
 	uint32_t flags, reserved;
@@ -234,6 +240,15 @@ enum {
 		<< 3, /* Coherent command/control allocation; bounded ready-page preference. */
 	TegraGM20BBoSystem = 1u
 		<< 4, /* Coherent write-combined system pages (bypasses GPU pool; parkable). */
+	/* Debug kernels only (a release kernel refuses it): an uncompressed BO on direct physical addresses, never compacted
+	 * into the Tegra SMMU's 64 KiB big pages (HW Test gpu.perf.fill's A/B of that compaction) */
+	TegraGM20BBoProbeDirect = 1u << 5,
+};
+
+/* TegraGM20BAbiBoAllocReply.reserved, debug kernels only (0 in a release kernel) */
+enum {
+	TegraGM20BBoReplySmmu = 1u
+		<< 0, /* the GPU reaches the BO's memory through the Tegra SMMU */
 };
 
 /* Method 2. Zero-filled pages below 4 GiB. map_token is the clientMemoryForType type for IOConnectMapMemory64. */
@@ -335,6 +350,12 @@ struct TegraGM20BAbiBoPark {
 enum {
 	TegraGM20BUnparkResident = 0,  /* original BO remapped at its parked VA; GPU binds intact */
 	TegraGM20BUnparkReclaimed = 1, /* kernel reclaimed pages; parked VA reservation kept */
+};
+
+/* Method 43. The process heard memory pressure or went to the background: under the VM's pressure the kernel gives its
+ * zeroed spares back and reclaims parked BOs at once, where it would otherwise wait for the next BoAlloc to look. */
+struct TegraGM20BAbiSparesGiveBack {
+	uint32_t reserved[2];
 };
 
 /* Method 36. Remaps a parked BO at its parked VA, or reports TegraGM20BUnparkReclaimed. */

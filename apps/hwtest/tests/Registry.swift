@@ -1,10 +1,27 @@
+@testable import HWTestCommon
 import HWTestCore
-import HWTestGPU
+@testable import HWTestDepth
+@testable import HWTestDisplay
+@testable import HWTestForms
+import HWTestKit
+@testable import HWTestMetal
+@testable import HWTestNative
+@testable import HWTestPaths
+@testable import HWTestRecovery
+import HWTestScenes
+@testable import HWTestShaders
+@testable import HWTestShared
+@testable import HWTestSystem
+@testable import HWTestTextures
+@testable import HWTestVideoTests
 
 public enum Registry {
-    /// The GPU scenes come first: the first of them reproduces the process's first command buffer.
+    /// The GPU scenes come first: the first of them reproduces the process's first command buffer. The compressed
+    /// targets follow it, while the GPU's ZBC table still has the entries they ask for (CompressedTargetsTest).
     static let gpuScenes: [any HWTest] =
-        Scenes.all.map { GPUSceneTest(scene: $0) } + [PackHitCostTest(), CAStateSweepTest(), CAAskedFormsTest()]
+        [GPUSceneTest(scene: Scenes.firstSurface), CompressedTargetsTest()]
+            + Scenes.all.dropFirst().map { GPUSceneTest(scene: $0) }
+            + [PackHitCostTest(), CAStateSweepTest(), CAAskedFormsTest()]
 
     static let metal: [any HWTest] = [
         MetalDeviceTest(), MetalComputeTest(), MetalColorPassTest(), MetalDepthStencilTest(), MetalMSAATest(),
@@ -16,11 +33,11 @@ public enum Registry {
         PackedPlaneTargetTest(), PackedSpareBitsTest(), XRTwoPlaneTest(),
         MPSBlurTest(), MPSMatrixTest(), MetalRuntimeCompileTest(), CoreImageLibraryTest(),
         MetalBenchmarkTest(), FetchBlendCostTest(), CompressionChurnTest(), RotatedTargetTest(), IntegerTargetTest(),
-        BlendKillTest(), WrittenTextureTest(),
+        BlendKillTest(), WrittenTextureTest(), AegirMoonTest(), BytesAddressTest(), PackedFetchReadTest(),
         Float32FilterTest(), CompareSamplerTest(), SurfaceBufferTest(), OwnAnswersTest(), ComputeFactsTest(),
         SourceLibraryTest(), StitchedLibraryTest(), SamplerTableTest(), FunctionTagsTest(),
         FunctionArgumentEncoderTest(), ArgumentGridsTest(), PlainStructEncoderTest(), BufferTexture16Test(),
-        PlaneRows16Test(), CompressedTargetsTest(), ZcullTest(), MipTwodTest(), MipCandidatesTest(), MipLodTest(),
+        PlaneRows16Test(), ZcullTest(), MipTwodTest(), MipCandidatesTest(), MipLodTest(),
         MipmapVolumeTest(), ShadowStencilTest(), ShadowStencilDepthTest(),
         VisibilityTest(), FixedBlendRuleTest(), FixedBlendFormatsTest(), PrivateCompressionTest(),
         PackSlotCleanTest(), ZoomTargetTest(),
@@ -28,9 +45,10 @@ public enum Registry {
         IconCornersTest(), TextureBufferTest(), IconSmallSizesTest(), IconPasscodeTest(), IconCalendarTest(),
         CompileSharedTest(), CompileFirstDrawTest(), CompileStageLibraryTest(), CompileAnswerLatencyTest(),
         CompileSharedStagesTest(),
-        DrawBandsTest(), DispatchPiecesTest(), ProbeCtaTest(), ProbeMacroWfiTest(), ForeignWaitIsolationTest(),
+        DrawBandsTest(), GPURatesTest(), GPUFillTest(), GPUCaBindingTest(), BandsPlanarInstancedTest(),
+        DispatchPiecesTest(), ProbeCtaTest(), ProbeMacroWfiTest(), ForeignWaitIsolationTest(),
         PosterTargetsTest(),
-        PushScanTargetsTest(), ResolveCostTest(), JobRefusalLinesTest(),
+        PushScanTargetsTest(), ResolveCostTest(), MapsFetchTest(), JobRefusalLinesTest(),
         MsaaFirstUseTest(), StoredDepthTest(), ZetaMoveTest(), ZetaKeptTest(), ZcViewFormatsTest(),
         ZcZetaLayersTest(), ZcZetaShadowTest(), ZcMixedTest(), ZcStencilCriterionTest(),
         ResolveTwodTest(), FillTextureTest(), StorageCompressedTest(), SharedLayoutTest(), PredicationTest(),
@@ -66,15 +84,17 @@ public enum Registry {
     static let gm20bRoutes: [any HWTest] =
         FetchShapeTest.all + [
             DepthFormatMismatchTest.attached, DepthFormatMismatchTest.unattached, HiddenDepthTest(),
-            BorderTableFullTest(), XrSrgbTest.bgr, XrSrgbTest.bgra, ComputeInvalidTest(), FillShapesTest(),
-            WordMipmapsTest(), StencilByteCopiesTest(), KernelYcbcrOnePlaneTest(), KernelConvertedWriteTest(),
+            BorderTableFullTest(), XrSrgbTest.bgr, XrSrgbTest.bgra, XrBesideNativeTest(), Argb8SrgbFormsTest(),
+            ComputeInvalidTest(),
+            FillShapesTest(), WordMipmapsTest(), StencilByteCopiesTest(), KernelYcbcrOnePlaneTest(),
+            KernelConvertedWriteTest(),
             DynamicStridesTest(), ReachShapesTest(), ResolveCodesTest(), ResolveOneSampleSwapTest(),
             SeparateStencilResolveTest(), P3YcbcrStoreTest(), Depth16ShaderTestsTest(), PlanesBlitsTest(),
             IcbComputeFormsTest(), StandInResolveTest(), StandInLayeredTest(), ResolveOtherCountTest(),
             ResolveCodesPartsTest(), RtalPastLayersTest(), XrPlanesImagesTest(), Bgra10XrResolveTest(),
             ViewSliceTargetTest(), NoRenderUsageTest(), P3YcbcrStoreSubsampledTest(), PlaneInBlocksTest(),
             Rg8SrgbTargetTest(), TextureBufferTargetTest(), ZetaApartTest(), ZetaResolvePartsTest(),
-            YcbcrNoRenderUsageTest(), MixedSamplesTest(), MixedEndRowsTest(),
+            YcbcrNoRenderUsageTest(), MixedSamplesTest(), MixedMergeProbeTest(), MixedEndRowsTest(),
             SameBitsTest(), Depth16LayeredTestsTest(), LayersPastTest(), LayersPastDepthTest(), TexelBufferReachTest(),
             FetchTessellatedTest(), PlanarRenderThenSampleTest(), XrTexelBufferStoresTest(),
             XrTexelBufferSurfaceTest(), TurnedStandInTargetsTest(), Bgra10XrSrgbEmptyPassTest(), StorageFormsTest(),
@@ -86,11 +106,14 @@ public enum Registry {
             SrgbEncodeTest(),
             ExactRoundTest(),
             X1GpuVicSyncTest(),
+            X1BridgeJoblessTest(),
             FrameWeightsTest(),
             YcbcrOnePlaneTargetsTest(),
             YcbcrRowsPastPageTest(),
             SM53LayoutTest(),
             FloatTestsTest(),
+            PowrSpecialsTest(),
+            HalfMinMaxTest(),
             YcbcrOverlapRowsTest(), YcbcrOverlapWordsTest(), XrCopyClampTest(),
             XrPlanesRowsOff32Test(), XrWrittenOnePlaneTest(),
             XrNextPlaneTest(), YcbcrAnySurfaceTest(), XrPlanesOff16Test(), XrAlphaSinkTest(),
@@ -118,13 +141,15 @@ public enum Registry {
         + PlaybackTest.all + VideoEncodeTest.all + VideoEncodeIdleTest.all
         + [VideoEncodeBFramesTest(), NVENCInputLayoutTest(), VideoTranscodeTest(), VideoGPUSourceTest()]
 
+    /// The NVJPG tile probe last: it tells NVJPG tilings no driver uses, and a job the kernel cancels resets the engine
     static let images: [any HWTest] =
         ImageDecodeTest.all + [
-            JPEGAfterIdleTest(), JPEGMappingLifetimeTest(), HEICEncodeTest(), CoreImageTest(), PixelTransferTest(),
+            JPEGAfterIdleTest(), JPEGMappingLifetimeTest(), HEICEncodeTest(), CoreImageTest(),
+            PixelTransferTest(),
             PixelTransfer422Test(),
             PixelTransferRouteTest(),
             VICLumaTest(),
-            VICGamutTest(), VICTagsTest(),
+            VICGamutTest(), VICTagsTest(), NVJPGCopyGuardTest(), NVJPGTileProbeTest(),
         ]
 
     static let audio: [any HWTest] = [
@@ -143,8 +168,8 @@ public enum Registry {
             ScanoutRoutesTest(), PlainSurfacesTest(), DisplaySnapshotTest(), WakeTest(),
             PlanesCroppedTest(), PlaneTagsTest(),
         ] + DisplayWindowProbeTest.all + [LandscapeVideoTest(), LandscapeDownscaleTest()]
-        // Holds the swaps for a second each; the forced producer failure last.
-        + [Host1xFlipTest.trial, Host1xFlipTest.teardown]
+        // Holds the swaps for a second or two each; the forced producer failure last.
+        + [Host1xFlipTest.trial, Host1xFlipTest.windowSyncpoints, Host1xFlipTest.vblank, Host1xFlipTest.teardown]
 
     static let sensorsAndInput: [any HWTest] = [
         AccelerometerTest(), GyroscopeTest(), DeviceMotionTest(), AmbientLightTest(), ControllersTest(), RailTest(),
@@ -166,7 +191,9 @@ public enum Registry {
         CPUIPIPingPongTest(), HogPacingTest(),
         DispatchSyncTest(), DispatchSyncWorkloopTest(), WorkloopSyncTest(), WidgetsRenderTest(), IconRenderTest(),
         DispatchSyncHandoffTest(),
-        SnapshotPurgeableTest(), RecorderHangDumpTest(),
+        SnapshotPurgeableTest(), RecorderHangDumpTest(), SharedCacheNestedTest(),
+        // Deliberate faults: an interrupt that never delivers panics the kernel.
+        MCFaultInterruptTest(),
     ]
 
     static let compositor: [any HWTest] =
@@ -198,13 +225,21 @@ public enum Registry {
     /// process's compressed asks while each runs; then fills the GPU's ZBC colour table for the rest of the boot
     /// (gpu.gm20b.zbc_full: no test after it counts ZBC hits); then programs a unit no other driver here drives (across
     /// pass boundaries, then each program forced), which kills the channel when its setup is wrong: each app's last.
+    /// Then the bench's two probes, which may kill the bench's own channel: SR_VIRTID read in a pixel program, and
+    /// MEM_OP_B, a host method clb06f.h says gm20x no longer has.
     public static let last: [any HWTest] = [
         X1TextureExtentsTest(), CompressionGivebackTest(), CompressedFloorTest(), ZbcFullTest(),
         IteratedBlendPassesTest(), FetchRungTest(
             id: "gpu.gm20b.fetch_rung3",
             rung: 3
         ),
+        InterlockAffinityTest(), L2FlushWritebackTest(),
     ]
+    /// State no device run has pushed before: each app's very last, after the recovery tests too, so a channel the GPU
+    /// stops for it misleads no test after it (tools/devicerun hwtest_test holds both apps to it). gpu.perf.knobs and
+    /// gpu.perf.nvn push new values of methods the driver pushes already (knobs, zcull formats and bounds) until their
+    /// first card run; gpu.perf.first_touch, last of all, pushes method 0x0f78 and knob 0x06164010.
+    public static let firstTouch: [any HWTest] = [GPUKnobsTest(), GPUNvnTest(), GPUFirstTouchTest()]
     /// Reset the copy engine under the present, then kill the app's raw channel: each app runs them after all its other
     /// tests, so a failed recovery spoils none of them.
     public static let recovery: [any HWTest] = [

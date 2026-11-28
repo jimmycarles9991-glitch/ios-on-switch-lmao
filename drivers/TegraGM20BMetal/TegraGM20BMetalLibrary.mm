@@ -3,6 +3,7 @@
 #import "TegraGM20BMetalInternal.h"
 #import "TegraGM20BMetalPipelineKey.h"
 #import "TegraGM20BMetalStatesKey.h"
+#include <os/log.h>
 #include "metallib.h"
 
 // The function list entry's TESS tag in the AIR slice the facade read (MetallibEntries.h); false where the facade read none
@@ -147,6 +148,8 @@ static id functionNotFound(NSString *name, NSError **error)
         return functionNotFound(d.name, error);
     if ((d.options & MTLFunctionOptionCompileToBinary) &&
         _functions.type(d.name.UTF8String) != MTLFunctionTypeVisible) {
+        os_log_error(gm20bLog(), "SwitchMetal: %{public}s: CompileToBinary refused for non-visible function %{public}s",
+                     getprogname(), d.name.UTF8String ?: "nil");
         if (error)
             *error =
                 [NSError errorWithDomain:MTLLibraryErrorDomain

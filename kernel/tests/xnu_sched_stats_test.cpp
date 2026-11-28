@@ -10,6 +10,7 @@
 #include "xnu_sched_stats_harness.h"
 
 using testing::HasSubstr;
+using testing::Not;
 
 namespace {
 std::string Format(const char *label, int pid, uint8_t base, uint8_t sched, uint8_t mode, uint8_t qos, uint8_t bucket,
@@ -75,6 +76,69 @@ TEST(XnuSchedStats, EntryNamesTheClassAndTheWaits)
 
     xnu_sched_set_counts(3, 2, 5400);
     EXPECT_THAT(Format("display.primary", 53, 31, 31, 3, 0, 3), HasSubstr(", 3 fail-safe, CPU limit 2/5400 us"));
+}
+
+// 25 Nov: backboardd's main thread had no run in the 19:16:42-52 and 19:16:52-17:02 windows, then waited 32.6 s for its
+// first run of 19:17:02-12. The wait was real (SwitchBusy saw 63.96 s of the stretch waiting for a core), but its entry
+// read as a wait inside the window.
+TEST(XnuSchedStats, ALongestWaitThatBeganBeforeTheWindowSaysSo)
+{
+    xnu_sched_reset();
+    xnu_sched_note(32555950);
+    xnu_sched_take_longest(32555950, 1036000, 1058555);
+    EXPECT_EQ(xnu_sched_before_ms(), 22555u);
+    EXPECT_THAT(Format("backboardd.main", 69, 53, 53, 3, 4, 1),
+                HasSubstr("1 runs 32555950/32555950/32555950 us, longest began 22555 ms before the window"));
+}
+
+// The 25 Nov sequence through stats.c's own helpers, in uptime: ten runs in the first window, two windows with no run,
+// then the dispatch that ends a 32.556 s wait. Its entry names the window start two empty takes moved forward.
+TEST(XnuSchedStats, AWaitAcrossTwoEmptyWindowsIsPlacedAgainstTheWindowItEndsIn)
+{
+    constexpr uint64_t kSecond = 1000000;
+    const auto take = [](uint64_t at) {
+        std::string out(256, '\0');
+        out.resize(xnu_sched_timeline_take(at, out.data(), out.size()));
+        return out;
+    };
+    xnu_sched_timeline_reset();
+    (void)take(1000 * kSecond);
+    for (uint64_t i = 0; i < 10; i++) {
+        xnu_sched_timeline_dispatch((1000 * kSecond) + (100000 * i), (1000 * kSecond) + (100000 * i) + 64);
+    }
+    EXPECT_EQ(take(1010 * kSecond), "backboardd.main[69] 53/53 TS IN FG: 10 runs 64/64/64 us");
+    EXPECT_EQ(take(1020 * kSecond), "backboardd.main[69] 53/53 TS IN FG: 0 runs 0/0/0 us");
+    EXPECT_EQ(take(1030 * kSecond), "backboardd.main[69] 53/53 TS IN FG: 0 runs 0/0/0 us");
+    xnu_sched_timeline_dispatch(1007 * kSecond, (1007 * kSecond) + 32556000);
+    EXPECT_EQ(take(1040 * kSecond), "backboardd.main[69] 53/53 TS IN FG: 1 runs 32556000/32556000/32556000 us, "
+                                    "longest began 23000 ms before the window");
+}
+
+TEST(XnuSchedStats, ALongestWaitInsideTheWindowSaysNothingMore)
+{
+    xnu_sched_reset();
+    xnu_sched_note(900);
+    xnu_sched_take_longest(900, 1060000, 1058555);
+    EXPECT_EQ(xnu_sched_before_ms(), 0u);
+    xnu_sched_take_longest(0, 0, 1058555);
+    EXPECT_EQ(xnu_sched_max(), 0u);
+    EXPECT_EQ(xnu_sched_before_ms(), 0u);
+    xnu_sched_take_longest(900, 1000, 0);
+    EXPECT_EQ(xnu_sched_before_ms(), 0u);
+    EXPECT_THAT(Format("display.primary", 53, 54, 54, 2, 0, 0), Not(HasSubstr("began")));
+}
+
+// The word's halves saturate rather than wrap, and its order is the wait's: a longer wait wins whatever its start.
+TEST(XnuSchedStats, TheLongestWordSaturatesAndOrdersByWait)
+{
+    EXPECT_GT(xnu_sched_longest(2, 0), xnu_sched_longest(1, UINT32_MAX));
+    EXPECT_EQ(xnu_sched_longest(UINT64_MAX, UINT64_MAX), UINT64_MAX);
+    xnu_sched_reset();
+    xnu_sched_take_longest(1ULL << 40, 5, 10);
+    EXPECT_EQ(xnu_sched_max(), UINT32_MAX);
+    EXPECT_EQ(xnu_sched_before_ms(), 5u);
+    xnu_sched_take_longest(900, UINT64_MAX, 1ULL << 33);
+    EXPECT_EQ(xnu_sched_before_ms(), 0u) << "a start saturated after 49.7 days of uptime places nothing";
 }
 
 TEST(XnuSchedStats, EntryStaysInsideItsBuffer)

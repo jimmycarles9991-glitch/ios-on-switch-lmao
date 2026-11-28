@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// setDepthBias:slopeScale:clamp: with infinite and NaN factors on the driver, against the depths an M4 Max stores

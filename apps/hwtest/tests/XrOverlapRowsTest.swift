@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// RGB10A8_2P_XR10 over 'b3a8' planes whose rows overlap inside a plane (gpu/XrOverlapRows.swift), against an M4 Max

@@ -82,11 +82,12 @@ public:
     static bool present();
     static bool answering();
 
-    void probe(bool ldoOn, bool capture);
+    void probe(bool ldoOn, bool capture, void (*waitMs)(void *, uint32_t) = nullptr, void *waitCtx = nullptr);
 
     static uint16_t read(uint8_t reg);
 
-    void biasStandby();
+    void biasStandbyBegin();
+    void biasStandbyFinish();
     void biasOff();
 
     bool biasIsOn() const
@@ -100,9 +101,26 @@ public:
     void powerCapture();
     void powerCaptureOff();
 
-    void routeUp(rt5639::Route to);
-    void routeDown();
+    void speakerRouteUpBegin();
+    void speakerRouteUpClassD();
+    void speakerRouteUpFinish();
+    void speakerRouteDownEarly();
+    void speakerRouteDownBegin();
+    void speakerRouteDownFinish();
+
+    void headphoneRouteUpBegin();
+    void headphoneRouteUpDepop();
+    void headphoneRouteUpFinish();
+    void headphoneRouteDownEarly();
+    void headphoneRouteDownBegin();
+    void headphoneRouteDownFinish();
+
     void mute(bool muted);
+
+    bool isMuted() const
+    {
+        return outputMuted;
+    }
 
     // Hybrid headphone analog stage: regVal in [8..39] (0.0 dB down to -46.5 dB in 1.5 dB steps).
     void setHeadphoneAnalog(uint8_t regVal, bool muted);
@@ -113,7 +131,8 @@ public:
         return currentRoute;
     }
 
-    bool detectHeadset(bool jackIn);
+    void detectHeadsetBegin();
+    bool detectHeadsetFinish();
 
     static bool jackPlugged(uint16_t irqStatus)
     {

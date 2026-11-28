@@ -29,7 +29,22 @@ enum {
 	/* "foreign_jobs=N foreign_fences=N foreign_promises=N foreign_events=N foreign_host1x=N": monotonic compositor
 	 * foreign-wait totals since boot (TGM_STATS) */
 	TegraGM20BPathsOpForeignWaits = 6,
+	/* "ids=a,b,c values=x,y,z": three host1x syncpoints for HW Test probes' GPU increments (gpu.x1.clean_l2_syncpoint,
+	 * gpu.x1.shadow_ram), taken from host1x at the first ask and never waited on, and their values now. A process
+	 * without SWITCH_GPU_PROBES_ENTITLEMENT gets kIOReturnNotPrivileged. */
+	TegraGM20BPathsOpProbeSyncpts = 7,
+	/* "jobless=N": host1x consumers' bridges that waited on the syncpoint of a channel of a process with the caller's
+	 * name, live or closed, with no GPU job of their own (TegraGM20BGpu.h tgm_chan_jobless; HW Test
+	 * gpu.x1.bridge_jobless) */
+	TegraGM20BPathsOpBridge = 8,
+	/* "colour=U/N depth=U/N c=FF:DS0,DS1,DS2,DS3;... d=FF:DS;...": the GPU's ZBC tables, every process's: entries held of
+	 * the slots, then each held entry's NV9097 format and SET_*_CLEAR_VALUE words in hex (TegraGM20BABI.h method 19) */
+	TegraGM20BPathsOpZbc = 9,
 };
+
+/* HW Test's alone: TegraGM20BPathsOpProbeSyncpts, and the facade's raw 3D-class methods (TegraGM20BMetalProbe.mm), which
+ * pass none of the encoders' checks and can increment any host1x syncpoint */
+#define SWITCH_GPU_PROBES_ENTITLEMENT "com.brunostjohn.switch.gpu-probes"
 
 struct TegraGM20BAbiPaths {
 	uint32_t op;
@@ -45,12 +60,12 @@ struct TegraGM20BAbiPathsSpan {
 
 /* Counts: "flags=0x... pid=N name=N ...", NUL-terminated */
 struct TegraGM20BAbiPathsReply {
-	char line[512];
+	char line[1024];
 };
 
 #ifdef __cplusplus
 static_assert(sizeof(TegraGM20BAbiPaths) == 8, "TegraGM20BAbiPaths layout");
-static_assert(sizeof(TegraGM20BAbiPathsReply) == 512, "TegraGM20BAbiPathsReply layout");
+static_assert(sizeof(TegraGM20BAbiPathsReply) == 1024, "TegraGM20BAbiPathsReply layout");
 static_assert(sizeof(TegraGM20BAbiPathsSpan) == 120, "TegraGM20BAbiPathsSpan layout");
 #endif
 #endif

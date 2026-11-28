@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #include "switch_nvdec_completions_stubs.h"
-#define SWITCH_DCACHE_OP(op, address) ((void)(address))
-#define SWITCH_DCACHE_BARRIER()       ((void)0)
+static std::vector<std::string> dcacheOps;
+#define SWITCH_DCACHE_OP(op, address) \
+    do {                              \
+        (void)(address);              \
+        dcacheOps.emplace_back(op);   \
+    } while (0)
+#define SWITCH_DCACHE_BARRIER() ((void)0)
 #include "../SwitchNVDECCompletions.cpp"
 
 struct switch_gpu_backing {
@@ -34,6 +39,8 @@ protected:
 
     void SetUp() override
     {
+        dcacheOps.clear();
+        switch_test_lock_acquisitions = 0;
         switch_test_sent.clear();
         switch_test_released_ports.clear();
         switch_test_rights.clear();
@@ -271,5 +278,24 @@ TEST_F(SwitchNVDECCompletionsTest, TeardownReleasesTheKeptRightBeforeTheLastComp
     EXPECT_EQ(switch_test_rights[kOtherPort], 0);
     completion.done(completion.context, 86, -5);
     EXPECT_TRUE(switch_test_sent.empty());
+}
+
+TEST_F(SwitchNVDECCompletionsTest, CompletionTakesSingleLockAndUsesPureInvalidateOnAlignedStatus)
+{
+    switch_test_lock_acquisitions = 0;
+    EXPECT_EQ(arm().done, nullptr);
+    EXPECT_EQ(switch_test_lock_acquisitions, 0u);
+
+    ASSERT_EQ(listen(kPort), kIOReturnSuccess);
+    const auto completion = arm();
+    ASSERT_NE(completion.done, nullptr);
+    status(0, 42);
+    dcacheOps.clear();
+    switch_test_lock_acquisitions = 0;
+    completion.done(completion.context, 90, 0);
+    EXPECT_EQ(switch_test_lock_acquisitions, 1u);
+    ASSERT_FALSE(dcacheOps.empty());
+    for (const auto &op : dcacheOps)
+        EXPECT_EQ(op, "ivac") << "status buffer must be invalidated with dc ivac, never dc civac";
 }
 }  // namespace

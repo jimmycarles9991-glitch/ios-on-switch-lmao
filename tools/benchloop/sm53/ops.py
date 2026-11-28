@@ -107,8 +107,12 @@ PAIR_FORMS: dict[str, Callable[[int], Instr]] = {
     'MOV32I': lambda d: e.mov32i(d, 0x3F000000),
     'SEL': lambda d: e.sel(d, K1, K2, PT),
     'ISETP': lambda _: e.isetp(0, K1, K2, 'lt s32'),
+    'FSETP': lambda _: e.fsetp(0, K1, K2, 'lt'),
     'MUFU': lambda d: e.mufu(d, K1, 'rcp'),
     'I2F': lambda d: e.i2f(d, K1),
+    'F2F': lambda d: e.f2f(d, K1, 'round'),
+    # c[1][0], the first initial register's word
+    'LDC': lambda d: e.ldc(d, e.RZ, 1),
 }
 PAIRS = (
     ('FFMA', 'FFMA'),

@@ -2,6 +2,8 @@ import AVFoundation
 import CoreMedia
 import CoreVideo
 import HWTestCore
+import HWTestKit
+import HWTestShared
 import IOSurface
 import UIKit
 
@@ -89,7 +91,9 @@ struct PlaneInUseTest: HWTest {
         guard !before.isEmpty else {
             var metrics = Metrics()
             metrics.set("sysctl", KernelSysctl.code(unread))
-            return .skip(KernelSysctl.unreadable("kern.switch_planes_*", unread), metrics)
+            return .skip(
+                KernelSysctl.unreadable("kern.switch_planes_*", unread, flag: "--//bazel:stats_frame"), metrics
+            )
         }
         let run = await context.onStage(fullScreen: true) { stage -> PlaneInUseRun in
             let run = PlaneInUseRun()

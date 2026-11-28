@@ -86,12 +86,7 @@ inline bool mipRoutable(const MipChain &c, bool twod, bool threeD)
 inline void emitGenerateLayers(Push &p, const MipChain &c, uint64_t va, uint32_t fmt2d, uint32_t first, uint32_t last,
                                uint32_t firstLayer, uint32_t layers, bool point = false)
 {
-    for (uint32_t layer = firstLayer; layer < firstLayer + layers; layer++) {
-        if (point)
-            emitPointGenerate(p, c, va + layer * c.arrayStride, fmt2d, first, last);
-        else
-            emitGenerate(p, c, va + layer * c.arrayStride, nullptr, fmt2d, first, last);
-    }
+    emitGenerateLayersRange(p, c, va, fmt2d, first, last, firstLayer, layers, point);
 }
 
 }  // namespace fx

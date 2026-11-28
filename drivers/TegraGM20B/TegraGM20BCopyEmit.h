@@ -13,6 +13,7 @@ extern "C" {
 #define TGM_FILL_SETUP_DWORDS 4u
 #define TGM_FILL_PITCH_DWORDS 3u
 #define TGM_FILL_LINES_DWORDS 7u
+#define TGM_COPY_PREDICATE_DWORDS 4u
 
 struct tgm_copy_side {
 	uint64_t va;
@@ -28,6 +29,9 @@ uint32_t tgm_copy_texels(uint32_t *w, const struct tgm_copy_side *src,
 uint32_t tgm_copy_rows(uint32_t *w, uint64_t src, uint32_t src_pitch, uint64_t dst,
 		       uint32_t dst_pitch, uint32_t row_bytes, uint32_t rows);
 
+/* The copy engine's launches from here run only while the 64-bit word at `va` is not zero (NVB0B5 SET_RENDER_ENABLE
+ * CONDITIONAL); va 0 puts them back to always */
+uint32_t tgm_copy_predicate(uint32_t *w, uint64_t va);
 /* A fill's constant: every four-byte element written is `value` (SET_REMAP_CONST_A, no source) */
 uint32_t tgm_fill_setup(uint32_t *w, uint32_t value);
 

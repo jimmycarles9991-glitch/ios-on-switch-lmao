@@ -35,6 +35,9 @@ static id<MTLLibrary> fileLibrary(id device, NSString *path, NSString *named, NS
     NSError *readError = nil;
     NSData *bytes = metallibFile(path, &readError);
     if (!bytes) {
+        if (readError && !(readError.domain == NSCocoaErrorDomain && readError.code == NSFileReadNoSuchFileError))
+            os_log_error(gm20bLog(), "SwitchMetal: %{public}s: cannot read metallib %{public}s: %{public}s",
+                         getprogname(), path.UTF8String ?: "nil", readError.localizedDescription.UTF8String ?: "?");
         if (error)
             *error = readError ?: libraryError(MTLLibraryErrorFileNotFound, @"no library file");
         return nil;
@@ -49,9 +52,13 @@ static id<MTLLibrary> fileLibrary(id device, NSString *path, NSString *named, NS
 
 @implementation SwitchMetalDevice (Libraries)
 
+// Apple's -[_MTLDevice newLibraryWithURL:error:] resolves via fileSystemRepresentation, which accepts scheme-less path
+// URLs like [NSURL URLWithString:@"/System/Library/.../default.metallib"] (Espresso) in addition to file:// URLs.
 - (id<MTLLibrary>)newLibraryWithURL:(NSURL *)url error:(NSError **)error
 {
-    if (!url.isFileURL) {
+    if (!url || (!url.isFileURL && url.scheme.length) || !url.path.length) {
+        os_log_error(gm20bLog(), "SwitchMetal: %{public}s: newLibraryWithURL: rejected %{public}s", getprogname(),
+                     url.absoluteString.UTF8String ?: "nil");
         if (error)
             *error = libraryError(MTLLibraryErrorFileNotFound, @"a file URL is required");
         return nil;

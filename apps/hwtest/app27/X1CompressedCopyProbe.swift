@@ -17,7 +17,10 @@ enum X1CompressedCopyProbe {
         probe: "copy.ce_compressed", risky: true, timeout: 300, body: run
     )
 
-    static let repeats = 24
+    /// Seeds 5r + 1 take the four clears in turn: eight repeats run each clear twice at 256 x 256 and 320 x 180, so the
+    /// value the boot table lacks reaches its third full clear (zbc.h kZbcRepeats asks for its entry) and is cleared to
+    /// again after; 1280 x 720 runs each once
+    static let repeats = 8
 
     static func run(_ gpu: GPU) async throws -> ProbeFinding {
         let journal = ProbeJournal(probe: "gpu.x1.ce_compressed")
@@ -45,7 +48,7 @@ enum X1CompressedCopyProbe {
                 made += 1
                 let plain = try kit.target(w, h, .blockLinear)!, plain2 = try kit.target(w, h, .blockLinear)!
                 let cases = Cases(kit: kit, width: w, height: h)
-                for repeatIndex in 0 ..< repeats {
+                for repeatIndex in 0 ..< (w == 1280 ? Cases.clears.count : repeats) {
                     let seed = repeatIndex * 5 + 1
                     for (name, got, want) in try await cases.all(
                         seed: seed, compressed: compressed, compressed2: compressed2, plain: plain, plain2: plain2

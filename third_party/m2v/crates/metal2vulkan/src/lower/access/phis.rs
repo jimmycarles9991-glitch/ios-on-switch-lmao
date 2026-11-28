@@ -32,8 +32,8 @@ pub struct PhiFacts {
 /// What one pointer phi's incoming values hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Incoming {
-    /// Some incoming value is a constant.
-    pub(super) constant: bool,
+    /// Some incoming value is a defined constant (neither `undef` nor `poison`).
+    pub(super) defined_constant: bool,
     /// The first incoming value, in order, that a static fat pointer refuses (a constant other
     /// than null, or a blob pointer), or whose root set selection did not read.
     pub(super) fat: Fat,
@@ -83,14 +83,15 @@ fn fill(cx: &SelectCx<'_>, facts: &mut PhiFacts, m: &mut Meter) -> Result<(), Er
             continue;
         }
         m.tick(1)?;
-        let mut constant = false;
+        let mut defined_constant = false;
         let mut fat = None;
         let mut not_wide = false;
         for (x, _) in incoming.iter() {
             m.tick(1)?;
             let is_const = matches!(x, Value::Const(_));
             let null = pointer::null_constant(cx, *x);
-            constant |= is_const;
+            let undef = pointer::undef_constant(cx, *x);
+            defined_constant |= is_const && !undef;
             not_wide |= !null && (is_const || !dynamic::is_wide(cx, *x));
             if fat.is_none() {
                 if is_const && !null {
@@ -110,7 +111,7 @@ fn fill(cx: &SelectCx<'_>, facts: &mut PhiFacts, m: &mut Meter) -> Result<(), Er
         facts.phis.insert(
             id,
             Incoming {
-                constant,
+                defined_constant,
                 fat: fat.unwrap_or(Fat::Plain),
                 not_wide,
             },

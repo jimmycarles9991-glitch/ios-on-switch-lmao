@@ -70,4 +70,28 @@ struct Push {
     }
 };
 
+// The value the last write of `method` on `subc` in [words, words + count) leaves it, `absent` where none writes it
+inline uint32_t lastWritten(const uint32_t *words, size_t count, uint32_t method, uint32_t absent,
+                            uint32_t subc = SUBC_3D)
+{
+    uint32_t value = absent;
+    for (size_t i = 0; i < count;) {
+        const uint32_t hdr = words[i], op = hdr >> 29, arg = hdr >> 16 & 0x1fff, mthd = (hdr & 0xfff) << 2;
+        const bool mine = (hdr >> 13 & 7) == subc;
+        if (op == 4) {
+            if (mine && mthd == method)
+                value = arg;
+            i += 1;
+            continue;
+        }
+        for (uint32_t k = 0; k < arg && i + 1 + k < count; k++) {
+            const uint32_t at = op == 1 ? mthd + 4 * k : op == 5 && k ? mthd + 4 : mthd;
+            if (mine && at == method && (op == 1 || op == 3 || op == 5))
+                value = words[i + 1 + k];
+        }
+        i += op == 1 || op == 3 || op == 5 ? 1 + arg : 1;
+    }
+    return value;
+}
+
 }  // namespace gm20b

@@ -1,5 +1,7 @@
 import Darwin
 import HWTestCore
+import HWTestKit
+import HWTestShared
 import SwitchCompilerProbe
 
 /// The system shader compiler at the end of the run: the boot's first compiler still serves (the GPU kext's broker,

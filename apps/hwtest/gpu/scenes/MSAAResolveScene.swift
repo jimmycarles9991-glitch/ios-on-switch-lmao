@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// 4x MSAA resolved: a triangle with no edge on the pixel grid, each pixel's coverage worked out at the device's own

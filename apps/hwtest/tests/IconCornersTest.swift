@@ -1,7 +1,10 @@
 import CoreGraphics
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
+import HWTestKit
 import Metal
 
 /// The App Library's icon corners. `rb<side>_<storage>_*`: RenderBox in this process draws the icon mask at the small

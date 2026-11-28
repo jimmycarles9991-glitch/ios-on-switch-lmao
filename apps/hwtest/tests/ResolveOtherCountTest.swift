@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A resolve into a texture of another sample count: a 32x32 4x target of BGRA8Unorm, RGBA16Float or RGBA8Snorm,

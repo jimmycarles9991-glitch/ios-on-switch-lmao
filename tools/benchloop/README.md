@@ -8,8 +8,8 @@ ROP's iterated blend unit and its float-to-unorm rounding.
 
 ## On the Switch
 
-The apps are on debug images only. Open HW Test. The first launch after a boot runs every test, so let that finish,
-then tap Bench at the top left. The screen keeps the display awake and has to stay open while batches run.
+The apps are on debug images only. Open HW Test and tap Bench at the top left. The screen keeps the display awake and
+has to stay open while batches run.
 
 The Self-check line should start with `PASS`. It times empty passes, draws the app's own known-answer program and runs a
 kernel that only exits, all without the Mac. The Inboxes section lists the folders the app watches. If

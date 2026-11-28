@@ -51,7 +51,8 @@ struct switch_us_site {
 	unsigned edits;
 	struct switch_us_edit edit[2];
 	const char *name, *applied;
-	bool every_scale;                           /* applied at scale 1 too; SWITCH_US_FIXED edits only */
+	/* applied at scale 1 too: SWITCH_US_FIXED edits, and SWITCH_US_MG_SCALE, whose 1.0 is the stock answer there */
+	bool every_scale;
 };
 
 /* One IPSW kind's cache: the build it shipped in, its header's magic and its sites. */
@@ -60,6 +61,7 @@ struct switch_us_cache {
 	char magic[16];
 	const struct switch_us_site *sites;
 	size_t count;
+	int main_screen_class;                      /* the identity's, which MobileGestalt's site answers */
 };
 
 #define SWITCH_US_PAGE_SIZE       0x4000ULL

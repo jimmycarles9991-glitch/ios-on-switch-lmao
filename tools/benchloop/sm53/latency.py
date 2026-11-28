@@ -9,6 +9,7 @@ chain       k dependent variable-latency ops through alternating barriers, a bod
 throughput  independent streams of each op over the whole target: time against k gives issue cycles per warp.
 dual        independent pairs (X, Y) in one warp, X at delay 0 and at delay 1, a short body looped.
 reuse       FFMA streams whose operands share a register bank, with and without reuse flags, and spread over banks.
+dual and reuse take `yld`: control bit 4 set on every instruction of the body (ops and variants named `/y`).
 
 Each experiment carries a host-only `meta` (what fit.py groups by) and `expect` (the interpreter's texel).
 """
@@ -234,33 +235,35 @@ def _pair_form(op: str, d: int) -> e.Instr:
     return instr if operands.of(instr).fixed else instr.sched(wr_bar=0)
 
 
-def dual(pairs: Iterable[tuple[str, str]] = PAIRS) -> list[dict]:
+def dual(pairs: Iterable[tuple[str, str]] = PAIRS, yld: bool = False) -> list[dict]:
     out = []
     init = {K1: f32(1.5), K2: f32(2.5), SRC: f32(0.5), CHAIN0: 0, CHAIN0 + 4: 0}
+    tag = '/y' if yld else ''
     for x, y in pairs:
-        first, second = _pair_form(x, CHAIN0), _pair_form(y, CHAIN0 + 4).sched(delay=1)
+        first, second = _pair_form(x, CHAIN0).sched(yld=yld), _pair_form(y, CHAIN0 + 4).sched(delay=1, yld=yld)
         for delay in (0, 1):
             for n in DUAL_BODIES:
                 k = n * DUAL_LOOPS
                 body = [first.sched(delay=delay), second] * n
                 prog = program.fragment(body, init, (CHAIN0, CHAIN0 + 4), loop=DUAL_LOOPS)
-                meta = {'family': 'dual', 'op': f'{x}+{y}', 'pair': [x, y], 'delay': delay, 'k': k}
-                eid = f'dual.{x.lower()}-{y.lower()}.d{delay}.k{k:03d}'
+                meta = {'family': 'dual', 'op': f'{x}+{y}{tag}', 'pair': [x, y], 'delay': delay, 'k': k}
+                eid = f'dual.{x.lower()}-{y.lower()}{tag.replace("/", ".")}.d{delay}.k{k:03d}'
                 out.append(experiment(eid, prog, ONE_WARP, meta, exact=x != 'MUFU' and y != 'MUFU'))
     return out
 
 
-def reuse() -> list[dict]:
+def reuse(yld: bool = False) -> list[dict]:
     out = []
     accumulators = [CHAIN0 + 4 * (i + 1) for i in range(REUSE_ACCUMULATORS)]
+    tag = '/y' if yld else ''
     for variant, (a, b, flags) in REUSE_VARIANTS.items():
         for k in REUSE_KS:
             accs = [accumulators[i % REUSE_ACCUMULATORS] for i in range(k)]
-            body = [e.ffma(acc, a, b, acc).sched(reuse=flags) for acc in accs]
+            body = [e.ffma(acc, a, b, acc).sched(reuse=flags, yld=yld) for acc in accs]
             init = {a: f32(1.0), b: f32(0.5)} | dict.fromkeys(accumulators, f32(0.0))
             prog = program.fragment(body, init, (accumulators[0], accumulators[-1]))
-            meta = {'family': 'reuse', 'op': 'FFMA', 'variant': variant, 'k': k, 'reuse': flags}
-            out.append(experiment(f'reuse.{variant}.k{k:03d}', prog, WHOLE, meta))
+            meta = {'family': 'reuse', 'op': 'FFMA', 'variant': variant + tag, 'k': k, 'reuse': flags}
+            out.append(experiment(f'reuse.{variant}{tag.replace("/", ".")}.k{k:03d}', prog, WHOLE, meta))
     return out
 
 

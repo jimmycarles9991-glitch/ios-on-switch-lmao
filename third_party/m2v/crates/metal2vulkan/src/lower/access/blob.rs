@@ -143,7 +143,7 @@ pub fn lowered_pointer(cx: &SelectCx<'_>, v: Value) -> Result<Option<DemoteTy>, 
     if !is_blob(cx, v)? {
         return Ok(None);
     }
-    if super::phis::incoming(cx, v)?.is_some_and(|i| i.constant) {
+    if super::phis::incoming(cx, v)?.is_some_and(|i| i.defined_constant) {
         return Err(refuse());
     }
     Ok(Some(DemoteTy::ArenaOffset))

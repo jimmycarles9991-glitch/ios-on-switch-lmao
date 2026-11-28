@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 
 /// Rule storage.compressed (drivers/TegraGM20BMetal/storage_form.h storageReadsCompressed): whether the

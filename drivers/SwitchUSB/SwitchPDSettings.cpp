@@ -122,6 +122,7 @@ void SwitchPD::leave()
     alert->disable();
     window->cancelTimeout();
     negoTimer->cancelTimeout();
+    cancelRailRamp();
     switch_pd_alt_leave();
     setSwitches(false);
     if (switch_pd_boost_on(phase))

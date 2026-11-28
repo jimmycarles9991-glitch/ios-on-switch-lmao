@@ -8,6 +8,7 @@
 #include "../ca_catch_all.h"
 #include "../TegraGM20BMetalCompileRequest.h"
 #include "../compile_request.h"
+#include "request_store_key.h"
 #include "../render_key.h"
 #include "../../../kits/SwitchSeedPack/SwitchSeedStore.h"
 #include "bazel/testing/fresh_process.h"
@@ -117,8 +118,8 @@ TEST(GM20BFacadeCreation, NoCompilerAtAllFailsTheCreationByNameWithNoCompileHere
 // Host tests build the release arm of anything under SWITCH_DEBUG (undefined here): the one behaviour above is both builds'
 TEST(GM20BFacadeCreation, DebugAndReleaseClientsCompleteStatesAlike)
 {
-    for (const char *file :
-         {"../TegraGM20BMetalComplete.h", "../TegraGM20BMetalComplete.mm", "../TegraGM20BMetalCompleteRemote.mm"}) {
+    for (const char *file : {"../TegraGM20BMetalComplete.h", "../TegraGM20BMetalComplete.mm",
+                             "../TegraGM20BMetalCompleteForms.mm", "../TegraGM20BMetalCompleteRemote.mm"}) {
         const std::string source = switch_ios::test::SourceText(file);
         EXPECT_EQ(switch_ios::test::Configured(source, "SWITCH_DEBUG", true),
                   switch_ios::test::Configured(source, "SWITCH_DEBUG", false))
@@ -320,12 +321,9 @@ struct RefusingCompiler {
             const std::string packKey = gm20b::requestPackKey(r, own);
             const gm20b::CacheKey k = gm20b::renderCacheKey(r.stack, packKey, hashes[r.stages[0].function],
                                                             hashes[r.stages[1].function], {}, own);
-            std::vector<gm20b::LibraryIdentity> ids;
-            for (const gm20b::RequestLibrary &l : r.libraries)
-                ids.push_back(gm20b::identityOf(l));
-            const std::string entry = gm20b::encodeEntry(k, nullptr, "a state this compiler refuses");
-            const gm20b::Digest name = gm20b::storeName(k, r, ids);
-            store.put(name.data(), reinterpret_cast<const uint8_t *>(entry.data()), uint32_t(entry.size()));
+            const gm20b::StoreKey key = harness::requestStoreKey(k, r);
+            const std::string entry = gm20b::encodeEntry(key.content, nullptr, "a state this compiler refuses");
+            store.put(key.name.data(), reinterpret_cast<const uint8_t *>(entry.data()), uint32_t(entry.size()));
             return int32_t(TegraGM20BCompileRefused);
         };
         return true;

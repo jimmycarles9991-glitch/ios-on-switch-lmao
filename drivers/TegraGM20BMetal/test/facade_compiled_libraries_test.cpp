@@ -214,7 +214,7 @@ void stitchedLibrary()
 {
     LibraryCompiler compiler;
     ASSERT_TRUE(compiler.serve());
-    compiler.made.metallib = made_metallib::thin({"stitched"}, {4}, {made_metallib::wrappedBitcode(0x61)});
+    compiler.made.metallib = made_metallib::thin({"stitched"}, {4}, {made_metallib::wrappedBitcode(0x61)}, {}, 0xC0);
     id<MTLDevice> device = completing();
     ASSERT_TRUE(device != nil);
     id<MTLLibrary> functions = stitchable(device);
@@ -271,7 +271,7 @@ void kernelDagLibrary()
     ASSERT_TRUE(compiler.serve());
     compiler.made.metallib =
         made_metallib::thin({"prefixPrimary_i8", "postfixPrimary_i8"}, {4, 4},
-                            {made_metallib::wrappedBitcode(0x81), made_metallib::wrappedBitcode(0x82)});
+                            {made_metallib::wrappedBitcode(0x81), made_metallib::wrappedBitcode(0x82)}, {}, 0xC8);
     id<MTLDevice> device = completing();
     ASSERT_TRUE(device != nil);
     id<MTLLibrary> functions = stitchable(device);
@@ -357,8 +357,8 @@ void specializedDagLibrary()
     for (const Ask &ask : {Ask{1, "", true}, Ask{2, "add_g2", true}, Ask{1, "", false}}) {
         const std::string called = ask.specializedName.empty() ? "add" : ask.specializedName;
         const std::string specializedAir = made_metallib::wrappedBitcode(uint8_t(0x60 + ask.gain));
-        compiler.made.metallib =
-            made_metallib::thin({called, "stitched"}, {4, 4}, {specializedAir, made_metallib::wrappedBitcode(0x7f)});
+        compiler.made.metallib = made_metallib::thin({called, "stitched"}, {4, 4},
+                                                     {specializedAir, made_metallib::wrappedBitcode(0x7f)}, {}, 0xD0);
         MTLFunctionConstantValues *values = [MTLFunctionConstantValues new];
         [values setConstantValue:&ask.gain type:MTLDataTypeUInt atIndex:3];
         MTLFunctionDescriptor *d = [MTLFunctionDescriptor functionDescriptor];
@@ -401,7 +401,8 @@ void filterLibrary()
 {
     LibraryCompiler compiler;
     ASSERT_TRUE(compiler.serve());
-    compiler.made.metallib = made_metallib::thin({"ciKernelMain"}, {2}, {made_metallib::wrappedBitcode(0x71)});
+    compiler.made.metallib =
+        made_metallib::thin({"ciKernelMain"}, {2}, {made_metallib::wrappedBitcode(0x71)}, {}, 0xD8);
     id<MTLDevice> device = completing();
     ASSERT_TRUE(device != nil);
     id<MTLLibrary> functions = stitchable(device);

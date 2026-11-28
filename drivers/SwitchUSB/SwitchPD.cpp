@@ -69,47 +69,63 @@ bool SwitchPD::begin(uint16_t &type, uint16_t &revision, uint16_t &config, bool 
         return false;
     }
     recordAsFound();
-    uint16_t status1 = 0;
-    uint16_t dpStatus = 0;
-    if (!read16(STATUS1, status1) && !read16(DP_STATUS, dpStatus) && switch_pd_reset_at_start(status1, dpStatus)) {
-        state.status1 = status1;
-        systemReset(kStartResetMS, "found plugged as DFP, in DisplayPort mode or after a failed command");
-    }
-    if (const int ocp = enableOcp())
-        IOLog("SwitchPD: over-current protection on failed (I2C %d)\n", ocp);
-    configureRoleSwaps(true);
-    if (!read16(CONFIG1, config)) {
-        switchesOn = ((config & CONFIG1_SPDSRC_MASK) >> CONFIG1_SPDSRC_SHIFT) != SPDSRC12_OFF;
-        const bool wereOn = switchesOn;
-        setSwitches(false);
-        turnedOff = wereOn && !switchesOn;
-    }
     vbusRailOn = true;  // whatever the boot chain left: driven off
     vconnOn = true;
     (void)setRails(false, false);
     loop = IOWorkLoop::workLoop();
     window = loop ? IOTimerEventSource::timerEventSource(this, &SwitchPD::windowFired) : nullptr;
     negoTimer = loop ? IOTimerEventSource::timerEventSource(this, &SwitchPD::negoFired) : nullptr;
+    railTimer = loop ? IOTimerEventSource::timerEventSource(this, &SwitchPD::railRampFired) : nullptr;
     IOService *nub = tegra_gpio_interrupt_nub(TEGRA_GPIO_PD_ALERT, TEGRA_GPIO_LEVEL_LOW);
     alert = nub && loop ? IOInterruptEventSource::interruptEventSource(this, &SwitchPD::alertFired, nub, 0) : nullptr;
     if (!loop || !window || loop->addEventSource(window) != kIOReturnSuccess || !negoTimer ||
-        loop->addEventSource(negoTimer) != kIOReturnSuccess || !alert ||
+        loop->addEventSource(negoTimer) != kIOReturnSuccess || !railTimer ||
+        loop->addEventSource(railTimer) != kIOReturnSuccess || !alert ||
         loop->addEventSource(alert) != kIOReturnSuccess) {
         panic("SwitchPD: cannot attach the BM92T36 ALERT (PK4, GPIO %u, level low)", TEGRA_GPIO_PD_ALERT);
     }
+
+    struct StartOut {
+        uint16_t *config;
+        bool *turnedOff;
+    } startOut{&config, &turnedOff};
+
     loop->runAction(
-        [](OSObject *owner, void *, void *, void *, void *) -> IOReturn {
+        [](OSObject *owner, void *outArg, void *, void *, void *) -> IOReturn {
             auto *self = static_cast<SwitchPD *>(owner);
-            uint16_t alertBits = 0;
+            auto *out = static_cast<StartOut *>(outArg);
             uint16_t status1 = 0;
+            uint16_t dpStatus = 0;
+            if (!read16(STATUS1, status1) && !read16(DP_STATUS, dpStatus) &&
+                switch_pd_reset_at_start(status1, dpStatus)) {
+                self->state.status1 = status1;
+                self->startResetPending = true;
+                if (self->systemReset(kStartResetMS,
+                                      "found plugged as DFP, in DisplayPort mode or after a failed command")) {
+                    *out->config = self->found.config1;
+                    return kIOReturnSuccess;
+                }
+                self->startResetPending = false;
+            }
+            if (const int ocp = enableOcp())
+                IOLog("SwitchPD: over-current protection on failed (I2C %d)\n", ocp);
+            self->configureRoleSwaps(true);
+            if (!read16(CONFIG1, *out->config)) {
+                self->switchesOn = ((*out->config & CONFIG1_SPDSRC_MASK) >> CONFIG1_SPDSRC_SHIFT) != SPDSRC12_OFF;
+                const bool wereOn = self->switchesOn;
+                self->setSwitches(false);
+                *out->turnedOff = wereOn && !self->switchesOn;
+            }
+            uint16_t alertBits = 0;
             uint16_t status2 = 0;
             (void)read16(ALERT_STATUS, alertBits);  // releases a latched ALERT; its event is the state read next
             if (self->readStatus(status1, status2))
                 self->handle(alertBits, status1, status2);
+            if (!self->resetPending)
+                self->alert->enable();
             return kIOReturnSuccess;
         },
-        this);
-    alert->enable();
+        this, &startOut);
     return true;
 }
 
@@ -244,16 +260,17 @@ bool SwitchPD::handleFault(uint16_t alertBits, uint16_t status1)
     return true;
 }
 
-// SYS_RESET, then `settleMS`, then ALERT_STATUS read to release the ALERT the reset raised (bm92t_system_reset_auto).
-void SwitchPD::systemReset(uint32_t settleMS, const char *why) const
+// SYS_RESET: mask ALERT and let windowFired() finish post-reset setup after `settleMS` (bm92t_system_reset_auto).
+bool SwitchPD::systemReset(uint32_t settleMS, const char *why)
 {
     const int err = write16(COMMAND, SYS_RESET_CMD);
     IOLog("SwitchPD: BM92T36 SYS_RESET%s: %s (status1 %#x)\n", err ? " failed" : "", why, state.status1);
     if (err)
-        return;
-    IOSleep(settleMS);
-    uint16_t released = 0;
-    (void)read16(ALERT_STATUS, released);
+        return false;
+    resetPending = true;
+    alert->disable();
+    window->setTimeoutMS(settleMS);
+    return true;
 }
 
 void SwitchPD::notify()
@@ -333,8 +350,12 @@ void SwitchPD::enter(switch_pd_phase next, const char *why)
         enter(SWITCH_PD_HELD, "not sourcing: over-current protection or the source rails failed");
         return;
     }
-    if (switches)
-        setSwitches(true);
+    if (switches) {
+        if (railRampPending && !switchesOn)
+            railRampSwitches = true;
+        else
+            setSwitches(true);
+    }
     if (next == SWITCH_PD_CLASSIFY)
         window->setTimeoutMS(kClassifyMS);
     if (next == SWITCH_PD_WAIT_SOURCE)
@@ -361,12 +382,24 @@ void SwitchPD::setSwitches(bool on)
     reportedSwitchFailure = err != 0;
 }
 
-// Source rails: OCP, v_vdd5v3 (PX3), ramp, VCONN (PK5). When raising rails in WaitSource while SPDSRC1/2 are still
-// open, CONFIG1 stays SPDSRC12_ON so Rp is never dropped; if our VBUS switch is already closed, open switches first.
+void SwitchPD::cancelRailRamp()
+{
+    if (railTimer)
+        railTimer->cancelTimeout();
+    railRampPending = false;
+    railRampVconn = false;
+    railRampSwitches = false;
+}
+
+// Source rails: OCP, v_vdd5v3 (PX3), kRailRampMS timer ramp, then VCONN (PK5) in railRampFired(). When raising rails
+// in WaitSource while SPDSRC1/2 are still open, CONFIG1 stays SPDSRC12_ON so Rp is never dropped; if our VBUS switch
+// is already closed, open switches first and defer re-closing until the ramp timer fires.
 bool SwitchPD::setRails(bool vbus, bool vconn)
 {
-    if (vbus == vbusRailOn && vconn == vconnOn && vconnSwap == vconnOn)
+    if (!railRampPending && vbus == vbusRailOn && vconn == vconnOn && vconnSwap == vconnOn)
         return true;
+    if (!vbus && railRampPending)
+        cancelRailRamp();
     if (vbus && switch_pd_vbus_ours(state.status1)) {
         setSwitches(false);
         if (switchesOn)
@@ -377,10 +410,6 @@ bool SwitchPD::setRails(bool vbus, bool vconn)
         err = enableOcp();
         if (!err)
             err = tegra_gpio_output(kSourceRailGpio, 1);
-        if (!err)
-            IOSleep(kRailRampMS);
-        if (!err && vconn && !vconnOn)
-            err = tegra_gpio_output(kVconnGpio, 1);
         if (err) {
             setVconnSwap(false);
             (void)tegra_gpio_output(kVconnGpio, 0);
@@ -391,8 +420,23 @@ bool SwitchPD::setRails(bool vbus, bool vconn)
             return false;
         }
         vbusRailOn = true;
-        if (vconn)
-            vconnOn = true;
+        railRampPending = true;
+        railRampVconn = vconn;
+        railRampSwitches = false;
+        if (railTimer)
+            railTimer->setTimeoutMS(kRailRampMS);
+        return true;
+    }
+    if (vbus && railRampPending) {
+        railRampVconn = vconn;
+        if (!vconn && vconnOn) {
+            setVconnSwap(false);
+            const int vconnErr = tegra_gpio_output(kVconnGpio, 0);
+            if (vconnErr)
+                err = vconnErr;
+            vconnOn = vconnErr != 0;
+        }
+        return err == 0;
     }
     if (!vconn && vconnOn) {
         setVconnSwap(false);
@@ -417,6 +461,38 @@ bool SwitchPD::setRails(bool vbus, bool vconn)
     if (err)
         IOLog("SwitchPD: source rails %s failed (%d)\n", (vbus || vconn) ? "on" : "off", err);
     return err == 0;
+}
+
+void SwitchPD::railRampFired(OSObject *owner, IOTimerEventSource *)
+{
+    auto *self = static_cast<SwitchPD *>(owner);
+    if (self->leaving || !self->railRampPending)
+        return;
+    self->railRampPending = false;
+    const bool wantVconn = self->railRampVconn;
+    const bool wantSwitches = self->railRampSwitches;
+    self->railRampVconn = false;
+    self->railRampSwitches = false;
+    if (!self->vbusRailOn)
+        return;
+    if (wantVconn && !self->vconnOn) {
+        const int err = tegra_gpio_output(kVconnGpio, 1);
+        if (err) {
+            self->setVconnSwap(false);
+            (void)tegra_gpio_output(kVconnGpio, 0);
+            (void)tegra_gpio_output(kSourceRailGpio, 0);
+            self->vbusRailOn = false;
+            self->vconnOn = false;
+            IOLog("SwitchPD: source rails on failed (%d)\n", err);
+            self->enter(SWITCH_PD_HELD, "not sourcing: over-current protection or the source rails failed");
+            self->notify();
+            return;
+        }
+        self->vconnOn = true;
+    }
+    self->setVconnSwap(self->vconnOn);
+    if (wantSwitches)
+        self->setSwitches(true);
 }
 
 void SwitchPD::sendPrSwap()
@@ -467,13 +543,15 @@ void SwitchPD::windowFired(OSObject *owner, IOTimerEventSource *)
     uint16_t status2 = 0;
     if (self->resetPending) {
         self->resetPending = false;
+        const bool announceSwaps = self->startResetPending;
+        self->startResetPending = false;
         uint16_t bits = 0;
         uint16_t config = 0;
         if (!read16(ALERT_STATUS, bits) && self->readStatus(status1, status2) && !read16(CONFIG1, config)) {
             self->switchesOn = (config & CONFIG1_SPDSRC_MASK) != CONFIG1_SPDSRC_MASK;
             self->setSwitches(false);
             if (!self->switchesOn && !self->enableOcp() && !switch_pd_internal_fault(status1)) {
-                self->configureRoleSwaps(false);
+                self->configureRoleSwaps(announceSwaps);
                 const bool sink = (status1 & SWITCH_PD_STATUS1_INSERT) &&
                                   (!(status1 & SWITCH_PD_STATUS1_SRC_MODE) || (status1 & SWITCH_PD_STATUS1_VSAFE));
                 self->enter(sink ? SWITCH_PD_SINK : SWITCH_PD_EMPTY, "power role after controller reset");
@@ -569,6 +647,7 @@ void SwitchPD::stopEvents()
     stuck = true;
     allowSource = false;
     window->cancelTimeout();
+    cancelRailRamp();
     endNegotiation();  // no events: no contract can be followed, so none stays published
     switch_pd_alt_leave();
     IOLog("SwitchPD: BM92T36 ALERT (PK4) fired %u times in 1 s, turned off (port sink-only until reboot): %s\n",

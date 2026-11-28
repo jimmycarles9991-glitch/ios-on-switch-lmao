@@ -83,18 +83,24 @@ public:
 
     int submitBridge()
     {
-        switch_gpu_bridge_release(&bridge);
-        int error;
-        for (;;) {
-            error = switch_gpu_bridge_submit(tokens, retained, &bridge);
-            if (error != -16)
-                break;
-            error = switch_gpu_bridge_wait_room();
-            if (error)
-                break;
-        }
-        dropTokens();
-        return error;
+        return submitWith(switch_gpu_bridge_submit);
+    }
+
+    // For a stream that waits on the bridge with no completion callback (SwitchGpuBridge.h): the hang check covers its
+    // producers from the submit until the bridge retires, which can be after the stream lets go of it
+    int submitWatchedBridge()
+    {
+        return submitWith(switch_gpu_bridge_submit_watched);
+    }
+
+    int failed() const
+    {
+        if (!bridge)
+            return 0;
+        if (const int error = switch_gpu_bridge_failed(bridge))
+            return error;
+        const int source = switch_gpu_bridge_source_failure(bridge);
+        return source < 0 ? source : 0;
     }
 
     bool acquire(uint32_t *syncpoint, uint32_t *threshold) const
@@ -113,6 +119,22 @@ public:
     }
 
 private:
+    template <class Submit> int submitWith(Submit submit)
+    {
+        switch_gpu_bridge_release(&bridge);
+        int error;
+        for (;;) {
+            error = submit(tokens, retained, &bridge);
+            if (error != -16)
+                break;
+            error = switch_gpu_bridge_wait_room();
+            if (error)
+                break;
+        }
+        dropTokens();
+        return error;
+    }
+
     void dropTokens()
     {
         while (retained)

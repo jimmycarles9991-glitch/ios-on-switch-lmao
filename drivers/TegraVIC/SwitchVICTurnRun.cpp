@@ -15,6 +15,7 @@ extern "C" IOReturn switch_display_landscape_run_call(const IOExternalMethodArgu
 namespace {
 SwitchVICTurnCounters gCounters;
 int gTestPid = -1;
+#if defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
 constexpr unsigned kShapes = 32;
 uint64_t gShapes[kShapes];
 
@@ -54,11 +55,13 @@ void fourcc(char out[5], uint32_t f)
         out[i] = char(f >> (24 - 8 * i));
     out[4] = 0;
 }
+#endif
 }  // namespace
 
 void switch_vic_turn_request_seen(const TegraVICRequest &r, const TegraVICSurfaceDesc &s, const TegraVICSurfaceDesc &d,
                                   int pid)
 {
+#if defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
     if (!firstOf(shapeOf(r, s, d, pid)))
         return;
     char name[32] = {}, from[5], to[5];
@@ -74,6 +77,12 @@ void switch_vic_turn_request_seen(const TegraVICRequest &r, const TegraVICSurfac
         d.width, d.height, r.dst_x, r.dst_y, r.dst_w, r.dst_h, r.src_event_port, r.src_wait, r.src_signal,
         r.dst_event_port, r.dst_wait, r.dst_signal, r.cb_fn != 0, (r.flags & TEGRA_VIC_REQ_SKIP_CALLBACK) != 0);
     os_log(OS_LOG_DEFAULT, "%s", line);
+#else
+    (void)r;
+    (void)s;
+    (void)d;
+    (void)pid;
+#endif
 }
 
 uint8_t switch_vic_turn_origin(int pid)
@@ -108,8 +117,40 @@ extern "C" void switch_vic_turn_counters(SwitchVICTurnCounters *out)
     out->ticks = __atomic_load_n(&gCounters.ticks, __ATOMIC_RELAXED);
 }
 
-// FORCE is held for the calling connection (TegraVIC drops it when that connection closes); SAMPLE and QUERY are the
-// display's.
+// The connection that holds each of PORTRAIT and COPY, which change the display's routing until their frame ends run out
+static const void *gHeldBy[2];
+
+static int holdIndex(uint32_t op)
+{
+    return op == SWITCH_DISPLAY_LANDSCAPE_PORTRAIT ? 0 : op == SWITCH_DISPLAY_LANDSCAPE_COPY ? 1 : -1;
+}
+
+static void landscapeHoldEnd(uint32_t op)
+{
+    SwitchDisplayLandscapeRequest request = {SWITCH_DISPLAY_LANDSCAPE_RUN_MAGIC, op, 0, 0};
+    SwitchDisplayLandscapeReply reply = {};
+    IOExternalMethodArguments args = {};
+    args.structureInput = &request;
+    args.structureInputSize = sizeof(request);
+    args.structureOutput = &reply;
+    args.structureOutputSize = sizeof(reply);
+    if (switch_display_landscape_run_call)
+        (void)switch_display_landscape_run_call(&args);
+}
+
+void switch_vic_landscape_release(const void *client)
+{
+    static const uint32_t ops[2] = {SWITCH_DISPLAY_LANDSCAPE_PORTRAIT, SWITCH_DISPLAY_LANDSCAPE_COPY};
+    for (uint32_t op : ops) {
+        const void *expected = client;
+        if (__atomic_compare_exchange_n(&gHeldBy[holdIndex(op)], &expected, nullptr, false, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE))
+            landscapeHoldEnd(op);
+    }
+}
+
+// FORCE, PORTRAIT and COPY are held for the calling connection (TegraVIC drops them when that connection closes);
+// SAMPLE and QUERY are the display's.
 IOReturn switch_vic_landscape_call(const void *client, const IOExternalMethodArguments *a)
 {
     const auto *request = static_cast<const SwitchDisplayLandscapeRequest *>(a->structureInput);
@@ -127,6 +168,11 @@ IOReturn switch_vic_landscape_call(const void *client, const IOExternalMethodArg
             switch_display_traits_release(client);
         return kIOReturnSuccess;
     }
-    return switch_display_landscape_run_call ? switch_display_landscape_run_call(a) : kIOReturnUnsupported;
+    if (!switch_display_landscape_run_call)
+        return kIOReturnUnsupported;
+    const IOReturn result = switch_display_landscape_run_call(a);
+    if (const int hold = holdIndex(request->op); hold >= 0 && result == kIOReturnSuccess)
+        __atomic_store_n(&gHeldBy[hold], request->value ? client : nullptr, __ATOMIC_RELEASE);
+    return result;
 }
 #endif

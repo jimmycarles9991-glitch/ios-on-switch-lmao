@@ -4,11 +4,13 @@
     translate.py delta --role ROLE --image MEMBER --driver D --tool T [--pins PINS] [--apple-trustcache F]...
                        [--cdhash-pairs F]... --out DIR
     translate.py cryptex --image MEMBER --delta DIR --role ROLE --apfs-tool T --out FILE --sha256 FILE
+    translate.py updates --delta DIR --role ROLE --pinned UPDATES_JSON --out DIR
 
 `delta` mounts the member's volume (the OS image's System volume by the UUID its pins name) read-only and runs the
 pretranslate driver over it into DIR. `cryptex` makes the member's translated, sealed cryptex from that delta
-(cryptex.py) and its sha256. Both attach disk images, so their actions run locally, unsandboxed. What they log goes
-to a file in TMPDIR; a failure prints its end.
+(cryptex.py) and its sha256. Both attach disk images, so their actions run locally, unsandboxed. `updates` copies
+the delta's translations of the files the boot package's pinned update list names (pretranslate.carried_updates).
+What they log goes to a file in TMPDIR; a failure prints its end.
 """
 
 import argparse
@@ -23,7 +25,7 @@ from pathlib import Path
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(os.path.abspath(__file__)).parents[2]))
 from tools.common import hashing
-from tools.install import cryptex, delta, disks, host, progress
+from tools.install import cryptex, delta, disks, host, pretranslate, progress
 
 TAIL_LINES = 40
 
@@ -81,6 +83,12 @@ def make_cryptex(args: argparse.Namespace, log: host.Log) -> None:
     Path(args.sha256).write_text(hashing.sha256_file(out) + '\n')
 
 
+def make_updates(args: argparse.Namespace, log: host.Log) -> None:
+    pinned = json.loads(Path(args.pinned).read_text())
+    pretranslate.carried_updates(Path(args.delta), args.role, pinned, Path(args.out))
+    log(f'{args.role}: {len(pinned)} updates carried')
+
+
 def arguments(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -102,6 +110,11 @@ def arguments(argv: list[str] | None) -> argparse.Namespace:
     c.add_argument('--apfs-tool', required=True)
     c.add_argument('--out', required=True)
     c.add_argument('--sha256', required=True)
+    u = commands.add_parser('updates')
+    u.add_argument('--delta', required=True)
+    u.add_argument('--role', required=True, choices=('os',))
+    u.add_argument('--pinned', required=True, help='ipsw/pretranslated/<kind>/<role>.updates.json')
+    u.add_argument('--out', required=True)
     return parser.parse_args(argv)
 
 
@@ -113,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
     progress.SCREEN = progress.Screen(out=log.file, tty=False)
     try:
         with disks.interrupts():
-            (make_delta if args.command == 'delta' else make_cryptex)(args, log)
+            {'delta': make_delta, 'cryptex': make_cryptex, 'updates': make_updates}[args.command](args, log)
     except (host.HostError, OSError) as error:
         log('FAILED:', error)
         sys.stderr.write(''.join(log_path.read_text().splitlines(keepends=True)[-TAIL_LINES:]))

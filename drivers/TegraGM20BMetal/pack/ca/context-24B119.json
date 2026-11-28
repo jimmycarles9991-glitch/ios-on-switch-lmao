@@ -15,9 +15,15 @@
       "proof": "manifest",
       "why": "get_pipeline_spec 0x184388044 takes A from the backing surface (+0x13c), 0x1843880d8-0x1843880f4 m (+0x126) and w (+0x64 bit 13); offline_compilation_manifest 0x1e05cfac8 names its 607 states over these two sets alone, as every device-made name does",
       "needs": {
-        "pbl": 3
+        "pbl": 3,
+        "peo": 3,
+        "pc0": 3,
+        "pc1": 3,
+        "prc": 3,
+        "ps0": 3,
+        "pcr": 3
       },
-      "needs_why": "the fewest attachments a texture function's fragment writes: path_blit_frag writes colour 2, so pbl exists on mw/3 only (the 23 Nov pack link refused its twelve m/2 forms with InvalidDescriptor(ColorAttachment { index: 2 }), the translator reading Apple's function; every pbl state devices made and the corpus holds is mw/3)"
+      "needs_why": "the fewest attachments a texture function's fragment writes: path_blit_frag, path_blit_frag_eo, path_clear and path_coverage functions (caspec27._function_targets) target colour attachment 2, so they exist on mw/3 only (the 23 Nov pack link refused pbl's twelve m/2 forms with InvalidDescriptor(ColorAttachment { index: 2 }))"
     },
     "S": {
       "values": [
@@ -77,12 +83,10 @@
       "why": "ContextState +0x141, set by bind_image (0x18438aa00), bind_surface (0x18439a284) and render_emitter_cells (0x1844c7ccc): a fixed-family state with an image"
     },
     "F": {
-      "proof": "demand",
+      "proof": "binary",
       "values": [
         "nr",
-        "bx"
-      ],
-      "unproven": [
+        "bx",
         "b4",
         "b8",
         "mb",
@@ -91,7 +95,11 @@
         "as",
         "la"
       ],
-      "why": "the texture's minification and magnification filters, the larger kept from 4 up (0x18438841c-0x184388434); bind_image hands its callers' filters to the texture and its 43 callers are not traced, so the values are those devices drew"
+      "cross_flags": [
+        "nr",
+        "bx"
+      ],
+      "why": "the texture's minification and magnification filters, the larger kept from 4 up (0x18438841c-0x184388434), only for textured images with image_plane_count > 0 (0x18438832c-0x184388414 zeros F for procedural images with mask 0x420_00fffe00) and M < 0 (bind_surface_impl binds 0..2); image_filter_from_string (0x1843b076c), texture_filter (0x1846e90d9), tile_cache_load (0x184563750), and CG::ImageFilter (0x1846c4324) reach all 9 codes. nr and bx cross with the full flag cube and both slots; the remaining 7 filters vary each textured slot over clean and single-flag contexts plus the seed's own flags"
     },
     "D": {
       "proof": "demand",

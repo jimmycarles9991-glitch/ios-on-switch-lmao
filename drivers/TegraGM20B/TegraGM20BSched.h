@@ -97,6 +97,7 @@ void tgm_hold_samples_take(int pid, uint32_t *n, uint64_t *max_ns,
 			   struct switch_gpu_preempt_counts *counts);
 /* Debug kernels: an app channel's batch ending at end_pt, the job's last or not: where a preempt lands */
 void tgm_hold_released(unsigned int chid, uint64_t end_pt, int job_last);
+void tgm_hold_progress(unsigned int chid, const volatile void *progress_cpu);
 /* Half its preemption latency after a preempt: if `chid` has left the GPU, the latency comes down. */
 void tgm_hold_check(struct nvkm_device *device, unsigned int chid);
 uint64_t tgm_hold_latency(unsigned int chid);

@@ -66,7 +66,6 @@ protected:
 		fake::atRegisters = nullptr;
 		fake::atAbandon = nullptr;
 		giveup_down = 0;
-		probedReaders = 0;
 		std::memset(&giveups, 0, sizeof(giveups));
 		giveup_call = nullptr;
 		for (auto &word : fake::pool)
@@ -104,18 +103,13 @@ protected:
 		switch_gpu_jobs_init(&chan.jobs, done);
 	}
 
-	// A job's acquires kicked on `chan`: chan_exec parks it on the promises among them still pending, under
-	// tgm_live_lock when any is
+	// A job's acquires kicked on `chan`: chan_exec parks it on the promises among them still pending.
 	static void parkPromises(fake_tgm_chan *chan, const switch_gpu_backing_token *tokens,
 				 uint32_t count)
 	{
 		uint32_t unsettled[(TegraGM20BMaxJobDependencies + 31) / 32] = {};
-		const bool locked = backing_unsettled(tokens, count, unsettled) != 0;
-		if (locked)
-			mutex_lock(&tgm_live_lock);
-		switch_gpu_chan_park_promises_locked(chan, tokens, count, unsettled);
-		if (locked)
-			mutex_unlock(&tgm_live_lock);
+		if (backing_unsettled(tokens, count, unsettled))
+			switch_gpu_chan_park_promises_locked(chan, tokens, count, unsettled);
 	}
 
 	// The reader's job, its acquire on the promise kicked: chan_exec parks it, then fences the job

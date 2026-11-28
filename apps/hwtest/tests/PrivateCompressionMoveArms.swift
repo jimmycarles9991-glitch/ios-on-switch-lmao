@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestShared
 import Metal
 
 /// gpu.gm20b.private_compression's arms array1 and ms4_move (drivers/TegraGM20BMetal/private_comp.h: a

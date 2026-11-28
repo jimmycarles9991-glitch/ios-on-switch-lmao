@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestX1
 import Metal
 
 /// Texture buffers (MTLTextureTypeTextureBuffer) over a buffer at the answered minimumTextureBufferAlignment and at twice

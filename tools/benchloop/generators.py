@@ -3,6 +3,7 @@
 from collections.abc import Callable
 
 from tools.benchloop import cbufsize, interlock_section, qmdchain, resolve_ties, rop, sweeps, twod, units
+from tools.benchloop.sm53 import interlock_spin
 
 GENERATORS: dict[str, Callable[[], list[dict]]] = {
     'precision': sweeps.precision,
@@ -15,4 +16,5 @@ GENERATORS: dict[str, Callable[[], list[dict]]] = {
     'qmdchain': qmdchain.generate,
     'cbufsize': cbufsize.generate,
     'interlock_section': interlock_section.generate,
+    'interlock_clock': interlock_spin.generate_clock_probe,
 }

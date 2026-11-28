@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A pass with no depth or stencil attachment under a depth/stencil state that tests: Apple's GPU tests in its tile,

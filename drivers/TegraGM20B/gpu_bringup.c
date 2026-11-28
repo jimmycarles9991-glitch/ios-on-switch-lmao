@@ -25,7 +25,7 @@ static const struct nvkm_device_tegra_func gm20b_platform_data = {
 };
 struct gpu_state tgm_gpu = {.lock = {NULL}};
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 /* Rail-gating's count of wakes, for its journal line: how many the display asked for, how many work at tgm_gpu.lock or the
  * gate did, where the first such caller came from, and the pool bytes its callers zeroed on the CPU while it was down. */
 struct rail_ups_state tgm_rail_ups;
@@ -48,7 +48,7 @@ int tgm_stage(void)
 {
 	return tgm_gpu.stage;
 }
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 /* Debug kernels: clock gating off (nvgpu's disable values, ELCG run) or on again, for a frame-time A/B within one boot;
  * under tgm_gpu.lock, once the bring-up has reached M3. */
 int tgm_clkgate_switch(int on)
@@ -136,7 +136,7 @@ static int m1(char *line, unsigned int len)
 	 * (nouveau gm20b.c:99-103, nvgpu clk_gm20b.c:56-69) where B01 needs C1 (clk_gm20b.c:71-85,
 	 * platform_gk20a_tegra.c:815-817), so it is not used. */
 	/* Bring-up trace: let the console's backlog drain first, so every step line below is on screen before its step. */
-	if (TGM_STATS && nvxnu_trace_paced())
+	if (TGM_DEBUG_PROBES && nvxnu_trace_paced())
 		nvxnu_usleep(2000000);
 	nvxnu_step("tegra-gm20b: M1 step: start\n");
 	ret = tegra_gm20b_platform_map();
@@ -227,7 +227,7 @@ static int m1(char *line, unsigned int len)
  * status and the GPCPLL output, so a step that leaves the ring or the GPU clock dead shows on the next line. */
 static void m2_step(struct nvkm_device *device, const char *what, const char *name)
 {
-	if (!TGM_STATS)
+	if (!TGM_DEBUG_PROBES)
 		return;
 	u32 pmc = nvkm_rd32(device, 0x000200);  /* PMC_ENABLE */
 	u32 elpg = nvkm_rd32(device, 0x00020c); /* PMC_ELPG_ENABLE: xbar 2, pfb 20, hub 29 */
@@ -441,6 +441,46 @@ int tgm_zbc_add(int depth, uint32_t format, const uint32_t ds[4], const uint32_t
 	return ret;
 }
 
+#if TGM_DEBUG_PROBES
+/* "colour=U/N depth=U/N c=FF:DS0,DS1,DS2,DS3;... d=FF:DS;...": the table's entries past the disabled slot 0, words in hex */
+void tgm_zbc_line(char *line, size_t size)
+{
+	struct nvkm_ltc *ltc = NULL;
+	struct gf100_gr *gr = NULL;
+	unsigned int colours = 0, depths = 0, at = 0;
+	int i = 0;
+
+	if (!size)
+		return;
+	line[0] = 0;
+	if (tgm_gpu.stage < 2 || !tgm_gpu.device->ltc->num_tags)
+		return;
+	ltc = tgm_gpu.device->ltc;
+	gr = gf100_gr(tgm_gpu.device->gr);
+	tgm_gpu_lock();
+	for (i = ltc->zbc_color_min; i <= ltc->zbc_color_max; i++)
+		colours += gr->zbc_color[i].format != 0;
+	for (i = ltc->zbc_depth_min; i <= ltc->zbc_depth_max; i++)
+		depths += gr->zbc_depth[i].format != 0;
+	at = scnprintf(line, size, "colour=%u/%d depth=%u/%d c=", colours,
+		       ltc->zbc_color_max - ltc->zbc_color_min + 1, depths,
+		       ltc->zbc_depth_max - ltc->zbc_depth_min + 1);
+	for (i = ltc->zbc_color_min; i <= ltc->zbc_color_max; i++) {
+		const struct gf100_gr_zbc_color *c = &gr->zbc_color[i];
+		if (c->format)
+			at += scnprintf(line + at, size - at, "%x:%x,%x,%x,%x;", c->format,
+					c->ds[0], c->ds[1], c->ds[2], c->ds[3]);
+	}
+	at += scnprintf(line + at, size - at, " d=");
+	for (i = ltc->zbc_depth_min; i <= ltc->zbc_depth_max; i++) {
+		if (gr->zbc_depth[i].format)
+			at += scnprintf(line + at, size - at, "%x:%x;", gr->zbc_depth[i].format,
+					gr->zbc_depth[i].ds);
+	}
+	mutex_unlock(&tgm_gpu.lock);
+}
+#endif
+
 uint64_t tgm_timestamp_ns(void)
 {
 	u64 t = 0;
@@ -596,6 +636,9 @@ int tgm_bringup(int stage, char *line, unsigned int len)
 			nvxnu_log("tegra-gm20b: no coherency registry: imports are cleaned once\n");
 		tgm_idle_start(); /* 768 MHz while busy, 76.8 MHz once truly idle */
 		tgm_scrub_open(); /* the copy engine zeroes the pool from here on (see "pool scrub") */
+#if TGM_STATS
+		tgm_stats_init();
+#endif
 	}
 	return ret;
 }

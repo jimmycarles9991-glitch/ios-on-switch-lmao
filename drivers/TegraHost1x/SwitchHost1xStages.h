@@ -93,7 +93,7 @@ struct SwitchHost1xStage {
     uint32_t hardware, inputs, successor, final, boundUs;
     uint32_t bridgeSyncpt, bridgeThreshold;
     int physical;
-    bool ended;
+    bool ended, hasProducers, singleHardware, singleFinal;
 };
 
 template <class Engine, uint32_t Slots> class SwitchHost1xStages {
@@ -122,8 +122,12 @@ public:
         stage.boundUs = boundUs;
         stage.physical = 1;
         stage.ended = false;
+        stage.hasProducers = false;
+        for (uint32_t i = 0; i < SwitchHost1xProducers::kMax; ++i)
+            stage.hasProducers |= producers.held(i);
+        stage.singleFinal = !semantic;
         bool behind = false;
-        if (ahead < Slots) {
+        if (ahead < Slots && __atomic_load_n(&stages[ahead].successor, __ATOMIC_ACQUIRE) == kNoSuccessor) {
             ++stage.inputs;
             ++stage.hardware;
             uint32_t expected = kNoSuccessor;
@@ -134,7 +138,8 @@ public:
                 --stage.hardware;
             }
         }
-        if (!own && !behind) {
+        stage.singleHardware = !own && !behind;
+        if (stage.singleHardware) {
             stage.inputs = 0;
             stage.successor = kInputsReady;
             return switch_host1x_fence_add(&stage.fence, boundUs);
@@ -272,6 +277,8 @@ private:
 
     static void foldProducerFailure(SwitchHost1xStage &stage)
     {
+        if (!stage.hasProducers)
+            return;
         int ran = 1;
         if (__atomic_load_n(&stage.physical, __ATOMIC_ACQUIRE) == ran)
             if (const int failed = stage.producers.failure())
@@ -280,7 +287,9 @@ private:
 
     static void hardwareStep(SwitchHost1xStage &stage)
     {
-        if (__atomic_sub_fetch(&stage.hardware, 1u, __ATOMIC_ACQ_REL))
+        if (stage.singleHardware)
+            __atomic_store_n(&stage.hardware, 0u, __ATOMIC_RELEASE);
+        else if (__atomic_sub_fetch(&stage.hardware, 1u, __ATOMIC_ACQ_REL))
             return;
         foldProducerFailure(stage);
         Engine::physical(slotOf(stage), __atomic_load_n(&stage.physical, __ATOMIC_ACQUIRE));
@@ -289,7 +298,9 @@ private:
 
     static void finalStep(SwitchHost1xStage &stage)
     {
-        if (__atomic_sub_fetch(&stage.final, 1u, __ATOMIC_ACQ_REL))
+        if (stage.singleFinal)
+            stage.final = 0;
+        else if (__atomic_sub_fetch(&stage.final, 1u, __ATOMIC_ACQ_REL))
             return;
         Engine::ended(slotOf(stage), __atomic_load_n(&stage.physical, __ATOMIC_ACQUIRE));
     }

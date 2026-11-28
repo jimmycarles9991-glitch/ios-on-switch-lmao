@@ -23,7 +23,10 @@ struct Model {
     Run run;
     Surface assembly = kFront, shown = kFront;
     uint32_t control = 0;
-    uint32_t producerSyncpt = 40, displaySyncpt = 900;
+    uint32_t producerSyncpt = 40, displaySyncpt = 900, vblank = 70, windowSyncpts[2] = {500, 600};
+    uint32_t windowPending[2] = {}, windowSettles = 0;  // window A's conditions waiting for the next latch
+    bool windowRaisesEarly = false, windowLate = false, windowNever = false;
+    uint32_t windowDeferred[2] = {};
     uint32_t words[64] = {}, wordCount = 0;
     bool queued = false, stuck = false, freeze = false, refuseNext = false, quietNow = true, underflowNext = false;
     bool reserveFails = false, raiseFails = false;
@@ -77,6 +80,29 @@ struct Model {
     uint32_t displayValue() const
     {
         return displaySyncpt;
+    }
+
+    static uint32_t window(uint32_t i)
+    {
+        return 180 + i;
+    }
+
+    uint32_t windowValue(uint32_t i) const
+    {
+        return windowSyncpts[i];
+    }
+
+    uint32_t vblankValue() const
+    {
+        return vblank;
+    }
+
+    void settleWindow(uint32_t regWrSafeAt, uint32_t lineFlippedAt)
+    {
+        ++windowSettles;
+        windowPending[0] = windowPending[1] = 0;
+        windowSyncpts[0] = regWrSafeAt;
+        windowSyncpts[1] = lineFlippedAt;
     }
 
     uint32_t *reserve(uint32_t capacity)
@@ -158,12 +184,30 @@ struct Model {
         if (!queued || stuck || delayFrames)
             return;
         ASSERT_GE(wordCount, 4u);
-        ASSERT_EQ(words[0], tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_HOST1X, 0x4e, 5));
+        const uint32_t wait = tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_HOST1X, 0x4e, 5);
+        ASSERT_EQ(words[0], wait);
         if (!switch_host1x_flip::reached(producerSyncpt, words[1]) || words[2] != kProducer)
             return;
-        ASSERT_EQ(words[3], tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_DC, 0, 0));
-        for (uint32_t i = 4; i < wordCount; ++i) {
+        uint32_t at = 3;
+        if (words[at] == wait) {
+            ASSERT_EQ(words[at + 2], switch_host1x_flip::kVblankSyncpt);
+            if (!switch_host1x_flip::reached(vblank, words[at + 1]))
+                return;
+            at += 3;
+        }
+        ASSERT_EQ(words[at], tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_DC, 0, 0));
+        for (uint32_t i = at + 1; i < wordCount; ++i) {
             const uint32_t op = words[i] >> 28, offset = (words[i] >> 16) & 0xfff;
+            if (op == 4 && offset == switch_host1x_flip::kWinAIncrSyncpt) {
+                const uint32_t cond = (words[i] >> 8) & 0xff, id = words[i] & 0xff;
+                const uint32_t which = cond == switch_host1x_flip::kRegWrSafe ? 0 : 1;
+                ASSERT_EQ(id, window(which));
+                if (windowRaisesEarly)
+                    ++windowSyncpts[which];
+                else
+                    ++windowPending[which];
+                continue;
+            }
             if (op == 4) {
                 ASSERT_EQ(offset, switch_host1x_flip::kIncrSyncpt);
                 ASSERT_EQ(words[i] & 0xff, kDisplay);
@@ -187,11 +231,20 @@ struct Model {
     // a delayed stream runs.
     void frameEnd()
     {
+        ++vblank;
         if (control && !freeze) {
             shown = refuseNext ? Surface{0x12340000, 0, 5120, 0} : assembly;
             refuseNext = false;
             control = 0;
+            for (uint32_t i = 0; i < 2; ++i) {
+                windowSyncpts[i] += windowDeferred[i];
+                windowDeferred[i] = 0;
+                if (!windowNever)
+                    (windowLate ? windowDeferred[i] : windowSyncpts[i]) += windowPending[i];
+                windowPending[i] = 0;
+            }
         }
+        execute();
         run.frameEnd(*this);
         if (delayFrames && !--delayFrames)
             execute();
@@ -240,7 +293,7 @@ TEST(Host1xFlipStream, WaitThenWindowAStartThenItsRequestThenDcAsIncrement)
 TEST(Host1xFlipRun, EveryFlipIsWrittenByHost1xBehindItsProducerAndLatchedAsWritten)
 {
     Model m;
-    m.run.begin(6, false);
+    m.run.begin(6, 0);
     const unsigned frames = m.runToEnd();
     ASSERT_TRUE(m.done);
     EXPECT_EQ(frames, 7u) << "one quiet frame end, then one per flip";
@@ -262,7 +315,7 @@ TEST(Host1xFlipRun, EveryFlipIsWrittenByHost1xBehindItsProducerAndLatchedAsWritt
 TEST(Host1xFlipRun, AnOddCountGoesBackToTheFrontThroughTheGate)
 {
     Model m;
-    m.run.begin(3, false);
+    m.run.begin(3, 0);
     m.runToEnd();
     ASSERT_TRUE(m.done);
     EXPECT_EQ(m.run.totals.host1x, 3u);
@@ -275,7 +328,7 @@ TEST(Host1xFlipRun, AnOddCountGoesBackToTheFrontThroughTheGate)
 TEST(Host1xFlipRun, AFailedProducersStreamIsTornDownBeforeTheGateWritesItsFlip)
 {
     Model m;
-    m.run.begin(6, true);
+    m.run.begin(6, switch_host1x_flip::kForcedFailure);
     m.runToEnd();
     ASSERT_TRUE(m.done);
     EXPECT_EQ(m.run.why, nullptr) << "a forced failure does not end the run";
@@ -302,7 +355,7 @@ TEST(Host1xFlipRun, AFailedProducersStreamIsTornDownBeforeTheGateWritesItsFlip)
 TEST(Host1xFlipRun, AStreamOneFrameLateIsNotTornDown)
 {
     Model m;
-    m.run.begin(4, false);
+    m.run.begin(4, 0);
     m.frameEnd();
     m.delayFrames = 2;
     m.runToEnd();
@@ -316,7 +369,7 @@ TEST(Host1xFlipRun, AChannelThatNeverRunsTheStreamIsTornDownAndTheGateWritesTheF
 {
     Model m;
     m.stuck = true;
-    m.run.begin(6, false);
+    m.run.begin(6, 0);
     const unsigned frames = m.runToEnd();
     ASSERT_TRUE(m.done);
     EXPECT_LE(frames, 6u);
@@ -333,7 +386,7 @@ TEST(Host1xFlipRun, AChannelThatNeverRunsTheStreamIsTornDownAndTheGateWritesTheF
 TEST(Host1xFlipRun, AFlipLatchedAsSomethingElseGoesThroughTheGateAndEndsTheRun)
 {
     Model m;
-    m.run.begin(6, false);
+    m.run.begin(6, 0);
     m.frameEnd();
     m.refuseNext = true;
     m.runToEnd();
@@ -350,7 +403,7 @@ TEST(Host1xFlipRun, AFlipLatchedAsSomethingElseGoesThroughTheGateAndEndsTheRun)
 TEST(Host1xFlipRun, ARequestThatNeverLatchesEndsTheRunInBoundedFrames)
 {
     Model m;
-    m.run.begin(6, false);
+    m.run.begin(6, 0);
     m.frameEnd();
     m.frameEnd();
     ASSERT_EQ(m.shown.start, kAlias.start);
@@ -366,7 +419,7 @@ TEST(Host1xFlipRun, ARequestThatNeverLatchesEndsTheRunInBoundedFrames)
 TEST(Host1xFlipRun, AFlipThatNeverLeftTheFrontNeedsNoRestoreLatch)
 {
     Model m;
-    m.run.begin(6, false);
+    m.run.begin(6, 0);
     m.frameEnd();
     m.freeze = true;
     EXPECT_EQ(m.runToEnd(), switch_host1x_flip::kLatchFrames + 1);
@@ -379,7 +432,7 @@ TEST(Host1xFlipRun, ABusyDisplayEndsTheRunUntouched)
 {
     Model m;
     m.quietNow = false;
-    m.run.begin(6, false);
+    m.run.begin(6, 0);
     EXPECT_EQ(m.runToEnd(), switch_host1x_flip::kWaitFrames);
     EXPECT_STREQ(m.run.why, "busy");
     EXPECT_TRUE(m.calls.empty());
@@ -389,7 +442,7 @@ TEST(Host1xFlipRun, NoSurfaceToFlipToEndsTheRunUntouched)
 {
     Model m;
     m.missing = "no_alias_slot";
-    m.run.begin(6, false);
+    m.run.begin(6, 0);
     EXPECT_EQ(m.runToEnd(), 1u);
     EXPECT_STREQ(m.run.why, "no_alias_slot");
     EXPECT_TRUE(m.calls.empty());
@@ -399,7 +452,7 @@ TEST(Host1xFlipRun, AStreamTheChannelRefusesGoesThroughTheGate)
 {
     Model m;
     m.reserveFails = true;
-    m.run.begin(6, false);
+    m.run.begin(6, 0);
     m.runToEnd();
     ASSERT_TRUE(m.done);
     EXPECT_STREQ(m.run.why, "submit");
@@ -411,7 +464,7 @@ TEST(Host1xFlipRun, AProducerSyncpointThatDoesNotRiseIsTakenBackWithoutARelease)
 {
     Model m;
     m.raiseFails = true;
-    m.run.begin(6, false);
+    m.run.begin(6, 0);
     m.runToEnd();
     ASSERT_TRUE(m.done);
     EXPECT_STREQ(m.run.why, "producer");
@@ -423,7 +476,7 @@ TEST(Host1xFlipRun, TheDisplayStoppingTearsTheStreamDownBeforeTheFrontGoesBack)
 {
     Model m;
     m.stuck = true;
-    m.run.begin(6, false);
+    m.run.begin(6, 0);
     m.frameEnd();
     m.run.abort(m, "the display stopped");
     ASSERT_TRUE(m.done);
@@ -439,11 +492,114 @@ TEST(Host1xFlipRun, TheDisplayStoppingTearsTheStreamDownBeforeTheFrontGoesBack)
 TEST(Host1xFlipRun, UnderflowsWhileFlippingAreCounted)
 {
     Model m;
-    m.run.begin(4, false);
+    m.run.begin(4, 0);
     m.frameEnd();
     m.underflowNext = true;
     m.runToEnd();
     EXPECT_EQ(m.run.totals.underflows, 1u);
 }
 
+// The probes' stream: the producer's WAIT, then the vblank's, then window A's flip, the general increment, and window A's
+// REG_WR_SAFE and LINE_FLIPPED increments last, each on its own syncpoint.
+TEST(Host1xFlipStream, TheProbesWaitForTheVblankAndEndWithWindowAsConditions)
+{
+    uint32_t w[switch_host1x_flip::kProbeStreamWords] = {};
+    switch_host1x_flip::Probes probes;
+    probes.vblank = probes.window = true;
+    probes.vblankAt = 72;
+    probes.regWrSafe = 180;
+    probes.lineFlipped = 181;
+    ASSERT_EQ(switch_host1x_flip::stream(w, 0x60000000, kProducer, 41, kDisplay, probes),
+              switch_host1x_flip::kProbeStreamWords);
+    EXPECT_EQ(w[3], tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_HOST1X, 0x4e, 5));
+    EXPECT_EQ(w[4], 72u);
+    EXPECT_EQ(w[5], switch_host1x_flip::kVblankSyncpt);
+    EXPECT_EQ(w[6], 0x70u << 6);
+    EXPECT_EQ(w[13], 0x400000abu);
+    EXPECT_EQ(w[14], 0x400803b4u) << "WIN_A_INCR_SYNCPT, REG_WR_SAFE";
+    EXPECT_EQ(w[15], 0x400804b5u) << "WIN_A_INCR_SYNCPT, LINE_FLIPPED";
+}
+
+TEST(Host1xFlipRun, WindowConditionsReachedAtTheFrameEndThatSeesTheLatchAreCountedThere)
+{
+    Model m;
+    m.run.begin(6, switch_host1x_flip::kWindowIncrements);
+    m.runToEnd();
+    ASSERT_TRUE(m.done);
+    EXPECT_EQ(m.run.why, nullptr);
+    for (uint32_t i = 0; i < 2; ++i) {
+        EXPECT_EQ(m.run.totals.window[i][switch_host1x_flip::kAtLatch], 6u) << i;
+        EXPECT_EQ(m.run.totals.window[i][switch_host1x_flip::kBefore] +
+                      m.run.totals.window[i][switch_host1x_flip::kLater] +
+                      m.run.totals.window[i][switch_host1x_flip::kNever],
+                  0u)
+            << i;
+    }
+}
+
+// A condition raised while the latch is held is counted before it; one raised a frame after the latch, later (the last
+// flip's never: the run ends at its latch).
+TEST(Host1xFlipRun, AConditionBeforeTheLatchOrAfterItIsTold)
+{
+    Model early;
+    early.windowRaisesEarly = true;
+    early.run.begin(2, switch_host1x_flip::kWindowIncrements);
+    early.frameEnd();
+    early.freeze = true;
+    early.frameEnd();
+    early.freeze = false;
+    early.runToEnd();
+    EXPECT_EQ(early.run.totals.window[1][switch_host1x_flip::kBefore], 1u);
+    EXPECT_EQ(early.run.totals.window[1][switch_host1x_flip::kAtLatch], 1u);
+
+    Model late;
+    late.windowLate = true;
+    late.run.begin(4, switch_host1x_flip::kWindowIncrements);
+    late.runToEnd();
+    EXPECT_EQ(late.run.totals.window[1][switch_host1x_flip::kLater], 3u);
+    EXPECT_EQ(late.run.totals.window[1][switch_host1x_flip::kNever], 1u);
+}
+
+// A torn-down stream's window conditions are settled with the client reset, so the next flip's thresholds still hold.
+TEST(Host1xFlipRun, ATornDownStreamsWindowConditionsAreSettled)
+{
+    Model m;
+    m.run.begin(6, switch_host1x_flip::kForcedFailure | switch_host1x_flip::kWindowIncrements);
+    m.runToEnd();
+    ASSERT_TRUE(m.done);
+    EXPECT_EQ(m.windowSettles, 1u);
+    EXPECT_EQ(m.run.totals.window[1][switch_host1x_flip::kAtLatch], 5u) << "every host1x flip's";
+}
+
+// Each stream waits two vblanks: the flip is written at the vblank it waited for and seen latched one later.
+TEST(Host1xFlipRun, AStreamHeldForTheVblankIsSeenLatchedTheFrameAfterIt)
+{
+    Model m;
+    m.run.begin(4, switch_host1x_flip::kVblankWait);
+    m.runToEnd();
+    ASSERT_TRUE(m.done);
+    EXPECT_EQ(m.run.why, nullptr);
+    EXPECT_EQ(m.run.totals.host1x, 4u);
+    EXPECT_EQ(m.run.totals.unwritten, 0u) << "a stream waiting for its vblank is not taken back";
+    EXPECT_EQ(m.run.totals.vblank[2], 4u);
+}
+
+// Conditions window A never raises are dropped at the run's end, before the display channel is the display's again.
+TEST(Host1xFlipRun, ConditionsNeverRaisedAreDroppedAtTheEnd)
+{
+    Model m;
+    m.windowNever = true;
+    m.run.begin(4, switch_host1x_flip::kWindowIncrements);
+    m.runToEnd();
+    ASSERT_TRUE(m.done);
+    EXPECT_EQ(m.windowSettles, 1u);
+    EXPECT_EQ(m.calls.end()[-2], "teardown");
+    EXPECT_EQ(m.calls.end()[-1], "restart");
+    EXPECT_EQ(m.run.totals.window[1][switch_host1x_flip::kNever], 4u);
+
+    Model clean;
+    clean.run.begin(4, switch_host1x_flip::kWindowIncrements);
+    clean.runToEnd();
+    EXPECT_EQ(clean.windowSettles, 0u) << "every condition raised: nothing to drop";
+}
 }  // namespace

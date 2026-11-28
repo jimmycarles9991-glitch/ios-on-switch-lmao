@@ -1,4 +1,4 @@
-"""The scenarios of a session: HW Test's tests, app launches, touch runs, hangs and the owner's marks, as windows.
+"""The scenarios of a session as windows: HW Test's tests and marks, launches, touches, hangs, Capture presses.
 
 Every section of the report is read per window, so an open question about one moment (a launch, a snapshot, a hang)
 gets one dossier of everything logged inside it.
@@ -21,6 +21,10 @@ BEGIN = re.compile(r'begin_time#_##_#(?P<t>\d+)##')
 END = re.compile(r'end_time#_##_#(?P<t>\d+)##')
 HANG_LINE = re.compile(r'Hang detected: (?P<s>[\d.]+)s')
 LAUNCH_LIMIT = timedelta(seconds=60)
+PRESS = 'Snapshot button pressed down'
+PRESS_BEFORE = timedelta(seconds=3)  # what the owner saw before pressing
+PRESS_JOIN = timedelta(seconds=2)  # a recorder line this close to a press is about it
+RECORDER_MARK = re.compile(r'SwitchRecorder: (?:capture (?P<seq>\d+) \(mark |refused mark .*?: (?P<why>\w+)$)')
 SUITE_IDS = {'suite', 'suite.reds'}
 
 
@@ -88,13 +92,46 @@ def touches(recs: list[Rec]) -> list[Window]:
 
 
 def marks(recs: list[Rec]) -> list[Window]:
-    """Each mark the owner set (capture button, HW Test scenario button) or a HW Test test logged, with its span."""
+    """Each scenario mark HW Test (or a kernel SwitchMark line) logged, with its span: not the owner's presses."""
     out = []
     for r in recs:
         if (r.proc == 'kernel' or r.subsystem == 'com.brunostjohn.switch.hwtest') and (m := MARK.match(r.msg)):
             span = timedelta(milliseconds=int(m['ms'] or 0))
             out.append(Window('mark', m['label'], r.time - span, r.time))
     return out
+
+
+def presses(recs: list[Rec]) -> list[Window]:
+    """Each Capture press of the owner's: SpringBoard's press line, with the recorder's capture or refusal of it.
+
+    Without SpringBoard's line (a Bluetooth controller's Capture, or debug.switch_recorder_mark), the recorder's own
+    mark line is the press. The window is the few seconds before it, what the owner saw.
+    """
+    kernel = [(r.time, m) for r in recs if r.proc == 'kernel' and (m := RECORDER_MARK.match(r.msg))]
+    used: set[int] = set()
+    out = []
+    for r in recs:
+        if r.proc != 'SpringBoard' or not r.msg.startswith(PRESS):
+            continue
+        note = 'no recorder line'
+        for i, (t, m) in enumerate(kernel):
+            if i not in used and abs(t - r.time) <= PRESS_JOIN:
+                used.add(i)
+                note = f'capture {m["seq"]}' if m['seq'] else f'refused ({m["why"]})'
+                break
+        out.append(Window('press', 'capture', r.time - PRESS_BEFORE, r.time, note=note))
+    for i, (t, m) in enumerate(kernel):
+        if i not in used:
+            out.append(
+                Window(
+                    'press',
+                    'mark',
+                    t - PRESS_BEFORE,
+                    t,
+                    note=f'capture {m["seq"]}' if m['seq'] else f'refused ({m["why"]})',
+                )
+            )
+    return sorted(out, key=lambda w: w.end)
 
 
 def hangs(recs: list[Rec]) -> list[Window]:

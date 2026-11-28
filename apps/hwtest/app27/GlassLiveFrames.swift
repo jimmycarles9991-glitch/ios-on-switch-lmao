@@ -1,4 +1,5 @@
 import Foundation
+import HWTestGPU
 import ImageIO
 import UniformTypeIdentifiers
 
@@ -98,8 +99,6 @@ struct LiveFrame: Codable {
     /// glass band).
     let changedOnScreen: Bool?
     let glassChangedOnScreen: Bool?
-    /// The render server's command buffers committed since the frame before was read: draws/encoders[Llevels].
-    var buffers: [String]
     let ms: Double
 }
 
@@ -107,8 +106,6 @@ struct LiveFrame: Codable {
 struct LiveSummary {
     let name: String
     let frames: [LiveFrame]
-    let recorded: Int
-    let regenerated: Int
     let seconds: Double
     /// "<last>/<after>": the glass of the frame left on screen when the motion stopped, and of the first frame after a
     /// one-point change under the glass half a second later, which makes the render server capture the backdrop again
@@ -138,19 +135,13 @@ struct LiveSummary {
         return "\(changed)/\(still)/\(black.count - changed - still)"
     }
 
-    var fps: Double { seconds > 0 ? Double(recorded) / seconds : 0 }
-
     struct Detail: Encodable {
         let name: String
-        let recorded: Int
-        let regenerated: Int
         let seconds: Double
         let frames: [LiveFrame]
 
         init(_ s: LiveSummary) {
             name = s.name
-            recorded = s.recorded
-            regenerated = s.regenerated
             seconds = s.seconds
             frames = s.frames
         }

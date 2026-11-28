@@ -35,6 +35,8 @@ int switch_native_scanout_acquire(OSObject *object, SwitchNativeScanout *scanout
     // Its STALE is a picture retired by a later write of the surface's rows: there is no picture to scan in place.
     if (error == SWITCH_GPU_BACKING_STALE)
         error = -2;
+    if (!error && !scanout->view.producer.engine)
+        error = -2;
     switch_gpu_cpu_lease *logical = nullptr;
     if (!error)
         error = switch_gpu_backing_conversion_reserve(scanout->view.logical, SWITCH_GPU_BACKING_READ, 1, &logical);

@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A Depth32Float array and a Stencil8 array of three slices as one pass's attachments, each from a slice of its own (a pair

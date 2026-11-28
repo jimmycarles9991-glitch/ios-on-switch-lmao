@@ -3,6 +3,7 @@
 #include "../record.h"
 #include "../samples.h"
 #include "../turn_copy.h"
+#include "bazel/testing/source_text.h"
 #include <gtest/gtest.h>
 #include <set>
 
@@ -107,7 +108,33 @@ TEST(GM20BKey, EveryResolveStateIsAnOwnState)
                                     ":15:0:1:0:0:1:0:0  | v resolve_vert  | f " + fragment;
             EXPECT_EQ(gm20b::packKeyHash(key), hash(name)) << format << " x" << samples;
         }
-    EXPECT_EQ(names.size(), 26u);
+    EXPECT_EQ(names.size(), 28u);
+}
+
+// packKeyHash files an own state by its functions alone, so only the pack line says what the state renders into. A
+// resolve pass renders into resolveTargetFormat's format (an 8-bit sRGB target as its UNORM twin), and the encoder skips
+// a state of any other format as a draw into a pass it cannot render
+TEST(GM20BKey, EveryResolveStateRendersIntoItsTargetsFormat)
+{
+    const std::string lines = switch_ios::test::SourceText("../pack/probe_states.h");
+    std::set<std::string> checked;
+    for (uint32_t format = 0; format < 700; format++)
+        for (uint32_t samples : {1u, 2u, 4u, 8u}) {
+            const char *name = gm20b::resolveState(format, samples);
+            if (!name)
+                continue;
+            const std::string fragment = std::string(name).substr(sizeof "raw.resolve." - 1);
+            const size_t at = lines.find(" | v resolve_vert | f " + fragment + "\"");
+            const size_t quote = at == std::string::npos ? at : lines.rfind('"', at);
+            if (quote == std::string::npos) {
+                ADD_FAILURE() << "no pack line for " << fragment;
+                continue;
+            }
+            checked.insert(fragment);
+            EXPECT_EQ(lines.substr(quote + 1, at - quote - 1), std::to_string(gm20b::resolveTargetFormat(format)))
+                << fragment << " for " << format;
+        }
+    EXPECT_EQ(checked.size(), 32u);
 }
 
 TEST(GM20BKey, FrameworkResolveSpecializationsHaveDistinctKeys)

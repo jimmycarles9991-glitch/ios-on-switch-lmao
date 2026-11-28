@@ -14,6 +14,8 @@
 	<true/>
 	<key>com.apple.private.memorystatus</key>
 	<true/>
+	<key>com.brunostjohn.switch.gpu-probes</key>
+	<true/>
 	<key>com.apple.private.security.container-required</key>
 	<true/>
 	<key>com.apple.security.system-groups</key>
@@ -28,9 +30,11 @@
 	</array>
 	<key>com.apple.security.exception.files.absolute-path.read-only</key>
 	<array>
+		<string>/Applications/</string>
 		<string>/private/var/mobile/Library/Logs/CrashReporter/</string>
 		<string>/private/var/Switch/icon-cache-gpu</string>
 		<string>/private/var/Switch/icon-cache-reset</string>
+		<string>/private/var/Switch/icon-cache-restored</string>
 	</array>
 	<key>com.apple.security.exception.files.absolute-path.read-write</key>
 	<array>
@@ -40,6 +44,10 @@
 	<array>
 		<string>kern.bootsessionuuid</string>
 		<string>kern.uuid</string>
+		<string>kern.version</string>
+		<string>kern.switch_motion_reports</string>
+		<string>kern.switch_motion_fastpath_copies</string>
+		<string>kern.switch_motion_gyro_us</string>
 		<string>kern.switch_planes_flips</string>
 		<string>kern.switch_planes_latched</string>
 		<string>kern.switch_planes_maps</string>
@@ -53,7 +61,6 @@
 		<string>kern.switch_native_publications</string>
 		<string>kern.switch_frame_info_shown</string>
 		<string>kern.switch_frame_info_unsent</string>
-		<string>kern.switch_frame_info_ordinary</string>
 		<string>kern.switch_frame_info_early</string>
 		<string>kern.switch_frame_info_unphased</string>
 		<string>kern.switch_display_refresh_min</string>
@@ -101,6 +108,7 @@
 		<string>kern.switch_media_flips_declined</string>
 		<string>debug.switch_display_dc_host1x_class</string>
 		<string>debug.switch_display_host1x_flip</string>
+		<string>debug.switch_gpu_gpc_khz</string>
 		<string>debug.switch_gpu_rail_cycle</string>
 		<string>debug.switch_gpu_ramfc</string>
 		<string>debug.switch_perf_dfll_landing</string>
@@ -115,6 +123,7 @@
 		<string>kern.memorystatus_level</string>
 		<string>kern.proc.all</string>
 		<string>kern.switch_shader_compiler</string>
+		<string>kern.switch_fsctl_marks</string>
 	</array>
 	<key>com.apple.security.exception.sysctl.read-write</key>
 	<array>

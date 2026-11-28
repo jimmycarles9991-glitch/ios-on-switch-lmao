@@ -43,6 +43,7 @@ struct Waiter {
     Band band = Band::Background;
     bool split = false;   // waits for the split form, not just the record
     bool joined = false;  // came while another request's compile of its record was queued or running
+    bool replay = false;  // boot-replay prewarm with no live process waiting
 };
 
 // What a job compiles; the pool only hands it to Hooks::run
@@ -64,6 +65,10 @@ public:
         std::function<void(void *token)> lower;
         // Called once on each worker thread with its 1-based slot (1..kWorkers) before taking jobs
         std::function<void(uint32_t worker)> registerWorker;
+        // Whether two works compile one record: a request joins a job of its name only then. Names are what any client
+        // can steer (store_key.h), so a job of another content under the same name runs apart, under the next free key.
+        // None: every job of a name is the same.
+        std::function<bool(const Work &a, const Work &b)> same;
         // Bind kernel request `id` to the worker registered in `worker` (1..kWorkers)
         std::function<void(uint64_t id, uint32_t worker)> serve;
         // On the worker whose job was the last one queued or running, after its waiters were answered, at the background
@@ -71,7 +76,7 @@ public:
         std::function<void()> idle;
     };
 
-    static constexpr unsigned kWorkers = 4, kForeground = 2, kBackgroundStarts = 1;
+    static constexpr unsigned kWorkers = 4, kForeground = 2, kBackgroundStarts = 1, kReplayStarts = 1;
 
     explicit Pool(Hooks hooks, unsigned workers = kWorkers);
     ~Pool();
@@ -90,12 +95,20 @@ public:
 
 private:
     struct Job {
+        enum class Lane : uint8_t {
+            None,
+            Replay,
+            Background,
+            Foreground
+        };
+
         Name name;
         std::unique_ptr<Work> work;
         std::vector<Waiter> waiters;
         Band band = Band::Background;
         uint64_t order = 0, client = 0;  // its arrival, and the client that asked first
-        bool running = false, primaryDone = false, foreground = false;
+        bool running = false, primaryDone = false, replay = false;
+        Lane lane = Lane::None;
         int32_t primaryResult = 0;
         pthread_t worker = nullptr;
         uint32_t workerSlot = 0;
@@ -104,16 +117,19 @@ private:
 
     Hooks hooks_;
     mutable std::mutex lock_;
-    std::condition_variable work_, idle_;
+    std::condition_variable work_, idle_, idleWork_;
     std::map<Name, std::shared_ptr<Job>> jobs_;
     std::vector<std::thread> workers_;
-    unsigned foregroundRunning_ = 0, backgroundStarting_ = 0;
-    uint64_t arrivals_ = 0;
+    std::thread idleWorker_;
+    unsigned foregroundRunning_ = 0, backgroundStarting_ = 0, replayStarting_ = 0, finishing_ = 0;
+    uint64_t arrivals_ = 0, idleEpoch_ = 0, idleHandled_ = 0;
     bool stopping_ = false;
     Stats stats_;
 
     void workerLoop(unsigned slot);
+    void idleLoop();
     std::shared_ptr<Job> next();
+    void releaseLane(Job &job);
     void primary(const std::shared_ptr<Job> &job, int32_t result);
     void finish(const std::shared_ptr<Job> &job, int32_t splitResult);
 };

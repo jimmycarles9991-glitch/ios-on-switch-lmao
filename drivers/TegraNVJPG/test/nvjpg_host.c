@@ -271,7 +271,7 @@ static void targets(void)
     img.mcuW = img.mcuH = 16, img.mcusX = 7, img.mcusY = 5;
     nvjpg_dec_drv_pic_setup_s s;
     TegraNVJPGExtent e;
-    TegraNVJPGTarget t = {TEGRA_NVJPG_OUT_NV12, 0, {128, 128, 0}, 0, 0, 0};
+    TegraNVJPGTarget t = {TEGRA_NVJPG_OUT_NV12, 0, {128, 128, 0}, 0};
     memset(&s, 0, sizeof(s));
     CHECK(!tegra_nvjpg_setup_output(&img, &t, 1, &s, &e), "NV12 refused");
     CHECK(e.width == 100 && e.height == 75 && e.planes == 2, "NV12 size");
@@ -284,7 +284,7 @@ static void targets(void)
     CHECK(tegra_nvjpg_setup_output(&img, &t, 1, &s, &e) != NULL, "stride below a padded row accepted");
     t.pitch[0] = 120;
     CHECK(tegra_nvjpg_setup_output(&img, &t, 0, &s, &e) != NULL, "stride not a multiple of 64 accepted");
-    t = (TegraNVJPGTarget){TEGRA_NVJPG_OUT_BGRA, 0, {448, 0, 0}, 0xff, 0, 0};
+    t = (TegraNVJPGTarget){TEGRA_NVJPG_OUT_BGRA, 0, {448, 0, 0}, 0xff};
     CHECK(!tegra_nvjpg_setup_output(&img, &t, 1, &s, &e), "BGRA refused");
     CHECK(e.planes == 1 && e.rows[0] == 80 && e.rowBytes[0] == 448, "BGRA extent");  // 448: already 64-byte bursts
     CHECK(s.output_pixel_format == 4 && s.memory_mode == 3 && s.output_chroma_mode == 1 && s.alpha_value == 255,
@@ -295,23 +295,23 @@ static void targets(void)
           "BGRA 1/8 extent %ux%u %u %u", e.width, e.height, e.rows[0], e.rowBytes[0]);
     t.scale = 4;
     CHECK(tegra_nvjpg_setup_output(&img, &t, 1, &s, &e) != NULL, "scale 4 accepted");
-    t = (TegraNVJPGTarget){TEGRA_NVJPG_OUT_GREY, 0, {128, 0, 0}, 0, 0, 0};
+    t = (TegraNVJPGTarget){TEGRA_NVJPG_OUT_GREY, 0, {128, 0, 0}, 0};
     CHECK(tegra_nvjpg_setup_output(&img, &t, 1, &s, &e) != NULL, "colour to grey accepted");
     {
         TegraNVJPGImage grey = img;
         grey.components = 1, grey.chroma = TEGRA_NVJPG_CHROMA_MONO, grey.mcuW = grey.mcuH = 8;
         grey.mcusX = 13, grey.mcusY = 10;
-        TegraNVJPGTarget g = {TEGRA_NVJPG_OUT_NV12, 0, {128, 128, 0}, 0, 0, 0};
+        TegraNVJPGTarget g = {TEGRA_NVJPG_OUT_NV12, 0, {128, 128, 0}, 0};
         CHECK(tegra_nvjpg_setup_output(&grey, &g, 1, &s, &e) != NULL, "grey to NV12 accepted");
-        g = (TegraNVJPGTarget){TEGRA_NVJPG_OUT_BGRA, 0, {448, 0, 0}, 0xff, 0, 0};
+        g = (TegraNVJPGTarget){TEGRA_NVJPG_OUT_BGRA, 0, {448, 0, 0}, 0xff};
         CHECK(!tegra_nvjpg_setup_output(&grey, &g, 1, &s, &e) && s.output_chroma_mode == 0 && e.rows[0] == 80,
               "grey to BGRA refused");
-        g = (TegraNVJPGTarget){TEGRA_NVJPG_OUT_GREY, 0, {128, 0, 0}, 0, 0, 0};
+        g = (TegraNVJPGTarget){TEGRA_NVJPG_OUT_GREY, 0, {128, 0, 0}, 0};
         CHECK(!tegra_nvjpg_setup_output(&grey, &g, 1, &s, &e) && s.memory_mode == 3 && e.planes == 1 &&
                   e.rowBytes[0] == 128,
               "grey to grey refused");
     }
-    t = (TegraNVJPGTarget){TEGRA_NVJPG_OUT_I420, 0, {128, 64, 128}, 0, 0, 0};
+    t = (TegraNVJPGTarget){TEGRA_NVJPG_OUT_I420, 0, {128, 64, 128}, 0};
     CHECK(tegra_nvjpg_setup_output(&img, &t, 1, &s, &e) != NULL, "I420 with different chroma strides accepted");
     // CMPhoto's interchange-format destinations ('422f', '444f', 'yuvf': 24B119 and 21H461 alike since the client's
     // format filter went): 'yuvf' packed at 4:2:2; '422f' and '444f' as three planes at the file's own sampling, which
@@ -320,19 +320,19 @@ static void targets(void)
         TegraNVJPGImage four22 = img, four44 = img;
         four22.chroma = TEGRA_NVJPG_CHROMA_422H, four22.mcuW = 16, four22.mcuH = 8, four22.mcusY = 10;
         four44.chroma = TEGRA_NVJPG_CHROMA_444, four44.mcuW = four44.mcuH = 8, four44.mcusX = 13, four44.mcusY = 10;
-        TegraNVJPGTarget n16 = {TEGRA_NVJPG_OUT_NV16, 0, {128, 64, 64}, 0, 0, 0};
+        TegraNVJPGTarget n16 = {TEGRA_NVJPG_OUT_NV16, 0, {128, 64, 64}, 0};
         CHECK(!tegra_nvjpg_setup_output(&four22, &n16, 1, &s, &e), "422 to 422f refused");
         CHECK(s.output_pixel_format == TEGRA_NVJPG_PIXEL_YUV && s.output_chroma_mode == TEGRA_NVJPG_CHROMA_422H &&
                   s.memory_mode == TEGRA_NVJPG_MEMORY_PLANAR && s.output_stride_luma == 128 &&
                   s.output_stride_chroma == 64 && e.planes == 3 && e.rows[0] == 80 && e.rows[1] == 80 &&
                   e.rows[2] == 80 && e.rowBytes[0] == 128 && e.rowBytes[1] == 64 && e.rowBytes[2] == 64,
               "422f setup: planar 4:2:2, chroma halved across only");
-        TegraNVJPGTarget yuy2 = {TEGRA_NVJPG_OUT_YUY2, 0, {256, 0, 0}, 0, 0, 0};
+        TegraNVJPGTarget yuy2 = {TEGRA_NVJPG_OUT_YUY2, 0, {256, 0, 0}, 0};
         CHECK(!tegra_nvjpg_setup_output(&four22, &yuy2, 1, &s, &e), "422 to yuvf refused");
         CHECK(s.output_chroma_mode == TEGRA_NVJPG_CHROMA_422H && s.memory_mode == TEGRA_NVJPG_MEMORY_YUY2 &&
                   e.planes == 1 && e.rowBytes[0] == 256,
               "yuvf setup: one packed plane, two bytes a sample");
-        TegraNVJPGTarget n24 = {TEGRA_NVJPG_OUT_NV24, 0, {128, 128, 128}, 0, 0, 0};
+        TegraNVJPGTarget n24 = {TEGRA_NVJPG_OUT_NV24, 0, {128, 128, 128}, 0};
         CHECK(!tegra_nvjpg_setup_output(&four44, &n24, 1, &s, &e), "444 to 444f refused");
         CHECK(s.output_pixel_format == TEGRA_NVJPG_PIXEL_YUV && s.output_chroma_mode == TEGRA_NVJPG_CHROMA_444 &&
                   s.memory_mode == TEGRA_NVJPG_MEMORY_PLANAR && e.planes == 3 && e.rowBytes[1] == 128 &&
@@ -353,7 +353,7 @@ static void targets(void)
             file.mcusX = (205 + file.mcuW - 1) / file.mcuW, file.mcusY = (83 + file.mcuH - 1) / file.mcuH;
             for (uint32_t format = 0; format < TEGRA_NVJPG_OUT_COUNT; format++) {
                 for (uint32_t scale = 0; scale < 4; scale++) {
-                    TegraNVJPGTarget any = {format, scale, {1024, 1024, 1024}, 0xff, 0, 0};
+                    TegraNVJPGTarget any = {format, scale, {1024, 1024, 1024}, 0xff};
                     memset(&s, 0, sizeof(s));
                     if (tegra_nvjpg_setup_output(&file, &any, 1, &s, &e))
                         continue;

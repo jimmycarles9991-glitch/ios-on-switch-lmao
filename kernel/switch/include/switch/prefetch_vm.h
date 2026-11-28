@@ -20,12 +20,6 @@ enum switch_prefetch_volume {
     SWITCH_PREFETCH_VOLUMES = 4,
 };
 
-enum switch_prefetch_run_state {
-    SWITCH_PREFETCH_RUN_UNUSED = 0,
-    SWITCH_PREFETCH_RUN_USED = 1,
-    SWITCH_PREFETCH_RUN_EVICTED = 2,
-};
-
 /* Layout written by vfs_cluster.c on the page-in path and read by prefetch_save.c after quiesce. */
 struct switch_record_entry {
     struct vnode *vp;
@@ -36,6 +30,12 @@ struct switch_record_entry {
     uint16_t when;
     uint32_t reserved;
 };
+
+/* What made a record entry (switch_cluster_record_file). */
+#define SWITCH_RECORD_CLUSTER   0u /* cluster_io on the file's own vnode */
+#define SWITCH_RECORD_DECMPFS   1u /* decmpfs: a compressed file's pages, decompressed from its resource fork */
+#define SWITCH_RECORD_FIRST_USE 2u /* the first use of a page the replay brought in */
+#define SWITCH_RECORD_KINDS     3u
 
 #define SWITCH_PREFETCH_STOP_NONE          0u
 #define SWITCH_PREFETCH_STOP_PRESSURE      1u
@@ -52,6 +52,8 @@ struct switch_record_entry {
  * The _locked hooks run under page/object locks: they only update atomic counters and report whether the caller
  * must call switch_vm_prefetch_wake() after dropping those locks. */
 extern bool switch_vm_prefetch_used_locked(void) SWITCH_PREFETCH_WEAK;
+/* VM_PAGE_CONSUME_CLUSTERED_WAKE, after the physical page lock is dropped, with the page's object locked. */
+extern void switch_vm_prefetch_first_use(void *object, uint64_t offset) SWITCH_PREFETCH_WEAK;
 extern bool switch_vm_prefetch_reclaimed_locked(void) SWITCH_PREFETCH_WEAK;
 extern void switch_vm_prefetch_wake(void) SWITCH_PREFETCH_WEAK;
 extern bool switch_vm_prefetch_is_replay_thread(void *thread) SWITCH_PREFETCH_WEAK;
@@ -80,22 +82,25 @@ extern void switch_cluster_register_cryptex_mount(unsigned int index, struct mou
 extern void switch_cluster_record_start(struct switch_record_entry *log, uint32_t capacity);
 extern uint32_t switch_cluster_record_stop(void);
 extern void switch_cluster_record_set_skip_thread(void *thread);
+extern void switch_cluster_record_file(struct vnode *vp, int64_t offset, uint64_t size, unsigned int kind);
 
 /* osfmk-side services exposed by prefetch_vm.c to bsd prefetch.c / prefetch_save.c. */
 extern bool switch_vm_prefetch_start_thread(void (*entry)(void *, int), void *arg);
 extern uint64_t switch_vm_prefetch_begin(uint64_t list_vm_pages, void *replay_thread);
 extern void switch_vm_prefetch_end_replay(void);
+extern void switch_vm_prefetch_forget_replay_thread(void);
 extern void switch_vm_prefetch_wait_inflight_drain(void);
 extern void switch_vm_prefetch_finish(void);
 extern bool switch_vm_prefetch_can_issue_now(void);
 extern bool switch_vm_prefetch_wait_can_issue(void);
+/* Blocks the replay thread until deadline_abs (mach time); false when replay stopped first. */
+extern bool switch_vm_prefetch_wait_until(uint64_t deadline_abs);
 extern uint32_t switch_vm_prefetch_wait_stop(void);
 extern uint32_t switch_vm_prefetch_stop(uint32_t reason);
 extern uint32_t switch_vm_prefetch_replay_stop_reason(void);
 extern uint32_t switch_vm_prefetch_boot_stop_reason(void);
-extern enum switch_prefetch_run_state switch_vm_prefetch_check_run(void *control, uint64_t offset, uint64_t length);
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
 struct switch_cluster_io_snapshot {
     uint64_t demand_bytes[SWITCH_PREFETCH_VOLUMES];
     uint64_t replay_reqs;
@@ -103,6 +108,8 @@ struct switch_cluster_io_snapshot {
     uint64_t demand_reqs;
     uint64_t demand_gt64k;
     uint64_t demand_abs;
+    uint64_t record_bytes[SWITCH_RECORD_KINDS];
+    uint64_t record_entries;
 };
 
 struct switch_prefetch_pace_snapshot {
@@ -113,10 +120,13 @@ struct switch_prefetch_pace_snapshot {
     uint64_t lead_bound;
     uint64_t replay_abs;
     uint64_t demand_upl_abs;
+    uint64_t replay_decmp_bytes;
+    uint64_t replay_decmp_tagged_bytes;
 };
 
 extern void switch_vm_prefetch_mark_demand_upl(void *upl);
 extern void switch_vm_prefetch_demand_done(uint64_t elapsed_abs) SWITCH_PREFETCH_WEAK;
+extern void switch_vm_prefetch_count_replay_decmp(uint64_t bytes, bool tagged) SWITCH_PREFETCH_WEAK;
 extern void switch_cluster_prefetch_snapshot(struct switch_cluster_io_snapshot *out);
 extern void switch_vm_prefetch_pace_snapshot(struct switch_prefetch_pace_snapshot *out);
 #endif

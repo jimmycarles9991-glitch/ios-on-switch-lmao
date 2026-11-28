@@ -165,7 +165,11 @@ struct machine_thread {
 	struct cpu_data *         CpuDatap;               /* current per cpu data */
 	unsigned int              preemption_count;       /* preemption count */
 	uint16_t                  exception_trace_code;
+#if DEVELOPMENT || DEBUG
+	uint8_t                   switch_systime_trap;    /* 1 + <switch/sched.h>'s bucket of the EL0 trap it is in */
+#else
 	bool                      reserved7;
+#endif
 	bool                      el0_synchronous_trap;   /* is this thread inside an EL0 synchronous trap handler? */
 #if HAS_MTE
 	bool                      sec_override;           /* disable MTE for this thread, regardless of the current map's MTE policy */

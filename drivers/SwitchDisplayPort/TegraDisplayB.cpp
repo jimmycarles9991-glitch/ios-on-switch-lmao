@@ -103,29 +103,35 @@ constexpr uint32_t actRequest(unsigned window)
 
 constexpr uint32_t kAllWindows = actRequest(0) | actRequest(1) | actRequest(2);
 
-bool sameMemory(const switch_display_memory_head &a, const switch_display_memory_head &b)
+bool sameWindowMemory(const switch_display_memory_window &x, const switch_display_memory_window &y)
 {
-    if (a.peak_bytes_per_second != b.peak_bytes_per_second)
+    return x.active == y.active && x.peak_bytes_per_second == y.peak_bytes_per_second &&
+           x.required_buffering_bytes == y.required_buffering_bytes &&
+           x.latency_buffering_bytes == y.latency_buffering_bytes;
+}
+
+bool sameMemoryPlan(const switch_display_memory_head &a, const switch_display_memory_window (&windows)[kWindows],
+                    uint64_t peakBytes)
+{
+    if (a.peak_bytes_per_second != peakBytes)
         return false;
     for (unsigned w = 0; w < kWindows; ++w) {
-        const auto &x = a.windows[w], &y = b.windows[w];
-        if (x.active != y.active || x.peak_bytes_per_second != y.peak_bytes_per_second ||
-            x.required_buffering_bytes != y.required_buffering_bytes ||
-            x.latency_buffering_bytes != y.latency_buffering_bytes)
+        if (!sameWindowMemory(a.windows[w], windows[w]))
             return false;
     }
     return true;
 }
 
-// What the windows need while a frame boundary may take `next` or leave `now`: each window's worst, and the larger peak.
-switch_external::Frame spanning(const switch_external::Frame &now, const switch_external::Frame &next)
+bool sameFrameMemory(const switch_display_memory_window (&a)[kWindows], uint64_t peakA,
+                     const switch_display_memory_window (&b)[kWindows], uint64_t peakB)
 {
-    switch_external::Frame both = next;
-    for (unsigned w = 0; w < kWindows; ++w)
-        switch_display::mergeMemoryWindow(both.memory[w], now.memory[w]);
-    if (now.peakBytes > both.peakBytes)
-        both.peakBytes = now.peakBytes;
-    return both;
+    if (peakA != peakB)
+        return false;
+    for (unsigned w = 0; w < kWindows; ++w) {
+        if (!sameWindowMemory(a[w], b[w]))
+            return false;
+    }
+    return true;
 }
 
 struct Reg {
@@ -213,8 +219,9 @@ void TegraDisplayB::forgetWindows()
         windows[w] = {};
         csc[w][0] = csc[w][1] = -1;
     }
-    latched = {};
-    requestedFrame = {};
+    latchedMemory = {};
+    requestedMemory = {};
+    memoryPending = false;
     requested = 0;
 }
 
@@ -286,12 +293,14 @@ void TegraDisplayB::enableSor(bool on)
     write(DC_CMD_STATE_ACCESS, kStateAccessReadActive);
 }
 
-void TegraDisplayB::reserve(const switch_display_memory_head &next)
+void TegraDisplayB::reserveMemory(const FrameMemory &next)
 {
-    if (sameMemory(memory, next))
+    if (sameMemoryPlan(memory, next.windows, next.peakBytes))
         return;
-    memory = next;
-    if (const int err = switch_emc_display_memory_reserve(&next); err == 0) {
+    memory.peak_bytes_per_second = next.peakBytes;
+    for (unsigned w = 0; w < kWindows; ++w)
+        memory.windows[w] = next.windows[w];
+    if (const int err = switch_emc_display_memory_reserve(&memory); err == 0) {
         emcRefusedLogged = false;
     } else if (!emcRefusedLogged) {
         emcRefusedLogged = true;
@@ -350,7 +359,22 @@ void TegraDisplayB::present(const Frame &frame)
         if (frame.window[w].csc && windowState(w).live)
             panic("SwitchDisplayPort: DCB window %c's CSC written while it may be scanning (matrix %d range %d)",
                   'A' + w, csc[w][0], csc[w][1]);
-    reserve(switch_external::memoryOf(memory, spanning(latched, frame)));
+    FrameMemory nextMem = {};
+    for (unsigned w = 0; w < kWindows; ++w)
+        nextMem.windows[w] = frame.memory[w];
+    nextMem.peakBytes = frame.peakBytes;
+    if (!sameFrameMemory(nextMem.windows, nextMem.peakBytes, latchedMemory.windows, latchedMemory.peakBytes) ||
+        !sameMemoryPlan(memory, nextMem.windows, nextMem.peakBytes)) {
+        FrameMemory both = nextMem;
+        for (unsigned w = 0; w < kWindows; ++w)
+            switch_display::mergeMemoryWindow(both.windows[w], latchedMemory.windows[w]);
+        if (latchedMemory.peakBytes > both.peakBytes)
+            both.peakBytes = latchedMemory.peakBytes;
+        reserveMemory(both);
+        memoryPending = !sameMemoryPlan(memory, nextMem.windows, nextMem.peakBytes);
+    } else {
+        memoryPending = false;
+    }
     uint32_t request = 0;
     for (unsigned w = 0; w < kWindows; ++w) {
         const auto &next = frame.window[w];
@@ -364,7 +388,7 @@ void TegraDisplayB::present(const Frame &frame)
         request |= actRequest(w);
     }
     requested = request;
-    requestedFrame = frame;
+    requestedMemory = nextMem;
     if (request)
         commit(request);
     frameInterrupt(true);
@@ -392,8 +416,11 @@ bool TegraDisplayB::latch()
         cache.live = cache.expectOn;
     }
     requested = 0;
-    latched = requestedFrame;
-    reserve(switch_external::memoryOf(memory, latched));
+    latchedMemory = requestedMemory;
+    if (memoryPending) {
+        memoryPending = false;
+        reserveMemory(latchedMemory);
+    }
     return true;
 }
 
@@ -412,7 +439,8 @@ void TegraDisplayB::windowsOff()
         windows[w].expectOn = false;
     }
     requested = kAllWindows;
-    requestedFrame = {};
+    requestedMemory = {};
+    memoryPending = true;
     commit(kAllWindows);
 }
 
@@ -420,14 +448,21 @@ void TegraDisplayB::releaseBandwidth()
 {
     if (!memory.peak_bytes_per_second)
         return;
-    reserve(switch_external::memoryOf(memory, {}));
+    reserveMemory({});
 }
 
 void TegraDisplayB::frameInterrupt(bool enable)
 {
-    if (enable != frameInterruptEnabled) {
-        frameInterruptEnabled = enable;
-        write(DC_CMD_INT_ENABLE, enable ? kFrameEnd : 0);
+    if (enable == frameInterruptEnabled)
+        return;
+    frameInterruptEnabled = enable;
+    if (enable) {
+        write(DC_CMD_INT_STATUS, kFrameEnd);
+        write(DC_CMD_INT_ENABLE, kFrameEnd);
+    } else {
+        write(DC_CMD_INT_ENABLE, 0);
+        write(DC_CMD_INT_STATUS, kFrameEnd);
+        (void)read(DC_CMD_INT_STATUS);
     }
 }
 

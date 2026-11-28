@@ -71,7 +71,8 @@ Linked link(const std::vector<File> &files, const std::vector<Pair> &pairs, enum
     REQUIRE(switch_pt_index_parse(l.index_raw.data(), l.index_raw.size(), &l.index) == SWITCH_PT_OK);
     REQUIRE(parse(l.originals_raw, &l.originals) == SWITCH_PT_OK);
     l.files.assign(l.originals.count, 0);
-    EXPECT_EQ(switch_pt_originals_link(&l.index, &l.originals, l.files.data()), want);
+    std::vector<uint8_t> scratch(switch_pt_originals_link_bytes(&l.index));
+    EXPECT_EQ(switch_pt_originals_link(&l.index, &l.originals, l.files.data(), scratch.data(), scratch.size()), want);
     return l;
 }
 
@@ -150,7 +151,8 @@ TEST(Originals, ByteFlipsNeverFindOutsideTheIndex)
             continue;
         }
         std::vector<uint32_t> files(o.count, 0);
-        if (switch_pt_originals_link(&index, &o, files.data()) != SWITCH_PT_OK) {
+        std::vector<uint8_t> scratch(switch_pt_originals_link_bytes(&index));
+        if (switch_pt_originals_link(&index, &o, files.data(), scratch.data(), scratch.size()) != SWITCH_PT_OK) {
             continue;
         }
         for (uint32_t i = 0; i < o.count; ++i) {
@@ -159,6 +161,32 @@ TEST(Originals, ByteFlipsNeverFindOutsideTheIndex)
             EXPECT_LT(static_cast<uint32_t>(file), index.count);
         }
     }
+}
+
+TEST(Originals, ShortScratchIsRefusedAndHashCollisionsMatchExactCdhash)
+{
+    const CDHash h1 = cdhash(0x11, 0x01);
+    const CDHash h2 = cdhash(0x11, 0x02);  // identical first 8 bytes -> guaranteed hash collision
+    const std::vector<File> files = {
+        {"/Applications/A.app/A", 10, 100, h1},
+        {"/Applications/B.app/B", 20, 200, h2},
+        {"/Applications/C.app/C", 30, 300, h1},  // duplicate CDHash -> keeps first match (index 0)
+    };
+    const std::vector<Pair> pairs = {{cdhash(0x50), h2}, {cdhash(0x60), h1}};
+    const std::vector<uint8_t> idx_raw = encode(files, {1000});
+    const std::vector<uint8_t> orig_raw = originals(pairs);
+    struct switch_pt_index idx;
+    struct switch_pt_originals orig;
+    REQUIRE(switch_pt_index_parse(idx_raw.data(), idx_raw.size(), &idx) == SWITCH_PT_OK);
+    REQUIRE(parse(orig_raw, &orig) == SWITCH_PT_OK);
+    std::vector<uint32_t> out(orig.count, 0);
+    const size_t need = switch_pt_originals_link_bytes(&idx);
+    std::vector<uint8_t> scratch(need);
+    EXPECT_EQ(switch_pt_originals_link(&idx, &orig, out.data(), nullptr, need), SWITCH_PT_STORAGE_SHORT);
+    EXPECT_EQ(switch_pt_originals_link(&idx, &orig, out.data(), scratch.data(), need - 1), SWITCH_PT_STORAGE_SHORT);
+    ASSERT_EQ(switch_pt_originals_link(&idx, &orig, out.data(), scratch.data(), scratch.size()), SWITCH_PT_OK);
+    EXPECT_EQ(switch_pt_original_file(&orig, out.data(), cdhash(0x50).data()), 1);
+    EXPECT_EQ(switch_pt_original_file(&orig, out.data(), cdhash(0x60).data()), 0);
 }
 
 }  // namespace

@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
+import HWTestKit
 import Metal
 
 /// The submit worker's encode ahead of command buffers that fail (gpu/AheadFrames.swift: 15 passes a millisecond

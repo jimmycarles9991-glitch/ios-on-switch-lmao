@@ -233,6 +233,11 @@ void *switch_linux_call_alloc(void (*fn)(void *arg), void *arg)
 	return switch_linux_malloc(1, 1);
 }
 
+void *switch_linux_call_alloc_deferrable(void (*fn)(void *arg), void *arg)
+{
+	return switch_linux_malloc(1, 1);
+}
+
 bool switch_linux_call_cancel(void *call)
 {
 	return false;
@@ -244,6 +249,11 @@ bool switch_linux_call_cancel_wait(void *call)
 }
 
 bool switch_linux_call_enter_after(void *call, uint64_t delay_ns)
+{
+	return true;
+}
+
+bool switch_linux_call_enter_after_leeway(void *call, uint64_t delay_ns, uint64_t leeway_ns)
 {
 	return true;
 }

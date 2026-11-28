@@ -14,7 +14,8 @@ import UIKit
 ///           intermediates' memory behind in its pool
 /// first_in_process= is the first control round's verdict when no test had built a glass stage before it (the render
 /// server still holds SpringBoard's and this app's own glass). Every snapshot arms the glass probe's draw lines (`raw:
-/// glass draw g<generation> ...` in every process, `SwitchMetal: glass cb g<generation>` in the render server):
+/// glass draw g<generation> ...`, each distinct state once a thread, in every process, `SwitchMetal: glass cb
+/// g<generation>` in the render server):
 /// Documents/ui/ui.glass_ab/rounds.json lists each round's arm, verdict, encoding, command buffers and generation;
 /// black pictures go beside it. The render server's draw and record lines share the generation; another process's draw
 /// lines count only its own armings.
@@ -34,10 +35,6 @@ struct UIGlassABTest: HWTest {
         let control: Bool
         let black: Bool
         let level: Int
-        let encoding: String
-        let buffers: String
-        let lost: UInt64
-        let generation: UInt64
     }
 
     func run(_ context: TestContext) async throws -> Outcome {
@@ -49,7 +46,7 @@ struct UIGlassABTest: HWTest {
         for arm in Arm.allCases {
             var (armed, control) = ([GlassRound](), [GlassRound]())
             for _ in 0 ..< Self.rounds {
-                let plain = await GlassRound.run(context, lines: true)
+                let plain = await GlassRound.run(context)
                 if firstInProcess == nil {
                     firstInProcess = plain.firstInProcess ? (plain.black ? "black" : "good") : "-"
                 }
@@ -60,9 +57,7 @@ struct UIGlassABTest: HWTest {
                 entries.append(
                     Entry(
                         arm: arm.rawValue, control: isControl, black: round.black,
-                        level: Int((round.level / 3 * 255).rounded()), encoding: round.recording.encoding,
-                        buffers: round.recording.signature, lost: round.recording.lost,
-                        generation: round.recording.generation
+                        level: Int((round.level / 3 * 255).rounded())
                     )
                 )
                 if round.black {
@@ -80,34 +75,30 @@ struct UIGlassABTest: HWTest {
         line.set("control_black", entries.filter { $0.control && $0.black }.count)
         line.set("first_in_process", firstInProcess ?? "-")
         line.merge(metrics)
-        let blackA = entries.filter { $0.black && $0.encoding == "A" }.count
-        let blackB = entries.filter { $0.black && $0.encoding == "B" }.count
-        line.set("black_by_encoding", "A\(blackA)/B\(blackB)")
         let black = entries.filter(\.black).count
         return black == 0
             ? .pass(line)
             : .fail("\(black) of \(entries.count) rounds show the glass over the grey black", line)
     }
 
-    /// "<black>/<rounds>:<encodings>", e.g. "3/3:BBB"
     static func field(_ rounds: [GlassRound]) -> String {
-        "\(rounds.filter(\.black).count)/\(rounds.count):" + rounds.map(\.recording.encoding).joined()
+        "\(rounds.filter(\.black).count)/\(rounds.count)"
     }
 
     static func round(_ arm: Arm, _ context: TestContext) async -> GlassRound {
         switch arm {
         case .nudge:
-            return await GlassRound.run(context, lines: true) { stage in
+            return await GlassRound.run(context) { stage in
                 stage.stripes.transform = CGAffineTransform(translationX: 1, y: 0)
             }
         case .wfi:
-            GlassProbe.post("fetch-barrier-wfi")
-            let round = await GlassRound.run(context, lines: true)
-            GlassProbe.post("fetch-barrier-ps")
+            DriverSwitch.post("fetch-barrier-wfi")
+            let round = await GlassRound.run(context)
+            DriverSwitch.post("fetch-barrier-ps")
             return round
         case .dirty:
             await GlassDirt.render(context)
-            return await GlassRound.run(context, lines: true)
+            return await GlassRound.run(context)
         }
     }
 }

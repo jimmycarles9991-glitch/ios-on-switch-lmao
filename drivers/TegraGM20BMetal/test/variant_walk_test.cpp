@@ -31,26 +31,26 @@ constexpr uint32_t kChip = gm20b::AssumeTexsF16, kResidual = gm20b::AssumeUnifor
 
 TEST(GM20BVariantWalk, ARecordOfVariantsAndAGenericSomeDrawTakesWalksClean)
 {
-    const gm20b::PackVariant variants[2] = {{gm20b::AssumeTurned, 1}, {kResidual, 2}};
+    const gm20b::PackVariant variants[2] = {{gm20b::AssumeTurned, 1, 0}, {kResidual, 2, 0}};
     EXPECT_EQ(firstUntaken(variants, 2, kChip), 3u);
     EXPECT_EQ(firstUntaken(nullptr, 0, kChip), 1u);
 }
 
 TEST(GM20BVariantWalk, AVariantBehindItsTwinWithAChipFactIsFound)
 {
-    const gm20b::PackVariant variants[2] = {{kResidual | kChip, 1}, {kResidual, 2}};
+    const gm20b::PackVariant variants[2] = {{kResidual | kChip, 1, 0}, {kResidual, 2, 0}};
     EXPECT_EQ(firstUntaken(variants, 2, kChip), 1u);
 }
 
 TEST(GM20BVariantWalk, AGenericBehindAVariantOfChipFactsAloneIsFound)
 {
-    const gm20b::PackVariant variants[2] = {{kResidual, 1}, {kChip, 2}};
+    const gm20b::PackVariant variants[2] = {{kResidual, 1, 0}, {kChip, 2, 0}};
     EXPECT_EQ(firstUntaken(variants, 2, kChip), 2u);
 }
 
 TEST(GM20BVariantWalk, AVariantAssumingNothingHidesTheGeneric)
 {
-    const gm20b::PackVariant variants[1] = {{0, 1}};
+    const gm20b::PackVariant variants[1] = {{0, 1, 0}};
     EXPECT_EQ(firstUntaken(variants, 1, kChip), 1u);
 }
 

@@ -5,8 +5,9 @@ import Metal
 import XCTest
 
 /// gpu.ca.sweep's reference (core/CAGoldens.swift): every Core Animation state of the pack's corpus drawn on this
-/// Mac's GPU with the IPSW's own QuartzCore library, written to apps/hwtest/goldens/ca_<build>.txt in the checkout
-/// under `bazel run` (the test's outputs otherwise). States of the other iOS version's QuartzCore are left out.
+/// Mac's GPU with the IPSW's own QuartzCore library, written to the test's outputs (ca_<build>.txt; apps/hwtest/goldens
+/// in the checkout under `bazel run`). States of the other iOS version's QuartzCore are left out. It draws nothing on
+/// another GPU than CAGoldens.referenceGPU, which the test action's `gpu` property gets it on the build hosts.
 final class CAGoldensWriter: XCTestCase {
     func testWriteTheReference() async throws {
         let environment = ProcessInfo.processInfo.environment
@@ -14,6 +15,12 @@ final class CAGoldensWriter: XCTestCase {
         let build = try XCTUnwrap(environment["CA_BUILD"])
         let states = try String(contentsOfFile: runfiles + XCTUnwrap(environment["CA_STATES"]), encoding: .utf8)
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        XCTAssertEqual(environment["CA_GPU"], CAGoldens.referenceGPU, "BUILD.bazel's CA_GOLDENS_GPU is not CAGoldens'")
+        guard device.name == CAGoldens.referenceGPU else {
+            XCTFail("this is \(device.name), and every Core Animation golden is \(CAGoldens.referenceGPU)'s: draw them "
+                + "with bazel test on the build hosts (apps/hwtest/BUILD.bazel ca_goldens)")
+            return
+        }
         let quartzCore = try device.makeLibrary(
             URL: URL(fileURLWithPath: runfiles + XCTUnwrap(environment["CA_LIBRARY"]))
         )

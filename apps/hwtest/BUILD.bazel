@@ -12,6 +12,30 @@ load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/testing:defs.bzl", "host_test")
 load("//kernel/rules:package.bzl", "ios_binary")
 load(":apps.bzl", "hwtest_app", "ios_arm64e", "metal_airs", "reproducible_apps")
+load(
+    ":modules.bzl",
+    "APP27_TESTS_SRCS",
+    "GPU_DECODE_SRCS",
+    "GPU_FORMS_SRCS",
+    "GPU_MODELS_SRCS",
+    "GPU_SCENES_SRCS",
+    "GPU_SRCS",
+    "GPU_X1_SRCS",
+    "KIT_COMMON_SRCS",
+    "KIT_SHARED_SRCS",
+    "KIT_SRCS",
+    "TESTS_DEPTH_SRCS",
+    "TESTS_DISPLAY_SRCS",
+    "TESTS_FORMS_SRCS",
+    "TESTS_METAL_SRCS",
+    "TESTS_NATIVE_SRCS",
+    "TESTS_PATHS_SRCS",
+    "TESTS_RECOVERY_SRCS",
+    "TESTS_SHADERS_SRCS",
+    "TESTS_SYSTEM_SRCS",
+    "TESTS_TEXTURES_SRCS",
+    "TESTS_VIDEO_SRCS",
+)
 
 package(default_visibility = ["//visibility:public"])
 
@@ -45,18 +69,70 @@ swift_library(
     deps = [":core"],
 )
 
-# The GPU scenes (Metal, MPS, Core Image, IOSurface; no UIKit), so the host test runs them on the Mac's GPU too.
+# The GPU harness, companions, scenes and X1 probes (Metal, MPS, Core Image, IOSurface; no UIKit),
+# split into bounded modules so host tests and iOS leaves rebuild only what they depend on.
 swift_library(
     name = "gpu",
-    srcs = glob([
-        "gpu/*.swift",
-        "gpu/scenes/*.swift",
-        "gpu/scenes27/*.swift",
-        "gpu/x1/*.swift",
-    ]),
+    srcs = GPU_SRCS,
     copts = SWIFT_COPTS,
     module_name = "HWTestGPU",
     deps = [":core"],
+)
+
+swift_library(
+    name = "gpu_decode",
+    srcs = GPU_DECODE_SRCS,
+    copts = SWIFT_COPTS,
+    module_name = "HWTestGPUDecode",
+    deps = [
+        ":core",
+        ":gpu",
+    ],
+)
+
+swift_library(
+    name = "gpu_forms",
+    srcs = GPU_FORMS_SRCS,
+    copts = SWIFT_COPTS,
+    module_name = "HWTestGPUForms",
+    deps = [
+        ":core",
+        ":gpu",
+    ],
+)
+
+swift_library(
+    name = "gpu_models",
+    srcs = GPU_MODELS_SRCS,
+    copts = SWIFT_COPTS,
+    module_name = "HWTestGPUModels",
+    deps = [
+        ":core",
+        ":gpu",
+    ],
+)
+
+swift_library(
+    name = "gpu_scenes",
+    srcs = GPU_SCENES_SRCS,
+    copts = SWIFT_COPTS,
+    module_name = "HWTestScenes",
+    deps = [
+        ":core",
+        ":gpu",
+    ],
+)
+
+swift_library(
+    name = "gpu_x1",
+    srcs = GPU_X1_SRCS,
+    copts = SWIFT_COPTS,
+    module_name = "HWTestX1",
+    deps = [
+        ":core",
+        ":gpu",
+        ":gpu_models",
+    ],
 )
 
 # Every GPU scene on this Mac's GPU against its CPU reference, the shaders compiled from source. Manual: it needs a Mac
@@ -71,6 +147,10 @@ swift_test(
     deps = [
         ":core",
         ":gpu",
+        ":gpu_forms",
+        ":gpu_models",
+        ":gpu_scenes",
+        ":gpu_x1",
     ],
 )
 
@@ -234,14 +314,14 @@ CA_NAMES = {"24B119": "//drivers/TegraGM20BMetal:precompile/ca-names/24B119.txt"
 
 genrule(
     name = "ca_asked",
-    srcs = ["//drivers/TegraGM20BMetal:stage-tegra-gm20b-metal.py"] + select({
+    srcs = ["//tools/gpu:stage_format.py"] + select({
         "//ipsw:" + kind: [tables] + ([CA_NAMES[kind]] if kind in CA_NAMES else [])
         for kind, tables in QC_TABLES.items()
     }),
     outs = ["ca_asked.log"],
     cmd = select({
         "//ipsw:" + kind: "$(execpath :ca_asked_forms) $(execpath " + tables + ") " +
-                          "$(execpath //drivers/TegraGM20BMetal:stage-tegra-gm20b-metal.py) $@" +
+                          "$(execpath //tools/gpu:stage_format.py) $@" +
                           (" $(execpath " + CA_NAMES[kind] + ")" if kind in CA_NAMES else "")
         for kind, tables in QC_TABLES.items()
     }),
@@ -279,6 +359,24 @@ py_test(
     deps = ["//drivers/TegraGM20BMetal:pack"],
 )
 
+# gpu/CACorpus.swift's lines: 21H461's as corpus.log has them, iOS 27's as pack/ca/caspec.py makes them with its tables
+py_test(
+    name = "ca_corpus_test",
+    size = "small",
+    srcs = ["ca_corpus_test.py"],
+    data = [
+        "gpu/CACorpus.swift",
+        "//drivers/TegraGM20BMetal:pack/ca/qc-24B119.json",
+        "//drivers/TegraGM20BMetal:precompile/corpus.log",
+    ],
+    env = {
+        "CA_CORPUS": "$(rootpath //drivers/TegraGM20BMetal:precompile/corpus.log)",
+        "CA_CORPUS_SWIFT": "$(rootpath gpu/CACorpus.swift)",
+        "QC_24B119": "$(rootpath //drivers/TegraGM20BMetal:pack/ca/qc-24B119.json)",
+    },
+    deps = ["//drivers/TegraGM20BMetal:pack"],
+)
+
 py_test(
     name = "ca_states_test",
     size = "small",
@@ -305,8 +403,8 @@ py_test(
     ],
 )
 
-# gpu.ca.sweep's reference for the build's IPSW: the corpus states drawn on a Mac's GPU with that IPSW's QuartzCore
-# (core/CAGoldens.swift), written into goldens/ by `bazel run --config=remote //apps/hwtest:ca_goldens` (and with --config=ios27).
+# gpu.ca.sweep's reference for the build's IPSW: the corpus states drawn on CA_GOLDENS_GPU with that IPSW's QuartzCore
+# (core/CAGoldens.swift), by :ca_goldens below.
 genrule(
     name = "ca_goldens_txt",
     srcs = select({
@@ -327,8 +425,16 @@ apple_resource_group(
     ],
 )
 
-# Rewrites goldens/ca_<build>.txt: every corpus state drawn on this Mac's GPU with the selected IPSW's QuartzCore
-# (ca_goldens/CAGoldensWriter.swift). Run it after a harvest adds Core Animation states. Manual: it needs a Mac GPU.
+# The GPU every Core Animation golden is drawn on (CAGoldens.referenceGPU): Metal's name for it, which each build host's
+# worker advertises as the `gpu` property of its one-slot GPU runner (tools/remote/host/worker.jsonnet).
+CA_GOLDENS_GPU = "Apple M4"
+
+# Draws goldens/ca_<build>.txt: every corpus state drawn with the selected IPSW's QuartzCore
+# (ca_goldens/CAGoldensWriter.swift) into the test's outputs. Only its test action is pinned to CA_GOLDENS_GPU's
+# build hosts ("test.gpu"), and the writer draws nothing on any other GPU. After a harvest adds Core Animation states:
+#   bazel test --config=ios27 --remote_download_outputs=toplevel //apps/hwtest:ca_goldens
+#   cp bazel-testlogs/apps/hwtest/ca_goldens/test.outputs/ca_24B119.txt apps/hwtest/goldens/
+# and the same with --config=ios17 and ca_21H461.txt. Manual: it needs a Mac GPU.
 swift_test(
     name = "ca_goldens",
     size = "medium",
@@ -341,11 +447,13 @@ swift_test(
     env = select({
         "//ipsw:" + kind: {
             "CA_BUILD": kind,
+            "CA_GPU": CA_GOLDENS_GPU,
             "CA_LIBRARY": "$(rlocationpath @ipsw//:crawl_qc)",
             "CA_STATES": "$(rlocationpath :ca_states)",
         }
         for kind in ("21H461", "24B119")
     }),
+    exec_properties = {"test.gpu": CA_GOLDENS_GPU},
     tags = ["manual"],
     deps = [
         ":core",
@@ -374,6 +482,7 @@ swift_test(
     deps = [
         ":core",
         ":gpu",
+        ":gpu_scenes",
     ],
 )
 
@@ -568,6 +677,21 @@ cc_library(
     target_compatible_with = ["@platforms//os:ios"],
 )
 
+swift_interop_hint(
+    name = "shared_cache_probe_module",
+    module_name = "SwitchSharedCacheProbe",
+)
+
+# system.shared_cache_nested's walk of the mapped dyld cache and of the app's own map over its read-only data.
+cc_library(
+    name = "shared_cache_probe",
+    srcs = ["system/switch_shared_cache_probe.c"],
+    hdrs = ["system/switch_shared_cache_probe.h"],
+    aspect_hints = [":shared_cache_probe_module"],
+    copts = ["-O2"],
+    target_compatible_with = ["@platforms//os:ios"],
+)
+
 # The probe's header alone, as :bench_api is the bench's
 cc_library(
     name = "compiler_probe_api",
@@ -642,6 +766,27 @@ exports_files(
     visibility = ["//tools/benchloop:__pkg__"],
 )
 
+config_setting(
+    name = "compiler_comparison",
+    flag_values = {
+        "//bazel:diagnostics": "true",
+        "//bazel:profile": "debug",
+        "//ipsw:kind": "24B119",
+    },
+)
+
+swift_interop_hint(
+    name = "compiler_bench_module",
+    module_name = "SwitchCompilerBench",
+)
+
+cc_library(
+    name = "compiler_bench_api",
+    hdrs = ["bench/compiler_api.h"],
+    aspect_hints = [":compiler_bench_module"],
+    implementation_deps = [":bench"],
+)
+
 swift_interop_hint(
     name = "bench_module",
     module_name = "SwitchBench",
@@ -659,6 +804,7 @@ cc_library(
         "bench/bench_completed.cpp",
         "bench/bench_device.h",
         "bench/bench_known.h",
+        "bench/bench_l2_flush.cpp",
         "bench/bench_records.cpp",
         "bench/bench_records.h",
         "bench/bench_pack.cpp",
@@ -671,6 +817,7 @@ cc_library(
         "//drivers/TegraGM20B:TegraGM20BHost.h",
         "//drivers/TegraGM20B:TegraGM20BJobABI.h",
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraGM20B:TegraGM20BSchedABI.h",
         "//drivers/TegraGM20B:TegraGM20BSchedPolicy.h",
         "//drivers/TegraGM20B:TegraGM20BVolatileABI.h",
         "//drivers/TegraGM20B:TegraGM20BZcullABI.h",
@@ -698,17 +845,18 @@ cc_library(
         "//drivers/TegraGM20BMetal:device_stamps.cpp",
         "//drivers/TegraGM20BMetal:draw.cpp",
         "//drivers/TegraGM20BMetal:draw_prepare.cpp",
-        "//drivers/TegraGM20BMetal:draw_probes.cpp",
         "//drivers/TegraGM20BMetal:draw_times.cpp",
         "//drivers/TegraGM20BMetal:draw_inputs.cpp",
         "//drivers/TegraGM20BMetal:draw_shader_tests.cpp",
         "//drivers/TegraGM20BMetal:memory.cpp",
         "//drivers/TegraGM20BMetal:parked_arena.cpp",
         "//drivers/TegraGM20BMetal:parked_chunks.cpp",
+        "//drivers/TegraGM20BMetal:scrubs.cpp",
         "//drivers/TegraGM20BMetal:pass_backings.cpp",
         "//drivers/TegraGM20BMetal:pass_begin.cpp",
         "//drivers/TegraGM20BMetal:pass_clears.cpp",
         "//drivers/TegraGM20BMetal:pass_end.cpp",
+        "//drivers/TegraGM20BMetal:nvn_probes.cpp",
         "//drivers/TegraGM20BMetal:pipelines.cpp",
         "//drivers/TegraGM20BMetal:samplers.cpp",
         "//drivers/TegraGM20BMetal:sparse_window.cpp",
@@ -740,7 +888,26 @@ cc_library(
         "//drivers/TegraGM20BMetal:vertex_streams.cpp",
         "//drivers/TegraGM20BMetal:zeta.cpp",
         "//drivers/TegraGM20BMetal:gm20b_runtime_headers",
-    ],
+    ] + select({
+        ":compiler_comparison": [
+            "bench/compiler_bind.cpp",
+            "bench/compiler_compare.cpp",
+            "bench/compiler_draw.h",
+            "bench/compiler_handles.h",
+            "bench/compiler_pixels.cpp",
+            "bench/compiler_pixels.h",
+            "bench/compiler_run.cpp",
+            "//drivers/TegraGM20BMetal:cache_io.h",
+            "//drivers/TegraGM20BMetal:gm20b_cache.cpp",
+            "//drivers/TegraGM20BMetal:gm20b_cache.h",
+            "//drivers/TegraGM20BMetal:kernel_cache.cpp",
+            "//drivers/TegraGM20BMetal:visibility.cpp",
+            "//drivers/TegraGM20BMetal:visibility_pass.cpp",
+            "//kits/SwitchSeedPack:SwitchSeedPack.h",
+            "//kits/SwitchSeedPack:SwitchSeedStore.h",
+        ],
+        "//conditions:default": [],
+    }),
     hdrs = ["bench/switch_bench.h"],
     additional_compiler_inputs = ["//drivers/TegraGM20BMetal:completed.cpp"],
     copts = [
@@ -780,6 +947,25 @@ cc_library(
 
 # The bench's records on the host, over a pack with the template state the Switch's pack gave it
 host_test(
+    name = "compiler_handles_test",
+    srcs = [
+        "bench/compiler_handles.h",
+        "bench/compiler_handles_test.cpp",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "compiler_pixels_test",
+    srcs = [
+        "bench/compiler_pixels.cpp",
+        "bench/compiler_pixels.h",
+        "bench/compiler_pixels_test.cpp",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
     name = "bench_records_test",
     srcs = [
         "bench/bench_known.h",
@@ -798,43 +984,295 @@ host_test(
         "//drivers/TegraGM20BMetal:record_parts.h",
         "//drivers/TegraGM20BMetal:set_entries.h",
         "//drivers/TegraGM20BMetal:program_stores.h",
+        "//drivers/TegraGM20BMetal:program_facts.h",
+        "//drivers/TegraGM20BMetal:viewports.h",
         "//drivers/TegraGM20BMetal:set_reads.h",
         "//drivers/TegraGM20BMetal:spill_table.h",
     ],
     cxx_std = "c++17",
 )
 
-# Every test every iOS version runs, the runner, the list, the log lines and the run reports. UIKit: built only under an
-# ios_application's transition, never for the host by `bazel build --config=remote //apps/hwtest/...`.
+# Test harness, UI, runner, log lines and bundled resources. UIKit: built only under an ios_application's transition,
+# never for the host by `bazel build --config=remote //apps/hwtest/...`.
 swift_library(
     name = "kit",
-    srcs = glob([
-        "kit/*.swift",
-        "tests/*.swift",
-    ]),
+    srcs = KIT_SRCS,
     copts = SWIFT_COPTS,
     data = [
         ":ca_states_resources",
-        ":scene_goldens_resources",
         ":compressed_assets",
         ":media_resources",
+        ":scene_goldens_resources",
     ],
     module_name = "HWTestKit",
     target_compatible_with = ["@platforms//os:ios"],
     deps = [
+        ":bench_api",
+        ":core",
+        ":gpu",
+    ],
+)
+
+swift_library(
+    name = "kit_shared",
+    srcs = KIT_SHARED_SRCS,
+    copts = SWIFT_COPTS,
+    features = ["swift.enable_testing"],
+    module_name = "HWTestShared",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        ":core",
+        ":gpu",
+        ":kit",
+        ":video",
+    ],
+)
+
+swift_library(
+    name = "kit_common",
+    srcs = KIT_COMMON_SRCS,
+    copts = SWIFT_COPTS,
+    features = ["swift.enable_testing"],
+    module_name = "HWTestCommon",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        ":core",
+        ":gpu",
+        ":gpu_models",
+        ":kit",
+        ":kit_shared",
+        ":texpeer_pattern",
+    ],
+)
+
+swift_library(
+    name = "tests_depth",
+    srcs = TESTS_DEPTH_SRCS,
+    copts = SWIFT_COPTS,
+    features = ["swift.enable_testing"],
+    module_name = "HWTestDepth",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        ":bench_api",
+        ":core",
+        ":gpu",
+        ":gpu_models",
+        ":gpu_scenes",
+        ":gpu_x1",
+        ":kit",
+        ":kit_common",
+        ":kit_shared",
+    ],
+)
+
+swift_library(
+    name = "tests_display",
+    srcs = TESTS_DISPLAY_SRCS,
+    copts = SWIFT_COPTS,
+    features = ["swift.enable_testing"],
+    module_name = "HWTestDisplay",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        ":cpu_clock",
+        ":core",
+        ":gpu",
+        ":gpu_scenes",
+        ":kit",
+        ":kit_common",
+        ":kit_shared",
+        ":video",
+    ],
+)
+
+swift_library(
+    name = "tests_forms",
+    srcs = TESTS_FORMS_SRCS,
+    copts = SWIFT_COPTS,
+    features = ["swift.enable_testing"],
+    module_name = "HWTestForms",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        ":bench_api",
+        ":core",
+        ":gpu",
+        ":gpu_forms",
+        ":gpu_models",
+        ":kit",
+        ":kit_common",
+    ],
+)
+
+swift_library(
+    name = "tests_metal",
+    srcs = TESTS_METAL_SRCS,
+    copts = SWIFT_COPTS,
+    features = ["swift.enable_testing"],
+    module_name = "HWTestMetal",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        ":core",
+        ":gpu",
+        ":gpu_forms",
+        ":kit",
+        ":kit_common",
+        ":kit_shared",
+        ":texpeer_pattern",
+        ":video",
+    ],
+)
+
+swift_library(
+    name = "tests_native",
+    srcs = TESTS_NATIVE_SRCS,
+    copts = SWIFT_COPTS,
+    features = ["swift.enable_testing"],
+    module_name = "HWTestNative",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        ":core",
+        ":gpu",
+        ":kit",
+        ":kit_common",
+        ":video",
+    ],
+)
+
+swift_library(
+    name = "tests_paths",
+    srcs = TESTS_PATHS_SRCS,
+    copts = SWIFT_COPTS,
+    features = ["swift.enable_testing"],
+    module_name = "HWTestPaths",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        ":core",
+        ":gpu",
+        ":gpu_models",
+        ":gpu_scenes",
+        ":kit",
+        ":kit_common",
+        ":kit_shared",
+        ":video",
+    ],
+)
+
+swift_library(
+    name = "tests_recovery",
+    srcs = TESTS_RECOVERY_SRCS,
+    copts = SWIFT_COPTS,
+    features = ["swift.enable_testing"],
+    module_name = "HWTestRecovery",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        ":bench_api",
+        ":core",
+        ":gpu",
+        ":gpu_models",
+        ":kit",
+        ":kit_shared",
+    ],
+)
+
+swift_library(
+    name = "tests_shaders",
+    srcs = TESTS_SHADERS_SRCS,
+    copts = SWIFT_COPTS,
+    features = ["swift.enable_testing"],
+    module_name = "HWTestShaders",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        ":compiler_probe_api",
+        ":core",
+        ":gpu",
+        ":gpu_models",
+        ":kit",
+        ":kit_shared",
+    ],
+)
+
+swift_library(
+    name = "tests_system",
+    srcs = TESTS_SYSTEM_SRCS,
+    copts = SWIFT_COPTS,
+    features = ["swift.enable_testing"],
+    module_name = "HWTestSystem",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
         ":a64x_probe",
         ":atomics",
-        ":bench_api",
-        ":compiler_probe_api",
         ":core",
         ":cpu_clock",
         ":gpu",
         ":ipi_probe",
+        ":kit",
+        ":kit_common",
+        ":kit_shared",
         ":sched_probe",
-        ":texpeer_pattern",
-        ":video",
+        ":shared_cache_probe",
         ":workloop_probe",
         "//apps/hwtest/dispatch:sync_handoff",
+    ],
+)
+
+swift_library(
+    name = "tests_textures",
+    srcs = TESTS_TEXTURES_SRCS,
+    copts = SWIFT_COPTS,
+    features = ["swift.enable_testing"],
+    module_name = "HWTestTextures",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        ":core",
+        ":gpu",
+        ":gpu_decode",
+        ":gpu_models",
+        ":gpu_x1",
+        ":kit",
+        ":kit_common",
+        ":kit_shared",
+    ],
+)
+
+swift_library(
+    name = "tests_video",
+    srcs = TESTS_VIDEO_SRCS,
+    copts = SWIFT_COPTS,
+    features = ["swift.enable_testing"],
+    module_name = "HWTestVideoTests",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        ":core",
+        ":gpu",
+        ":kit",
+        ":kit_common",
+        ":kit_shared",
+        ":video",
+    ],
+)
+
+swift_library(
+    name = "kit_registry",
+    srcs = ["tests/Registry.swift"],
+    copts = SWIFT_COPTS,
+    module_name = "HWTestRegistry",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        ":core",
+        ":gpu_scenes",
+        ":kit",
+        ":kit_common",
+        ":kit_shared",
+        ":tests_depth",
+        ":tests_display",
+        ":tests_forms",
+        ":tests_metal",
+        ":tests_native",
+        ":tests_paths",
+        ":tests_recovery",
+        ":tests_shaders",
+        ":tests_system",
+        ":tests_textures",
+        ":tests_video",
     ],
 )
 
@@ -844,21 +1282,60 @@ swift_library(
     copts = SWIFT_COPTS,
     module_name = "SwitchHWTest17",
     target_compatible_with = ["@platforms//os:ios"],
-    deps = [":kit"],
+    deps = [
+        ":kit",
+        ":kit_registry",
+    ],
 )
 
 # iOS 27's own tests: Liquid Glass, QuartzCore 27's glass states, Metal 4, VideoToolbox's frame processors.
 swift_library(
-    name = "app27_lib",
-    srcs = glob(["app27/*.swift"]),
+    name = "app27_tests",
+    srcs = APP27_TESTS_SRCS,
     copts = SWIFT_COPTS,
-    module_name = "SwitchHWTest27",
+    features = ["swift.enable_testing"],
+    module_name = "SwitchHWTest27Tests",
     target_compatible_with = ["@platforms//os:ios"],
     deps = [
         ":core",
         ":gpu",
+        ":gpu_models",
+        ":gpu_scenes",
+        ":gpu_x1",
         ":kit",
+        ":kit_common",
+        ":kit_shared",
     ],
+)
+
+swift_library(
+    name = "app27_lib",
+    srcs = [
+        "app27/SwitchHWTest27.swift",
+        "app27/Tests27.swift",
+    ] + select({
+        ":compiler_comparison": ["app27/CompilerCompare.swift"],
+        "//conditions:default": [],
+    }),
+    copts = SWIFT_COPTS + select({
+        ":compiler_comparison": ["-DSWITCH_COMPILER_COMPARISON"],
+        "//conditions:default": [],
+    }),
+    module_name = "SwitchHWTest27",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        ":app27_tests",
+        ":gpu_scenes",
+        ":kit",
+        ":kit_common",
+        ":kit_registry",
+    ] + select({
+        ":compiler_comparison": [
+            ":compiler_bench_api",
+            ":core",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # Each iOS version's app is /Applications/SwitchHWTest.app on its own image (the debug //:boot of that kind,

@@ -2,6 +2,7 @@ import Foundation
 import HWTestCore
 import HWTestGPU
 import HWTestKit
+import HWTestShared
 
 /// L959: kTegraVICTraits.multiSlot, one VIC job composing several slots bottom first
 /// (drivers/TegraVIC/SwitchVICComposeProbe.h), the display's overlays as one plane when DC A's memory admission refuses

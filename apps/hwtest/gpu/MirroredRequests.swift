@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Requests Metal's validation layer stops (the scenes of gpu.gm20b.invalid_requests's later arms): a copy between

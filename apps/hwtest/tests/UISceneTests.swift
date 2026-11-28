@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import SwiftUI
 import UIKit
 
@@ -35,17 +37,19 @@ public enum UISceneTests {
 
 /// UILabels at every system text style, dark on light and light on dark, as the render server composites their
 /// backing stores against the CPU's drawing of the same layers.
-struct UITextTest: HWTest {
-    let id = "ui.text"
-    let name = "Text at every system text style, composited against the CPU"
-    let subsystem = Subsystem.compositor
+public struct UITextTest: HWTest {
+    public let id = "ui.text"
+    public let name = "Text at every system text style, composited against the CPU"
+    public let subsystem = Subsystem.compositor
 
-    static let styles: [UIFont.TextStyle] = [
+    public static let styles: [UIFont.TextStyle] = [
         .largeTitle, .title1, .title2, .title3, .headline, .body, .callout, .subheadline, .footnote, .caption1,
         .caption2,
     ]
 
-    func run(_ context: TestContext) async throws -> Outcome {
+    public init() {}
+
+    public func run(_ context: TestContext) async throws -> Outcome {
         let checks = await UISceneTests.staged(context) { stage, screen -> [UIView] in
             [(UIColor.white, UIColor.black), (UIColor(white: 0.11, alpha: 1), UIColor.white)].enumerated().map {
                 index, colors in

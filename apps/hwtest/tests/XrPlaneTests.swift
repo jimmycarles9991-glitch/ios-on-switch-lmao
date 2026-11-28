@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// A 550 over a 'b3a8' whose rows are off 32 bytes (gpu/XrPlanesRows.swift), against an M4 Max: made; a draw reading

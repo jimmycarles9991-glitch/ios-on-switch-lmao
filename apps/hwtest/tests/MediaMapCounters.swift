@@ -1,5 +1,6 @@
 import Darwin
 import HWTestCore
+import HWTestShared
 
 /// The kernel's media identity counts since boot (debug kernels): SMMU mappings VIC made and remade after evicting
 /// them for room, window B's remakes, and native publications that needed a new surface object or went into a surface

@@ -103,9 +103,10 @@ unsigned int tdfll_poll_timeouts(void)
 	return __atomic_load_n(&poll_timeouts, __ATOMIC_RELAXED);
 }
 
-static void *call_alloc(void (*fn)(void *), void *arg)
+static void *call_alloc(void (*fn)(void *), void *arg, bool deferrable)
 {
-	void *call = switch_linux_call_alloc(fn, arg);
+	void *call = deferrable ? switch_linux_call_alloc_deferrable(fn, arg)
+				: switch_linux_call_alloc(fn, arg);
 
 	if (!call)
 		panic("TegraDFLL: cannot allocate a thread call for a DFLL timer");
@@ -121,16 +122,26 @@ static void timer_list_fire(void *arg)
 
 void init_timer(struct timer_list *timer)
 {
-	timer->tdfll_call = call_alloc(timer_list_fire, timer);
+	timer->tdfll_deferrable = false;
+	timer->tdfll_call = call_alloc(timer_list_fire, timer, false);
+}
+
+void init_timer_deferrable(struct timer_list *timer)
+{
+	timer->tdfll_deferrable = true;
+	timer->tdfll_call = call_alloc(timer_list_fire, timer, true);
 }
 
 int mod_timer(struct timer_list *timer, unsigned long expires)
 {
 	unsigned long now = jiffies;
+	const u64 delay_ns = (u64)(expires > now ? expires - now : 0) * (u64)(NSEC_PER_SEC / HZ);
 
 	timer->expires = expires;
-	switch_linux_call_enter_after(timer->tdfll_call, (u64)(expires > now ? expires - now : 0) *
-								 (u64)(NSEC_PER_SEC / HZ));
+	if (timer->tdfll_deferrable)
+		switch_linux_call_enter_after_leeway(timer->tdfll_call, delay_ns, delay_ns);
+	else
+		switch_linux_call_enter_after(timer->tdfll_call, delay_ns);
 	return 0;
 }
 
@@ -154,7 +165,7 @@ static void hrtimer_fire(void *arg)
 
 void hrtimer_init(struct hrtimer *timer, int which_clock, enum hrtimer_mode mode)
 {
-	timer->tdfll_call = call_alloc(hrtimer_fire, timer);
+	timer->tdfll_call = call_alloc(hrtimer_fire, timer, false);
 }
 
 void hrtimer_start(struct hrtimer *timer, ktime_t tim, const enum hrtimer_mode mode)
@@ -167,6 +178,11 @@ void hrtimer_start(struct hrtimer *timer, ktime_t tim, const enum hrtimer_mode m
 int hrtimer_cancel(struct hrtimer *timer)
 {
 	return timer->tdfll_call && switch_linux_call_cancel_wait(timer->tdfll_call) ? 1 : 0;
+}
+
+int hrtimer_try_to_cancel(struct hrtimer *timer)
+{
+	return timer->tdfll_call && switch_linux_call_cancel(timer->tdfll_call) ? 1 : 0;
 }
 
 /* device tree: static nodes (see of.h) */

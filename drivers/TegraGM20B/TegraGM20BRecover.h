@@ -63,7 +63,7 @@ static inline int tgm_ctxsw_redo_pending(int reset, uint32_t reset_after, uint32
  * before the caller resets the engine. */
 enum tgm_ctxsw tgm_ctxsw_decide(int chid, const char *engine, int gr);
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 /* gpu_copy_reset.c's HW Test hook, thread context: what ctxsw_work does for TGM_CTXSW_REDO, on the copy engine if it is
  * busy with hardware channel chid's context; mark runs first (tgm_ctxsw_redo_mark). *status: the engine's
  * PFIFO_ENG_STATUS. 1 if it was reset. */
@@ -455,6 +455,14 @@ static inline int tgm_progress_seen(uint32_t completed, uint32_t irq_done, uint3
 	if (completed == irq_done || completed == *seen)
 		return 0;
 	*seen = completed;
+	return 1;
+}
+
+static inline int tgm_progress_word_seen(uint32_t word, uint32_t *seen)
+{
+	if (word == *seen)
+		return 0;
+	*seen = word;
 	return 1;
 }
 

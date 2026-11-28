@@ -101,7 +101,7 @@ extern "C" void switch_gpu_event_waits_commit(switch_gpu_event_waits **owned)
 	else
 		s->waits = batch;
 	s->waitsTail = batch;
-	__atomic_add_fetch(&s->pendingSignals, 1u, __ATOMIC_RELEASE);
+	__atomic_store_n(&s->pendingSignals, s->pendingSignals + 1u, __ATOMIC_RELEASE);
 	IOLockUnlock(s->lock);
 	switch_gpu_events_schedule();
 }
@@ -196,13 +196,7 @@ extern "C" void switch_gpu_event_waits_release(switch_gpu_event_waits **owned)
 
 extern "C" int switch_gpu_event_waits_status(switch_gpu_event_waits *batch)
 {
-	if (!batch)
-		return -22;
-	auto *s = switch_gpu_events_state();
-	IOLockLock(s->lock);
-	const int result = batch->result;
-	IOLockUnlock(s->lock);
-	return result;
+	return batch ? __atomic_load_n(&batch->result, __ATOMIC_ACQUIRE) : -22;
 }
 
 extern "C" int switch_gpu_event_waits_wait(switch_gpu_event_waits *batch, uint64_t deadline_ns)
@@ -294,12 +288,12 @@ extern "C" int switch_gpu_event_waits_merge_uncommitted(switch_gpu_event_waits *
 {
 	if (!destination || !source || destination == source)
 		return -22;
-	auto *s = switch_gpu_events_state();
-	IOLockLock(s->lock);
-	const bool invalid = destination->committed || source->committed || destination->result ||
-			     source->result || source->previous;
+	if (destination->committed || source->committed ||
+	    __atomic_load_n(&destination->result, __ATOMIC_ACQUIRE) ||
+	    __atomic_load_n(&source->result, __ATOMIC_ACQUIRE) || source->previous)
+		return -22;
 	uint32_t capacity = destination->count;
-	for (uint32_t i = 0; !invalid && i < source->count; ++i) {
+	for (uint32_t i = 0; i < source->count; ++i) {
 		bool duplicate = false;
 		for (uint32_t j = 0; j < destination->count; ++j)
 			duplicate |= sameUse(destination->uses[j], source->uses[i]);
@@ -307,20 +301,13 @@ extern "C" int switch_gpu_event_waits_merge_uncommitted(switch_gpu_event_waits *
 			duplicate |= sameUse(source->uses[j], source->uses[i]);
 		capacity += !duplicate;
 	}
-	IOLockUnlock(s->lock);
-	if (invalid || capacity > SWITCH_GPU_EVENT_MAX_SOURCES)
-		return invalid ? -22 : -28;
+	if (capacity > SWITCH_GPU_EVENT_MAX_SOURCES)
+		return -28;
 	if (capacity == destination->count)
 		return 0;
 	auto **replacement = IONewZero(switch_gpu_event_use *, capacity);
 	if (!replacement)
 		return -12;
-	IOLockLock(s->lock);
-	if (destination->committed || source->committed || destination->result || source->result) {
-		IOLockUnlock(s->lock);
-		IODelete(replacement, switch_gpu_event_use *, capacity);
-		return -22;
-	}
 	uint32_t count = destination->count;
 	for (uint32_t i = 0; i < count; ++i)
 		replacement[i] = destination->uses[i];
@@ -339,7 +326,6 @@ extern "C" int switch_gpu_event_waits_merge_uncommitted(switch_gpu_event_waits *
 	destination->uses = replacement;
 	destination->count = count;
 	destination->capacity = capacity;
-	IOLockUnlock(s->lock);
 	if (old != destination->inlineUses)
 		IODelete(old, switch_gpu_event_use *, oldCapacity);
 	return 0;
@@ -446,8 +432,8 @@ extern "C" int switch_gpu_event_waits_covers_token(switch_gpu_event_waits *batch
 		return 1;
 	if (!batch)
 		return 0;
-	auto *s = switch_gpu_events_state();
-	IOLockLock(s->lock);
+	if (batch->committed)
+		return -22;
 	bool covered = false;
 	for (uint32_t i = 0; i < batch->count && !covered; ++i) {
 		const auto &held = batch->uses[i]->token;
@@ -455,6 +441,5 @@ extern "C" int switch_gpu_event_waits_covers_token(switch_gpu_event_waits *batch
 			  held.reset_generation == token->reset_generation &&
 			  held.value == token->value;
 	}
-	IOLockUnlock(s->lock);
 	return covered ? 1 : 0;
 }

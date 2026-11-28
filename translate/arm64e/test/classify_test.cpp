@@ -51,6 +51,14 @@ const Case kCases[] = {
     {0x0EB0F800, A64X_FP16, false, 0, "fminv h0, v0.4h"},
     {0x5EB0C800, A64X_FP16, false, 0, "fminnmp h0, v0.2h"},
     {0x5E30D800, A64X_FP16, false, 0, "faddp h0, v0.2h"},
+    {0x1EE60020, A64X_FP16, true, 0x0E023C20, "fmov w0, h1 -> umov w0, v1.h[0]"},
+    {0x9EE60043, A64X_FP16, true, 0x0E023C43, "fmov x3, h2 -> umov w3, v2.h[0]"},
+    {0x1EE04064, A64X_FP16, true, 0x5E020464, "fmov h4, h3 -> dup h4, v3.h[0]"},
+    {0x0EF8F8A5, A64X_FP16, true, 0x2F04B405, "fabs v5.4h, v5.4h -> bic v5.4h, #0x80, lsl #8"},
+    {0x4EF8F8C6, A64X_FP16, true, 0x6F04B406, "fabs v6.8h, v6.8h -> bic v6.8h, #0x80, lsl #8"},
+    {0x0EF8F8C5, A64X_FP16, false, 0, "fabs v5.4h, v6.4h (d != n): stub"},
+    {0x4F03FE07, A64X_FP16, true, 0x4F01A787, "fmov v7.8h, #1.0 -> movi v7.8h, #0x3c, lsl #8"},
+    {0x0F03FC28, A64X_FP16, false, 0, "fmov v8.4h, #imm with lo != 0: stub"},
     {0x8B020020, A64X_OK, false, 0, "add x0, x1, x2"},
     {0xD503237F, A64X_OK, false, 0, "pacibsp (a hint: a NOP on ARMv8.0)"},
     {0xD50323BF, A64X_OK, false, 0, "autiasp (hint)"},
@@ -76,6 +84,27 @@ TEST(Classify, HintSpacePacIsLeftAlone)
     EXPECT_FALSE(a64x_is_pac_hint(kNop));
     uint32_t out;
     EXPECT_FALSE(a64x_rewrite1(0xD503237F, &out));
+}
+
+TEST(Classify, DecodeLdraSignExtendsAndExtractsWriteback)
+{
+    int32_t imm = 0;
+    bool wb = false;
+    a64x_decode_ldra(0xF8201420u, &imm, &wb);  // ldraa x0, [x1, #8]
+    EXPECT_EQ(imm, 8);
+    EXPECT_FALSE(wb);
+    a64x_decode_ldra(0xF87C1C20u, &imm, &wb);  // ldraa x0, [x1, #-504]!
+    EXPECT_EQ(imm, -504);
+    EXPECT_TRUE(wb);
+    a64x_decode_ldra(0xF87FF420u, &imm, &wb);  // ldraa x0, [x1, #-8]
+    EXPECT_EQ(imm, -8);
+    EXPECT_FALSE(wb);
+    a64x_decode_ldra(0xF8600420u, &imm, &wb);  // ldraa x0, [x1, #-4096]
+    EXPECT_EQ(imm, -4096);
+    EXPECT_FALSE(wb);
+    a64x_decode_ldra(0xF83FF420u, &imm, &wb);  // ldraa x0, [x1, #4088]
+    EXPECT_EQ(imm, 4088);
+    EXPECT_FALSE(wb);
 }
 
 TEST(Classify, EveryRewriteIsArmv80)

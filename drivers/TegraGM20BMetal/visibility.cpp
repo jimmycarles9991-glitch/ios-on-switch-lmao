@@ -80,9 +80,13 @@ void VisibilityQueries::finishResult(Push &p, size_t i) const
     if (q.accumulate) {
         if (q.mode != kVisibilityBoolean)
             return;
-        kit(p, switch_gm20b_copy_predicate, q.slotVa, uint32_t(NVB0B5_SET_RENDER_ENABLE_C_MODE_RENDER_IF_NOT_EQUAL));
-        kit(p, switch_gm20b_copy_word_reduce, q.resultVa, q.resultVa, 1u,
+        // SET_RENDER_ENABLE predicates copy DMA transfers on NVB0B5, not semaphore releases, so reduce into the slot
+        // first and predicate a plain DMA copy back to the result word.
+        kit(p, switch_gm20b_copy_word_reduce, q.resultVa, q.slotVa + 24, 1u,
             uint32_t(NVB0B5_LAUNCH_DMA_SEMAPHORE_REDUCTION_IOR), false);
+        kit(p, switch_gm20b_copy_predicate, q.slotVa, uint32_t(NVB0B5_SET_RENDER_ENABLE_C_MODE_RENDER_IF_NOT_EQUAL));
+        kit(p, switch_gm20b_copy_bytes, q.slotVa + 24, q.resultVa, 4u,
+            uint8_t(NVB0B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED));
         kit(p, switch_gm20b_copy_predicate, 0ull, uint32_t(NVB0B5_SET_RENDER_ENABLE_C_MODE_TRUE));
         return;
     }

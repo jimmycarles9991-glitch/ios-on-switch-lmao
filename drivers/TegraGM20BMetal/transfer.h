@@ -81,15 +81,16 @@ private:
 
     using Claim = std::unique_ptr<Slot, Unclaim>;
 
-    bool retire(Kernel &kernel, std::unique_lock<gm20b::Mutex> &serial, Slot &slot);
+    bool retire(Kernel &kernel, std::unique_lock<gm20b::UnfairMutex> &serial, Slot &slot);
     void reset(Kernel &kernel);
     Claim claim();
-    Claim open(Kernel &kernel, std::unique_lock<gm20b::Mutex> &serial, gm20b::Mutex &allocationLock, uint64_t bytes);
+    Claim open(Kernel &kernel, std::unique_lock<gm20b::UnfairMutex> &serial, gm20b::Mutex &allocationLock,
+               uint64_t bytes);
     bool name(Kernel &kernel, ResourceSet &set, SurfaceList &uses, uint64_t va, uint64_t bytes, bool write,
               uint32_t flags);
     bool submit(Kernel &kernel, ResourceSet &set, Slot &slot, uint64_t offset, const uint32_t *start,
                 const uint32_t *end, SurfaceList &uses, uint32_t removals, KernelJob job, std::shared_ptr<void> owner);
-    gm20b::Mutex lock_;
+    gm20b::UnfairMutex lock_;
     std::deque<Slot> slots_ = std::deque<Slot>(4);  // grows, never shrinks: a claimed slot stays where it is
     SetView view_;
     std::vector<SetUse> recorded_;

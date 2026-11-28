@@ -83,7 +83,7 @@ void *client(int n)
 
 void map(int n, uint32_t id, uint64_t address)
 {
-	gViews.mappings[{client(n), id}] = {client(n), task(n), address, kPages * 4096, 0, 0};
+	gViews.mappings[{client(n), id}] = {client(n), task(n), address, kPages * 4096, 0, 0, nullptr};
 }
 
 class Views : public ::testing::Test
@@ -541,7 +541,7 @@ TEST_F(Views, CompressedUnlockWritebackFailurePropagatesErrorAndLogsRefusal)
 					      TGM_LAYOUT_ASK_WRITES | TGM_LAYOUT_ASK_COMPRESS),
 		  1);
 	ASSERT_EQ(tegra_gm20b_surface_kind(pas[0]), 0xdbu);
-	gViews.mappings[{client(1), 91}] = {client(1), task(1), 0x300000, 16 * 4096, 0, 0};
+	gViews.mappings[{client(1), 91}] = {client(1), task(1), 0x300000, 16 * 4096, 0, 0, nullptr};
 
 	ASSERT_EQ(tegra_gm20b_iosurface_view(client(1), kLock, 91, 0), 0);
 	tgm_views_gpu_writes(c);
@@ -557,6 +557,139 @@ TEST_F(Views, CompressedUnlockWritebackFailurePropagatesErrorAndLogsRefusal)
 	EXPECT_TRUE(sawWritebackFailed);
 	gMoveFails = false;
 	tgm_coherency_put(c);
+}
+
+// Reproduces the Maps widget systemMedium path (382x176 BGRA8, row_bytes=1536, y_log2=1):
+// MapKit.SnapshotService renders into a block-linear IOSurface and keeps its GPU import cached,
+// while GeneralMapsWidget (VectorKit) reads [surface baseAddress] without IOSurfaceLock and only
+// calls unlockWithOptions:kIOSurfaceLockReadOnly in releaseIOSurface.
+TEST_F(Views, MapsWidget382x176UnlockedReadSeesRowsAndUnlockReleasesScratch)
+{
+	constexpr uint32_t kMapW = 382, kMapH = 176, kMapBpp = 4, kMapRow = 1536, kMapPages = 68;
+	std::vector<uint64_t> pas;
+	for (uint32_t i = 0; i < kMapPages; i++)
+		pas.push_back(0xc0000000ULL + i * 0x1000ULL);
+	const tgm_relayout_pages pages = {pas.data(), kMapPages};
+	std::vector<uint8_t> want(kMapPages * 4096, 0);
+	for (uint32_t y = 0; y < kMapH; y++) {
+		for (uint32_t x = 0; x < kMapW; x++) {
+			const size_t at = size_t(y) * kMapRow + size_t(x) * kMapBpp;
+			want[at + 0] = uint8_t((x * 3 + y * 5) & 0xff);
+			want[at + 1] = uint8_t((y * 7 + 11) & 0xff);
+			want[at + 2] = uint8_t((x ^ y) & 0xff);
+			want[at + 3] = 0xff;
+		}
+	}
+	scatter(pages, want);
+	int covered = 0;
+	tgm_coh *c = tgm_coherency_add(pas[0], 63, pas.data(), kMapPages, 1, 1, &covered);
+	ASSERT_EQ(tgm_coherency_pin(c, reinterpret_cast<switch_gpu_backing *>(1), nullptr, nullptr),
+		  0);
+	const int disconnectedBefore = gViews.disconnectedCalls;
+	ASSERT_EQ(tgm_coherency_layout_fitted(c, kMapW, kMapH, kMapBpp, kMapRow,
+					      TGM_LAYOUT_ASK_WRITES),
+		  1);
+	EXPECT_GT(gViews.disconnectedCalls, disconnectedBefore);
+	EXPECT_EQ(gViews.markedPages.count(pas[0]), 1u);
+
+	tgm_layout l{};
+	ASSERT_TRUE(tegra_gm20b_surface_layout(pas[0], &l));
+	EXPECT_EQ(l.y_log2, 1u);
+
+	const std::vector<uint8_t> gpuTexels = gather(pages);
+	const uint64_t readerVa = 0x500000;
+	gViews.mappings[{client(2), 63}] = {client(2), task(2), readerVa, kMapPages * 4096, 0, 0, nullptr};
+
+	gMoves.clear();
+	const int putBefore = gViews.scratchesPut;
+	// Unlocked read fault in the middle of the surface (VM_PROT_READ = 1): prefaulted RO -> rc 2
+	ASSERT_EQ(tegra_gm20b_tiled_cpu_fault(task(2), readerVa + 5 * 4096, pas[5], 1), 2);
+	ASSERT_EQ(gMoves.size(), 1u);
+	EXPECT_EQ(gMoves[0].op, TGM_RELAYOUT_TO_ROWS);
+	EXPECT_TRUE(gViews.readOnly.count({task(2), readerVa}) == 1u);
+	EXPECT_EQ(gather(pages), gpuTexels);
+
+	const auto *scratch =
+		static_cast<const tgm_scratch *>(gViews.mapped.at({task(2), readerVa}));
+	ASSERT_NE(scratch, nullptr);
+	const std::vector<uint8_t> got =
+		gather({scratch->pas.data(), uint32_t(scratch->pas.size())});
+	for (uint32_t y = 0; y < kMapH; y++)
+		ASSERT_EQ(memcmp(&got[size_t(y) * kMapRow], &want[size_t(y) * kMapRow],
+				 kMapW * kMapBpp),
+			  0)
+			<< "row " << y;
+
+	// VectorKit's releaseIOSurface calls unlockWithOptions:kIOSurfaceLockReadOnly without a prior lock
+	ASSERT_EQ(tegra_gm20b_iosurface_view(client(2), kUnlock, 63, kReadOnly), 0);
+	EXPECT_EQ(gMoves.size(), 1u);
+	EXPECT_EQ((gViews.mapped[{task(2), readerVa}]), ViewModel::surface(63));
+	EXPECT_EQ(gViews.scratchesPut - putBefore, 1);
+	EXPECT_EQ(gViews.holds[task(2)], 0);
+
+	tgm_coherency_put(c);
+	EXPECT_TRUE(gViews.markedPages.empty());
+}
+
+TEST_F(Views, UnlockedReadViewInvalidatesOnGpuWriteAndUntilesOnLastImportDrop)
+{
+	Tiled s(0xc1000000, 92);
+	map(2, s.id, 0x600000);
+	gMoves.clear();
+	ASSERT_EQ(tegra_gm20b_tiled_cpu_fault(task(2), 0x600000, s.pas[0], 1), 2);
+	ASSERT_EQ(gMoves.size(), 1u);
+	EXPECT_TRUE(s.rowsAre(s.seen(task(2), 0x600000), s.rows));
+
+	// A GPU write drops the unlocked read-only view so the next unlocked read faults fresh rows
+	tgm_views_gpu_writes(s.coh);
+	EXPECT_EQ((gViews.mapped[{task(2), 0x600000}]), ViewModel::surface(s.id));
+
+	std::vector<uint8_t> updated(s.rows.size(), 0x77), texels = s.texels();
+	tgm_layout_write(&s.l, texels.data(), 0, 0, kW, kH, updated.data(), kRow);
+	scatter(s.pages, texels);
+	tgm_coherency_wrote(s.coh, 3, 1);
+	gGpu.completed[3] = 1;
+
+	ASSERT_EQ(tegra_gm20b_tiled_cpu_fault(task(2), 0x600000, s.pas[0], 1), 2);
+	EXPECT_TRUE(s.rowsAre(s.seen(task(2), 0x600000), updated));
+
+	// Last GPU import drops while the unlocked view is still live: untiles in place and restores the mapping
+	tgm_coherency_put(s.coh);
+	EXPECT_FALSE(tegra_gm20b_surface_tiled(s.pas[0]));
+	EXPECT_EQ((gViews.mapped[{task(2), 0x600000}]), ViewModel::surface(s.id));
+	EXPECT_TRUE(s.rowsAre(s.texels(), updated));
+	EXPECT_EQ(gViews.holds[task(2)], 0);
+	EXPECT_TRUE(gViews.markedPages.empty());
+}
+
+TEST_F(Views, UnlockedWriteUpgradesReadOnlyScratchAndFlushesBeforeGpuJob)
+{
+	Tiled s(0xc2000000, 93);
+	map(2, s.id, 0x700000);
+	ASSERT_EQ(tegra_gm20b_tiled_cpu_fault(task(2), 0x700000, s.pas[0], 1), 2);
+	auto *scratch = static_cast<const tgm_scratch *>(gViews.mapped.at({task(2), 0x700000}));
+	ASSERT_NE(scratch, nullptr);
+	EXPECT_EQ(gViews.markedPages.count(scratch->pas[0]), 1u);
+
+	// Unlocked write fault on the read-only scratch page (VM_PROT_WRITE = 2)
+	EXPECT_EQ(tegra_gm20b_tiled_cpu_fault(task(2), 0x700000, scratch->pas[0], 2), 0);
+	EXPECT_EQ(gViews.markedPages.count(scratch->pas[0]), 0u);
+
+	const tgm_relayout_pages rows = {scratch->pas.data(), uint32_t(scratch->pas.size())};
+	std::vector<uint8_t> written = gather(rows);
+	memset(&written[2 * kRow], 0x99, kW * kBpp);
+	scatter(rows, written);
+
+	// Before the next GPU submission runs (even one that only reads s), unlocked writes land in the texels
+	tgm_views_job_writes(nullptr, 0);
+	EXPECT_EQ((gViews.mapped[{task(2), 0x700000}]), ViewModel::surface(s.id));
+	std::vector<uint8_t> back(s.rows.size());
+	const std::vector<uint8_t> after = s.texels();
+	tgm_layout_read(&s.l, after.data(), 0, 0, kW, kH, back.data(), kRow);
+	EXPECT_TRUE(s.rowsAre(back, written));
+
+	tgm_coherency_put(s.coh);
+	EXPECT_TRUE(gViews.markedPages.empty());
 }
 
 }  // namespace

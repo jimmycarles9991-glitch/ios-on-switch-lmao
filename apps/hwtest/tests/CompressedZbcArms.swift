@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestShared
 import Metal
 
 /// gpu.gm20b.compressed_targets' ZBC arms (drivers/TegraGM20BMetal/zbc.h zbcColorEntry, zbcDepthEntry): a
@@ -12,7 +13,9 @@ import Metal
 /// EQUAL-tested quad at the clear depth over a private BGRA8 target. The first round's clear writes texels (the facade
 /// asks for the entry at the third), so every later round must read back the first round's bytes: an entry's L2 texel
 /// is what the ROP writes for the value. `zbc_<arm>=<first round texels off the value>:<last round texels off the
-/// first>:<ZBC hits>`; FAIL on either count, on no hit, or on an arm that could not run (`zbc_<arm>_error`).
+/// first>:<ZBC hits>`; FAIL on either count, on no hit, on an entry the kernel refused (`zbc_<arm>_table_full`, the
+/// refusals as `zbc_<arm>_refused`: the arm's clears were ordinary ones, ZBC untested), or on an arm that could not run
+/// (`zbc_<arm>_error`). An arm the table had no slot left for before the test ran is `no_room` and not run.
 enum CompressedZbcArms {
     static let width = 256, height = 128, rounds = 12
 
@@ -49,8 +52,24 @@ enum CompressedZbcArms {
 
     static let depth16 = Float(39321) / 65535
 
-    static func run(_ gpu: GPU, _ metrics: inout Metrics, _ wrong: inout [String]) async {
+    /// The entry the arm's clears ask for, in the facade's words (zbc.h zbcColorEntry's formats)
+    static func value(_ arm: Arm) -> ZbcValue {
+        switch arm.format {
+        case .bgra8Unorm_srgb: return ZbcValue.float(arm.name, format: 0x1c, arm.clear)
+        case .rgba8Unorm_srgb: return ZbcValue.float(arm.name, format: 0x2c, arm.clear)
+        case .rgb10a2Unorm: return ZbcValue.unorm(arm.name, format: 0x20, arm.clear, bits: [10, 10, 10, 2])
+        case .rgba16Unorm: return ZbcValue.unorm(arm.name, format: 0x08, arm.clear, bits: [16, 16, 16, 16])
+        default: return ZbcValue.float(arm.name, format: 0x04, arm.clear)
+        }
+    }
+
+    /// `noRoom`: arms whose entry the GPU's table had no slot left for (ZbcBudget), reported `zbc_<arm>=no_room` and not run
+    static func run(_ gpu: GPU, _ metrics: inout Metrics, _ wrong: inout [String], noRoom: Set<String> = []) async {
         for arm in arms {
+            if noRoom.contains(arm.name) {
+                metrics.set("zbc_\(arm.name)", "no_room")
+                continue
+            }
             await judged(arm.name, gpu, &metrics, &wrong) {
                 let (first, last) = try await colourRounds(gpu, arm)
                 let size = arm.texel.count
@@ -75,11 +94,12 @@ enum CompressedZbcArms {
         let before = GM20BFacade.compression(of: gpu.device)
         do {
             let (firstOff, lastOff) = try await body()
-            let hits = (GM20BFacade.compression(of: gpu.device)["zbc_hits"] ?? 0) - (before["zbc_hits"] ?? 0)
+            let after = GM20BFacade.compression(of: gpu.device)
+            let hits = (after["zbc_hits"] ?? 0) - (before["zbc_hits"] ?? 0)
+            let refused = (after["zbc_full"] ?? 0) - (before["zbc_full"] ?? 0)
             metrics.set("zbc_\(name)", "\(firstOff):\(lastOff):\(hits)")
-            if firstOff > 0 { wrong.append("zbc_\(name)_first") }
-            if lastOff > 0 { wrong.append("zbc_\(name)_held_texel") }
-            if hits == 0 { wrong.append("zbc_\(name)_no_hit") }
+            if refused > 0 { metrics.set("zbc_\(name)_refused", refused) }
+            wrong += ZbcArmVerdict.wrong(name, firstOff: firstOff, lastOff: lastOff, hits: hits, refused: refused)
         } catch {
             metrics.set("zbc_\(name)_error", String(describing: error).prefix(80).description)
             wrong.append("zbc_\(name)_error")

@@ -73,37 +73,50 @@ bool SwitchMetalRangeEncode::beginPass(size_t at)
 {
     SwitchMetalCommandBuffer *cb = cb_;
     gm20b::CommandBuffer *rc = rc_;
-    const Cmd c = cb->_plan.legacy(at);
+    const bool own = !ahead_;
+    const auto &header = own ? cb->_plan.ownBegin(at) : cb->_plan.begin(at);
     computeUnit_ = false;
     rc->endPredicationUnit();
     SWITCH_METAL_ENCODE_SPAN(Pass);
-    const SwitchMetalPass &pass = cb->_passes[c.x];
+    const SwitchMetalPass &pass = own ? cb->_passes.own(header.pass) : cb->_passes[header.pass];
     renderBegin_ = at;
     if (continuing_) {
         continuing_ = false;
-        uint8_t stores = 0;
-        for (uint32_t i = 0; i < 8; ++i)
+        uint8_t stores = 0, discards = 0;
+        const uint8_t mask = pass.colorMask ? pass.colorMask : 0xffu;
+        for (uint8_t m = mask; m; m &= uint8_t(m - 1)) {
+            const uint32_t i = uint32_t(__builtin_ctz(m));
             if (pass.color[i].texture && pass.color[i].store == MTLStoreActionStore)
                 stores |= uint8_t(1u << i);
-        re_->continuePass(stores);
-        planSplitPrograms(cb, at, *re_);
-        planPassUses(cb, at, planned_);
+            if (pass.color[i].texture && pass.color[i].store == MTLStoreActionDontCare)
+                discards |= uint8_t(1u << i);
+        }
+        re_->continuePass(stores, discards);
+        planSplitPrograms(cb, at, *re_, own);
+        planPassUses(cb, at, planned_, own);
         return true;
     }
     gm20b::PassDesc p;
-    bool shaderTestsDepth = false;
-    for (size_t sub = at; sub == at || (sub < to_ && gm20bContinuesPass(cb, sub)); sub = cb->_plan.encoderEnd(sub)) {
+    p.mayFetch = false;
+    bool shaderTestsDepth = false, testsStencil = false;
+    for (size_t sub = at; sub == at || (sub < to_ && gm20bContinuesPass(cb, sub));
+         sub = (own ? cb->_plan.ownBegin(sub).end : cb->_plan.begin(sub).end)) {
+        const SwitchMetalPass &subPass =
+            sub == at ? pass : (own ? cb->_passes.own(cb->_plan.ownBegin(sub).pass) : cb->_passes[cb->_plan.begin(sub).pass]);
         if (sampledShadows_)
             refresh(sub);
         if (standIns_ && !standIns(sub))
             return false;
-        if (cb->_passes[cb->_plan.legacy(sub).x].xrPlaneBinds && !imagePlanes(sub, p))
+        if (subPass.xrPlaneBinds && !imagePlanes(sub, p))
             return false;
-        passStorageMasks(cb, sub, p);
-        p.hiddenZeta |= cb->_passes[cb->_plan.legacy(sub).x].testsHiddenZeta;
-        shaderTestsDepth |= cb->_passes[cb->_plan.legacy(sub).x].shaderTestsDepth;
+        passStorageMasks(cb, sub, p, own);
+        p.hiddenZeta |= subPass.testsHiddenZeta;
+        shaderTestsDepth |= subPass.shaderTestsDepth;
+        testsStencil |= subPass.testsStencil;
     }
-    for (unsigned j = 0; j < 8; j++) {
+    const uint8_t colorMask = pass.colorMask ? pass.colorMask : 0xffu;
+    for (uint8_t cm = colorMask; cm; cm &= uint8_t(cm - 1)) {
+        const unsigned j = unsigned(__builtin_ctz(cm));
         const SwitchMetalPass::Color &a = pass.color[j];
         __unsafe_unretained SwitchMetalTexture *t = (SwitchMetalTexture *)a.texture;
         if (!t)
@@ -138,7 +151,8 @@ bool SwitchMetalRangeEncode::beginPass(size_t at)
         }
         if (!fresh_.empty())
             fresh_.erase(t);  // this pass writes it
-        standInFresh_.erase(t);
+        if (!standInFresh_.empty())
+            standInFresh_.erase(t);
         // a one-layer pass's part has a header of its own (a fetch of the attachment reads it); a texture buffer's row and a
         // plane image are images of their own
         const uint32_t level = uint32_t(a.level), slice = uint32_t(a.slice);
@@ -161,19 +175,13 @@ bool SwitchMetalRangeEncode::beginPass(size_t at)
             target = &levelTargets_[j];
         }
         const bool whole = target == &t->_raw || (target == &levelTargets_[j] && gm20bWholeViewTarget(t));
-        if (!whole && !own) {
-#if SWITCH_METAL_DIAGNOSTICS
-            static std::atomic<bool> loggedLevel{false};
-            levelPasses_++;
-            if (!loggedLevel.exchange(true))
-                os_log(gm20bLog(),
-                       "SwitchMetal: renders into levels and slices (first: level %lu slice %lu of %ux%u format %u "
-                       "type %u)",
-                       (unsigned long)a.level, (unsigned long)a.slice, t->_raw.width, t->_raw.height, t->_raw.format,
-                       unsigned(t->_raw.type));
-#endif
-        }
+        if (!whole && !own)
+            SWITCH_METAL_DIAGNOSTIC(levelPasses_++);
         p.color[j].texture = target != &t->_raw ? target : standIn ? standIn : &t->_raw;
+        if (p.color[j].texture == &t->_raw && t->_raw.nativePlane != ~0u) {
+            if (const gm20b::Texture *native = rc->writeTexture(&t->_raw); native != &t->_raw)
+                p.color[j].texture = const_cast<gm20b::Texture *>(native);
+        }
         if (standIn && t->_raw.rotation) {  // laid out as its planes (TegraGM20BMetalRotated.mm): drawn turned
             levelTargets_[j] = *standIn;
             levelTargets_[j].rotation = t->_raw.rotation;
@@ -189,6 +197,7 @@ bool SwitchMetalRangeEncode::beginPass(size_t at)
         const bool copied = a.resolve && t->_raw.samples <= 1 && a.store == MTLStoreActionMultisampleResolve;
         p.color[j].store =
             a.store == MTLStoreActionStore || a.store == MTLStoreActionStoreAndMultisampleResolve || copied;
+        p.color[j].discard = !p.color[j].store && !a.resolve;
         if (a.store == MTLStoreActionMultisampleResolve || a.store == MTLStoreActionStoreAndMultisampleResolve)
             if (__unsafe_unretained SwitchMetalTexture *r = (SwitchMetalTexture *)a.resolve)
                 resolves_.push_back({j, r, a.store == MTLStoreActionStoreAndMultisampleResolve,
@@ -244,29 +253,19 @@ bool SwitchMetalRangeEncode::beginPass(size_t at)
         p.depthStencil.loaded = pass.depthLoad == MTLLoadActionLoad || pass.stencilLoad == MTLLoadActionLoad;
         p.depthStencil.stored =
             pass.zeta[0].store != MTLStoreActionDontCare || pass.zeta[1].store != MTLStoreActionDontCare;
-        bool loadedLater = false;
-        if (whole_) {
-            for (size_t k = cb->_plan.encoderEnd(at); k < to_;) {
-                const Op nextOp = cb->_plan.operation(k).op;
-                if (nextOp == OpRender) {
-                    const SwitchMetalPass &later = cb->_passes[cb->_plan.legacy(k).x];
-                    if (later.depth == pass.depth && later.depthLoad == MTLLoadActionLoad) {
-                        loadedLater = true;
-                        break;
-                    }
-                }
-                const size_t nextEnd = SwitchMetalCommandPlan::isEncoderBegin(nextOp) ? cb->_plan.encoderEnd(k) : k + 1;
-                k = std::max(nextEnd, k + 1);
-            }
-        }
-        p.depthStencil.loadedLater = loadedLater;
+        p.depthStencil.depthEnabled = (pass.zetaAspects & 1) != 0;
+        p.depthStencil.stencilEnabled = (pass.zetaAspects & 2) != 0;
         p.depthStencil.depth = gm20b::metalClearDepth(pass.clearDepth, z->_raw.format);
         p.depthStencil.stencil = pass.clearStencil;
         if (separate) {
             separateZeta(pass, z, s, p);
             if (!depth16Zeta(pass, p))
                 return false;
-        } else if (shaderTestsDepth && z->_raw.format == MTLPixelFormatDepth16Unorm && !depth16Tested(pass, p)) {
+        } else if (((z->_raw.format == MTLPixelFormatDepth16Unorm && (shaderTestsDepth || testsStencil)) ||
+                    (z->_raw.format == MTLPixelFormatDepth32Float && testsStencil) ||
+                    (z->_raw.format == MTLPixelFormatDepth32Float_Stencil8 && testsStencil &&
+                     !(pass.zetaAspects & 2))) &&
+                   !depth16Tested(pass, p)) {
             return false;
         }
     }
@@ -279,7 +278,7 @@ bool SwitchMetalRangeEncode::beginPass(size_t at)
             return false;
     standInLoads_.clear();
     PlanDraws draws(cb, at, to_, *rc);
-    const size_t next = cb->_plan.encoderEnd(at);
+    const size_t next = header.end;
     if (!loadPlanes(p) || !formatStandIns(pass, p, draws, next < to_ && gm20bContinuesPass(cb, next)))
         return false;
     if (loadedTargets_ && !reachOfLoadedTargets(pass, p, draws, *rc, loadedReach_, why_)) {
@@ -292,7 +291,7 @@ bool SwitchMetalRangeEncode::beginPass(size_t at)
         gm20bReachFails(cb, ahead_, *why_, turned_.failedForMemory(), rc->refusal);
         return fail(PredPassRotated, *why_, 0, 0, *why_);
     }
-    p.metalDepth = true;
+    p.metalDraws = true;
     // the recording failed every pass Metal's validation stops (TegraGM20BMetalPassErrors.h): render() refuses the rest for
     // want of memory alone
     if (!(re_ = rc->render(p, why_))) {
@@ -301,16 +300,50 @@ bool SwitchMetalRangeEncode::beginPass(size_t at)
     }
     counters_->started(at, *re_);
     passDraws_ = rc->draws;
-    planSplitPrograms(cb, at, *re_);
-    planned_ = gm20b::PassUses{};
+    planSplitPrograms(cb, at, *re_, own);
+    planned_.reset();
     planned_.known = !sampledShadows_ && !standIns_;
-    planPassUses(cb, at, planned_);
+    planPassUses(cb, at, planned_, own);
     return true;
+}
+
+// The zcull regions the job ending at `to` stored that a pass of the raw ranges straight after it loads (none past an
+// event's or a held range) are kept for those ranges (gm20b::CommandBuffer::carryZcull). Read at the seal, from the
+// commit on, when every pass of the command buffer is recorded.
+void SwitchMetalRangeEncode::carryZcull(size_t to)
+{
+    SwitchMetalCommandBuffer *cb = cb_;
+    const std::vector<gm20b::ZcullStored> &regions = rc_->zcullRegions();
+    if (regions.empty())
+        return;
+    size_t end = to;
+    for (size_t s = cb->_segNext + 1; s < cb->_segs.size(); ++s) {
+        const SwitchMetalSegment &next = cb->_segs[s];
+        if (next.event || next.held || next.from != end)
+            break;
+        end = next.to;
+    }
+    const SwitchMetalCommandPlan &plan = cb->_plan;
+    uint32_t kept = 0;
+    for (size_t k = to; k < end;) {
+        const Op op = plan.operation(k).op;
+        if (op == OpRender) {
+            const SwitchMetalPass &later = cb->_passes[plan.legacy(k).x];
+            if (later.depth && later.depthLoad == MTLLoadActionLoad)
+                for (size_t i = 0; i < regions.size(); i++)
+                    kept |= uint32_t(regions[i].zetaVa == ((SwitchMetalTexture *)later.depth)->_raw.va) << i;
+        }
+        k = std::max(SwitchMetalCommandPlan::isEncoderBegin(op) ? plan.encoderEnd(k) : k + 1, k + 1);
+    }
+    if (end > to)
+        rc_->carryZcull((__bridge const void *)cb, to, kept);
 }
 
 void SwitchMetalRangeEncode::overlappingPlanes(const SwitchMetalPass &pass, gm20b::PassDesc &p)
 {
-    for (unsigned j = 0; j < 8; j++) {
+    const uint8_t mask = pass.colorMask ? pass.colorMask : 0xffu;
+    for (uint8_t m = mask; m; m &= uint8_t(m - 1)) {
+        const unsigned j = unsigned(__builtin_ctz(m));
         const SwitchMetalPass::Color &a = pass.color[j];
         __unsafe_unretained SwitchMetalTexture *t = (SwitchMetalTexture *)a.texture;
         if (!t)

@@ -621,3 +621,49 @@ TEST(DisplayB, CombinedTeardownKeepsPllD2RunningThroughDcbPowerDown)
     EXPECT_TRUE(model.log.empty());
     EXPECT_EQ(xusbWritesTo(kDpaux + 0x138).size(), 0u);
 }
+
+TEST(DisplayB, FrameInterruptClearsStatusOnEnableAndReadsBackOnDisable)
+{
+    Display d;
+    constexpr uintptr_t kIntStatus = dc + 4 * 0x37;
+    constexpr uintptr_t kIntEnable = dc + 4 * 0x39;
+    constexpr uint32_t kFrameEnd = 1u << 1;
+
+    d.clear();
+    d.dcb.frameInterrupt(true);
+    const long statusClearOnEnable = xusbFirstWrite(kIntStatus, kFrameEnd);
+    const long enableOn = xusbFirstWrite(kIntEnable, kFrameEnd);
+    ASSERT_GE(statusClearOnEnable, 0);
+    ASSERT_GE(enableOn, 0);
+    EXPECT_LT(statusClearOnEnable, enableOn);
+
+    d.clear();
+    const unsigned readsBefore = xusbModel().reads[kIntStatus];
+    d.dcb.frameInterrupt(false);
+    const long enableOff = xusbFirstWrite(kIntEnable, 0);
+    const long statusClearOnDisable = xusbFirstWrite(kIntStatus, kFrameEnd);
+    ASSERT_GE(enableOff, 0);
+    ASSERT_GE(statusClearOnDisable, 0);
+    EXPECT_LT(enableOff, statusClearOnDisable);
+    EXPECT_GT(xusbModel().reads[kIntStatus], readsBefore);
+
+    d.clear();
+    d.dcb.frameInterrupt(false);
+    EXPECT_TRUE(xusbModel().log.empty());
+}
+
+TEST(DisplayB, SteadyStateFlipsSkipEmcReservation)
+{
+    Display d;
+    d.dcb.present(clone(0x10000000, 0x14400000, true));
+    d.banks.boundary();
+    ASSERT_TRUE(d.dcb.latch());
+    ASSERT_EQ(plans.size(), 1u);
+
+    for (uint32_t i = 0; i < 10; ++i) {
+        d.dcb.present(clone(0x10000000 + (i % 2) * 0x04400000u, 0x18800000 + (i % 2) * 0x04400000u, false));
+        d.banks.boundary();
+        ASSERT_TRUE(d.dcb.latch());
+    }
+    EXPECT_EQ(plans.size(), 1u);
+}

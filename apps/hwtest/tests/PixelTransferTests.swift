@@ -1,6 +1,7 @@
 import CoreVideo
 import Foundation
 import HWTestCore
+import HWTestKit
 import HWTestVideo
 import VideoToolbox
 

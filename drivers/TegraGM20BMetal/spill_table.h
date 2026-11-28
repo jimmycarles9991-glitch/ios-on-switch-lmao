@@ -70,6 +70,12 @@ public:
         return va_;
     }
 
+    void forget()
+    {
+        va_ = 0;
+        count_ = 0;
+    }
+
 private:
     std::array<uint32_t, kSpillWordsMax> words_{};
     uint32_t count_ = 0;

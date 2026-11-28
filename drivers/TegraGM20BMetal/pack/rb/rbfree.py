@@ -31,6 +31,8 @@ import rbspec
 
 UNORM8 = (70, 80)  # MTLPixelFormatRGBA8Unorm, MTLPixelFormatBGRA8Unorm
 RGBA16_FLOAT = 115
+RGB8_444_2P = 542  # renders through an RGBA16Float stand-in (planar_target.h)
+FLOAT_TARGETS = (RGBA16_FLOAT, RGB8_444_2P)
 
 # MTLBlendFactor and MTLBlendOperation
 ZERO, ONE, ONE_MINUS_SOURCE_COLOR, ONE_MINUS_SOURCE_ALPHA = 0, 1, 3, 5
@@ -126,12 +128,12 @@ def _target(tables: rbspec.Tables, spec: rbspec.Spec) -> str:
     """Give why the blended colour's target takes no form, '' where it takes one."""
     colour = spec.field(tables, 'colour')
     fmt = spec.colours.get(colour, (0, 0, ''))[0]
-    if fmt not in UNORM8 and fmt != RGBA16_FLOAT:
-        return f'blended colour {fmt} not RGBA8, BGRA8 or RGBA16Float'
+    if fmt not in UNORM8 and fmt not in FLOAT_TARGETS:
+        return f'blended colour {fmt} not RGBA8, BGRA8, RGBA16Float or RGB8_444_2P'
     if spec.field(tables, 'alpha_only'):
         return 'destination alpha only'
     saturates = spec.field(tables, 'mode') in tables.saturated_unless_extended
-    if fmt == RGBA16_FLOAT and saturates and not spec.field(tables, 'extended'):
+    if fmt in FLOAT_TARGETS and saturates and not spec.field(tables, 'extended'):
         return 'saturates a source alpha the float target does not clamp'
     return ''
 

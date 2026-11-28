@@ -143,7 +143,6 @@
 24B119 MTLDevice supportsTextureSwizzle base
 24B119 MTLDevice supportsUnalignedVertexFetch base
 24B119 MTLDevice supportsWritableArrayOfTextures base
-24B119 MTLDevice targetDeviceArchitecture base
 24B119 MTLDevice unloadShaderCaches base
 24B119 MTLDevice unmapShaderSampleBuffer none
 24B119 MTLRenderCommandEncoder dispatchThreadsPerTile: m2v

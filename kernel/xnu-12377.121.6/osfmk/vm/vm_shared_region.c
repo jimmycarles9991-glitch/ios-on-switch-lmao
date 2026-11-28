@@ -76,6 +76,7 @@ extern bool a64x_cache_pretranslated(struct vnode *vp);
 #include <vm/vm_protos_internal.h>
 #include <vm/vm_object_internal.h>
 #include <vm/vm_shared_region.h>
+#include <switch/fvariant_hooks.h>
 
 #include <vm/vm_protos.h>
 #if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT && CONFIG_CODE_DECRYPTION
@@ -937,6 +938,7 @@ vm_shared_region_create(
 	shared_region->sr_page_shift = (uint8_t)target_page_shift;
 #endif /* __ARM_MIXED_PAGE_SIZE__ */
 	shared_region->sr_driverkit = (uint8_t)is_driverkit;
+	shared_region->sr_switch_fvariant = NULL;
 	shared_region->sr_rsr_version = rsr_version;
 	shared_region->sr_root_dir = root_dir;
 
@@ -2114,6 +2116,7 @@ vm_shared_region_map_file(
 	assert(shared_region->sr_config_map != NULL);
 	switch_ctx = vm_map_switch_to(shared_region->sr_config_map);
 	map_switched = true;
+	shared_region->sr_switch_fvariant = switch_fvariant_for_region(shared_region);
 
 	/*
 	 * The call above installed direct mappings to the shared cache file.
@@ -2779,6 +2782,7 @@ vm_shared_region_slide_mapping(
 	si->si_start = start;
 	si->si_end = si->si_start + size;
 	si->si_slide = slide;
+	si->si_switch_fvariant = sr->sr_switch_fvariant;
 #if __has_feature(ptrauth_calls)
 	/*
 	 * If there is authenticated pointer data in this slid mapping,

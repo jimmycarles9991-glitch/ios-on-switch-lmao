@@ -56,8 +56,10 @@ std::string state(const std::string &head, const std::string &colours, const std
 
 // The base state first, then one field changed each, as compiler_stages_test's table measured them: the vertex stage's
 // compile reads the blend switch (its push words and layout), and the fragment stage's the blend switch, a 16-bit
-// float target, the sample count and, fetching its attachment, the write mask; the colour format within a class, the
-// blend factors and operations, the topology class, a depth attachment and every attribute layout reach neither
+// float target, a second unorm target (unormTargets), the sample count and, fetching its attachment, the write mask;
+// m2v's translation reads none of the colour format within a class or, blended, across classes, nor a second attachment
+// the function does not write; the blend factors and operations, the topology class, a depth attachment and every
+// attribute layout reach neither
 std::vector<Case> renderCases()
 {
     const std::string plain = "samples=1 topo=0 ds=0/0";
@@ -65,14 +67,14 @@ std::vector<Case> renderCases()
         {"base", state(plain, kBlended), true, true, true},
         {"colour format BGRA8 -> RGBA8", state(plain, "c0=70:15:1:4:5:0:4:5:0"), false, false, false},
         {"colour format -> RGBA16Float", state(plain, "c0=115:15:1:4:5:0:4:5:0"), false, true, false},
-        {"colour format -> R8Unorm", state(plain, "c0=10:15:1:4:5:0:4:5:0"), false, false, true},
+        {"colour format -> R8Unorm", state(plain, "c0=10:15:1:4:5:0:4:5:0"), false, false, false},
         {"write mask", state(plain, "c0=80:7:1:4:5:0:4:5:0"), false, false, false},
         {"blending off", state(plain, "c0=80:15:0:4:5:0:4:5:0"), true, true, true},
         {"source RGB factor", state(plain, "c0=80:15:1:1:5:0:4:5:0"), false, false, false},
         {"destination RGB factor", state(plain, "c0=80:15:1:4:1:0:4:5:0"), false, false, false},
         {"RGB operation", state(plain, "c0=80:15:1:4:5:1:4:5:0"), false, false, false},
         {"alpha factors and operation", state(plain, "c0=80:15:1:1:1:1:4:5:0"), false, false, false},
-        {"a second colour attachment", state(plain, kBlended + " c1=80:15:0:1:0:0:1:0:0"), false, false, true},
+        {"a second colour attachment", state(plain, kBlended + " c1=80:15:0:1:0:0:1:0:0"), false, true, false},
         {"four samples", state("samples=4 topo=0 ds=0/0", kBlended), false, true, true},
         {"topology class", state("samples=1 topo=3 ds=0/0", kBlended), false, false, false},
         {"depth attachment", state("samples=1 topo=0 ds=252/0", kBlended), false, false, false},

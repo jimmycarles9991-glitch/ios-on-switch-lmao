@@ -1,12 +1,20 @@
 // SPDX-License-Identifier: MIT
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
+#include <IOKit/IOKitKeys.h>
 #include <IOKit/IOUserClient.h>
+#ifdef KERNEL
+#include <IOKit/IOMessage.h>
+#include <IOKit/IOService.h>
+#include <kern/thread_call.h>
+#endif
 #include <kern/thread.h>
 #include "SwitchGpuBacking.h"
 #include "TegraGM20BGpu.h"
 #include "TegraGM20BViews.h"
 #include "../TegraDisplayFlip/TegraScanoutCopy.h"
+
+extern "C" void switch_gpu_surface_sweep(void);
 
 namespace
 {
@@ -34,16 +42,70 @@ struct Pending {
 	uint32_t index;
 };
 
+struct ClientWatch {
+	ClientWatch *next;
+	IOUserClient *client;
+	IONotifier *notifier;
+	uint32_t refs;
+	bool registering;
+};
+
 IOLock *lock;
 Lease *leases, *free_leases;
 uint32_t lease_count;  // leases' length, read without the lock by switch_gpu_surface_sweep
 Pending *pending, *free_pending;
 Association *associations;
+ClientWatch *watches;
+#ifdef KERNEL
+thread_call_t sweep_call;
+
+void sweep_work(thread_call_param_t, thread_call_param_t)
+{
+	switch_gpu_surface_sweep();
+}
+
+void schedule_sweep()
+{
+	if (thread_call_t call = __atomic_load_n(&sweep_call, __ATOMIC_ACQUIRE))
+		thread_call_enter(call);
+}
+
+IOReturn client_interest(void *, void *, UInt32 message_type, IOService *, void *, vm_size_t)
+{
+	if (message_type == kIOMessageServiceIsTerminated)
+		schedule_sweep();
+	return kIOReturnSuccess;
+}
+#else
+void schedule_sweep()
+{
+	switch_gpu_surface_sweep();
+}
+
+int client_interest(void *, void *, uint32_t message_type, IOService *, void *, size_t)
+{
+	if (message_type == kIOMessageServiceIsTerminated)
+		schedule_sweep();
+	return 0;
+}
+#endif
 
 bool initialize()
 {
 	if (__atomic_load_n(&lock, __ATOMIC_ACQUIRE))
 		return true;
+#ifdef KERNEL
+	if (!__atomic_load_n(&sweep_call, __ATOMIC_ACQUIRE)) {
+		thread_call_t call = thread_call_allocate_with_options(
+			sweep_work, nullptr, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+		if (!call)
+			return false;
+		thread_call_t no_call = nullptr;
+		if (!__atomic_compare_exchange_n(&sweep_call, &no_call, call, false,
+						 __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
+			thread_call_free(call);
+	}
+#endif
 	IOLock *made = IOLockAlloc(), *expected = nullptr;
 	if (!made)
 		return false;
@@ -51,6 +113,24 @@ bool initialize()
 					 __ATOMIC_ACQUIRE))
 		IOLockFree(made);
 	return true;
+}
+
+ClientWatch *find_watch_locked(IOUserClient *client)
+{
+	for (auto *watch = watches; watch; watch = watch->next)
+		if (watch->client == client)
+			return watch;
+	return nullptr;
+}
+
+void unlink_watch_locked(ClientWatch *target)
+{
+	for (auto **at = &watches; *at; at = &(*at)->next) {
+		if (*at == target) {
+			*at = target->next;
+			return;
+		}
+	}
 }
 
 Lease **find(void *client, uint32_t id)
@@ -91,13 +171,25 @@ bool take_pending(Lease *lease, uint32_t index)
 
 void recycle(Lease *lease)
 {
-	lease->client->release();
-	if (lease->backing)
-		switch_gpu_backing_release(lease->backing);
+	IOUserClient *client = lease->client;
+	switch_gpu_backing *backing = lease->backing;
+	IONotifier *drop_notifier = nullptr;
 	IOLockLock(lock);
+	if (ClientWatch *watch = find_watch_locked(client)) {
+		if (!--watch->refs && !watch->registering) {
+			unlink_watch_locked(watch);
+			drop_notifier = watch->notifier;
+			IODelete(watch, ClientWatch, 1);
+		}
+	}
 	lease->next = free_leases;
 	free_leases = lease;
 	IOLockUnlock(lock);
+	if (drop_notifier)
+		drop_notifier->remove();
+	client->release();
+	if (backing)
+		switch_gpu_backing_release(backing);
 }
 
 void release_one(void *client, uint32_t id, uint32_t options, bool failed)
@@ -122,7 +214,7 @@ void release_one(void *client, uint32_t id, uint32_t options, bool failed)
 		!lease->pending[0] && !lease->pending[1] && !lease->held[0] && !lease->held[1];
 	if (last) {
 		*at = lease->next;
-		__atomic_sub_fetch(&lease_count, 1u, __ATOMIC_RELEASE);
+		__atomic_store_n(&lease_count, lease_count - 1u, __ATOMIC_RELEASE);
 	}
 	IOLockUnlock(lock);
 	if (backing) {
@@ -215,7 +307,7 @@ extern "C" void switch_gpu_surface_sweep(void)
 			continue;
 		}
 		*at = lease->next;
-		__atomic_sub_fetch(&lease_count, 1u, __ATOMIC_RELEASE);
+		__atomic_store_n(&lease_count, lease_count - 1u, __ATOMIC_RELEASE);
 		lease->next = dead;
 		dead = lease;
 		for (auto **item = &pending; *item;) {
@@ -329,21 +421,37 @@ acquire_backing:
 	if (client->isInactive() ||
 	    (lease && (lease->backing != backing || lease->descriptor != descriptor)))
 		result = -19;
+	ClientWatch *register_watch = nullptr;
 	if (!result && !lease) {
 		lease = free_leases;
 		if (lease)
 			free_leases = lease->next;
 		else
 			lease = IONew(Lease, 1);
+		ClientWatch *watch = lease ? find_watch_locked(client) : nullptr;
+		if (lease && !watch) {
+			watch = IONew(ClientWatch, 1);
+			if (!watch) {
+				lease->next = free_leases;
+				free_leases = lease;
+				lease = nullptr;
+			} else {
+				*watch = {watches, client, nullptr, 0, true};
+				watches = watch;
+				register_watch = watch;
+				client->retain();
+			}
+		}
 		if (!lease) {
 			result = -12;
 		} else {
+			++watch->refs;
 			*lease = {leases, client, backing, descriptor, bytes, id, flags, {}, {}};
 			client->retain();
 			if (backing)
 				switch_gpu_backing_retain(backing);
 			leases = lease;
-			__atomic_add_fetch(&lease_count, 1u, __ATOMIC_RELEASE);
+			__atomic_store_n(&lease_count, lease_count + 1u, __ATOMIC_RELEASE);
 		}
 	}
 	if (!result) {
@@ -355,6 +463,28 @@ acquire_backing:
 		free_pending = item;
 	}
 	IOLockUnlock(lock);
+	if (register_watch) {
+		IONotifier *notifier = client->registerInterest(gIOGeneralInterest, client_interest,
+								nullptr, nullptr);
+		IONotifier *drop_notifier = nullptr;
+		bool need_sweep = false;
+		IOLockLock(lock);
+		register_watch->registering = false;
+		if (!register_watch->refs) {
+			unlink_watch_locked(register_watch);
+			IODelete(register_watch, ClientWatch, 1);
+			drop_notifier = notifier;
+		} else {
+			register_watch->notifier = notifier;
+			need_sweep = !notifier || client->isInactive();
+		}
+		IOLockUnlock(lock);
+		if (drop_notifier)
+			drop_notifier->remove();
+		client->release();
+		if (need_sweep)
+			schedule_sweep();
+	}
 	if (result) {
 		if (backing)
 			switch_gpu_backing_cpu_cancel(backing, flags | access(index));
@@ -408,3 +538,72 @@ extern "C" void switch_gpu_surface_unlock_did(void *client, uint32_t id, uint32_
 {
 	release_one(client, id, options, false);
 }
+
+#if TGM_STATS
+namespace
+{
+// Debug kernels (K18): the surfaces a submission cleaned whole while a CPU writer still held them, which their release
+// cannot have cleaned. Lock-free: begin() notes them under the backing locks. The first eight surfaces keep a slot.
+struct ConcurrentClean {
+	uint32_t surface, cleans;
+	uint64_t bytes;
+};
+
+ConcurrentClean concurrentCleans[8];
+}  // namespace
+
+extern "C" void switch_gpu_concurrent_clean_note(uint32_t surface, uint64_t bytes)
+{
+	for (ConcurrentClean &c : concurrentCleans) {
+		uint32_t seen = __atomic_load_n(&c.surface, __ATOMIC_RELAXED);
+		if (!seen && __atomic_compare_exchange_n(&c.surface, &seen, surface, false,
+							 __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+			seen = surface;
+		if (seen != surface)
+			continue;
+		__atomic_add_fetch(&c.cleans, 1, __ATOMIC_RELAXED);
+		__atomic_add_fetch(&c.bytes, bytes, __ATOMIC_RELAXED);
+		return;
+	}
+}
+
+#ifdef KERNEL
+// The window's notes, each surface with the processes that hold it locked now and how ("pid N, name": the user client's
+// creator), then cleared; 0 when there were none
+extern "C" unsigned long switch_gpu_concurrent_clean_line(char *out, unsigned long size)
+{
+	unsigned long at = 0;
+	const auto advance = [&](int n) {
+		if (n > 0)
+			at = at + unsigned(n) < size ? at + unsigned(n) : size - 1;
+	};
+	out[0] = 0;
+	for (ConcurrentClean &c : concurrentCleans) {
+		const uint32_t surface = __atomic_load_n(&c.surface, __ATOMIC_RELAXED);
+		const uint32_t cleans = __atomic_exchange_n(&c.cleans, 0u, __ATOMIC_RELAXED);
+		const uint64_t bytes = __atomic_exchange_n(&c.bytes, 0ull, __ATOMIC_RELAXED);
+		if (!surface || !cleans)
+			continue;
+		advance(snprintf(out + at, size - at,
+				 "%sIOSurface %u: %u cleans, %llu KiB, locked by", at ? "; " : "",
+				 surface, cleans, static_cast<unsigned long long>(bytes >> 10)));
+		IOLockLock(lock);
+		for (Lease *l = leases; l; l = l->next) {
+			if (l->id != surface ||
+			    !(l->held[0] + l->held[1] + l->pending[0] + l->pending[1]))
+				continue;
+			OSObject *creator =
+				l->client ? l->client->copyProperty(kIOUserClientCreatorKey)
+					  : nullptr;
+			const OSString *name = OSDynamicCast(OSString, creator);
+			advance(snprintf(out + at, size - at, " [%s: %u writing, %u reading]",
+					 name ? name->getCStringNoCopy() : "?",
+					 l->held[1] + l->pending[1], l->held[0] + l->pending[0]));
+			OSSafeReleaseNULL(creator);
+		}
+		IOLockUnlock(lock);
+	}
+	return at;
+}
+#endif
+#endif

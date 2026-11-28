@@ -116,12 +116,14 @@ PretranslatedPinsInfo = provider(
     fields = {
         "trust": "list of File: the trust modules of the translated binaries, os, app_cryptex, system_cryptex",
         "cache_list": "File or None: the translated dyld cache files' cdhashes (/chosen/a64x-cache-pretranslated)",
+        "updates": "File or None: {System path: CDHash} of the files a deploy replaces (/chosen/switch-pretranslated-updates)",
         "pins": "File or None: {file name: sha256}, what the image composer's run must reproduce",
     },
 )
 
 _PRETRANSLATE_ROLES = ("os", "app_cryptex", "system_cryptex")
 _CACHE_LIST = "a64x-cache-pretranslated.bin"
+_UPDATES = "os.updates.json"
 
 def _ipsw_pretranslated_impl(ctx):
     pins = ctx.attr.ipsw[IpswInfo].derived.get("pretranslated", {})
@@ -151,8 +153,17 @@ def _ipsw_pretranslated_impl(ctx):
     trust = [checked[role + ".trustcache"] for role in _PRETRANSLATE_ROLES if role + ".trustcache" in checked]
     return [
         DefaultInfo(files = depset(checked.values())),
-        PretranslatedPinsInfo(trust = trust, cache_list = checked.get(_CACHE_LIST), pins = pins_file),
-        OutputGroupInfo(pins = depset([pins_file] if pins_file else [])),
+        PretranslatedPinsInfo(
+            trust = trust,
+            cache_list = checked.get(_CACHE_LIST),
+            updates = checked.get(_UPDATES),
+            pins = pins_file,
+        ),
+        OutputGroupInfo(
+            pins = depset([pins_file] if pins_file else []),
+            os_trust = depset([checked["os.trustcache"]] if "os.trustcache" in checked else []),
+            os_updates = depset([checked[_UPDATES]] if _UPDATES in checked else []),
+        ),
     ]
 
 ipsw_pretranslated = rule(

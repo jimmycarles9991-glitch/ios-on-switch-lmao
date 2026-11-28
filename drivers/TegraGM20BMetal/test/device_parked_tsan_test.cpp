@@ -172,13 +172,15 @@ TEST(DeviceParkedTsan, CloseWhileChunksAndHeapsAreParkedAndReclaimedReleasesAllC
         std::string err;
         ASSERT_TRUE(dev.open(emptyPack().c_str(), 0, err, gm20b::Device::Role::Client)) << err;
 
-        gm20b::Buffer pooled, dedicated, wc;
+        gm20b::Buffer pooled, dedicated, wc, volWc;
         ASSERT_TRUE(dev.createBuffer(64 << 10, pooled, false));
         ASSERT_TRUE(dev.createBuffer(4 << 20, dedicated, false));
         ASSERT_TRUE(dev.createBuffer(64 << 10, wc, true));
+        ASSERT_TRUE(dev.createBuffer(64 << 10, volWc, true, true, true));
         dev.destroyBuffer(pooled);
         dev.destroyBuffer(dedicated);
         dev.destroyBuffer(wc);
+        dev.destroyBuffer(volWc);
         dev.trim();
 
         uint32_t a1 = 0, a2 = 0;

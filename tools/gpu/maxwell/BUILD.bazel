@@ -8,6 +8,10 @@
 #   bazel run //tools/gpu/maxwell:gate -- --rungs <dump dir> --corpus ...   (fetch-free forms through the ROP: rungcheck.py)
 #   bazel run //tools/gpu/maxwell:storecheck -- <pack.bin> --corpus ...   (what storage forms do with each fetched colour)
 #   bazel run //tools/gpu/maxwell:ticketcheck -- <pack.bin>   (each interlock ticket reader's wait and header bit)
+#   bazel build --config=ios27 //tools/gpu/maxwell:hot_pack   (the states devices drew, in minutes: hotcorpus.py)
+#   bazel run //tools/gpu/maxwell:hotstat -- <hot_pack dir> --corpus $PWD/tools/gpu/maxwell/testdata/hot_24B119.corpus
+#       [--json out.json] [--before before.json]   (every stage's code, by state; a before/after table)
+#   python3 tools/gpu/maxwell/hotgate.py <before hot_pack dir> <after> --corpus ...   (gate.py over two hot packs)
 #
 # direct_exec_test runs the driver's direct compile of direct/exec.metal's states and kernels and the counter resolve
 # kernel (direct/directrun.mm, built on this Mac beside the shader tools' mock GM20B) and executes their programs here.
@@ -17,6 +21,7 @@ load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
 load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
+load("//gpu/seed:defs.bzl", "sample_pipeline_pack")
 load(":direct/runner.bzl", "direct_runner")
 
 lint_files(exclude = [
@@ -347,4 +352,15 @@ py_test(
         ":interp",
         ":isa",
     ],
+)
+
+sample_pipeline_pack(
+    name = "hot_pack",
+    srcs = ["//drivers/TegraGM20BMetal:pack_generator"],
+    corpus = select({"//ipsw:" + kind: "testdata/hot_%s.corpus" % kind for kind in ("21H461", "24B119")}),
+    crawl = "//gpu/seed:crawl",
+    device_libraries = "@gpu_device_data//:libraries",
+    generator = "//drivers/TegraGM20BMetal:pack/make_pack.py",
+    tags = ["manual"],
+    tools = "//gpu/seed:default_tools",
 )

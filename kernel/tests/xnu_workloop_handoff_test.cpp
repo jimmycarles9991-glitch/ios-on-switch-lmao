@@ -162,17 +162,23 @@ TEST(WorkloopHandoffSource, Xnu10063HasNoHandoffHook)
 TEST(WorkloopHandoffSource, ReleaseKernelsCompileEveryHookToNothing)
 {
     const std::string header = SourceText("../switch/include/switch/diag.h");
-    const std::string release =
-        Between(Between(header, "#if DEVELOPMENT || DEBUG\n", "\n__END_DECLS"), "\n#else\n", "\n#endif\n");
+    const std::string release = Between(
+        Between(header, "#if (DEVELOPMENT || DEBUG) && defined(SWITCH_DIAG_WORKLOOP) && SWITCH_DIAG_WORKLOOP\n",
+                "\n__END_DECLS"),
+        "\n#else\n", "\n#endif\n");
     EXPECT_THAT(release, HasSubstr("static inline void switch_diag_wl_event("));
     EXPECT_THAT(release, HasSubstr("static inline void switch_diag_wl_hold("));
     EXPECT_THAT(Between(release, "static inline bool switch_diag_wl_unheld(", "}"), HasSubstr("return false;"));
     EXPECT_THAT(Between(release, "static inline const void *switch_diag_wl_waking(", "}"), HasSubstr("return NULL;"));
     const std::string logger = SourceText("../switch/diag/workloop.c");
-    EXPECT_THAT(Between(logger, "#if DEVELOPMENT || DEBUG\n", "void switch_diag_wl_event("),
-                HasSubstr("#if XNU_12377_121_6\n"));
+    EXPECT_THAT(
+        Between(logger, "#if (DEVELOPMENT || DEBUG) && defined(SWITCH_DIAG_WORKLOOP) && SWITCH_DIAG_WORKLOOP\n",
+                "void switch_diag_wl_event("),
+        HasSubstr("#if XNU_12377_121_6\n"));
     const std::string helper =
         Body(SourceText("../xnu-12377.121.6/bsd/kern/kern_event.c"), "switch_wl_line(enum switch_wl_kind kind,");
-    EXPECT_THAT(Between(helper, "#if DEVELOPMENT || DEBUG\n", "\n#else\n"), HasSubstr("switch_diag_wl_event("));
+    EXPECT_THAT(Between(helper, "#if (DEVELOPMENT || DEBUG) && defined(SWITCH_DIAG_WORKLOOP) && SWITCH_DIAG_WORKLOOP\n",
+                        "\n#else\n"),
+                HasSubstr("switch_diag_wl_event("));
     EXPECT_THAT(Between(helper, "\n#else\n", "\n#endif\n"), Not(HasSubstr("switch_diag_wl_event")));
 }

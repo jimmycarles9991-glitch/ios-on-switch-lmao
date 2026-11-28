@@ -1,6 +1,6 @@
 """The Core Animation states this device's QuartzCore asks for that the pack holds by deduction, not by a journal.
 
-ca_asked.py <qc-<build>.json> <stage-tegra-gm20b-metal.py> <out> [<ca-names/<build>.txt>]. Apple's offline compilation
+ca_asked.py <qc-<build>.json> <tools/gpu/stage_format.py> <out> [<ca-names/<build>.txt>]. Apple's offline compilation
 manifest names its states for extended-colour devices; this device's QuartzCore names them as
 pack/ca/deepcolour.py gives (asked), from the Core Animation preferences the stager writes. A device's logs name the
 states it made at run time (precompile/ca-names/<build>.txt), which the pack's corpus tier makes from their names. <out>
@@ -37,9 +37,9 @@ def named_lines(tables: caspec.Tables, names: list[str]) -> list[str]:
 
 
 def main() -> None:
-    tables_path, stager, out, *names = sys.argv[1:]
+    tables_path, preferences, out, *names = sys.argv[1:]
     tables = caspec.Tables(tables_path)
-    cif10 = deepcolour.cif10(Path(stager))
+    cif10 = deepcolour.cif10(Path(preferences))
     lines = asked_lines(tables, cif10) + named_lines(tables, Path(names[0]).read_text().split() if names else [])
     answer = 'mobilegestalt' if cif10 is None else str(cif10).lower()
     Path(out).write_text(f'# cif10={answer}\n' + ''.join(line + '\n' for line in dict.fromkeys(lines)))

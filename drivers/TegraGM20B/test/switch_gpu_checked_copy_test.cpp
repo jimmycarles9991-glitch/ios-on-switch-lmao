@@ -129,10 +129,6 @@ extern "C" void *tgm_pool_alloc(uint64_t bytes, uint64_t, uint64_t *pa)
 	return poolBytes;
 }
 
-extern "C" void tgm_stats_unlocked(enum tgm_unlocked, uint64_t)
-{
-}
-
 extern "C" void tgm_pool_free(void *va, uint64_t, uint64_t)
 {
 	++poolFrees;
@@ -877,12 +873,23 @@ TEST_F(CheckedCopy, ARewrittenSlotIsFetchedAsWritten)
 	auto a = allocation(), b = allocation();
 	ASSERT_EQ(copy(a, b), 0);
 	finish();
-	const tegra_gm20b_ce_wait afterVic = {7, 3};
+	const tegra_gm20b_ce_wait afterVic = {7, 3, 0, 0};
 	ASSERT_EQ(copy(a, b, 0, nullptr, &afterVic), 0);
 	ASSERT_EQ(syncpts.size(), 1u);
 	EXPECT_FALSE(syncpts[0].incr);
 	EXPECT_EQ(syncpts[0].id, 7u);
 	EXPECT_EQ(syncpts[0].threshold, 3u);
+}
+
+// The copy engine's predicate is proven only on a 16-byte-aligned structure (Mesa's nak
+// hw_tests): a guard word at 8 mod 16 is refused, not left to a unit that may read the 16 bytes
+// below it.
+TEST_F(CheckedCopy, APredicateWordOffSixteenBytesIsRefused)
+{
+	auto a = allocation(), b = allocation();
+	const tegra_gm20b_ce_wait off = {7, 3, 1, 8}, on = {7, 3, 1, 16};
+	EXPECT_EQ(copy(a, b, 0, nullptr, &off), -22);
+	EXPECT_EQ(copy(a, b, 0, nullptr, &on), 0);
 }
 
 // The same push length in a rewritten slot: a stale fetch would run the slot's last copy again, and report success.

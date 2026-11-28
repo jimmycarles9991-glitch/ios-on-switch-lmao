@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Instanced draws, indexed and not, with base vertex and base instance: 16- and 32-bit indices, an index buffer

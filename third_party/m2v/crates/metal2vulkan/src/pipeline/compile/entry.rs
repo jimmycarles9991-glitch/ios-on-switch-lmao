@@ -70,6 +70,7 @@ impl<'a> EntryDescriptor<'a> {
             dynamic: super::DynamicOrder::default(),
             inputs,
             kept: None,
+            scope: Some(0),
         }
     }
 }

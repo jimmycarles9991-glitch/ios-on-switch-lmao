@@ -410,6 +410,11 @@ int main()
         const NSUInteger commands = switch_test_updates.count;
         assert(!switch_bootstrap_update_core(root, base, packages, hash, helper, NO, &updated));
         assert(!updated && switch_test_updates.count == commands);
+        NSArray<NSString *> *twelve = @[
+            @"--force-confold", @"--no-triggers", @"--install", @"a", @"b", @"c", @"d", @"e", @"f", @"g", @"h", @"i"
+        ];
+        assert(!switch_bootstrap_update_command(@"/var/jb/usr/bin/dpkg", twelve));
+        assert([switch_test_updates.lastObject isEqual:twelve]);
         switch_test_check_lifecycle(root);
         assert([manager removeItemAtPath:base error:nil]);
     }

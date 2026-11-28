@@ -81,9 +81,10 @@ static void switch_test_read(SwitchMigrationStatus expected, int error = 0, NSSt
     assert(actual == expected);
 }
 
-static void switch_test_save(SwitchMigrationStatus value, const char *phase = nullptr, int error = 0)
+static void switch_test_save(SwitchMigrationStatus value, const char *phase = nullptr, int error = 0,
+                             unsigned attempt = 1)
 {
-    assert(!switch_migration_write(switch_test_base, switch_test_current, value, phase, error));
+    assert(!switch_migration_write(switch_test_base, switch_test_current, value, phase, error, attempt));
     switch_test_read(value);
 }
 
@@ -110,17 +111,42 @@ int main()
         NSString *interrupted = nil;
         SwitchMigrationStatus previous;
         int recordedError = -1;
-        assert(!switch_migration_read(switch_test_base, switch_test_current, &previous, &interrupted, &recordedError));
-        assert(previous == SwitchMigrationWorking && [interrupted isEqual:@"registration"] && !recordedError);
+        unsigned attempt = 99;
+        assert(!switch_migration_read(switch_test_base, switch_test_current, &previous, &interrupted, &recordedError,
+                                      &attempt));
+        assert(previous == SwitchMigrationWorking && [interrupted isEqual:@"registration"] && !recordedError &&
+               attempt == 1);
+        assert(([[NSData dataWithContentsOfFile:receipt]
+            isEqualToData:[[NSString stringWithFormat:@"working %@ registration\n", switch_test_current]
+                              dataUsingEncoding:NSASCIIStringEncoding]]));
+        switch_test_save(SwitchMigrationWorking, "preparation", 0, 2);
+        assert(!switch_migration_read(switch_test_base, switch_test_current, &previous, &interrupted, &recordedError,
+                                      &attempt));
+        assert(previous == SwitchMigrationWorking && [interrupted isEqual:@"preparation"] && !recordedError &&
+               attempt == 2);
+        assert(([[NSData dataWithContentsOfFile:receipt]
+            isEqualToData:[[NSString stringWithFormat:@"working %@ preparation 2\n", switch_test_current]
+                              dataUsingEncoding:NSASCIIStringEncoding]]));
         for (int code : {ECANCELED, EIO}) {
             switch_test_save(SwitchMigrationFailed, "registration", code);
-            assert(!switch_migration_read(switch_test_base, switch_test_current, &previous, &interrupted, &recordedError));
-            assert(previous == SwitchMigrationFailed && [interrupted isEqual:@"registration"] && recordedError == code);
+            assert(!switch_migration_read(switch_test_base, switch_test_current, &previous, &interrupted,
+                                          &recordedError, &attempt));
+            assert(previous == SwitchMigrationFailed && [interrupted isEqual:@"registration"] &&
+                   recordedError == code && attempt == 1);
+            switch_test_save(SwitchMigrationFailed, "registration", code, 3);
+            assert(!switch_migration_read(switch_test_base, switch_test_current, &previous, &interrupted,
+                                          &recordedError, &attempt));
+            assert(previous == SwitchMigrationFailed && [interrupted isEqual:@"registration"] &&
+                   recordedError == code && attempt == 3);
         }
-        assert(!switch_migration_read(switch_test_base, switch_test_previous, &previous, &interrupted, &recordedError));
-        assert(previous == SwitchMigrationMissing && !interrupted && !recordedError);
+        assert(!switch_migration_read(switch_test_base, switch_test_previous, &previous, &interrupted, &recordedError,
+                                      &attempt));
+        assert(previous == SwitchMigrationMissing && !interrupted && !recordedError && !attempt);
         switch_test_save(SwitchMigrationRepair);
         switch_test_save(SwitchMigrationComplete);
+        assert(!switch_migration_read(switch_test_base, switch_test_current, &previous, &interrupted, &recordedError,
+                                      &attempt));
+        assert(previous == SwitchMigrationComplete && !interrupted && !recordedError && !attempt);
         NSData *complete = [NSData dataWithContentsOfFile:receipt];
         assert(([complete isEqualToData:[[NSString stringWithFormat:@"complete %@\n", switch_test_current]
                                             dataUsingEncoding:NSASCIIStringEncoding]]));
@@ -133,6 +159,10 @@ int main()
         assert(switch_migration_write(switch_test_base, switch_test_current, SwitchMigrationWorking, nullptr, 0) ==
                EINVAL);
         assert(switch_migration_write(switch_test_base, switch_test_current, SwitchMigrationFailed, "register", 0) ==
+               EINVAL);
+        assert(switch_migration_write(switch_test_base, switch_test_current, SwitchMigrationWorking, "preparation", 0,
+                                      0) == EINVAL);
+        assert(switch_migration_write(switch_test_base, switch_test_current, SwitchMigrationComplete, nullptr, 0, 2) ==
                EINVAL);
         switch_test_read(SwitchMigrationComplete);
 
@@ -157,7 +187,11 @@ int main()
                  @"", @"complete", [@"complete " stringByAppendingString:switch_test_current],
                  [NSString stringWithFormat:@"complete %@\n\n", switch_test_current],
                  [NSString stringWithFormat:@"working %@ bad phase\n", switch_test_previous],
+                 [NSString stringWithFormat:@"working %@ preparation 0\n", switch_test_current],
+                 [NSString stringWithFormat:@"working %@ preparation 01\n", switch_test_current],
                  [NSString stringWithFormat:@"failed %@ register 00\n", switch_test_previous],
+                 [NSString stringWithFormat:@"failed %@ register 5 0\n", switch_test_current],
+                 [NSString stringWithFormat:@"failed %@ register 5 extra\n", switch_test_current],
                  [NSString stringWithFormat:@"failed %@ register 1000000000000000\n", switch_test_current],
                  [@"" stringByPaddingToLength:161 withString:@"x" startingAtIndex:0]
              ]) {

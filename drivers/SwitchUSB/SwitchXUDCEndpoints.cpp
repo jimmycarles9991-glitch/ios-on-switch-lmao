@@ -30,6 +30,7 @@ IOReturn SwitchXUDC::handleStallEndpoint(int address, bool stall)
     if (!dci) {
         if (stall)
             ep0Cancel(kIOReturnAborted);
+        const DciOp op(this, 1u);
         hw.setHalt(0, stall);
     } else if (endpoints[dci].isoch) {
         switch_refusal("usb-device", "isochronous-halt",
@@ -38,10 +39,14 @@ IOReturn SwitchXUDC::handleStallEndpoint(int address, bool stall)
                        static_cast<unsigned>(address));
         return kIOReturnUnsupported;
     } else if (stall) {
+        const DciOp op(this, 1u << dci);
         hw.setHalt(dci, true);
         drainSoon();
     } else {
-        hw.resetSequence(dci);
+        {
+            const DciOp op(this, 1u << dci);
+            hw.resetSequence(dci);
+        }
         kick(dci);
     }
     return kIOReturnSuccess;
@@ -72,7 +77,10 @@ IOReturn SwitchXUDC::resetEndpointDataToggle(int address)
     const uint32_t dci = dciFor(address);
     if (!dci || dci >= kMaxDci || endpoints[dci].isoch)
         return kIOReturnSuccess;
-    hw.resetSequence(dci);
+    {
+        const DciOp op(this, 1u << dci);
+        hw.resetSequence(dci);
+    }
     kick(dci);
     return kIOReturnSuccess;
 }
@@ -188,18 +196,31 @@ IOReturn SwitchXUDC::activateEndpoint(int address, int type, int maxPacketSize, 
     // Every other data endpoint that is not isochronous, interrupt endpoints too, is paused while an isochronous one
     // is set up, so that the controller has the resources for it (T210 TRM 22.9.5.4, "Enabling ISO Endpoints"; both
     // Linux tegra-xudc copies pause the bulk ones only).
-    uint32_t paused = 0;
-    for (uint32_t d = 2; isoch && d < kMaxDci; ++d) {
-        if (d != dci && endpoints[d].active && !endpoints[d].isoch) {
-            hw.setPause(d, true);
-            paused |= 1u << d;
+    uint32_t opMask = 1u << dci;
+    if (isoch) {
+        waitForSettling(UINT32_MAX);
+        for (uint32_t d = 2; d < kMaxDci; ++d) {
+            if (d != dci && endpoints[d].active && !endpoints[d].isoch)
+                opMask |= 1u << d;
         }
     }
-    const bool ready = hw.initEndpoint(dci, kind, packet, period, burst);
-    const bool reloaded = ready && hw.enableEndpoint(dci);
-    for (uint32_t d = 2; d < kMaxDci; ++d) {
-        if (paused & (1u << d))
-            hw.setPause(d, false);
+    bool ready = false;
+    bool reloaded = false;
+    {
+        const DciOp op(this, opMask);
+        uint32_t paused = 0;
+        for (uint32_t d = 2; isoch && d < kMaxDci; ++d) {
+            if (d != dci && endpoints[d].active && !endpoints[d].isoch) {
+                hw.setPause(d, true);
+                paused |= 1u << d;
+            }
+        }
+        ready = hw.initEndpoint(dci, kind, packet, period, burst);
+        reloaded = ready && hw.enableEndpoint(dci);
+        for (uint32_t d = 2; d < kMaxDci; ++d) {
+            if (paused & (1u << d))
+                hw.setPause(d, false);
+        }
     }
     if (!ready) {
         IOLog("SwitchUSB: endpoint %#x (DCI %u) not activated: no memory for its transfer ring\n", address, dci);
@@ -218,7 +239,10 @@ IOReturn SwitchXUDC::deactivateEndpoint(int address)
         return kIOReturnSuccess;
     endpoints[dci].active = false;
     cancel(dci, kIOReturnAborted);
-    hw.disableEndpoint(dci);
+    {
+        const DciOp op(this, 1u << dci);
+        hw.disableEndpoint(dci);
+    }
     for (uint32_t d = 2; d < kMaxDci; ++d) {
         if (endpoints[d].active)
             return kIOReturnSuccess;

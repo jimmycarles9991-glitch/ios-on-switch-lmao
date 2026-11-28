@@ -208,6 +208,35 @@ TEST_F(Landscape, ADetachedTurnedDestinationScansThePictureItself)
     EXPECT_FALSE(switch_landscape::turnedVideoImage(destination, layout, 0, 0, 1280, 720, 7, turned, 720, 1280, image));
 }
 
+// Core Animation hands the display the decoder's picture with the quarter turn in the swap (once rotation is
+// published): window A scans it exactly as it scans a turn TegraVIC recorded for the same picture and word.
+TEST_F(Landscape, ATurnInTheSwapScansThePictureAsARecordedTurnDoes)
+{
+    Layer swapped;
+    swapped.kind = kKindNv12Video;
+    swapped.surface.format = fourcc('4', '2', '0', 'v');
+    swapped.surface.width = 1280;
+    swapped.surface.height = 720;
+    swapped.src = {0, 0, 1280, 720};
+    swapped.dst = {0, 0, 720, 1280};
+    for (const uint32_t word : {4u, 7u}) {
+        swapped.transform = word;
+        Image recorded, image;
+        ASSERT_TRUE(
+            switch_landscape::videoImage(picture, layout, 0, 0, swapped.src, word, swapped.dst, 720, 1280, recorded));
+        ASSERT_TRUE(switch_landscape::swapTurnedVideoImage(swapped, layout, 0, 0, 1280, 720, 720, 1280, image));
+        EXPECT_EQ(image.options, recorded.options) << word;
+        EXPECT_EQ(image.prescaled, recorded.prescaled) << word;
+        EXPECT_EQ(image.hOffset, recorded.hOffset) << word;
+        EXPECT_EQ(image.vOffset, recorded.vOffset) << word;
+        EXPECT_EQ(image.start[0], recorded.start[0]) << word;
+        EXPECT_EQ(image.start[1], recorded.start[1]) << word;
+    }
+    swapped.transform = 3;  // a half turn is no column scan: the conversion job's
+    Image image;
+    EXPECT_FALSE(switch_landscape::swapTurnedVideoImage(swapped, layout, 0, 0, 1280, 720, 720, 1280, image));
+}
+
 TEST_F(Landscape, TheUiOnWindowBIsInFrontOfTheVideo)
 {
     EXPECT_EQ(switch_landscape::kUiOnB.layer & 0xff, 0u);  // depth 0: in front

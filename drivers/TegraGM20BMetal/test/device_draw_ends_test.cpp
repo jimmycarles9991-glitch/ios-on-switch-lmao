@@ -276,4 +276,62 @@ TEST_F(DeviceDrawEnds, AShaderTestOfAnAspectOrSampleCountThePassLacksIsTheClient
     EXPECT_EQ(unconverted.refusal.a, kDepth16);
 }
 
+TEST_F(DeviceDrawEnds, ArrayViewHandleReinterpretsCubeAndCubeArrayAsTwoDArray)
+{
+    auto reading = [](uint64_t key, bool arrayView) {
+        gm20b::RuntimeRecord r = recordOf(key, "samples=1 c0=70 ds=0/0 ", true);
+        gm20b::PackPipeline &pp = r.pipeline;
+        gm20b::setEntryCount(pp, 1);
+        pp.entry[0] = {
+            0, gm20b::EntryTexture, 2, 0, gm20b::SamplerNone, 0, uint8_t(arrayView ? gm20b::kEntryArrayView : 0)};
+        pp.setBytes = 32;
+        r.blob = {0x1a00, 0x1111};
+        return r;
+    };
+    gm20b::Pipeline *asArray = made(reading(0xde40, true)), *asCube = made(reading(0xde41, false));
+    ASSERT_NE(asArray, nullptr);
+    ASSERT_NE(asCube, nullptr);
+
+    gm20b::Texture array, cubeView, cubeArray;
+    ASSERT_TRUE(dev.createArray(16, 16, 12, kRGBA8, gm20b::fx::kTexTwoDArray, array, 2));
+    ASSERT_TRUE(dev.createPartView(array, kRGBA8, gm20b::fx::kTexCube, 0, 2, 6, 6, cubeView));
+    ASSERT_TRUE(dev.createArray(16, 16, 12, kRGBA8, gm20b::fx::kTexCubeArray, cubeArray, 2));
+
+    const Drawn cubeAsArray = draw(asArray, onto(target), [&](gm20b::RenderEncoder &e) {
+        e.setTexture(0, &cubeView);
+    });
+    ASSERT_TRUE(cubeAsArray.drawn) << cubeAsArray.why;
+    const uint32_t cubeTic = cubeAsArray.handle & 0xfffffu;
+    EXPECT_NE(cubeTic, cubeView.tic);
+    const auto cubeW = gm20b::DeviceHarness::header(dev, cubeTic);
+    EXPECT_EQ((cubeW[4] >> 23) & 0xfu, gm20b::fx::kTexTwoDArray);
+    EXPECT_EQ((cubeW[5] >> 16) & 0x3fffu, 5u);
+
+    const Drawn cubeArrayAsArray = draw(asArray, onto(target), [&](gm20b::RenderEncoder &e) {
+        e.setTexture(0, &cubeArray);
+    });
+    ASSERT_TRUE(cubeArrayAsArray.drawn) << cubeArrayAsArray.why;
+    const uint32_t cubeArrayTic = cubeArrayAsArray.handle & 0xfffffu;
+    EXPECT_NE(cubeArrayTic, cubeArray.tic);
+    const auto cubeArrayW = gm20b::DeviceHarness::header(dev, cubeArrayTic);
+    EXPECT_EQ((cubeArrayW[4] >> 23) & 0xfu, gm20b::fx::kTexTwoDArray);
+    EXPECT_EQ((cubeArrayW[5] >> 16) & 0x3fffu, 11u);
+
+    const Drawn plainArray = draw(asArray, onto(target), [&](gm20b::RenderEncoder &e) {
+        e.setTexture(0, &array);
+    });
+    ASSERT_TRUE(plainArray.drawn) << plainArray.why;
+    EXPECT_EQ(plainArray.handle & 0xfffffu, array.tic);
+
+    const Drawn sampledCube = draw(asCube, onto(target), [&](gm20b::RenderEncoder &e) {
+        e.setTexture(0, &cubeView);
+    });
+    ASSERT_TRUE(sampledCube.drawn) << sampledCube.why;
+    EXPECT_EQ(sampledCube.handle & 0xfffffu, cubeView.tic);
+
+    dev.destroyTexture(cubeArray);
+    dev.destroyTexture(cubeView);
+    dev.destroyTexture(array);
+}
+
 }  // namespace

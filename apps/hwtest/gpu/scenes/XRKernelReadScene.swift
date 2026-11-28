@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// A kernel's read() and nearest sample of RGB10A8_2P_XR10 over a two-plane surface, through the kernel's own view of

@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// gpu.x1.rotated_target's cells with a second turned plane loaded beside the target (besideR4, turns, frames), over its

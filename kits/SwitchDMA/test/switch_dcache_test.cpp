@@ -184,4 +184,16 @@ TEST(SwitchDcache, HardwarePagesSkipUnmanagedOnesAndTheirOffsets)
     want.insert(want.end(), second.begin(), second.end());
     EXPECT_EQ(got, want);
 }
+
+TEST(SwitchDcache, HardwarePagesCoalesceContiguousRuns)
+{
+    gLookups.clear();
+    const uint64_t pages[] = {0x80000000, 0x80001000, 0x80002000, 0x80003000, 0x80008000, 0x80009000};
+    switch_dcache_hw_pages(SWITCH_DCACHE_CLEAN, pages, 6);
+    EXPECT_EQ(gLookups, (std::vector<uint64_t>{0x80000000, 0x80008000}));
+    std::vector<Event> got = take(), want = expected(SWITCH_DCACHE_CLEAN, 0x80000000 + kAperture, 0x4000);
+    const std::vector<Event> second = expected(SWITCH_DCACHE_CLEAN, 0x80008000 + kAperture, 0x2000);
+    want.insert(want.end(), second.begin(), second.end());
+    EXPECT_EQ(got, want);
+}
 }  // namespace

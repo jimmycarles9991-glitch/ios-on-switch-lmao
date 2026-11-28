@@ -61,23 +61,43 @@ void BlitEncoder::copyElements(const CopySide &s, const CopySide &d, uint32_t w,
     }
 }
 
-void BlitEncoder::copyTexels(const Texture &src, uint32_t sx, uint32_t sy, uint32_t sz, const Texture &dst, uint32_t dx,
+bool BlitEncoder::copyTexels(const Texture &src, uint32_t sx, uint32_t sy, uint32_t sz, const Texture &dst, uint32_t dx,
                              uint32_t dy, uint32_t dz, uint32_t w, uint32_t h, uint8_t aspect)
 {
-    cb_->use(src, false);
-    cb_->use(dst, true);
-    room(32);
+    if (!w || !h)
+        return true;
+    const CopySide s = sideOf(src, sx, sy, sz), d = sideOf(dst, dx, dy, dz);
     // an eight-byte texel's first or second word alone: Depth32Float_Stencil8's depth or stencil word, RGB10A8_2P_XR10's
     // colour word or alpha word
     const uint32_t remap = aspect == kAspectStencil ? remapOf(kRemapNoWrite, 1, kRemapNoWrite, kRemapNoWrite, 4, 2, 2)
                            : aspect == kAspectDepth ? remapOf(0, kRemapNoWrite, kRemapNoWrite, kRemapNoWrite, 4, 2, 2)
                                                     : texelRemap(src.bpp);
-    copyElements(sideOf(src, sx, sy, sz), sideOf(dst, dx, dy, dz), w, h, remap, aspect == kAspectWhole ? src.bpp : 4);
-#if SWITCH_METAL_DIAGNOSTICS
-    char detail[64];
-    snprintf(detail, sizeof detail, " from %ux%u f%u at %u,%u", src.width, src.height, src.format, sx, sy);
-    logEdgeMiss("copy", dst, {dx, dy, dx + w, dy + h}, detail);
-#endif
+    const uint32_t unit = (remap >> 16 & 3) + 1, sElement = unit * ((remap >> 20 & 3) + 1),
+                   dElement = unit * ((remap >> 24 & 3) + 1);
+    const CopyOverlap ov =
+        copySideOverlap(s, d, w, h, sElement, dElement, true, src.storageRange().arena, dst.storageRange().arena);
+    if (ov == CopyOverlap::Identity)
+        return true;
+    cb_->use(src, false);
+    cb_->use(dst, true);
+    if (ov == CopyOverlap::Overlap) {
+        uint32_t stagePitch = 0;
+        uint64_t planeBytes = 0, totalBytes = 0;
+        if (!overlapStageLayout(w, h, sElement, 1, stagePitch, planeBytes, totalBytes))
+            return false;
+        Texture *scratch = cb_->copyScratch(totalBytes);
+        if (!scratch)
+            return false;
+        const CopySide stage{scratch->va, stagePitch};
+        // Both launches run NON_PIPELINED and the trailing barrier drains stage -> d without resetting access() sets.
+        copyElements(s, stage, w, h, texelRemap(sElement), sElement, true);
+        copyElements(stage, d, w, h, remap, aspect == kAspectWhole ? src.bpp : 4, true);
+        barrier();
+    } else {
+        room(32);
+        copyElements(s, d, w, h, remap, aspect == kAspectWhole ? src.bpp : 4);
+    }
+    return true;
 }
 
 void BlitEncoder::copyStencilTexels(const Texture &zeta, uint32_t x, uint32_t y, uint32_t z, const Texture &bytes,
@@ -161,10 +181,6 @@ void BlitEncoder::copyBufferTexels(uint64_t va, uint32_t pitch, const Texture &t
     if (!toTexture)
         cb_->bufferWrites_.note(va, uint64_t(pitch) * h + uint64_t(w) * 16);
     cb_->use(t, toTexture);
-#if SWITCH_METAL_DIAGNOSTICS
-    if (toTexture && !t.zeta)
-        logEdgeMiss("upload", t, {x, y, x + w, y + h}, "");
-#endif
     room(48);
     const CopySide rows{va, pitch}, texels = sideOf(t, x, y, z);
     const CopySide &from = toTexture ? rows : texels, &to = toTexture ? texels : rows;

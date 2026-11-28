@@ -7,7 +7,8 @@
 
 static int switch_launchd_catalog_lookup(const char *path, vnode_t parent, vnode_t *file, vfs_context_t context)
 {
-    struct nameidata *nd = kalloc_type(struct nameidata, Z_WAITOK | Z_NOFAIL);
+    struct nameidata *nd = kalloc_type(struct nameidata, Z_WAITOK);
+    if (!nd) return ENOMEM;
     NDINIT(nd, LOOKUP, OP_LOOKUP, NOFOLLOW | (parent ? NOCROSSMOUNT : 0), UIO_SYSSPACE, CAST_USER_ADDR_T(path), context);
     nd->ni_flag |= NAMEI_NOFOLLOW_ANY;
     if (parent) {

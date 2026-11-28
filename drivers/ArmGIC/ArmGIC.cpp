@@ -64,8 +64,10 @@ constexpr uint8_t kSpiPriority = 0xa0;  // below ArmCpu's timer PPI and IPI SGI 
 // Priorities around it (GIC-400 keeps the top five bits; GICC_PMR is 0xff). XNU runs every handler with IRQs masked
 // and never nests them, so a priority only decides which of the SPIs pending at one CPU interface ArmCpu takes next
 // from GICC_IAR; a tie goes to the lowest INTID.
+constexpr uint8_t kPmuPriority = 0x88;     // per-core PMUv3 overflow SPIs: above frames, below timers and IPIs
 constexpr uint8_t kFramePriority = 0x90;   // a late one is a late frame: above all other SPIs
 constexpr uint8_t kSerialPriority = 0xc0;  // high-rate UARTs behind hardware flow control: below all other SPIs
+constexpr uint32_t kPmuIntidFirst = 32 + 144, kPmuIntidLast = 32 + 147;
 // The SPIs a frame waits on: display controller A (frame end, vblank; NativeLegacyDisplay, TegraPanel), the GM20B
 // stall/nonstall lines (fences and the copy-engine present; TegraGM20B) and host1x's syncpoint line, which ends every
 // VIC job (Core Animation's IOSurfaceAccelerator copies, NVDEC -> VIC video frames; TegraHost1x).
@@ -87,6 +89,10 @@ constexpr SteeredSpi kSteered[] = {
     {32 + 44, 2},  // XUDC (SwitchXUDC)
     {32 + 39, 2},  // XUSB host (SwitchXHCI)
     {32 + 40, 2},  // XUSB mailbox (SwitchXHCI)
+    // Per-core Cortex-A57 PMUv3 overflow SPIs (INT_CPU1..3_PMU_INTR); CPU0's INTID 176 stays on CPU0.
+    {32 + 145, 1},
+    {32 + 146, 2},
+    {32 + 147, 3},
     // The C7 wake timers (ArmCpuIdle.cpp) on the core each one wakes; CPU0's TMR10 stays on CPU0.
     {32 + 177, 1},  // TMR11
     {32 + 178, 2},  // TMR12
@@ -119,9 +125,12 @@ class ArmGIC : public IOInterruptController {
     uint32_t intids = 0;     // INTIDs the distributor implements: 32 * (GICD_TYPER.ITLinesNumber + 1), < 1020
     uint8_t cpu0Target = 0;  // CPU interface mask of logical CPU 0
     bool steering = false;   // frame and kSteered SPIs go to their secondary core
+    uint32_t anySteerPending = 0;
     uint32_t steerPending[kMaxIntid / 32 + 1] = {};  // steered SPIs made before their core took SPIs
     uint32_t edge[kMaxIntid / 32 + 1] = {};          // trigger of each INTID, fixed when its nub is made
-    uint32_t *fired = nullptr;                       // handled interrupts per INTID, for panic messages
+#if DEVELOPMENT || DEBUG
+    uint32_t *fired = nullptr;  // handled interrupts per INTID, for panic messages
+#endif
     IOService **nubs = nullptr;
     IOLock *nubLock = nullptr;
     const OSSymbol *name = nullptr;
@@ -198,6 +207,8 @@ class ArmGIC : public IOInterruptController {
     // for over a second and backboardd's waitFence panicked.
     static uint8_t priorityFor(uint32_t intid)
     {
+        if (intid >= kPmuIntidFirst && intid <= kPmuIntidLast)
+            return kPmuPriority;
         if (isFrame(intid))
             return kFramePriority;
         switch (intid) {
@@ -257,7 +268,9 @@ class ArmGIC : public IOInterruptController {
             return cpu0Target;
         if (const uint8_t target = steerTarget(intid))
             return target;
-        __atomic_fetch_or(&steerPending[intid / 32], 1U << (intid % 32), __ATOMIC_RELAXED);
+        const uint32_t bit = 1U << (intid % 32);
+        if ((__atomic_fetch_or(&steerPending[intid / 32], bit, __ATOMIC_RELAXED) & bit) == 0u)
+            __atomic_fetch_add(&anySteerPending, 1U, __ATOMIC_RELAXED);
         return cpu0Target;
     }
 
@@ -277,9 +290,15 @@ public:
 
     uint32_t count(uint32_t intid) const
     {
+#if DEVELOPMENT || DEBUG
         return intid >= kFirstSpi && intid < intids ? __atomic_load_n(&fired[intid], __ATOMIC_RELAXED) : 0;
+#else
+        (void)intid;
+        return 0;
+#endif
     }
 
+    bool dispatchSpi(uint32_t intid);
     IOReturn handleInterrupt(void *refCon, IOService *nub, int source) override;
 
     bool vectorCanBeShared(IOInterruptVectorNumber, IOInterruptVector *) override
@@ -371,18 +390,18 @@ const char *ArmGIC::setup()
     steering = true;
     vectors = IONewZero(IOInterruptVector, intids);
     nubs = IONewZero(IOService *, intids);
+#if DEVELOPMENT || DEBUG
     fired = IONewZero(uint32_t, intids);
+#endif
     nubLock = IOLockAlloc();
     controllerLock = IOSimpleLockAlloc();
     name = OSSymbol::withCStringNoCopy(kControllerName);
-    if (!vectors || !nubs || !fired || !nubLock || !controllerLock || !name)
+    if (!vectors || !nubs ||
+#if DEVELOPMENT || DEBUG
+        !fired ||
+#endif
+        !nubLock || !controllerLock || !name)
         return "out of memory";
-    // IOInterruptController::registerInterrupt takes the vector lock of every vector a nub names.
-    for (uint32_t intid = kFirstSpi; intid < intids; ++intid) {
-        vectors[intid].interruptLock = IOLockAlloc();
-        if (!vectors[intid].interruptLock)
-            return "out of memory";
-    }
     if (physical == kTegra210Distributor) {
         IOMemoryDescriptor *memory = IOMemoryDescriptor::withPhysicalAddress(kTegra210Lic, 0x1000, kIODirectionInOut);
         licMap = memory ? memory->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
@@ -410,8 +429,10 @@ void ArmGIC::free()
     }
     if (nubs)
         IODelete(nubs, IOService *, intids);
+#if DEVELOPMENT || DEBUG
     if (fired)
         IODelete(fired, uint32_t, intids);
+#endif
     if (nubLock)
         IOLockFree(nubLock);
     if (controllerLock)
@@ -461,6 +482,11 @@ IOService *ArmGIC::nubFor(uint32_t intid, bool edgeTriggered)
               edgeTriggered ? "edge" : "level", edgeTriggered ? "level" : "edge");
     }
     if (!nub) {
+        if (!vectors[intid].interruptLock) {
+            vectors[intid].interruptLock = IOLockAlloc();
+            if (!vectors[intid].interruptLock)
+                panic("ArmGIC: cannot allocate vector lock for INTID %u", intid);
+        }
         // The trigger is recorded before the nub exists, so getVectorType() already knows it at registration.
         if (edgeTriggered) {
             edge[intid / 32] |= 1U << (intid % 32);
@@ -477,17 +503,16 @@ IOService *ArmGIC::nubFor(uint32_t intid, bool edgeTriggered)
 }
 
 // Primary interrupt context, any core, from ArmCpu after GICC_IAR; ArmCpu writes GICC_EOIR afterwards.
-IOReturn ArmGIC::handleInterrupt(void *, IOService *, int source)
+bool ArmGIC::dispatchSpi(uint32_t intid)
 {
-    const uint32_t intid = static_cast<uint32_t>(source);
     if (intid < kFirstSpi || intid >= intids)
-        return kIOReturnNoInterrupt;
+        return false;
     IOInterruptVector *vector = &vectors[intid];
     if (!vector->interruptRegistered)
-        return kIOReturnNoInterrupt;
-    // An INTID's handler never runs on two cores at once (the GIC holds it active until the EOI), so a load and a
-    // store count it, without an exclusive-monitor loop.
+        return false;
+#if DEVELOPMENT || DEBUG
     __atomic_store_n(&fired[intid], __atomic_load_n(&fired[intid], __ATOMIC_RELAXED) + 1U, __ATOMIC_RELAXED);
+#endif
     if (isFrame(intid))
         switch_idle_note_frame();
     // Soft disabled before it fired, or by its own handler (a level IOInterruptEventSource): masked before the EOI,
@@ -505,7 +530,12 @@ IOReturn ArmGIC::handleInterrupt(void *, IOService *, int source)
         [this, intid] {
             maskLine(intid);
         });
-    return kIOReturnSuccess;
+    return true;
+}
+
+IOReturn ArmGIC::handleInterrupt(void *, IOService *, int source)
+{
+    return dispatchSpi(static_cast<uint32_t>(source)) ? kIOReturnSuccess : kIOReturnNoInterrupt;
 }
 
 // Under the vector lock at registration; the vector is still hard disabled.
@@ -553,11 +583,14 @@ void ArmGIC::enableVector(IOInterruptVectorNumber vectorNumber, IOInterruptVecto
 {
     const uint32_t intid = static_cast<uint32_t>(vectorNumber);
     // A steered SPI made before its core took interrupts: move it now, while it is still masked.
-    const uint32_t bit = 1U << (intid % 32);
-    if (__improbable(__atomic_load_n(&steerPending[intid / 32], __ATOMIC_RELAXED) & bit)) {
-        if (const uint8_t target = steerTarget(intid)) {
-            write8(GICD_ITARGETSR + intid, target);
-            __atomic_fetch_and(&steerPending[intid / 32], ~bit, __ATOMIC_RELAXED);
+    if (__improbable(__atomic_load_n(&anySteerPending, __ATOMIC_RELAXED) != 0u)) {
+        const uint32_t bit = 1U << (intid % 32);
+        if (__improbable(__atomic_load_n(&steerPending[intid / 32], __ATOMIC_RELAXED) & bit)) {
+            if (const uint8_t target = steerTarget(intid)) {
+                write8(GICD_ITARGETSR + intid, target);
+                if ((__atomic_fetch_and(&steerPending[intid / 32], ~bit, __ATOMIC_RELAXED) & bit) != 0u)
+                    __atomic_fetch_sub(&anySteerPending, 1U, __ATOMIC_RELAXED);
+            }
         }
     }
     switchgic::unmask([this, intid] {
@@ -585,7 +618,7 @@ void ArmGIC::describe(uint32_t intid, char *buffer, size_t size) const
     snprintf(buffer, size,
              "INTID %u: fired %u, registered %u, soft-off %u, gicd en %u pend %u act %u, %s, prio %#x, "
              "target %#x, lic ier %d",
-             intid, fired[intid], vector.interruptRegistered, vector.interruptDisabledSoft,
+             intid, count(intid), vector.interruptRegistered, vector.interruptDisabledSoft,
              static_cast<int>(readBit(GICD_ISENABLER, intid)), static_cast<int>(readBit(GICD_ISPENDR, intid)),
              static_cast<int>(readBit(GICD_ISACTIVER, intid)), isEdge(intid) ? "edge" : "level",
              read8(GICD_IPRIORITYR + intid), read8(GICD_ITARGETSR + intid),
@@ -659,7 +692,8 @@ void ArmGIC::cpuOnline(uint32_t cpu)
             !(__atomic_load_n(&steerPending[spi.intid / 32], __ATOMIC_RELAXED) & bit))
             continue;
         write8(GICD_ITARGETSR + spi.intid, target);
-        __atomic_fetch_and(&steerPending[spi.intid / 32], ~bit, __ATOMIC_RELAXED);
+        if ((__atomic_fetch_and(&steerPending[spi.intid / 32], ~bit, __ATOMIC_RELAXED) & bit) != 0u)
+            __atomic_fetch_sub(&anySteerPending, 1U, __ATOMIC_RELAXED);
     }
     OSSynchronizeIO();
 }
@@ -687,8 +721,8 @@ extern "C" void arm_gic_resume(void)
 
 extern "C" bool switch_gic_dispatch(uint32_t intid)
 {
-    ArmGIC *gic = __atomic_load_n(&gGic, __ATOMIC_ACQUIRE);
-    return (gic != nullptr) && gic->handleInterrupt(nullptr, nullptr, static_cast<int>(intid)) == kIOReturnSuccess;
+    ArmGIC *gic = __atomic_load_n(&gGic, __ATOMIC_RELAXED);
+    return (gic != nullptr) && gic->dispatchSpi(intid);
 }
 
 int switch_check_after_ms(IOTimerEventSource *timer, uint32_t ms)

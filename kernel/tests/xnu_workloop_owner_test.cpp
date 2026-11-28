@@ -13,8 +13,9 @@ namespace {
 
 constexpr int kOwner = 0, kNamed = 1, kWaiter = 2, kServicer = 3;
 constexpr int kAttach = 0, kTouch = 1, kDrop = 2;
-constexpr uint16_t kAddDisable = 0x1 | 0x8, kDeleteEnable = 0x2 | 0x4;
-constexpr uint32_t kHint = NOTE_WL_SYNC_WAKE | NOTE_WL_DISCOVER_OWNER | NOTE_WL_IGNORE_ESTALE | NOTE_WL_OWNER_HINT;
+constexpr uint16_t kAddDisable = 0x1u | 0x8u, kDeleteEnable = 0x2u | 0x4u;
+constexpr uint32_t kHint = uint32_t{NOTE_WL_SYNC_WAKE} | uint32_t{NOTE_WL_DISCOVER_OWNER} |
+                           uint32_t{NOTE_WL_IGNORE_ESTALE} | uint32_t{NOTE_WL_OWNER_HINT};
 
 xnu_wl_kevent Hint(int named)
 {
@@ -65,13 +66,13 @@ TEST(WorkloopOwnerHint, TheOwnersEndAfterAHintDoesNotFreeIt)
     const xnu_wl_kevent hint = Hint(kNamed);
     xnu_wl_update(&hint);
     const xnu_wl_kevent end = {.op = kDrop,
-                               .fflags = NOTE_WL_SYNC_WAKE | NOTE_WL_END_OWNERSHIP,
+                               .fflags = uint32_t{NOTE_WL_SYNC_WAKE} | uint32_t{NOTE_WL_END_OWNERSHIP},
                                .flags = kDeleteEnable,
                                .named = XNU_WL_NONE,
                                .stale = false,
                                .self = kOwner,
                                .waiter = kOwner,
-                               .sfflags = NOTE_WL_SYNC_WAIT | NOTE_WL_SYNC_WAKE};
+                               .sfflags = uint32_t{NOTE_WL_SYNC_WAIT} | uint32_t{NOTE_WL_SYNC_WAKE}};
     EXPECT_EQ(xnu_wl_update(&end).error, 0);
     EXPECT_EQ(xnu_wl_owner(), XNU_WL_NONE);
     EXPECT_TRUE(xnu_wl_detach(kOwner)) << "filt_wldetach freed a thread that was never terminated";
@@ -141,7 +142,7 @@ TEST(WorkloopOwnerHandoff, AWakeMovesTheOwnersReferenceToTheWaiter)
 {
     xnu_wl_reset(kOwner, XNU_WL_NONE, false);
     const xnu_wl_kevent wake = {.op = kTouch,
-                                .fflags = NOTE_WL_SYNC_WAKE | NOTE_WL_DISCOVER_OWNER,
+                                .fflags = uint32_t{NOTE_WL_SYNC_WAKE} | uint32_t{NOTE_WL_DISCOVER_OWNER},
                                 .flags = kAddDisable,
                                 .named = kWaiter,
                                 .stale = false,

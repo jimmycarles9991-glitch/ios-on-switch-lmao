@@ -30,16 +30,48 @@
 - (id)initWithDictionaryRepresentation:(NSDictionary *)dictionary;
 @end
 
+enum SwitchHookSlot {
+    SwitchHookInstall,
+    SwitchHookInstallBundle,
+    SwitchHookBundleInfo,
+    SwitchHookValidateBundle,
+    SwitchHookInstallEmbeddedProfiles,
+    SwitchHookInstallProfilesFromUserOptions,
+    SwitchHookInstallProfilesAtStagingRoot,
+    SwitchHookValidateAppID,
+    SwitchHookBuiltInAppUpgrade,
+    SwitchHookAppManagementDomain,
+    SwitchHookAppClip,
+    SwitchHookValidateAppMetadata,
+    SwitchHookValidateExtensions,
+    SwitchHookDeviceCapabilities,
+    SwitchHookDeviceFamily,
+    SwitchHookOSVersion,
+    SwitchHookThinning,
+    SwitchHookExtensionMetadata,
+    SwitchHookExtensionEntitlements,
+    SwitchHookExtensionNoDot,
+    SwitchHookThirdPartyExtensionPoint,
+    SwitchHookPluginKitBundles,
+    SwitchHookExtensionKitBundles,
+    SwitchHookEligibility,
+    SwitchHookCount,
+};
+
 struct SwitchPolicyHook {
+    SwitchHookSlot slot;
     const char *className;
     const char *selectorName;
     IMP replacement;
-    IMP original;
     const char *types;
 };
 
 static __thread void *switch_installer;
 static Ivar switch_verification_state;
+static IMP switch_originals[SwitchHookCount];
+static Class switch_signing_info_class;
+static Class switch_plugin_kit_class;
+static Class switch_extension_kit_class;
 static const void *switch_signing_info_key = &switch_signing_info_key;
 static const void *switch_image_info_key = &switch_image_info_key;
 static const void *switch_bundle_info_key = &switch_bundle_info_key;
@@ -88,11 +120,9 @@ static BOOL switch_scoped(void)
     return switch_installer != NULL;
 }
 
-static IMP switch_original(id object, SEL selector);
-
 static BOOL switch_install(id<SwitchInstallObject> self, SEL selector, NSError **error)
 {
-    auto original = (BOOL (*)(id, SEL, NSError **))switch_original(self, selector);
+    auto original = (BOOL (*)(id, SEL, NSError **))switch_originals[SwitchHookInstall];
     id<SwitchInstallObject> options = [self options];
     void *previous = switch_installer;
     switch_installer = [options isSystemAppInstall] ? NULL : (__bridge void *)self;
@@ -131,7 +161,7 @@ static BOOL switch_mark(NSURL *url, NSError **error)
 
 static BOOL switch_install_bundle(id<SwitchInstallObject> self, SEL selector, NSError **error)
 {
-    auto original = (BOOL (*)(id, SEL, NSError **))switch_original(self, selector);
+    auto original = (BOOL (*)(id, SEL, NSError **))switch_originals[SwitchHookInstallBundle];
     id<SwitchInstallObject> bundle = [self bundle];
     NSURL *source = [bundle bundleURL];
     if (!original(self, selector, error))
@@ -178,8 +208,7 @@ static id switch_signing_info(id<SwitchInstallObject> bundle, NSError **error)
     } mutableCopy];
     if (capabilities[@"com.apple.developer.team-identifier"])
         dictionary[@"TeamIdentifier"] = capabilities[@"com.apple.developer.team-identifier"];
-    info = [(id<SwitchInstallObject>)[switch_class("MICodeSigningInfo") alloc]
-        initWithDictionaryRepresentation:dictionary];
+    info = [(id<SwitchInstallObject>)[switch_signing_info_class alloc] initWithDictionaryRepresentation:dictionary];
     if (!info) {
         switch_fail(error, @"Could not create ordinary app signing metadata");
         return nil;
@@ -198,32 +227,35 @@ static id switch_signing_info(id<SwitchInstallObject> bundle, NSError **error)
 static id switch_bundle_info(id self, SEL selector, BOOL resources, BOOL online, BOOL cached, BOOL trust, BOOL profile,
                              NSError **error)
 {
-    id info = ((id (*)(id, SEL, BOOL, BOOL, BOOL, BOOL, BOOL, NSError **))switch_original(self, selector))(
-        self, selector, resources, online, cached, trust, profile, error);
+    auto original = (id (*)(id, SEL, BOOL, BOOL, BOOL, BOOL, BOOL, NSError **))switch_originals[SwitchHookBundleInfo];
+    id info = original(self, selector, resources, online, cached, trust, profile, error);
     return !info && switch_candidate(self) ? switch_signing_info(self, error) : info;
 }
 
 static id switch_validate_bundle(id self, SEL selector, id bundle, BOOL resources, BOOL online, BOOL trust, BOOL free,
                                  BOOL profile, NSError **error)
 {
-    id info = ((id (*)(id, SEL, id, BOOL, BOOL, BOOL, BOOL, BOOL, NSError **))switch_original(self, selector))(
-        self, selector, bundle, resources, online, trust, free, profile, error);
+    auto original =
+        (id (*)(id, SEL, id, BOOL, BOOL, BOOL, BOOL, BOOL, NSError **))switch_originals[SwitchHookValidateBundle];
+    id info = original(self, selector, bundle, resources, online, trust, free, profile, error);
     return !info && switch_candidate(bundle) ? switch_signing_info(bundle, error) : info;
 }
 
+template <SwitchHookSlot Slot>
 static BOOL switch_allow0(id self, SEL selector, NSError **error)
 {
     if (!switch_scoped())
-        return ((BOOL (*)(id, SEL, NSError **))switch_original(self, selector))(self, selector, error);
+        return ((BOOL (*)(id, SEL, NSError **))switch_originals[Slot])(self, selector, error);
     if (error)
         *error = nil;
     return YES;
 }
 
+template <SwitchHookSlot Slot>
 static BOOL switch_allow1(id self, SEL selector, id value, NSError **error)
 {
     if (!switch_scoped())
-        return ((BOOL (*)(id, SEL, id, NSError **))switch_original(self, selector))(self, selector, value, error);
+        return ((BOOL (*)(id, SEL, id, NSError **))switch_originals[Slot])(self, selector, value, error);
     if (error)
         *error = nil;
     return YES;
@@ -232,7 +264,7 @@ static BOOL switch_allow1(id self, SEL selector, id value, NSError **error)
 static BOOL switch_allow_appclip(id self, SEL selector, NSDictionary *entitlements, BOOL *clip, NSError **error)
 {
     if (!switch_scoped())
-        return ((BOOL (*)(id, SEL, id, BOOL *, NSError **))switch_original(self, selector))(
+        return ((BOOL (*)(id, SEL, id, BOOL *, NSError **))switch_originals[SwitchHookAppClip])(
             self, selector, entitlements, clip, error);
     id value = entitlements[@"com.apple.developer.on-demand-install-capable"];
     if (clip)
@@ -245,7 +277,8 @@ static BOOL switch_allow_appclip(id self, SEL selector, NSDictionary *entitlemen
 static BOOL switch_allow_third_party_extension(id self, SEL selector, BOOL *allowed, NSError **error)
 {
     if (!switch_scoped())
-        return ((BOOL (*)(id, SEL, BOOL *, NSError **))switch_original(self, selector))(self, selector, allowed, error);
+        return ((BOOL (*)(id, SEL, BOOL *, NSError **))switch_originals[SwitchHookThirdPartyExtensionPoint])(
+            self, selector, allowed, error);
     if (allowed)
         *allowed = YES;
     if (error)
@@ -253,19 +286,19 @@ static BOOL switch_allow_third_party_extension(id self, SEL selector, BOOL *allo
     return YES;
 }
 
+template <SwitchHookSlot Slot, BOOL ExtensionKit>
 static id switch_extension_bundles(id<SwitchInstallObject> self, SEL selector, unsigned char flags, NSError **error)
 {
     if (switch_scoped() && [self parentBundle])
         return @[];
-    auto original = (id (*)(id, SEL, unsigned char, NSError **))switch_original(self, selector);
+    auto original = (id (*)(id, SEL, unsigned char, NSError **))switch_originals[Slot];
     NSArray *known = original(self, selector, flags, error);
     if (!switch_scoped() || !known)
         return known;
-    BOOL extensionKit = sel_isEqual(selector, @selector(extensionKitBundlesPerformingPlatformValidation:withError:));
-    NSArray *bundles = switch_discover_extensions(self,
-        switch_class(extensionKit ? "MIExtensionKitBundle" : "MIPluginKitBundle"), extensionKit, known, error);
+    Class targetClass = ExtensionKit ? switch_extension_kit_class : switch_plugin_kit_class;
+    NSArray *bundles = switch_discover_extensions(self, targetClass, ExtensionKit, known, error);
     if (bundles) {
-        if (extensionKit)
+        if (ExtensionKit)
             [self setExtensionKitBundles:bundles];
         else
             [self setPluginKitBundles:bundles];
@@ -277,7 +310,7 @@ static id switch_extension_bundles(id<SwitchInstallObject> self, SEL selector, u
 static BOOL switch_allow_eligibility(id self, SEL selector, id info, id distributor, BOOL web, NSError **error)
 {
     if (!switch_scoped())
-        return ((BOOL (*)(id, SEL, id, id, BOOL, NSError **))switch_original(self, selector))(
+        return ((BOOL (*)(id, SEL, id, id, BOOL, NSError **))switch_originals[SwitchHookEligibility])(
             self, selector, info, distributor, web, error);
     if (error)
         *error = nil;
@@ -285,57 +318,75 @@ static BOOL switch_allow_eligibility(id self, SEL selector, id info, id distribu
 }
 #endif
 
-#define SWITCH_HOOK(className, selector, replacement, types) \
-    {className, selector, (IMP)replacement, NULL, types}
+#define SWITCH_HOOK(slot, className, selector, replacement, types) \
+    {slot, className, selector, (IMP)replacement, types}
 
-static SwitchPolicyHook switch_hooks[] = {
-    SWITCH_HOOK("MIInstaller", "performInstallationWithError:", switch_install, "B@:^@"),
-    SWITCH_HOOK("MIInstallableBundle", "performInstallationWithError:", switch_install_bundle, "B@:^@"),
-    SWITCH_HOOK("MIExecutableBundle", "codeSigningInfoByValidatingResources:performingOnlineAuthorization:"
-                                      "ignoringCachedSigningInfo:checkingTrustCacheIfApplicable:skippingProfileIDValidation:error:",
+static const SwitchPolicyHook switch_hooks[] = {
+    SWITCH_HOOK(SwitchHookInstall, "MIInstaller", "performInstallationWithError:", switch_install, "B@:^@"),
+    SWITCH_HOOK(SwitchHookInstallBundle, "MIInstallableBundle", "performInstallationWithError:", switch_install_bundle,
+                "B@:^@"),
+    SWITCH_HOOK(SwitchHookBundleInfo, "MIExecutableBundle",
+                "codeSigningInfoByValidatingResources:performingOnlineAuthorization:"
+                "ignoringCachedSigningInfo:checkingTrustCacheIfApplicable:skippingProfileIDValidation:error:",
                 switch_bundle_info, "@@:BBBBB^@"),
-    SWITCH_HOOK("MIInstallableBundle", "_validateBundle:validatingResources:performingOnlineAuthorization:"
-                                       "checkingTrustCacheIfApplicable:allowingFreeProfileValidation:skippingProfileIDValidation:error:",
+    SWITCH_HOOK(SwitchHookValidateBundle, "MIInstallableBundle",
+                "_validateBundle:validatingResources:performingOnlineAuthorization:"
+                "checkingTrustCacheIfApplicable:allowingFreeProfileValidation:skippingProfileIDValidation:error:",
                 switch_validate_bundle, "@@:@BBBBB^@"),
-    SWITCH_HOOK("MIInstallableBundle", "_installEmbeddedProfilesWithError:", switch_allow0, "B@:^@"),
-    SWITCH_HOOK("MIInstaller", "_installProvisioningProfilesFromUserOptionsWithError:", switch_allow0, "B@:^@"),
-    SWITCH_HOOK("MIInstaller", "_installProvisioningProfilesAtStagingRootWithError:", switch_allow0, "B@:^@"),
-    SWITCH_HOOK("MIInstallableBundle", "_validateApplicationIdentifierForNewBundleSigningInfo:error:", switch_allow1, "B@:@^@"),
-    SWITCH_HOOK("MIInstallableBundle", "_performBuiltInAppUpgradeValidationWithSigningInfo:error:", switch_allow1, "B@:@^@"),
-    SWITCH_HOOK("MIInstallableBundle", "_validateAppManagementDomainForSigningInfo:error:", switch_allow1, "B@:@^@"),
-    SWITCH_HOOK("MIInstallableBundle", "_performAppClipSpecificValidationForEntitlements:isAppClip:withError:",
-                switch_allow_appclip, "B@:@^B^@"),
-    SWITCH_HOOK("MIBundle", "validateAppMetadataWithError:", switch_allow0, "B@:^@"),
-    SWITCH_HOOK("MIBundle", "_validateExtensions:error:", switch_allow1, "B@:@^@"),
-    SWITCH_HOOK("MIBundle", "isApplicableToCurrentDeviceCapabilitiesWithError:", switch_allow0, "B@:^@"),
-    SWITCH_HOOK("MIBundle", "isApplicableToCurrentDeviceFamilyWithError:", switch_allow0, "B@:^@"),
-    SWITCH_HOOK("MIBundle", "isApplicableToCurrentOSVersionWithError:", switch_allow0, "B@:^@"),
-    SWITCH_HOOK("MIBundle", "thinningMatchesCurrentDeviceWithError:", switch_allow0, "B@:^@"),
-    SWITCH_HOOK("MIAppExtensionBundle", "validateBundleMetadataWithError:", switch_allow0, "B@:^@"),
-    SWITCH_HOOK("MIAppExtensionBundle", "validateHasCorrespondingEntitlements:error:", switch_allow1, "B@:@^@"),
-    SWITCH_HOOK("MIAppExtensionBundle", "validateHasNoDotInBundleIDSuffix:", switch_allow0, "B@:^@"),
-    SWITCH_HOOK("MIExtensionKitBundle", "getMayTargetThirdPartyExtensionPoint:withError:",
-                switch_allow_third_party_extension, "B@:^B^@"),
-    SWITCH_HOOK("MIBundle", "pluginKitBundlesPerformingPlatformValidation:withError:", switch_extension_bundles, "@@:C^@"),
-    SWITCH_HOOK("MIBundle", "extensionKitBundlesPerformingPlatformValidation:withError:", switch_extension_bundles, "@@:C^@"),
+    SWITCH_HOOK(SwitchHookInstallEmbeddedProfiles, "MIInstallableBundle", "_installEmbeddedProfilesWithError:",
+                switch_allow0<SwitchHookInstallEmbeddedProfiles>, "B@:^@"),
+    SWITCH_HOOK(SwitchHookInstallProfilesFromUserOptions, "MIInstaller",
+                "_installProvisioningProfilesFromUserOptionsWithError:",
+                switch_allow0<SwitchHookInstallProfilesFromUserOptions>, "B@:^@"),
+    SWITCH_HOOK(SwitchHookInstallProfilesAtStagingRoot, "MIInstaller",
+                "_installProvisioningProfilesAtStagingRootWithError:",
+                switch_allow0<SwitchHookInstallProfilesAtStagingRoot>, "B@:^@"),
+    SWITCH_HOOK(SwitchHookValidateAppID, "MIInstallableBundle",
+                "_validateApplicationIdentifierForNewBundleSigningInfo:error:",
+                switch_allow1<SwitchHookValidateAppID>, "B@:@^@"),
+    SWITCH_HOOK(SwitchHookBuiltInAppUpgrade, "MIInstallableBundle",
+                "_performBuiltInAppUpgradeValidationWithSigningInfo:error:",
+                switch_allow1<SwitchHookBuiltInAppUpgrade>, "B@:@^@"),
+    SWITCH_HOOK(SwitchHookAppManagementDomain, "MIInstallableBundle",
+                "_validateAppManagementDomainForSigningInfo:error:",
+                switch_allow1<SwitchHookAppManagementDomain>, "B@:@^@"),
+    SWITCH_HOOK(SwitchHookAppClip, "MIInstallableBundle",
+                "_performAppClipSpecificValidationForEntitlements:isAppClip:withError:", switch_allow_appclip,
+                "B@:@^B^@"),
+    SWITCH_HOOK(SwitchHookValidateAppMetadata, "MIBundle", "validateAppMetadataWithError:",
+                switch_allow0<SwitchHookValidateAppMetadata>, "B@:^@"),
+    SWITCH_HOOK(SwitchHookValidateExtensions, "MIBundle", "_validateExtensions:error:",
+                switch_allow1<SwitchHookValidateExtensions>, "B@:@^@"),
+    SWITCH_HOOK(SwitchHookDeviceCapabilities, "MIBundle", "isApplicableToCurrentDeviceCapabilitiesWithError:",
+                switch_allow0<SwitchHookDeviceCapabilities>, "B@:^@"),
+    SWITCH_HOOK(SwitchHookDeviceFamily, "MIBundle", "isApplicableToCurrentDeviceFamilyWithError:",
+                switch_allow0<SwitchHookDeviceFamily>, "B@:^@"),
+    SWITCH_HOOK(SwitchHookOSVersion, "MIBundle", "isApplicableToCurrentOSVersionWithError:",
+                switch_allow0<SwitchHookOSVersion>, "B@:^@"),
+    SWITCH_HOOK(SwitchHookThinning, "MIBundle", "thinningMatchesCurrentDeviceWithError:",
+                switch_allow0<SwitchHookThinning>, "B@:^@"),
+    SWITCH_HOOK(SwitchHookExtensionMetadata, "MIAppExtensionBundle", "validateBundleMetadataWithError:",
+                switch_allow0<SwitchHookExtensionMetadata>, "B@:^@"),
+    SWITCH_HOOK(SwitchHookExtensionEntitlements, "MIAppExtensionBundle", "validateHasCorrespondingEntitlements:error:",
+                switch_allow1<SwitchHookExtensionEntitlements>, "B@:@^@"),
+    SWITCH_HOOK(SwitchHookExtensionNoDot, "MIAppExtensionBundle", "validateHasNoDotInBundleIDSuffix:",
+                switch_allow0<SwitchHookExtensionNoDot>, "B@:^@"),
+    SWITCH_HOOK(SwitchHookThirdPartyExtensionPoint, "MIExtensionKitBundle",
+                "getMayTargetThirdPartyExtensionPoint:withError:", switch_allow_third_party_extension, "B@:^B^@"),
+    SWITCH_HOOK(SwitchHookPluginKitBundles, "MIBundle", "pluginKitBundlesPerformingPlatformValidation:withError:",
+                (switch_extension_bundles<SwitchHookPluginKitBundles, NO>), "@@:C^@"),
+    SWITCH_HOOK(SwitchHookExtensionKitBundles, "MIBundle",
+                "extensionKitBundlesPerformingPlatformValidation:withError:",
+                (switch_extension_bundles<SwitchHookExtensionKitBundles, YES>), "@@:C^@"),
 #if SWITCH_INSTALL_POLICY_IOS27
-    SWITCH_HOOK("MIInstallableBundle", "_checkEligibilityForAppWithSigningInfo:distributorInfo:isWebDistribution:withError:",
+    SWITCH_HOOK(SwitchHookEligibility, "MIInstallableBundle",
+                "_checkEligibilityForAppWithSigningInfo:distributorInfo:isWebDistribution:withError:",
                 switch_allow_eligibility, "B@:@@B^@"),
 #else
-    SWITCH_HOOK("MIInstallableBundle", "_checkEligibilityForEntitlements:withError:", switch_allow1, "B@:@^@"),
+    SWITCH_HOOK(SwitchHookEligibility, "MIInstallableBundle", "_checkEligibilityForEntitlements:withError:",
+                switch_allow1<SwitchHookEligibility>, "B@:@^@"),
 #endif
 };
-
-static IMP switch_original(id object, SEL selector)
-{
-    for (Class cls = object_getClass(object); cls; cls = class_getSuperclass(cls)) {
-        for (const auto &hook : switch_hooks) {
-            if (cls == switch_class(hook.className) && sel_isEqual(selector, sel_registerName(hook.selectorName)))
-                return hook.original;
-        }
-    }
-    abort();
-}
 
 BOOL switch_install_policy_activate(NSError **error)
 {
@@ -346,7 +397,11 @@ BOOL switch_install_policy_activate(NSError **error)
     switch_verification_state = class_getInstanceVariable(bundle, "_codeSignatureVerificationState");
     if (!switch_verification_state || strcmp(ivar_getTypeEncoding(switch_verification_state), @encode(uint64_t)))
         return switch_fail(error, @"The installed bundle verification state has an unknown ABI");
-    for (auto &hook : switch_hooks) {
+    switch_signing_info_class = switch_class("MICodeSigningInfo");
+    switch_plugin_kit_class = switch_class("MIPluginKitBundle");
+    switch_extension_kit_class = switch_class("MIExtensionKitBundle");
+    IMP resolved[SwitchHookCount] = {};
+    for (const auto &hook : switch_hooks) {
         Method method = class_getInstanceMethod(switch_class(hook.className), sel_registerName(hook.selectorName));
         NSMethodSignature *expected = [NSMethodSignature signatureWithObjCTypes:hook.types];
         BOOL matches = method && method_getNumberOfArguments(method) == expected.numberOfArguments;
@@ -365,9 +420,10 @@ BOOL switch_install_policy_activate(NSError **error)
         if (!matches)
             return switch_fail(error, [NSString stringWithFormat:@"Unknown install-policy ABI: %s %s", hook.className,
                                                                hook.selectorName]);
-        hook.original = method_getImplementation(method);
+        resolved[hook.slot] = method_getImplementation(method);
     }
     for (const auto &hook : switch_hooks) {
+        switch_originals[hook.slot] = resolved[hook.slot];
         Class cls = switch_class(hook.className);
         SEL selector = sel_registerName(hook.selectorName);
         Method method = class_getInstanceMethod(cls, selector);

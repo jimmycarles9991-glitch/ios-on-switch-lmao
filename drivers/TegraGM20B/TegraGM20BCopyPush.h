@@ -13,7 +13,7 @@ extern "C" {
 
 #define TGM_COPY_DWORDS                                                                  \
 	(TGM_RELAYOUT_MAX_WAITS * TGM_RELAYOUT_ACQUIRE_DWORDS + TGM_SYNCPT_WAIT_DWORDS + \
-	 TGM_COPY_RECT_DWORDS + TGM_SYNCPT_INCR_DWORDS)
+	 TGM_COPY_RECT_DWORDS + TGM_SYNCPT_INCR_DWORDS + 2 * TGM_COPY_PREDICATE_DWORDS)
 
 struct tgm_copy_job {
 	uint64_t src_va, dst_va; /* each plane's first byte */
@@ -21,6 +21,8 @@ struct tgm_copy_job {
 	/* a block-linear source or destination surface's layout (never both), else null */
 	const struct tgm_layout *src_tiled, *dst_tiled;
 	uint32_t wait_syncpt, wait_threshold, incr_syncpt; /* TEGRA_GM20B_CE_NO_SYNCPT: none */
+	uint64_t
+		predicate_va; /* the copy runs only while the 64-bit word here is not zero; 0: always */
 };
 
 /* At most TGM_COPY_DWORDS words; `nwaits` at most TGM_RELAYOUT_MAX_WAITS */
@@ -32,6 +34,8 @@ static inline uint32_t tgm_copy_push(uint32_t *w, const struct tgm_copy_job *j,
 		i += tgm_relayout_acquire(w + i, &waits[k]);
 	if (j->wait_syncpt != TEGRA_GM20B_CE_NO_SYNCPT)
 		i += tgm_syncpt_wait(w + i, j->wait_syncpt, j->wait_threshold);
+	if (j->predicate_va)
+		i += tgm_copy_predicate(w + i, j->predicate_va);
 	if (j->src_tiled) {
 		i += tgm_relayout_copy(w + i, j->src_tiled, j->src_va, 1, j->dst_va, 0,
 				       j->dst_pitch);
@@ -42,6 +46,8 @@ static inline uint32_t tgm_copy_push(uint32_t *w, const struct tgm_copy_job *j,
 		i += tgm_copy_rows(w + i, j->src_va, j->src_pitch, j->dst_va, j->dst_pitch,
 				   j->row_bytes, j->rows);
 	}
+	if (j->predicate_va)
+		i += tgm_copy_predicate(w + i, 0);
 	if (j->incr_syncpt != TEGRA_GM20B_CE_NO_SYNCPT)
 		i += tgm_syncpt_incr(w + i, j->incr_syncpt);
 	return i;

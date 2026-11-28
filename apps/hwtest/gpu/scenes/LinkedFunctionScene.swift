@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// A fragment function calling custom_fn, a visible function its pipeline links under that name, as RenderBox draws iOS

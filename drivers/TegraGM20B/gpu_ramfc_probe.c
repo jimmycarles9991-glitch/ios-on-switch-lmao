@@ -6,7 +6,7 @@
 #include <engine/fifo/chan.h>
 #include "TegraGM20BGrPreempt.h"
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 static void ramfc_owner(struct tgm_ramfc_look *look, const struct tgm_chan *chan, size_t *at)
 {
 	char owner[sizeof(chan->owner)];

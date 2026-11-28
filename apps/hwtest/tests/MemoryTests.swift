@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import HWTestCore
+import HWTestKit
 import os
 
 /// The VM's page counts, jetsam's free-memory level and how much more this app may take before jetsam kills it.

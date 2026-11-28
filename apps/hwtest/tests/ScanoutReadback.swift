@@ -34,7 +34,9 @@ public enum ScanoutReadback {
     public static let inFlight: Int32 = 2
     public static let done: Int32 = 3
 
-    public static func capture(nudge: @escaping @MainActor () -> Void) async -> Result {
+    public static func capture(
+        includeRasters: Bool = true, nudge: @escaping @MainActor () -> Void
+    ) async -> Result {
         guard let gpu = GPUConnection() else { return .unavailable("no_connection") }
         let (kr, _) = readback(gpu, arm)
         guard kr == KERN_SUCCESS else {
@@ -44,9 +46,9 @@ public enum ScanoutReadback {
         }
         defer { _ = readback(gpu, disarm) }
         var reply: [UInt8] = []
-        for _ in 0 ..< 30 {
+        for _ in 0 ..< 120 {
             await MainActor.run { nudge() }
-            try? await Task.sleep(nanoseconds: 100_000_000)
+            try? await Task.sleep(nanoseconds: 25_000_000)
             let (kr, answer) = readback(gpu, query)
             guard kr == KERN_SUCCESS else { return .unavailable("query_" + GPUConnection.hex(kr)) }
             reply = answer
@@ -71,10 +73,11 @@ public enum ScanoutReadback {
         let copyRows = (0 ..< height).filter { y in
             memcmp(framebuffer.base + y * rowBytes, scanout.base + y * rowBytes, rowBytes) != 0
         }.count
+        let empty = Raster(width: 0, height: 0, channels: 3, samples: [])
         return .frame(
             Frame(
-                framebuffer: raster(framebuffer.base, width: width, height: height),
-                scanout: raster(scanout.base, width: width, height: height),
+                framebuffer: includeRasters ? raster(framebuffer.base, width: width, height: height) : empty,
+                scanout: includeRasters ? raster(scanout.base, width: width, height: height) : empty,
                 direct: GPUConnection.uint32(reply, 16) & 1 != 0, copyRows: copyRows,
                 sequence: Int(GPUConnection.uint64(reply, 32))
             )

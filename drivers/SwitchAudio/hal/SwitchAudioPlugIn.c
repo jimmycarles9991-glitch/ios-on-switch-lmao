@@ -121,6 +121,8 @@ static const UInt32 kZeroPeriod = SWITCH_AUDIO_RING_FRAMES / 4;  // matches ADMA
 
 static AudioServerPlugInHostRef gHost;
 static pthread_mutex_t gLock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t gIoCond = PTHREAD_COND_INITIALIZER;
+static Boolean gIoTransitioning;
 static atomic_uint gRefs = 1;
 static io_connect_t gConnect;
 static SwitchAudioControl *gControl;
@@ -175,10 +177,11 @@ static void jackChanged(void *refcon, io_service_t service, uint32_t type, void 
 static Float32 levelToDb(Float32 min, Float32 scalar);
 static void sendHeadphoneLevel(void);
 static void sendSpeakerLevel(void);
-static void sendMuteLocked(AudioObjectID fallbackObj);
+static void syncMute(AudioObjectID obj);
 
-static int connectService(void)
+static int connectService(Boolean *connectedNow)
 {
+    *connectedNow = false;
     if (gControl)
         return 0;
     io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(SWITCH_AUDIO_CLASS));
@@ -219,10 +222,7 @@ static int connectService(void)
         atomic_store_explicit(&gRate, (Float64)c->rate, memory_order_release);
     __atomic_store_n(&gJack, c->jack, __ATOMIC_RELAXED);
     __atomic_store_n(&gControl, c, __ATOMIC_RELEASE);
-    setHostClock();
-    sendHeadphoneLevel();
-    sendSpeakerLevel();
-    sendMuteLocked(kSpeakerMute);
+    *connectedNow = true;
     return 0;
 }
 
@@ -230,9 +230,16 @@ static int connectServiceLocked(void)
 {
     if (__atomic_load_n(&gControl, __ATOMIC_ACQUIRE))
         return 0;
+    Boolean connectedNow = false;
     pthread_mutex_lock(&gLock);
-    const int r = connectService();
+    const int r = connectService(&connectedNow);
     pthread_mutex_unlock(&gLock);
+    if (r == 0 && connectedNow) {
+        setHostClock();
+        sendHeadphoneLevel();
+        sendSpeakerLevel();
+        syncMute(kSpeakerMute);
+    }
     return r;
 }
 
@@ -282,44 +289,50 @@ static void jackChanged(void *refcon, io_service_t service, uint32_t type, void 
 // gConnect is open (connectService): the headphone level to the codec, as attenuation in millidecibels.
 static void sendHeadphoneLevel(void)
 {
-    const Float32 level = atomic_load_explicit(&gCodecVolume, memory_order_relaxed);
-    const uint64_t attenuation =
-        level <= 0.0f
-            ? UINT32_MAX
-            : (uint64_t)(-levelToDb(-(Float32)SWITCH_AUDIO_HEADPHONE_RANGE_MDB / 1000.0f, level) * 1000.0f + 0.5f);
-    if (IOConnectCallScalarMethod(gConnect, SwitchAudioSetHeadphoneLevel, &attenuation, 1, NULL, NULL) != KERN_SUCCESS)
-        os_log_error(OS_LOG_DEFAULT, "SwitchAudio: headphone level not set");
+    if (!gConnect)
+        return;
+    for (int tries = 0; tries < 4; ++tries) {
+        const Float32 level = atomic_load_explicit(&gCodecVolume, memory_order_acquire);
+        const uint64_t attenuation =
+            level <= 0.0f
+                ? UINT32_MAX
+                : (uint64_t)(-levelToDb(-(Float32)SWITCH_AUDIO_HEADPHONE_RANGE_MDB / 1000.0f, level) * 1000.0f + 0.5f);
+        if (IOConnectCallScalarMethod(gConnect, SwitchAudioSetHeadphoneLevel, &attenuation, 1, NULL, NULL) !=
+            KERN_SUCCESS)
+            os_log_error(OS_LOG_DEFAULT, "SwitchAudio: headphone level not set");
+        if (atomic_load_explicit(&gCodecVolume, memory_order_acquire) == level)
+            break;
+    }
 }
 
 static void applyHeadphoneLevel(void)
 {
-    pthread_mutex_lock(&gLock);
-    if (gControl)
+    if (connectServiceLocked() == 0)
         sendHeadphoneLevel();
-    else
-        connectService();  // which sends it
-    pthread_mutex_unlock(&gLock);
 }
 
 static void sendSpeakerLevel(void)
 {
-    const Float32 level = atomic_load_explicit(&gVolume, memory_order_relaxed);
-    const uint64_t attenuation =
-        level <= 0.0f
-            ? UINT32_MAX
-            : (uint64_t)(-levelToDb(-(Float32)SWITCH_AUDIO_SPEAKER_RANGE_MDB / 1000.0f, level) * 1000.0f + 0.5f);
-    if (IOConnectCallScalarMethod(gConnect, SwitchAudioSetSpeakerLevel, &attenuation, 1, NULL, NULL) != KERN_SUCCESS)
-        os_log_error(OS_LOG_DEFAULT, "SwitchAudio: speaker level not set");
+    if (!gConnect)
+        return;
+    for (int tries = 0; tries < 4; ++tries) {
+        const Float32 level = atomic_load_explicit(&gVolume, memory_order_acquire);
+        const uint64_t attenuation =
+            level <= 0.0f
+                ? UINT32_MAX
+                : (uint64_t)(-levelToDb(-(Float32)SWITCH_AUDIO_SPEAKER_RANGE_MDB / 1000.0f, level) * 1000.0f + 0.5f);
+        if (IOConnectCallScalarMethod(gConnect, SwitchAudioSetSpeakerLevel, &attenuation, 1, NULL, NULL) !=
+            KERN_SUCCESS)
+            os_log_error(OS_LOG_DEFAULT, "SwitchAudio: speaker level not set");
+        if (atomic_load_explicit(&gVolume, memory_order_acquire) == level)
+            break;
+    }
 }
 
 static void applySpeakerLevel(void)
 {
-    pthread_mutex_lock(&gLock);
-    if (gControl)
+    if (connectServiceLocked() == 0)
         sendSpeakerLevel();
-    else
-        connectService();
-    pthread_mutex_unlock(&gLock);
 }
 
 static uint64_t effectiveMuteLocked(AudioObjectID fallbackObj)
@@ -335,26 +348,36 @@ static uint64_t effectiveMuteLocked(AudioObjectID fallbackObj)
     return fallbackObj == kCodecMute ? hp : spk;
 }
 
-static void sendMuteLocked(AudioObjectID fallbackObj)
+static void sendMuteValue(uint64_t muted)
 {
     if (!gConnect)
         return;
-    const uint64_t muted = effectiveMuteLocked(fallbackObj);
     if (IOConnectCallScalarMethod(gConnect, SwitchAudioSetMute, &muted, 1, NULL, NULL) != KERN_SUCCESS)
         os_log_error(OS_LOG_DEFAULT, "SwitchAudio: output mute not set");
 }
 
-static void applyMute(AudioObjectID obj)
+static void syncMute(AudioObjectID obj)
 {
-    pthread_mutex_lock(&gLock);
-    if (gControl)
-        sendMuteLocked(obj);
-    else
-        connectService();
-    pthread_mutex_unlock(&gLock);
+    for (int tries = 0; tries < 4; ++tries) {
+        pthread_mutex_lock(&gLock);
+        const uint64_t muted = effectiveMuteLocked(obj);
+        pthread_mutex_unlock(&gLock);
+        sendMuteValue(muted);
+        pthread_mutex_lock(&gLock);
+        const Boolean done = effectiveMuteLocked(obj) == muted;
+        pthread_mutex_unlock(&gLock);
+        if (done)
+            break;
+    }
 }
 
-static void sendRouteLocked(uint32_t route)
+static void applyMute(AudioObjectID obj)
+{
+    if (connectServiceLocked() == 0)
+        syncMute(obj);
+}
+
+static void sendRoute(uint32_t route)
 {
     const uint64_t arg = route;
     if (gConnect && IOConnectCallScalarMethod(gConnect, SwitchAudioSetRoute, &arg, 1, NULL, NULL) != KERN_SUCCESS)
@@ -526,15 +549,15 @@ static HRESULT QueryInterface(void *self, REFIID uuid, LPVOID *out);
 static ULONG AddRef(void *self)
 {
     (void)self;
-    return atomic_fetch_add(&gRefs, 1) + 1;
+    return atomic_fetch_add_explicit(&gRefs, 1, memory_order_relaxed) + 1;
 }
 
 static ULONG Release(void *self)
 {
     (void)self;
-    UInt32 r = atomic_load(&gRefs);
+    UInt32 r = atomic_load_explicit(&gRefs, memory_order_relaxed);
     if (r)
-        r = atomic_fetch_sub(&gRefs, 1) - 1;
+        r = atomic_fetch_sub_explicit(&gRefs, 1, memory_order_acq_rel) - 1;
     return r;
 }
 
@@ -542,10 +565,8 @@ static OSStatus Initialize(AudioServerPlugInDriverRef d, AudioServerPlugInHostRe
 {
     (void)d;
     gHost = host;
-    pthread_mutex_lock(&gLock);
-    if (connectService())
+    if (connectServiceLocked())
         os_log_error(OS_LOG_DEFAULT, "SwitchAudio: kernel service not available yet");
-    pthread_mutex_unlock(&gLock);
     return 0;
 }
 
@@ -589,28 +610,21 @@ static OSStatus PerformDeviceConfigurationChange(AudioServerPlugInDriverRef d, A
     (void)d;
     (void)i;
     if (o == kDisplay) {
-        pthread_mutex_lock(&gLock);
-        const OSStatus result =
-            connectService() ? kAudioHardwareNotRunningError : switch_audio_display_perform(gConnect, a);
-        pthread_mutex_unlock(&gLock);
-        return result;
+        return connectServiceLocked() ? kAudioHardwareNotRunningError : switch_audio_display_perform(gConnect, a);
     }
     if (o == kMic || (Float64)a == atomic_load_explicit(&gRate, memory_order_acquire))
         return 0;
+    if (connectServiceLocked())
+        return kAudioHardwareIllegalOperationError;
     const uint64_t rate = a;
-    pthread_mutex_lock(&gLock);
-    kern_return_t kr =
-        connectService() ? KERN_FAILURE : IOConnectCallScalarMethod(gConnect, SwitchAudioSetRate, &rate, 1, NULL, NULL);
-    Float64 newRate = atomic_load_explicit(&gRate, memory_order_relaxed);
-    if (kr == KERN_SUCCESS) {
-        newRate = (Float64)gControl->rate;
-        atomic_store_explicit(&gTicksPerFrame, (Float64)gControl->ticks_per_frame_q32 / 4294967296.0,
-                              memory_order_release);
-        atomic_store_explicit(&gRate, newRate, memory_order_release);
-    }
-    pthread_mutex_unlock(&gLock);
+    const kern_return_t kr = IOConnectCallScalarMethod(gConnect, SwitchAudioSetRate, &rate, 1, NULL, NULL);
     if (kr != KERN_SUCCESS)
         return kAudioHardwareIllegalOperationError;
+    pthread_mutex_lock(&gLock);
+    const Float64 newRate = (Float64)gControl->rate;
+    atomic_store_explicit(&gTicksPerFrame, (Float64)gControl->ticks_per_frame_q32 / 4294967296.0, memory_order_release);
+    atomic_store_explicit(&gRate, newRate, memory_order_release);
+    pthread_mutex_unlock(&gLock);
     os_log(OS_LOG_DEFAULT, "SwitchAudio: clock now %.0f Hz", newRate);
     gHost->RequestDeviceConfigurationChange(gHost, o == kSpeaker ? kCodec : kSpeaker, a, NULL);
     return 0;
@@ -815,17 +829,24 @@ static OSStatus IsPropertySettable(AudioServerPlugInDriverRef d, AudioObjectID o
     return HasProperty(d, o, pid, a) ? 0 : kAudioHardwareUnknownPropertyError;
 }
 
-// gLock held: the kernel's input direction follows whether the codec device runs IO and its input stream is active.
+// gLock held and gIoTransitioning set: drops gLock across the blocking ioctl while preserving input serialization.
 static void syncCodecInput(void)
 {
-    const Boolean want = gCodecUsers > 0 && gCodecInActive && gControl;
-    if (want == gCodecInRunning)
-        return;
-    if (call(want ? SwitchAudioStartInput : SwitchAudioStopInput) == KERN_SUCCESS) {
-        gCodecInRunning = want;
-        os_log(OS_LOG_DEFAULT, "SwitchAudio: headset microphone %{public}s", want ? "on" : "off");
-    } else if (want) {
-        os_log_error(OS_LOG_DEFAULT, "SwitchAudio: headset microphone not started: the kernel service refused");
+    for (;;) {
+        const Boolean want = gCodecUsers > 0 && gCodecInActive && gControl;
+        if (want == gCodecInRunning)
+            return;
+        pthread_mutex_unlock(&gLock);
+        const kern_return_t kr = call(want ? SwitchAudioStartInput : SwitchAudioStopInput);
+        pthread_mutex_lock(&gLock);
+        if (kr == KERN_SUCCESS) {
+            gCodecInRunning = want;
+            os_log(OS_LOG_DEFAULT, "SwitchAudio: headset microphone %{public}s", want ? "on" : "off");
+        } else {
+            if (want)
+                os_log_error(OS_LOG_DEFAULT, "SwitchAudio: headset microphone not started: the kernel service refused");
+            return;
+        }
     }
 }
 
@@ -892,19 +913,28 @@ static OSStatus SetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
         if (o == kCodecIn) {
             pthread_mutex_lock(&gLock);
             __atomic_store_n(&gCodecInActive, active, __ATOMIC_RELEASE);
+            while (gIoTransitioning)
+                pthread_cond_wait(&gIoCond, &gLock);
+            gIoTransitioning = true;
             syncCodecInput();
+            gIoTransitioning = false;
+            pthread_cond_broadcast(&gIoCond);
             pthread_mutex_unlock(&gLock);
         } else if (o == kCodecOut) {
             pthread_mutex_lock(&gLock);
             __atomic_store_n(&gCodecOutActive, active, __ATOMIC_RELEASE);
-            if (gCodecUsers > 0 && gControl) {
-                if (active) {
-                    sendRouteLocked(SwitchAudioRouteHeadphones);
-                    sendMuteLocked(kCodecMute);
-                } else if (gSpeakerUsers > 0) {
-                    sendRouteLocked(SwitchAudioRouteSpeaker);
-                    sendMuteLocked(kSpeakerMute);
-                }
+            while (gIoTransitioning)
+                pthread_cond_wait(&gIoCond, &gLock);
+            if (gCodecUsers > 0 && gControl && (active || gSpeakerUsers > 0)) {
+                gIoTransitioning = true;
+                const uint32_t route = active ? SwitchAudioRouteHeadphones : SwitchAudioRouteSpeaker;
+                const uint64_t muted = effectiveMuteLocked(active ? kCodecMute : kSpeakerMute);
+                pthread_mutex_unlock(&gLock);
+                sendRoute(route);
+                sendMuteValue(muted);
+                pthread_mutex_lock(&gLock);
+                gIoTransitioning = false;
+                pthread_cond_broadcast(&gIoCond);
             }
             pthread_mutex_unlock(&gLock);
         }
@@ -1305,16 +1335,12 @@ static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cl
     (void)d;
     (void)client;
     if (o == kDisplay) {
-        pthread_mutex_lock(&gLock);
-        const OSStatus result = connectService() ? kAudioHardwareNotRunningError : switch_audio_display_start(gConnect);
-        pthread_mutex_unlock(&gLock);
-        return result;
+        return connectServiceLocked() ? kAudioHardwareNotRunningError : switch_audio_display_start(gConnect);
     }
     if (!isDevice(o))
         return kAudioHardwareBadObjectError;
-    OSStatus r = 0;
-    pthread_mutex_lock(&gLock);
     if (o == kMic) {
+        pthread_mutex_lock(&gLock);
         if (!gMicUsers) {
             atomic_store_explicit(&gMicOrigin, mach_absolute_time(), memory_order_release);
             atomic_fetch_add_explicit(&gMicSeed, 1, memory_order_acq_rel);
@@ -1323,39 +1349,71 @@ static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cl
         pthread_mutex_unlock(&gLock);
         return 0;
     }
-    UInt32 *users = o == kSpeaker ? &gSpeakerUsers : &gCodecUsers;
     const char *const what = o == kSpeaker ? "speaker" : "headphone";
+    if (connectServiceLocked()) {
+        os_log_error(OS_LOG_DEFAULT, "SwitchAudio: %{public}s IO not started: the kernel service refused", what);
+        return kAudioHardwareNotRunningError;
+    }
+    OSStatus r = 0;
+    pthread_mutex_lock(&gLock);
+    while (gIoTransitioning)
+        pthread_cond_wait(&gIoCond, &gLock);
+    gIoTransitioning = true;
+    UInt32 *users = o == kSpeaker ? &gSpeakerUsers : &gCodecUsers;
+    AudioObjectID muteObj = kSpeakerMute;
+    uint64_t sentMute = 0;
+    Boolean startedNew = false;
     if (*users == 0) {
         const Boolean first = !gSpeakerUsers && !gCodecUsers;
-        if (connectService()) {
+        uint32_t route = SwitchAudioRouteSpeaker;
+        if (o == kCodec && (!gSpeakerUsers || gCodecOutActive)) {
+            route = SwitchAudioRouteHeadphones;
+        }
+        muteObj = route == SwitchAudioRouteHeadphones ? kCodecMute : kSpeakerMute;
+        sentMute = effectiveMuteLocked(muteObj);
+        pthread_mutex_unlock(&gLock);
+
+        sendRoute(route);
+        sendMuteValue(sentMute);
+        kern_return_t startKr = KERN_SUCCESS;
+        if (first) {
+            startKr = call(SwitchAudioStartOutput);
+            if (startKr != KERN_SUCCESS) {
+                sendRoute(SwitchAudioRouteAuto);
+            } else {
+                setHostClock();  // again: the shared page may have been read back from disk since
+            }
+        }
+
+        pthread_mutex_lock(&gLock);
+        if (first && startKr != KERN_SUCCESS) {
             r = kAudioHardwareNotRunningError;
             os_log_error(OS_LOG_DEFAULT, "SwitchAudio: %{public}s IO not started: the kernel service refused", what);
         } else {
-            const uint32_t route = o == kSpeaker || !gSpeakerUsers || gCodecOutActive
-                                       ? (o == kSpeaker ? SwitchAudioRouteSpeaker : SwitchAudioRouteHeadphones)
-                                       : SwitchAudioRouteSpeaker;
-            sendRouteLocked(route);
-            sendMuteLocked(route == SwitchAudioRouteHeadphones ? kCodecMute : kSpeakerMute);
-            if (first && call(SwitchAudioStartOutput) != KERN_SUCCESS) {
-                sendRouteLocked(SwitchAudioRouteAuto);
-                r = kAudioHardwareNotRunningError;
-                os_log_error(OS_LOG_DEFAULT, "SwitchAudio: %{public}s IO not started: the kernel service refused",
-                             what);
-            } else {
-                if (first) {
-                    setHostClock();  // again: the shared page may have been read back from disk since
-                    atomic_store_explicit(&gZeroOrigin, nowFrames(), memory_order_release);
-                    atomic_fetch_add_explicit(&gZeroSeed, 1, memory_order_acq_rel);
-                }
-                os_log(OS_LOG_DEFAULT, "SwitchAudio: %{public}s IO started (volume control %.1f dB)", what,
-                       (double)toDb(atomic_load_explicit(&gVolume, memory_order_relaxed)));
+            startedNew = true;
+            if (first) {
+                atomic_store_explicit(&gZeroOrigin, nowFrames(), memory_order_release);
+                atomic_store_explicit(&gZeroSeed, atomic_load_explicit(&gZeroSeed, memory_order_relaxed) + 1,
+                                      memory_order_release);
             }
+            os_log(OS_LOG_DEFAULT, "SwitchAudio: %{public}s IO started (volume control %.1f dB)", what,
+                   (double)toDb(atomic_load_explicit(&gVolume, memory_order_relaxed)));
         }
     }
     if (!r) {
         __atomic_store_n(users, *users + 1, __ATOMIC_RELEASE);
         syncCodecInput();
+        if (startedNew) {
+            const uint64_t nowMute = effectiveMuteLocked(muteObj);
+            if (nowMute != sentMute) {
+                pthread_mutex_unlock(&gLock);
+                sendMuteValue(nowMute);
+                pthread_mutex_lock(&gLock);
+            }
+        }
     }
+    gIoTransitioning = false;
+    pthread_cond_broadcast(&gIoCond);
     pthread_mutex_unlock(&gLock);
     return r;
 }
@@ -1365,38 +1423,49 @@ static OSStatus StopIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cli
     (void)d;
     (void)client;
     if (o == kDisplay) {
-        pthread_mutex_lock(&gLock);
-        const OSStatus result = switch_audio_display_stop(gConnect);
-        pthread_mutex_unlock(&gLock);
-        return result;
+        return __atomic_load_n(&gControl, __ATOMIC_ACQUIRE) ? switch_audio_display_stop(gConnect) : 0;
     }
     if (!isDevice(o))
         return kAudioHardwareBadObjectError;
-    pthread_mutex_lock(&gLock);
     if (o == kMic) {
+        pthread_mutex_lock(&gLock);
         if (gMicUsers)
             __atomic_store_n(&gMicUsers, gMicUsers - 1, __ATOMIC_RELEASE);
-    } else {
-        UInt32 *users = o == kSpeaker ? &gSpeakerUsers : &gCodecUsers;
-        if (*users) {
-            const UInt32 next = *users - 1;
-            __atomic_store_n(users, next, __ATOMIC_RELEASE);
-            if (next == 0) {
-                syncCodecInput();
-                if (!gSpeakerUsers && !gCodecUsers) {
-                    call(SwitchAudioStopOutput);
-                    sendRouteLocked(SwitchAudioRouteAuto);
-                } else if (gSpeakerUsers) {
-                    sendRouteLocked(SwitchAudioRouteSpeaker);
-                    sendMuteLocked(kSpeakerMute);
-                } else {
-                    sendRouteLocked(SwitchAudioRouteHeadphones);
-                    sendMuteLocked(kCodecMute);
-                }
-                os_log(OS_LOG_DEFAULT, "SwitchAudio: %{public}s IO stopped", o == kSpeaker ? "speaker" : "headphone");
+        pthread_mutex_unlock(&gLock);
+        return 0;
+    }
+    pthread_mutex_lock(&gLock);
+    while (gIoTransitioning)
+        pthread_cond_wait(&gIoCond, &gLock);
+    gIoTransitioning = true;
+    UInt32 *users = o == kSpeaker ? &gSpeakerUsers : &gCodecUsers;
+    if (*users) {
+        const UInt32 next = *users - 1;
+        __atomic_store_n(users, next, __ATOMIC_RELEASE);
+        if (next == 0) {
+            syncCodecInput();
+            const Boolean stopAll = !gSpeakerUsers && !gCodecUsers;
+            uint32_t route = SwitchAudioRouteAuto;
+            if (!stopAll) {
+                route = gSpeakerUsers ? SwitchAudioRouteSpeaker : SwitchAudioRouteHeadphones;
             }
+            const uint64_t muted = stopAll ? 0 : effectiveMuteLocked(gSpeakerUsers ? kSpeakerMute : kCodecMute);
+            pthread_mutex_unlock(&gLock);
+
+            if (stopAll) {
+                call(SwitchAudioStopOutput);
+                sendRoute(SwitchAudioRouteAuto);
+            } else {
+                sendRoute(route);
+                sendMuteValue(muted);
+            }
+            os_log(OS_LOG_DEFAULT, "SwitchAudio: %{public}s IO stopped", o == kSpeaker ? "speaker" : "headphone");
+
+            pthread_mutex_lock(&gLock);
         }
     }
+    gIoTransitioning = false;
+    pthread_cond_broadcast(&gIoCond);
     pthread_mutex_unlock(&gLock);
     return 0;
 }
@@ -1418,7 +1487,8 @@ static OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef d, AudioObjectID o, 
         *seed = atomic_load_explicit(&gMicSeed, memory_order_acquire);
         return 0;
     }
-    const SwitchAudioControl *ctrl = __atomic_load_n(&gControl, __ATOMIC_ACQUIRE);
+    // gControl is write-once before StartIO; RT callbacks need no acquire barrier.
+    const SwitchAudioControl *ctrl = gControl;
     const Float64 tpf = atomic_load_explicit(&gTicksPerFrame, memory_order_acquire);
     if (!ctrl || tpf <= 0.0)
         return kAudioHardwareNotRunningError;
@@ -1480,7 +1550,7 @@ static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, Aud
         memset(main, 0, (size_t)frames * channelsOf(stream) * sizeof(Float32));  // silent inputs (top of file)
         return 0;
     }
-    SwitchAudioControl *ctrl = __atomic_load_n(&gControl, __ATOMIC_ACQUIRE);
+    SwitchAudioControl *ctrl = gControl;
     if (!ctrl)
         return 0;
     if (op == kAudioServerPlugInIOOperationWriteMix && (stream == kSpeakerOut || stream == kCodecOut)) {

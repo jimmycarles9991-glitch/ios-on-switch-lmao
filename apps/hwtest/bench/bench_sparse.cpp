@@ -391,3 +391,14 @@ int32_t switch_bench_zcull_info(uint32_t *flags, uint32_t info[12], uint32_t zc[
     memcpy(zc, &layout, sizeof layout);
     return kr;
 }
+
+int32_t switch_bench_gpu_units(uint32_t *gpcs, uint32_t *tpcs)
+{
+    gm20b::Kernel k;
+    std::string err;
+    if (!k.open(err))
+        return -1;
+    *gpcs = k.info().gpc_count;
+    *tpcs = k.info().tpc_count;
+    return 0;
+}

@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import IOSurface
 import Metal
 
@@ -9,6 +10,8 @@ public enum XrTiledSurface {
     public struct Reading: Sendable {
         public var made = false
         public var readOff = -1, storeOff = -1, cpuOff = -1, blitOff = -1
+        /// The first texel the kernel read: zeros name a pool texture never filled from the blocks
+        public var first = "-"
     }
 
     static let size = 64
@@ -58,6 +61,7 @@ public enum XrTiledSurface {
         let cleared = try await SurfaceReads.read(gpu, xr)
         let clearWant = SIMD4<Float>(128.0 / 510, 0.5, 382.0 / 510, 0)
         reading.readOff = cleared.filter { !close($0, clearWant) }.count
+        if let texel = cleared.first { reading.first = "\(texel.x),\(texel.y),\(texel.z),\(texel.w)" }
         let path = try await SurfaceReads.fill(gpu, xr, SIMD4(0.5, 0.25, -0.25, 0.75))
         guard !path.hasPrefix("error:") else { throw TestFailure("the 550 store failed: \(path)") }
         let stored = try await SurfaceReads.read(gpu, target)

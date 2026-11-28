@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
+import HWTestKit
 import Metal
 
 /// Fetching draws of every kind of storage-form state keep Metal's order inside the pixel interlock on the driver: a
@@ -17,12 +19,12 @@ import Metal
 /// i % 2 at pixels 0-63) read as float4 and as half4 and written back unchanged gives half(c / 31) in a colour(1) copy
 /// (code 1 0x3d042000, 15 0x3ef7c000, 16 0x3f042000). Judged per case: every pixel Apple's (<case>_wrong=, <case>_saw=
 /// the first pixel off), drawn on raw, and one fetch_interlocked and no fetch_sequential a draw (not_interlocked= the
-/// cases that were not); no command buffer failed over the run, timing included (failed_cbs=0). Reported, not judged:
+/// cases that were not); no command buffer failed over the run (failed_cbs=0). Reported, not judged:
 /// bgr5a1_overlap8 and bgr5a1_overlap16, the texel of 8 and 16 triangles, Apple 951d and a204, raw 951b and a209
-/// (Apple's tile holds a half through the pass, raw stores a code at every write); gpu_us_storage_<kind> and
-/// gpu_us_twin_<kind>, the fastest of five draws of 64 such triangles at 1280x720 forced to the storage form (probe 4)
-/// and to the barrier twin a triangle at a time (probe 5), the variant kinds' twin the same scene with no depth
-/// attachment; ratio_<kind> twin over storage, timing_twins= fetch_blend_twin draws.
+/// (Apple's tile holds a half through the pass, raw stores a code at every write); with HWTEST_LONG=1 (0.5-2.4 s a
+/// draw), gpu_us_storage_<kind> and gpu_us_twin_<kind>, the faster of two draws of 64 such triangles at 1280x720 forced
+/// to the storage form (probe 4) and to the barrier twin a triangle at a time (probe 5), the variant kinds' twin the
+/// same scene with no depth attachment; ratio_<kind> twin over storage, timing_twins= fetch_blend_twin draws.
 struct StorageFormsTest: HWTest {
     typealias Cases = StorageFormsCases
 
@@ -71,11 +73,13 @@ struct StorageFormsTest: HWTest {
         routes.report(&metrics, &checks)
         metrics.set("readback_paths", gpu.paths.isEmpty ? "-" : String(gpu.paths.text.prefix(80)))
         let judged = GM20BFacade.counters(of: gpu.device)
-        await Self.time(scene, &metrics)
+        if LongRuns.on { await Self.time(scene, &metrics) }
         let after = GM20BFacade.counters(of: gpu.device)
         metrics.merge(PathTally.counterMetrics(before: before, after: after))
         checks.append(FailedCounts.judged(before: before, after: after, own: gpu.paths, &metrics))
-        metrics.set("timing_twins", (after["fetch_blend_twin"] ?? 0) - (judged["fetch_blend_twin"] ?? 0))
+        if LongRuns.on {
+            metrics.set("timing_twins", (after["fetch_blend_twin"] ?? 0) - (judged["fetch_blend_twin"] ?? 0))
+        }
         metrics.set("host_clocked", gpu.hostClockedRuns)
         metrics.fitLog(within: 720, keeping: Self.kept)
         return .judged(checks, metrics, proof: gpu.proof)

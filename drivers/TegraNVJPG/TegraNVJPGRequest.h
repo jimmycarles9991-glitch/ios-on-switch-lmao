@@ -135,11 +135,19 @@ typedef struct {
     uint64_t writeEnd;       // one past the last byte the engine may write
     uint32_t fillChroma;     // grey into '420f': the CPU fills the CbCr plane with 0x80 after the decode
     uint64_t fillStart, fillRowBytes, fillPitch, fillRows;
-    // '422f' and '444f': the planes start in the service's own buffer of `repackBytes`, not the destination, and VIC
-    // re-packs them into the destination at the request's offset
+    // '422f' and '444f': VIC re-packs NVJPG's 3-plane output (TEGRA_NVJPG_REPACK_VIC).
+    // Pitch/block layout mismatches: Copy Engine DMA-repacks NVJPG's 64B-aligned output (TEGRA_NVJPG_REPACK_CE).
     uint32_t repack;
     uint64_t repackBytes;
+    uint64_t copyDstStart[2];
+    uint32_t copyDstPitch[2], copyRowBytes[2], copyRows[2];
 } TegraNVJPGPlan;
+
+enum {
+    TEGRA_NVJPG_REPACK_NONE = 0,
+    TEGRA_NVJPG_REPACK_VIC = 1,
+    TEGRA_NVJPG_REPACK_CE = 2
+};
 
 enum {
     TEGRA_NVJPG_PLAN_OK = 0,
@@ -195,6 +203,150 @@ static inline uint64_t tegra_nvjpg_align(uint64_t value, uint64_t to)
     return (value + to - 1) / to * to;
 }
 
+static inline uint32_t tegra_nvjpg_bpp_of(uint32_t format)
+{
+    if (format == TEGRA_NVJPG_OUT_YUY2)
+        return 2;
+    if (tegra_nvjpg_is_yuv(format) || format == TEGRA_NVJPG_OUT_GREY)
+        return 1;
+    return 4;
+}
+
+static inline void tegra_nvjpg_picture_plane(const TegraNVJPGDecodeRequest *r, uint32_t format, uint32_t bpp,
+                                             uint32_t plane, uint64_t *rows, uint64_t *bytes)
+{
+    *rows = plane && format == TEGRA_NVJPG_OUT_NV12 ? (r->out_height + 1) / 2 : r->out_height;
+    const uint64_t pairs = 2 * (((uint64_t)r->out_width + 1) / 2);
+    *bytes = (uint64_t)r->out_width * bpp;
+    if (format == TEGRA_NVJPG_OUT_YUY2) {
+        *bytes = 2 * pairs;
+    } else if (plane && format == TEGRA_NVJPG_OUT_NV12) {
+        *bytes = pairs;
+    }
+}
+
+static inline uint64_t tegra_nvjpg_dst_plane_start(const TegraNVJPGDecodeRequest *r, const TegraNVJPGSurface *d,
+                                                   uint32_t format, uint32_t bpp, uint32_t plane)
+{
+    if (plane && format == TEGRA_NVJPG_OUT_NV12)
+        return d->planeOffset[1] + (uint64_t)(r->y_offset / 2) * d->planeBytesPerRow[1] + r->x_offset;
+    return d->planeOffset[0] + (uint64_t)r->y_offset * d->planeBytesPerRow[0] + (uint64_t)r->x_offset * bpp;
+}
+
+// Stage pitch-linear NVJPG output in a 64-byte-aligned scratch buffer, then DMA-repack to `d` with Copy Engine.
+// Returns NULL on success with `p` filled for TEGRA_NVJPG_REPACK_CE; otherwise returns why CE cannot take it.
+static inline const char *tegra_nvjpg_plan_stage_ce(const TegraNVJPGDecodeRequest *r, const TegraNVJPGImage *img,
+                                                    const TegraNVJPGSurface *d, const TegraNVJPGAbility *a,
+                                                    uint32_t surfacePlanes, uint32_t bpp, TegraNVJPGPlan *p)
+{
+    TegraNVJPGPlan staged;
+    memset(&staged, 0, sizeof(staged));
+    staged.target.format = p->target.format;
+    staged.target.scale = p->target.scale;
+    staged.target.alpha = p->target.alpha;
+    const uint32_t format = staged.target.format;
+    const uint32_t w = a->clipped ? tegra_nvjpg_shr_up(img->width, staged.target.scale)
+                                  : (img->mcusX * img->mcuW) >> staged.target.scale;
+    const uint32_t cw = (w + 1) / 2;
+    if (format == TEGRA_NVJPG_OUT_NV12) {
+        staged.target.pitch[0] = (uint32_t)tegra_nvjpg_align(w, 64);
+        staged.target.pitch[1] = (uint32_t)tegra_nvjpg_align(2ull * cw, 64);
+    } else if (format == TEGRA_NVJPG_OUT_YUY2) {
+        staged.target.pitch[0] = (uint32_t)tegra_nvjpg_align(4ull * cw, 64);
+    } else if (format == TEGRA_NVJPG_OUT_GREY) {
+        staged.target.pitch[0] = (uint32_t)tegra_nvjpg_align(w, 64);
+    } else {
+        staged.target.pitch[0] = (uint32_t)tegra_nvjpg_align(4ull * w, 64);
+    }
+    nvjpg_dec_drv_pic_setup_s scratch;
+    memset(&scratch, 0, sizeof(scratch));
+    const char *why = tegra_nvjpg_setup_output(img, &staged.target, a->clipped == 0, &scratch, &staged.extent);
+    if (why)
+        return why;
+    staged.planes = staged.extent.planes;
+    if (staged.planes > 2)
+        return "too many planes for copy-engine repack";
+    uint64_t end = 0;
+    for (uint32_t i = 0; i < staged.planes; i++) {
+        uint64_t rows = 0, bytes = 0;
+        tegra_nvjpg_picture_plane(r, format, bpp, i, &rows, &bytes);
+        const uint64_t dstStart = tegra_nvjpg_dst_plane_start(r, d, format, bpp, i);
+        if ((dstStart & 15) || d->planeBytesPerRow[i] < bytes || rows > 0xffffffffULL || bytes > 0xffffffffULL)
+            return "destination plane offset not 16-byte aligned";
+        const uint64_t dstEnd = dstStart + (rows - 1) * d->planeBytesPerRow[i] + bytes;
+        if (dstEnd > d->length)
+            return "picture runs past the destination";
+        for (uint32_t j = 0; j < surfacePlanes; j++) {
+            if (j == i)
+                continue;
+            const uint64_t start = d->planeOffset[j];
+            const uint64_t stop = start + d->planeBytesPerRow[j] * d->planeHeight[j];
+            if (dstStart < stop && dstEnd > start)
+                return "writes would run into another plane";
+        }
+        staged.planeStart[i] = end;
+        end = tegra_nvjpg_align(end + (uint64_t)staged.target.pitch[i] * staged.extent.rows[i], 256);
+        staged.copyDstStart[i] = dstStart;
+        staged.copyDstPitch[i] = (uint32_t)d->planeBytesPerRow[i];
+        staged.copyRowBytes[i] = (uint32_t)bytes;
+        staged.copyRows[i] = (uint32_t)rows;
+    }
+    if (format == TEGRA_NVJPG_OUT_GREY) {
+        staged.fillChroma = 1;
+        staged.fillPitch = d->planeBytesPerRow[1];
+        staged.fillStart = d->planeOffset[1] + (uint64_t)(r->y_offset / 2) * staged.fillPitch + r->x_offset;
+        staged.fillRowBytes = 2 * (((uint64_t)r->out_width + 1) / 2);
+        staged.fillRows = ((uint64_t)r->out_height + 1) / 2;
+        if (staged.fillStart + (staged.fillRows - 1) * staged.fillPitch + staged.fillRowBytes > d->length)
+            return "chroma fill would run past the destination";
+    }
+    staged.writeEnd = end;
+    staged.repack = TEGRA_NVJPG_REPACK_CE;
+    staged.repackBytes = tegra_nvjpg_align(end, 4096);
+    *p = staged;
+    return NULL;
+}
+
+// A direct single-plane plan moved onto NVJPG's rows in the service's scratch, which the copy engine then copies into
+// the destination (`tiled`: whole, into the blocks GM20B laid it out in, tiledW x tiledH texels of tiledBpp bytes).
+// True with `p` and `s` updated.
+static inline bool tegra_nvjpg_plan_fallback_ce(const TegraNVJPGDecodeRequest *r, const TegraNVJPGSurface *d,
+                                                uint64_t maxRepackBytes, bool tiled, uint32_t tiledW, uint32_t tiledH,
+                                                uint32_t tiledBpp, bool compressed, TegraNVJPGPlan *p,
+                                                nvjpg_dec_drv_pic_setup_s *s)
+{
+    if (p->repack != TEGRA_NVJPG_REPACK_NONE || p->planes != 1 || p->fillChroma || compressed)
+        return false;
+    const uint32_t format = p->target.format;
+    const uint32_t bpp = tegra_nvjpg_bpp_of(format);
+    uint64_t rows = 0, bytes = 0;
+    tegra_nvjpg_picture_plane(r, format, bpp, 0, &rows, &bytes);
+    const uint64_t dstStart = tegra_nvjpg_dst_plane_start(r, d, format, bpp, 0);
+    if ((dstStart & 15) || d->planeBytesPerRow[0] > 0xffffffffULL || d->planeBytesPerRow[0] < bytes ||
+        rows > 0xffffffffULL || bytes > 0xffffffffULL)
+        return false;
+    if (dstStart + (rows - 1) * d->planeBytesPerRow[0] + bytes > d->length)
+        return false;
+    if (tiled && (dstStart != 0 || (uint64_t)tiledW * tiledBpp != bytes || tiledH != rows))
+        return false;
+    const uint32_t scratchPitch = (uint32_t)tegra_nvjpg_align(p->extent.rowBytes[0], 64);
+    const uint64_t end = tegra_nvjpg_align((uint64_t)scratchPitch * p->extent.rows[0], 256);
+    const uint64_t repackBytes = tegra_nvjpg_align(end, 4096);
+    if (!scratchPitch || !repackBytes || repackBytes > maxRepackBytes)
+        return false;
+    p->target.pitch[0] = scratchPitch;
+    p->planeStart[0] = 0;
+    p->writeEnd = end;
+    p->repack = TEGRA_NVJPG_REPACK_CE;
+    p->repackBytes = repackBytes;
+    p->copyDstStart[0] = dstStart;
+    p->copyDstPitch[0] = (uint32_t)d->planeBytesPerRow[0];
+    p->copyRowBytes[0] = (uint32_t)bytes;
+    p->copyRows[0] = (uint32_t)rows;
+    s->output_stride_luma = (int)scratchPitch;
+    return true;
+}
+
 // '422f' or '444f' (p->target's format, scale set): Y, Cb and Cr at the file's own sampling into the service's buffer,
 // each plane's rows 256 bytes apart (VIC's source pitch) and each plane on 256 bytes. The destination is VIC's: its
 // rectangle must start on a chroma pair. *kind is the caller's UNSUPPORTED until the plan is OK.
@@ -220,7 +372,7 @@ static inline const char *tegra_nvjpg_plan_repack(const TegraNVJPGDecodeRequest 
         end = tegra_nvjpg_align(end + (uint64_t)t->pitch[i] * p->extent.rows[i], 256);
     }
     p->writeEnd = end;
-    p->repack = 1;
+    p->repack = TEGRA_NVJPG_REPACK_VIC;
     p->repackBytes = tegra_nvjpg_align(end, 4096);
     return NULL;
 }
@@ -283,66 +435,74 @@ static inline const char *tegra_nvjpg_plan(const TegraNVJPGDecodeRequest *r, con
             *kind = TEGRA_NVJPG_PLAN_OK;
         return why;
     }
+    if (format == TEGRA_NVJPG_OUT_NV12 && ((r->x_offset | r->y_offset) & 1))
+        return "odd offset into 4:2:0";
+    if (format == TEGRA_NVJPG_OUT_YUY2 && (r->x_offset & 1))
+        return "odd offset into 4:2:2";
+    const uint32_t bpp = tegra_nvjpg_bpp_of(format);
+    const uint32_t enginePlanes = tegra_nvjpg_planes(format);
     for (uint32_t i = 0; i < planes && i < 3; i++) {
         if (d->planeBytesPerRow[i] > 0xffffffffULL)
             return "stride";
         t->pitch[i] = (uint32_t)d->planeBytesPerRow[i];
     }
-    nvjpg_dec_drv_pic_setup_s scratch;
-    memset(&scratch, 0, sizeof(scratch));
-    const char *why = tegra_nvjpg_setup_output(img, t, a->clipped == 0, &scratch, &p->extent);
-    if (why)
-        return why;
-    // Where each engine plane starts: the destination's plane plus the picture's offset in it.
-    uint32_t bpp = 4;
-    if (format == TEGRA_NVJPG_OUT_YUY2) {
-        bpp = 2;
-    } else if (tegra_nvjpg_is_yuv(format) || format == TEGRA_NVJPG_OUT_GREY) {
-        bpp = 1;
-    }
-    if (format == TEGRA_NVJPG_OUT_NV12 && ((r->x_offset | r->y_offset) & 1))
-        return "odd offset into 4:2:0";
-    if (format == TEGRA_NVJPG_OUT_YUY2 && (r->x_offset & 1))
-        return "odd offset into 4:2:2";
-    p->planes = p->extent.planes;
-    p->planeStart[0] = d->planeOffset[0] + (uint64_t)r->y_offset * t->pitch[0] + (uint64_t)r->x_offset * bpp;
-    if (format == TEGRA_NVJPG_OUT_NV12)
-        p->planeStart[1] = d->planeOffset[1] + (uint64_t)(r->y_offset / 2) * t->pitch[1] + r->x_offset;
-    for (uint32_t i = 0; i < p->planes; i++) {
-        if (p->planeStart[i] & 0xff)
-            return "a plane does not start on 256 bytes (NVJPG takes address >> 8)";
-    }
-    // Each plane's writes stay off every other plane, and inside the surface plus the sink.
-    for (uint32_t i = 0; i < p->planes; i++) {
-        const uint64_t end = p->planeStart[i] + (uint64_t)(p->extent.rows[i] - 1) * t->pitch[i] + p->extent.rowBytes[i];
-        if (end > p->writeEnd)
-            p->writeEnd = end;
-        for (uint32_t j = 0; j < planes; j++) {
-            if (j == i)
-                continue;
-            const uint64_t start = d->planeOffset[j];
-            const uint64_t stop = start + d->planeBytesPerRow[j] * d->planeHeight[j];
-            if (p->planeStart[i] < stop && end > start)
-                return "writes would run into another plane";
+    // The picture itself must fit in the destination regardless of whether NVJPG writes directly or stages via CE.
+    for (uint32_t i = 0; i < enginePlanes; i++) {
+        uint64_t rows = 0, bytes = 0;
+        tegra_nvjpg_picture_plane(r, format, bpp, i, &rows, &bytes);
+        if (d->planeBytesPerRow[i] < bytes) {
+            *kind = TEGRA_NVJPG_PLAN_BAD;
+            return "stride below the row";
         }
-    }
-    // The picture itself lies inside the surface; only the MCU padding past its last row may reach the sink.
-    for (uint32_t i = 0; i < p->planes; i++) {
-        const uint64_t rows = i && format == TEGRA_NVJPG_OUT_NV12 ? (r->out_height + 1) / 2 : r->out_height;
-        const uint64_t pairs = 2 * (((uint64_t)r->out_width + 1) / 2);
-        uint64_t bytes = (uint64_t)r->out_width * bpp;
-        if (format == TEGRA_NVJPG_OUT_YUY2) {
-            bytes = 2 * pairs;
-        } else if (i && format == TEGRA_NVJPG_OUT_NV12) {
-            bytes = pairs;
-        }
-        if (p->planeStart[i] + (rows - 1) * t->pitch[i] + bytes > d->length) {
+        const uint64_t start = tegra_nvjpg_dst_plane_start(r, d, format, bpp, i);
+        if (start + (rows - 1) * d->planeBytesPerRow[i] + bytes > d->length) {
             *kind = TEGRA_NVJPG_PLAN_BAD;
             return "picture runs past the destination";
         }
     }
-    if (p->writeEnd > d->length + sink)
-        return "MCU padding would run past the destination and its sink";
+    nvjpg_dec_drv_pic_setup_s scratch;
+    memset(&scratch, 0, sizeof(scratch));
+    const char *directWhy = tegra_nvjpg_setup_output(img, t, a->clipped == 0, &scratch, &p->extent);
+    if (!directWhy) {
+        p->planes = p->extent.planes;
+        for (uint32_t i = 0; i < p->planes; i++)
+            p->planeStart[i] = tegra_nvjpg_dst_plane_start(r, d, format, bpp, i);
+        for (uint32_t i = 0; i < p->planes; i++) {
+            if (p->planeStart[i] & 0xff) {
+                directWhy = "a plane does not start on 256 bytes (NVJPG takes address >> 8)";
+                break;
+            }
+        }
+    }
+    if (!directWhy) {
+        for (uint32_t i = 0; i < p->planes; i++) {
+            const uint64_t end =
+                p->planeStart[i] + (uint64_t)(p->extent.rows[i] - 1) * t->pitch[i] + p->extent.rowBytes[i];
+            if (end > p->writeEnd)
+                p->writeEnd = end;
+            for (uint32_t j = 0; j < planes; j++) {
+                if (j == i)
+                    continue;
+                const uint64_t start = d->planeOffset[j];
+                const uint64_t stop = start + d->planeBytesPerRow[j] * d->planeHeight[j];
+                if (p->planeStart[i] < stop && end > start) {
+                    directWhy = "writes would run into another plane";
+                    break;
+                }
+            }
+            if (directWhy)
+                break;
+        }
+    }
+    if (!directWhy && p->writeEnd > d->length + sink)
+        directWhy = "MCU padding would run past the destination and its sink";
+    if (directWhy) {
+        if (!tegra_nvjpg_plan_stage_ce(r, img, d, a, planes, bpp, p)) {
+            *kind = TEGRA_NVJPG_PLAN_OK;
+            return NULL;
+        }
+        return directWhy;
+    }
     if (format == TEGRA_NVJPG_OUT_GREY) {
         // '420f' from a grey file: the chroma plane is the CPU's, neutral (0x80), over the picture's rows.
         p->fillChroma = 1;
@@ -354,49 +514,6 @@ static inline const char *tegra_nvjpg_plan(const TegraNVJPGDecodeRequest *r, con
             return "chroma fill would run past the destination";
     }
     *kind = TEGRA_NVJPG_PLAN_OK;
-    return NULL;
-}
-
-// Plan `p` (rows) moved onto a destination GM20B laid out block-linear (tegra_gm20b_surface_layout): `rowBytes` a row
-// of GOBs, 2^`yLog2` GOBs a block, blocks row by row. The picture's offset must fall on a block: x on a GOB's 64 bytes,
-// y on a block's rows. The engine may touch every block of the block rows its rows reach. NULL with `p` and the setup's
-// output stride and tiling rewritten, or why the decode cannot write those blocks.
-static inline const char *tegra_nvjpg_plan_block_linear(const TegraNVJPGDecodeRequest *r, uint64_t length,
-                                                        uint64_t sink, uint32_t rowBytes, uint32_t yLog2,
-                                                        TegraNVJPGPlan *p, nvjpg_dec_drv_pic_setup_s *s)
-{
-    if (p->planes != 1 || p->fillChroma || yLog2 > 5)
-        return "block-linear destination of more than one plane, or blocks over 32 GOBs";
-    uint32_t bpp = 4;
-    if (p->target.format == TEGRA_NVJPG_OUT_YUY2) {
-        bpp = 2;
-    } else if (p->target.format == TEGRA_NVJPG_OUT_GREY) {
-        bpp = 1;
-    }
-    const uint64_t blockRows = 8ull << yLog2;
-    const uint64_t blockBytes = 512ull << yLog2;
-    const uint64_t blockRowBytes = (uint64_t)rowBytes * blockRows;
-    const uint64_t x = (uint64_t)r->x_offset * bpp;
-    if (!rowBytes || (rowBytes & 63))
-        return "block-linear row not a whole number of GOBs";
-    if ((x & 63) || r->y_offset % blockRows)
-        return "picture offset off the destination's blocks";
-    if (x + p->extent.rowBytes[0] > rowBytes)
-        return "picture wider than the destination's blocks";
-    const uint64_t firstBlockRow = r->y_offset / blockRows;
-    const uint64_t pictureEnd = (firstBlockRow + (r->out_height + blockRows - 1) / blockRows) * blockRowBytes;
-    if (pictureEnd > length)
-        return "picture runs past the destination's blocks";
-    p->target.pitch[0] = rowBytes;
-    p->target.blockLinear = 1;
-    p->target.blockHeightLog2 = yLog2;
-    p->planeStart[0] = firstBlockRow * blockRowBytes + (x / 64) * blockBytes;
-    p->writeEnd = (firstBlockRow + (p->extent.rows[0] + blockRows - 1) / blockRows) * blockRowBytes;
-    if (p->writeEnd > length + sink)
-        return "MCU padding would run past the destination's blocks and its sink";
-    s->output_stride_luma = (int)rowBytes;
-    s->tile_mode = TEGRA_NVJPG_TILE_TEGRA_BLOCK_LINEAR;
-    s->block_linear_height = (int)yLog2;
     return NULL;
 }
 

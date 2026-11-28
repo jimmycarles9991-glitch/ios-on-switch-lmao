@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestX1
 import Metal
 
 extension X1TwodProbes {

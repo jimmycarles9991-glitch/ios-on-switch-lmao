@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Draws Metal's validation stops fail their command buffer on the driver with the driver's own reason: a

@@ -249,9 +249,10 @@ bool Device::hostAccess(const Buffer &buffer, const void *cpu, uint64_t bytes, b
 {
     if (!hostRangeContains(buffer.cpu, buffer.length, cpu, bytes))
         return false;
-    // WC + VOL=1 bypasses both CPU D-cache and GPU L2; taking a kernel CPU lease would evict the volatile chunk from
-    // ResourceSet, stall on host1x-bridge, and bump host_epoch.
-    if (buffer.wc && buffer.gpuVolatile)
+    // A write-combined chunk's buffer: its memory holds no CPU line, and the GPU's side is the job's (a host-written use
+    // drops the L2's lines first, a write ends External). A kernel CPU lease would sleep on the chunk's GPU work, take it
+    // out of the resource set and bump host_epoch. A heap's arena buffer keeps its lease (hostArenaAccess).
+    if (buffer.wc && (buffer.gpuVolatile || !buffer.span.storage))
         return true;
     if (buffer.span.storage)
         return hostArenaAccess(*buffer.span.storage, cpu, bytes, write, access);

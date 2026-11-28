@@ -61,13 +61,35 @@ TEST(CompilerRefusals, ARefusalIsThisBuildsAtItsCompileAndTheWarmUpMakesAnotherB
     const std::string service = switch_ios::test::SourceText("../compiler/compiler_service.mm");
     const std::string warm = switch_ios::test::Body(service, "void Service::warm(uint64_t stack)");
     EXPECT_THAT(warm, HasSubstr("stored == TegraGM20BCompileRefused && !confirmed.confirmed(name)"));
-    EXPECT_THAT(warm, HasSubstr("if (unconfirmed)\n                store_.retire(name);"));
+    EXPECT_THAT(warm, HasSubstr("if (unconfirmed)\n                store_.retire(name, prepared.content);"));
     EXPECT_THAT(warm, testing::Not(HasSubstr("confirm(name)")));
     const std::string kept = switch_ios::test::Body(service, "void Service::remember(const Asked &asked, int32_t ran)");
     EXPECT_THAT(kept,
                 HasSubstr("if (result == TegraGM20BCompileRefused)\n        refusals_->confirm(asked.prepared.name);"));
     EXPECT_THAT(kept, HasSubstr("(result == TegraGM20BCompileMade || result == TegraGM20BCompileRefused) && "
                                 "!asked.request.empty()"));
+    EXPECT_THAT(kept, HasSubstr("asked.prepared.request.kind != gm20b::RequestKind::Library"));
+    EXPECT_THAT(warm, HasSubstr("prepared.request.kind == gm20b::RequestKind::Library"));
+}
+
+// A compile's result keeps a made entry of its content already stored (compiler_store.h Store::put's `keep`), and a
+// full form's record is filed as its plain content's at its compile, at a worker's store hit, and from the taking
+// thread's hit through a job (filedAsPlain): no plain record stays over a full one, nor goes back over it
+TEST(CompilerRefusals, AFullFormIsFiledAsItsPlainContentsRecordAndNoPlainCompileUndoesIt)
+{
+    const std::string service = switch_ios::test::SourceText("../compiler/compiler_service.mm");
+    const std::string publish = switch_ios::test::Body(service, "bool Service::publish(");
+    EXPECT_THAT(publish, HasSubstr("return keepMade && storedResult(held, key) == TegraGM20BCompileMade;"));
+    const std::string run = switch_ios::test::Body(service, "int32_t Service::run(Work &work)");
+    EXPECT_THAT(run, HasSubstr("publish(&p.name, p.content, entry, result == TegraGM20BCompileMade, true, why)"));
+    EXPECT_THAT(run, HasSubstr("if (gm20b::fullForm(p.request.form) && place.stored == TegraGM20BCompileMade)\n"
+                               "            filedAsPlain(p, place.bytes, true);"));
+    EXPECT_THAT(run, HasSubstr("if (result == TegraGM20BCompileMade && gm20b::fullForm(p.request.form))\n"
+                               "        filedAsPlain(p, entry, true);"));
+    const std::string submit = switch_ios::test::Body(service, "bool Service::submit(");
+    EXPECT_THAT(submit, HasSubstr("filedAsPlain(prepared, place.bytes, false)"));
+    const std::string filed = switch_ios::test::Body(service, "bool Service::filedAsPlain(");
+    EXPECT_THAT(filed, HasSubstr("return publish(&primary, p.primaryContent, filed, false, false, ignored);"));
 }
 
 // The request log and the refusal list are written once the compile's waiters have their answer, never between the

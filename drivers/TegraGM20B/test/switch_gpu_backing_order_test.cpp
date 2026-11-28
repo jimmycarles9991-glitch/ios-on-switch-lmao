@@ -139,6 +139,59 @@ TEST_F(Backing, TwoChannelsJobsOnOneBackingGoOneAfterTheOther)
 	switch_gpu_backing_release(b);
 }
 
+TEST_F(Backing, TwoJobsOnDisjointBackingsRunConcurrently)
+{
+	auto *a = drawn(3), *b = drawn(4);
+	std::promise<void> begun, release;
+	std::thread holder([&] {
+		switch_gpu_backing_use use = {a, kWrite | kBeside, 0};
+		switch_gpu_backing_transaction transaction = {};
+		const auto completion = token(5, 1);
+		ASSERT_EQ(switch_gpu_backing_begin_held(&use, 1, nullptr, 0, nullptr, 0,
+							&completion, &transaction),
+			  0);
+		begun.set_value();
+		release.get_future().wait();
+		switch_gpu_backing_commit(&transaction);
+	});
+	begun.get_future().wait();
+	auto other = std::async(std::launch::async, [&] {
+		job(b, kWrite, token(6, 1));
+	});
+	EXPECT_TRUE(finishes(other, std::chrono::seconds(1)))
+		<< "a job on a disjoint backing blocked behind an unrelated transaction";
+	release.set_value();
+	holder.join();
+	switch_gpu_backing_release(a);
+	switch_gpu_backing_release(b);
+}
+
+TEST_F(Backing, MultiBackingBeginsInOppositeOrdersNeverDeadlock)
+{
+	auto *a = drawn(3), *b = drawn(4);
+	std::atomic<uint32_t> seqA{1}, seqB{1};
+	auto run = [&](switch_gpu_backing *first, switch_gpu_backing *second, uint32_t queue,
+		       std::atomic<uint32_t> &seq) {
+		for (int i = 0; i < 200; ++i) {
+			switch_gpu_backing_use uses[2] = {{first, kRead | kBeside, 0},
+							  {second, kWrite | kBeside, 0}};
+			switch_gpu_backing_transaction transaction = {};
+			const auto completion = token(queue, seq.fetch_add(1));
+			ASSERT_EQ(switch_gpu_backing_begin_held(uses, 2, nullptr, 0, nullptr, 0,
+								&completion, &transaction),
+				  0);
+			switch_gpu_backing_publish(&transaction);
+			switch_gpu_backing_finish(&transaction);
+		}
+	};
+	std::thread t1(run, a, b, 5u, std::ref(seqA));
+	std::thread t2(run, b, a, 6u, std::ref(seqB));
+	t1.join();
+	t2.join();
+	switch_gpu_backing_release(a);
+	switch_gpu_backing_release(b);
+}
+
 TEST_F(Backing, ACpuLocksCachePassHoldsAJobOnItsBackingButNoOther)
 {
 	auto *a = drawn(3), *b = drawn(4);

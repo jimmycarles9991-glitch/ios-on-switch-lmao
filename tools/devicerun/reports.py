@@ -162,6 +162,13 @@ def headline(groups: list[tuple[str, list[Result]]]) -> str:
     return 'HW Test reds from failed command buffers: ' + ('; '.join(parts) or 'no HW Test lines') + '\n'
 
 
+def blocking(groups: list[tuple[str, list[Result]]]) -> str:
+    """Return the failed checks that keep the build from counting as good, for the table's top."""
+    failed = [r for _, results in groups for r in results if r.check.blocks and r.verdict == FAIL]
+    parts = [f'{r.check.name}: {r.observed}' for r in failed]
+    return 'Blocks the build: ' + ('; '.join(parts) or 'nothing') + '\n'
+
+
 def ips_header(path: Path) -> tuple[str, str]:
     """Return (bug_type, process) from an .ips file's two JSON parts."""
     with path.open(errors='replace') as f:

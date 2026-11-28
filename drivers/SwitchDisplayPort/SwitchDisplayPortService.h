@@ -5,6 +5,7 @@
 #ifndef SWITCH_DISPLAY_PORT_SERVICE_H
 #define SWITCH_DISPLAY_PORT_SERVICE_H
 
+#include <IOKit/IOFilterInterruptEventSource.h>
 #include <IOKit/IOInterruptEventSource.h>
 #include <IOKit/IOCommandGate.h>
 #include <IOKit/IOService.h>
@@ -69,8 +70,11 @@ private:
 
     IOWorkLoop *loop = nullptr;
     IOCommandGate *gate = nullptr;
-    IOInterruptEventSource *auxSource = nullptr, *dcSource = nullptr;
+    IOInterruptEventSource *auxSource = nullptr;
+    IOFilterInterruptEventSource *dcSource = nullptr;
     IOTimerEventSource *auxTimer = nullptr, *stepTimer = nullptr, *cecTimer = nullptr;
+    uint32_t dcFeTaken = 0, dcFeHandled = 0;
+    uint64_t dcFeTime = 0, dcFeContinuous = 0;
     TegraDpaux1 aux;
     TegraSor1 sor;
     TegraDisplayB dcb;
@@ -109,6 +113,7 @@ private:
     bool cecReleasePending = false, cecRestartPending = false;
 
     static void auxInterrupt(OSObject *owner, IOInterruptEventSource *, int);
+    static bool dcFilter(OSObject *owner, IOFilterInterruptEventSource *source);
     static void dcInterrupt(OSObject *owner, IOInterruptEventSource *, int);
     static void auxTimerFired(OSObject *owner, IOTimerEventSource *);
     static void stepTimerFired(OSObject *owner, IOTimerEventSource *);

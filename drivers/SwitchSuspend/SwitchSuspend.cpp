@@ -48,6 +48,7 @@ void arm_gic_suspend(void);
 void arm_gic_resume(void);
 void tegra_i2c_suspend(void);
 void tegra_i2c_resume(void);
+void tegra_apbdma_resume(void);
 void switch_rtc_sleep_enable(void);
 int switch_rtc_resume(void);  // 1 when ALARM1 is what woke the console
 void switch_pmic_sleep_report(char *line, size_t size);
@@ -494,6 +495,7 @@ void SwitchSuspend::wakeDevices()
         switch_sleep_trail(SWITCH_STEP_WAKE_I2C);
         const uint64_t at = mach_absolute_time();
         tegra_i2c_resume();
+        tegra_apbdma_resume();
         switch_power_journal("SwitchSuspend: wake i2c: %llu us", switch_ns_since(at) / 1000);
     }
     switch_battery_gauge gaugeAfter = {};

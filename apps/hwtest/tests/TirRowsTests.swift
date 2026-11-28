@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Probe rows of a mixed pass, a one-sample BGRA8 colour beside a four-sample memoryless Depth32Float drawn by a state

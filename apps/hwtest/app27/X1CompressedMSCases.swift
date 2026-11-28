@@ -2,6 +2,7 @@ import Foundation
 import HWTestCore
 import HWTestGPU
 import HWTestKit
+import HWTestShared
 import Metal
 
 /// gpu.x1.ce_compressed's multisampled cases: the copy engine reading the sample grid of a stored 2x or 4x BGRA8 target

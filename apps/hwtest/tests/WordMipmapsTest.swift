@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// generateMipmapsForTexture: of extended-range, sRGB, 16-bit packed and shared-exponent words on the driver, every

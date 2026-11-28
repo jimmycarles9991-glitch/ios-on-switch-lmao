@@ -14,7 +14,7 @@ load("@rules_python//python:py_binary.bzl", "py_binary")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//boot:overlay.bzl", "OVERLAY_BINARIES")
 load(":defs.bzl", "fake_boot_package", "image_inputs", "install_artifacts", "install_spec", "ipsw_pins", "prelink_options", "release_prelink", "release_tree", "test_member")
-load(":translated.bzl", "delta_metadata", "packed_image", "pretranslated_delta", "translated_cryptex")
+load(":translated.bzl", "delta_metadata", "packed_image", "pretranslated_delta", "pretranslated_updates", "translated_cryptex")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -64,7 +64,13 @@ py_binary(
         "--system-cryptex=$(rlocationpath :system_cryptex)",
         "--app-cryptex=$(rlocationpath @ipsw//:app_cryptex)",
         "--boot-package=$(rlocationpath //deploy:boot_package)",
-    ],
+    ] + select({
+        "//ipsw:ios27": [
+            "--pretranslated-trust=$(rlocationpath //ipsw:pretranslated_os_trust)",
+            "--pretranslated-updates=$(rlocationpath :pretranslated_updates)",
+        ],
+        "//conditions:default": [],
+    }),
     data = [
         ":ipsw_pins",
         ":spec",
@@ -72,7 +78,13 @@ py_binary(
         "//deploy:boot_package",
         "@ipsw//:app_cryptex",
         "@ipsw//:os",
-    ],
+    ] + select({
+        "//ipsw:ios27": [
+            ":pretranslated_updates",
+            "//ipsw:pretranslated_os_trust",
+        ],
+        "//conditions:default": [],
+    }),
     main = "//tools/install:sd.py",
     # Not part of `bazel build //...`: building it fetches the 5.2 GB OS image and inflates the 3.3 GB system cryptex.
     # `bazel run //install:sd` builds it on demand.
@@ -241,6 +253,15 @@ image_inputs(
         ],
     ),
 ]]
+
+# iOS 27: the delta's translations of the files the boot package's pinned update list names, for //deploy:sd and
+# //install:sd to place under Data's Switch/pretranslated-updates (tools/deploy/translated_tree.py).
+pretranslated_updates(
+    name = "pretranslated_updates",
+    delta = ":delta_os",
+    pinned = "//ipsw:pretranslated_os_updates",
+    tags = ["manual"],
+)
 
 [translated_cryptex(
     name = "translated_" + role,

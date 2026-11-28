@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 from tools.common import files, hashing
-from tools.install import host, owners as ownership, progress
+from tools.install import cryptex_record, host, owners as ownership, progress
 
 SKIP = ('.fseventsd', '.Spotlight-V100', '.Trashes')
 
@@ -92,7 +92,7 @@ def cryptex_images(
 def stage_cryptexes(
     preboot: Path, spec: dict, images: dict[str, tuple[Path, str]], owners: ownership.Owners | None, log: host.Log
 ) -> None:
-    """Stage the cryptex images (cryptex_images) into Preboot, each checked against its sha256."""
+    """Stage the cryptex images (cryptex_images) into Preboot, each checked against its sha256 and recorded."""
     for item in spec['cryptexes']:
         member = item['member']
         source, want = images[member]
@@ -100,7 +100,12 @@ def stage_cryptexes(
         if Path(relative).name != source.name:
             raise host.HostError('{}: the kernel opens {}, the image is {}'.format(member, item['path'], source))
         target = preboot / relative
-        if target.is_file() and target.stat().st_size == source.stat().st_size and hashing.sha256_file(target) == want:
+        if cryptex_record.read(target) == want or (
+            target.is_file() and target.stat().st_size == source.stat().st_size and hashing.sha256_file(target) == want
+        ):
+            cryptex_record.write(target, want)
+            if owners:
+                owners.set(cryptex_record.path(target), 0, 0, 0o644)
             log(f'preboot: {relative} unchanged')
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -112,10 +117,12 @@ def stage_cryptexes(
             if hashing.sha256_file(partial, progress.advance) != want:
                 raise host.HostError(f'{relative}: copy does not match its sha256')
         target.chmod(0o644)
+        cryptex_record.write(target, want)
         if owners:
             owners.set(preboot, 0, 0, 0o755)
             owners.set(target.parent, 0, 0)
             owners.set(target, 0, 0, 0o644)
+            owners.set(cryptex_record.path(target), 0, 0, 0o644)
         log(f'preboot: {relative} staged ({source.stat().st_size} bytes)')
     host.run('sync')
 

@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Core Animation's states, one per class of the pack's corpus (gpu/CAStateSweep.swift), each drawn by the raw
@@ -10,9 +11,9 @@ import Metal
 /// coarse and wrong fail: a specialised state draws the Mac's picture within one code. Each class's state is also
 /// timed as one full-screen 1280x720 pass (ms720= in states.txt; pass720_* metrics: the median, the costliest and
 /// its label), unless every state is drawn. A state whose command buffer left the driver failed
-/// (failed=, its path in states.txt); one the reference lacks is counted apart (no_golden=: run
+/// (failed=, its path in states.txt); one the reference lacks is counted apart (no_golden=: redraw the reference with
 /// //apps/hwtest:ca_goldens after a harvest), and one whose reference line names no signature fails
-/// (malformed_golden=). The wrong states' PNGs and every verdict land in
+/// (malformed_golden=). A reference drawn on another GPU than CAGoldens.referenceGPU fails the test before any draw. The wrong states' PNGs and every verdict land in
 /// Documents/gpu/gpu.ca.sweep/. HWTEST_SWEEP_ALL=1 in the app's environment draws every corpus state.
 public struct CAStateSweepTest: HWTest {
     public let id = "gpu.ca.sweep"
@@ -35,6 +36,12 @@ public struct CAStateSweepTest: HWTest {
               let goldenText = try? String(contentsOf: goldensURL, encoding: .utf8)
         else { return .fail("ca_states.log or ca_goldens.txt is not in the app's bundle") }
         let goldens = CAGoldens(goldenText)
+        guard goldens.gpu == CAGoldens.referenceGPU else {
+            return .fail(
+                "the reference was drawn on \(goldens.gpu ?? "no named GPU") (\(goldens.header)), not "
+                    + "\(CAGoldens.referenceGPU): another GPU moves a third of the states by a code"
+            )
+        }
         let everyState = ProcessInfo.processInfo.environment["HWTEST_SWEEP_ALL"] == "1"
         let states = CAStateSweep.states(text, everyState: everyState)
         let library = try raw.device.makeLibrary(URL: CAState.library)

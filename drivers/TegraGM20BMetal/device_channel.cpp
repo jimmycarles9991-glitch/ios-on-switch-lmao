@@ -49,11 +49,11 @@ bool Device::waitFence(uint32_t seqno, uint64_t generation)
         if (done(seqno))
             return !lost(seqno);
         if (++refused == kRefusals) {
-            os_log_error(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "gm20b"),
+            os_log_error(gm20b::log(),
                          "SwitchMetal: the kernel refused %u waits on channel %u's seqno %u (%s): taken as killed",
                          refused, ch, seqno, k_.error().c_str());
             {
-                std::lock_guard<gm20b::Mutex> l(killedLock_);
+                std::lock_guard<gm20b::UnfairMutex> l(killedLock_);
                 killedKept_[killedNext_++ % killedKept_.size()] = {st.completed + 1, lastSubmitted(), kWaitRefused};
                 keptThrough_.store(lastSubmitted(), std::memory_order_relaxed);
                 keptKills_.store(true, std::memory_order_release);
@@ -68,7 +68,7 @@ bool Device::waitFence(uint32_t seqno, uint64_t generation)
 // A job the kernel says its own event wait failed, which the fence record no longer names
 void Device::keepFailure(uint32_t seqno)
 {
-    std::lock_guard<gm20b::Mutex> l(killedLock_);
+    std::lock_guard<gm20b::UnfairMutex> l(killedLock_);
     killedKept_[killedNext_++ % killedKept_.size()] = {seqno, seqno, kDependencyFailed};
     const uint32_t through = keptThrough_.load(std::memory_order_relaxed);
     if (!keptKills_.load(std::memory_order_relaxed) || int32_t(seqno - through) > 0)
@@ -82,7 +82,7 @@ std::vector<KillRange> Device::failedSeqnos() const
 {
     std::vector<KillRange> failed;
     {
-        std::lock_guard<gm20b::Mutex> l(killedLock_);
+        std::lock_guard<gm20b::UnfairMutex> l(killedLock_);
         for (const Killed &kept : killedKept_)
             if (kept.error)
                 failed.push_back(kept);
@@ -105,7 +105,7 @@ std::vector<KillRange> Device::failedSeqnos() const
 // A kept record names the seqnos of the slot it was written in, which a channel made in another slot gives out again
 void Device::forgetKept()
 {
-    std::lock_guard<gm20b::Mutex> l(killedLock_);
+    std::lock_guard<gm20b::UnfairMutex> l(killedLock_);
     killedKept_ = {};
     keptThrough_.store(0, std::memory_order_relaxed);
     keptKills_.store(false, std::memory_order_release);
@@ -149,7 +149,7 @@ bool Device::killed(uint32_t seqno) const
     if (!keptKills_.load(std::memory_order_acquire) ||
         int32_t(seqno - keptThrough_.load(std::memory_order_relaxed)) > 0)
         return false;
-    std::lock_guard<gm20b::Mutex> l(killedLock_);
+    std::lock_guard<gm20b::UnfairMutex> l(killedLock_);
     for (const Killed &kept : killedKept_)
         if (covers(kept)) {
             killedError_.store(kept.error, std::memory_order_relaxed);
@@ -222,7 +222,7 @@ bool Device::reopen()
         Killed live = {};
         if (liveKill(live)) {
             k_.markLost(oldChannel, k_.opened());
-            std::lock_guard<gm20b::Mutex> l(killedLock_);
+            std::lock_guard<gm20b::UnfairMutex> l(killedLock_);
             killedKept_[killedNext_++ % killedKept_.size()] = live;
             keptThrough_.store(live.last, std::memory_order_relaxed);
             keptKills_.store(true, std::memory_order_release);
@@ -234,6 +234,9 @@ bool Device::reopen()
         generations_.closed(retiring);
         channel_.store(0, std::memory_order_release);
         fence_.store(&kNoFence, std::memory_order_release);
+        setView_.useCache.clear();
+        progressVa_ = 0;
+        progressSeq_ = 0;
     }
     if (!channelRefusal_.mayAsk(k_))
         return false;
@@ -244,11 +247,14 @@ bool Device::reopen()
                          return !gaveBack;
                      })) {
         channelRefusal_.refused(gaveBack);
-        std::lock_guard<gm20b::Mutex> l(channelLock_);
+        std::lock_guard<gm20b::UnfairMutex> l(channelLock_);
         channelError_ = k_.error();
         return false;
     }
     channelRefusal_.made();
+    progressVa_ = 0;
+    progressSeq_ = 0;
+    k_.channelProgress(channel_.load(std::memory_order_relaxed), progressVa_);
     if (fence_.load(std::memory_order_relaxed) != keptSlot_)
         forgetKept();
     contextless_ = false;
@@ -267,6 +273,8 @@ bool Device::newContext(uint32_t channel, uint32_t &seq)
         for (Backing *b : backings_)
             b->submitted = false;
         heapInvalidated_ = ~0ull;
+        ticInvalidated_ = ~0ull;
+        tscInvalidated_ = ~0ull;
     }
     slmChannel_ = 0;
     memset(rootPush_, 0, sizeof rootPush_);
@@ -274,6 +282,7 @@ bool Device::newContext(uint32_t channel, uint32_t &seq)
     rtLayer_ = ~0u;
     alphaHeld_ = kAlphaControlUnknown;
     sampleMaskHeld_ = kSampleMaskUnknown;
+    clampRangeHeld_ = false;
     const uint32_t words = contextWords() + uint32_t(fx::twodInitWords());
     uint64_t va;
     uint32_t *start = reinterpret_cast<uint32_t *>(alloc(push_, words * 4, 256, va));
@@ -282,11 +291,14 @@ bool Device::newContext(uint32_t channel, uint32_t &seq)
     // The interlock's tickets start at zero with the new context's dispensers (a fresh context: its dispenser values are
     // zero already). Warps of the dead channel may have held tickets, and their lines may sit dirty in the GPU's L2, so the
     // copy engine zeroes the buffer in the new channel's own order, done before the 3D engine runs again.
-    p.inc(CE_OFFSET_IN_UPPER,
-          {uint32_t(zero_.va >> 32), uint32_t(zero_.va), uint32_t(tickets_.va >> 32), uint32_t(tickets_.va)},
-          SUBC_COPY);
-    p.inc(CE_LINE_LENGTH_IN, {uint32_t(tickets_.bytes), 1}, SUBC_COPY);
-    p.m(CE_LAUNCH_DMA, kLaunchPitch, SUBC_COPY);
+    // in copies of the zero page, which is smaller than the buffer
+    for (uint64_t done = 0; done < tickets_.bytes; done += zero_.bytes) {
+        const uint64_t to = tickets_.va + done;
+        p.inc(CE_OFFSET_IN_UPPER, {uint32_t(zero_.va >> 32), uint32_t(zero_.va), uint32_t(to >> 32), uint32_t(to)},
+              SUBC_COPY);
+        p.inc(CE_LINE_LENGTH_IN, {uint32_t(std::min<uint64_t>(zero_.bytes, tickets_.bytes - done)), 1}, SUBC_COPY);
+        p.m(CE_LAUNCH_DMA, kLaunchPitch, SUBC_COPY);
+    }
     p.m(WAIT_FOR_IDLE, 0);
     fx::emitTwodInit(p);
     TegraGM20BAbiPush seg = {va, uint32_t(p.at - start), 0};

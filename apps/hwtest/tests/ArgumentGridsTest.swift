@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Arrays of arrays in an argument buffer (textures, samplers, pointers, constants, three deep, and pointers to

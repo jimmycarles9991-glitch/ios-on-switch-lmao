@@ -24,6 +24,8 @@
 namespace {
 constexpr uint32_t kSetupStride = 1024, kThiMethod0 = 0x40;
 constexpr uint32_t kWaitBoundUs = SwitchNVDECQueue::kSlots * 400000;
+constexpr uint32_t kSubmissionPool = SwitchNVDECQueue::kSlots;
+constexpr uint32_t kNoSetupSlot = UINT32_MAX, kMaxSetupSlots = 32;
 static_assert(uint32_t(SWITCH_NVDEC_READ) == uint32_t(SWITCH_GPU_BACKING_READ) &&
               uint32_t(SWITCH_NVDEC_WRITE) == uint32_t(SWITCH_GPU_BACKING_WRITE));
 IOLock *gLock;
@@ -32,12 +34,113 @@ switch_dma_buffer gSetup;
 uint32_t gSyncpt;
 uint64_t gCompleted;
 bool gSuspended, gFailed;
+uint32_t gQueueWaiters;
+uint32_t gSetupInUse;
+uint32_t gSlotSetup[SwitchNVDECQueue::kSlots];
 
 struct Submission {
     TegraNVDECBlock blocks[TEGRA_NVDEC_MAX_ENTRIES] = {};
     switch_gpu_backing_use uses[TEGRA_NVDEC_MAX_ENTRIES] = {};
     uint32_t *words = nullptr;
     uint32_t useCount = 0;
+    uint32_t setupSlot = kNoSetupSlot;
+};
+
+Submission gSubmissions[kSubmissionPool];
+uint32_t gSubmissionInUse;
+
+Submission *acquireSubmission()
+{
+    uint32_t cur = __atomic_load_n(&gSubmissionInUse, __ATOMIC_ACQUIRE);
+    for (;;) {
+        const uint32_t avail = ~cur & ((1u << kSubmissionPool) - 1u);
+        if (!avail) {
+            auto *work = IONewZero(Submission, 1);
+            if (work)
+                work->setupSlot = kNoSetupSlot;
+            return work;
+        }
+        const uint32_t slot = static_cast<uint32_t>(__builtin_ctz(avail));
+        if (__atomic_compare_exchange_n(&gSubmissionInUse, &cur, cur | (1u << slot), true, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE)) {
+            gSubmissions[slot].words = nullptr;
+            gSubmissions[slot].useCount = 0;
+            gSubmissions[slot].setupSlot = kNoSetupSlot;
+            return &gSubmissions[slot];
+        }
+    }
+}
+
+void releaseSubmission(Submission *work)
+{
+    if (work >= gSubmissions && work < gSubmissions + kSubmissionPool) {
+        const uint32_t slot = static_cast<uint32_t>(work - gSubmissions);
+        __atomic_fetch_and(&gSubmissionInUse, ~(1u << slot), __ATOMIC_RELEASE);
+        return;
+    }
+    IODelete(work, Submission, 1);
+}
+
+uint32_t acquireSetupSlot()
+{
+    const uint64_t total = gSetup.size / kSetupStride;
+    const uint32_t count = static_cast<uint32_t>(total > kMaxSetupSlots ? kMaxSetupSlots : total);
+    if (!count)
+        return kNoSetupSlot;
+    const uint32_t mask = count == 32 ? UINT32_MAX : (1u << count) - 1u;
+    uint32_t cur = __atomic_load_n(&gSetupInUse, __ATOMIC_ACQUIRE);
+    for (;;) {
+        const uint32_t avail = ~cur & mask;
+        if (!avail)
+            return kNoSetupSlot;
+        const uint32_t slot = static_cast<uint32_t>(__builtin_ctz(avail));
+        if (__atomic_compare_exchange_n(&gSetupInUse, &cur, cur | (1u << slot), true, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE))
+            return slot;
+    }
+}
+
+void releaseSetupSlot(uint32_t slot)
+{
+    if (slot < kMaxSetupSlots)
+        __atomic_fetch_and(&gSetupInUse, ~(1u << slot), __ATOMIC_SEQ_CST);
+}
+
+void releaseSetupSlotAndWake(uint32_t slot)
+{
+    if (slot >= kMaxSetupSlots)
+        return;
+    releaseSetupSlot(slot);
+    if (__atomic_load_n(&gQueueWaiters, __ATOMIC_SEQ_CST)) {
+        IOLockLock(gLock);
+        if (__atomic_load_n(&gQueueWaiters, __ATOMIC_RELAXED))
+            IOLockWakeup(gLock, &gQueue.count, false);
+        IOLockUnlock(gLock);
+    }
+}
+
+void writeSetupSlot(uint32_t slot, const TegraNVDECSubmit &submit, bool sync)
+{
+    if (!submit.setup_bytes)
+        return;
+    uint8_t *dst = gSetup.va + static_cast<uint64_t>(slot) * kSetupStride;
+    memcpy(dst, submit.setup, submit.setup_bytes);
+    if (sync)
+        switch_dcache_clean(dst, submit.setup_bytes);
+    else
+        switch_dcache_clean_lines(dst, submit.setup_bytes);
+}
+
+struct QueueWaiterGuard {
+    QueueWaiterGuard()
+    {
+        __atomic_add_fetch(&gQueueWaiters, 1u, __ATOMIC_SEQ_CST);
+    }
+
+    ~QueueWaiterGuard()
+    {
+        __atomic_sub_fetch(&gQueueWaiters, 1u, __ATOMIC_RELAXED);
+    }
 };
 
 bool gCancelling, gRecovered, gRecoveredReady;  // a stalled job's cancellation (TegraNVDECCancel.cpp)
@@ -89,7 +192,8 @@ void renumberLocked()
     gRecovered = false;
     __atomic_store_n(&gCancelling, false, __ATOMIC_RELEASE);
     IOLockWakeup(gLock, &gCancelling, false);
-    IOLockWakeup(gLock, &gQueue.count, false);
+    if (__atomic_load_n(&gQueueWaiters, __ATOMIC_RELAXED))
+        IOLockWakeup(gLock, &gQueue.count, false);
 }
 
 struct Retirement {
@@ -118,16 +222,11 @@ struct Retirement {
 
     static void ended(uint32_t slot, int result)
     {
-        IOLockLock(gLock);
         auto &job = gQueue.jobs[slot];
-        auto *semantics = job.semantics;
-        auto *outcome = job.outcome;
-        const auto completion = job.completion;
         const auto fence = static_cast<uint32_t>(job.sequence);
-        job.semantics = nullptr;
-        job.outcome = nullptr;
+        const auto completion = job.completion;
         job.completion = {};
-        IOLockUnlock(gLock);
+        auto *semantics = __atomic_exchange_n(&job.semantics, nullptr, __ATOMIC_ACQ_REL);
         if (semantics) {
             const int semantic = switch_gpu_event_waits_cached_status(semantics);
             if (semantic < 0)
@@ -136,19 +235,31 @@ struct Retirement {
         }
         if (completion.done)
             completion.done(completion.context, fence, result < 0 ? result : 0);
-        Results::complete(&outcome, result);
+
         IOLockLock(gLock);
+        auto *outcome = job.outcome;
+        job.outcome = nullptr;
         Stages::stages[slot].ended = true;
-        while (gQueue.count && Stages::stages[gQueue.head].ended)
-            gQueue.retire(static_cast<uint32_t>(gQueue.jobs[gQueue.head].sequence));
+        bool retiredAny = false;
+        while (gQueue.count && Stages::stages[gQueue.head].ended) {
+            const uint32_t head = gQueue.head;
+            const uint32_t setupSlot = gSlotSetup[head];
+            gSlotSetup[head] = kNoSetupSlot;
+            gQueue.retire(static_cast<uint32_t>(gQueue.jobs[head].sequence));
+            releaseSetupSlot(setupSlot);
+            retiredAny = true;
+        }
         if (gRecovered && !gQueue.count)
             renumberLocked();
-        if (!gQueue.count)
-            switch_nvdec_power_idle();
+        const bool nowEmpty = !gQueue.count;
         __atomic_store_n(&gCompleted, gQueue.completed, __ATOMIC_RELEASE);
-        IOLockWakeup(gLock, &gQueue.count, false);
-        IOLockWakeup(gLock, &gQueue.completed, false);
+        if (retiredAny && __atomic_load_n(&gQueueWaiters, __ATOMIC_RELAXED))
+            IOLockWakeup(gLock, &gQueue.count, false);
         IOLockUnlock(gLock);
+
+        Results::complete(&outcome, result);
+        if (nowEmpty)
+            switch_nvdec_power_idle();
         switch_gpu_backing_completed();
     }
 };
@@ -159,7 +270,7 @@ void semanticRetired(switch_gpu_event_waits *batch)
     IOLockLock(gLock);
     for (uint32_t i = 0; i < gQueue.count && slot == SwitchNVDECQueue::kSlots; ++i) {
         const uint32_t at = (gQueue.head + i) % SwitchNVDECQueue::kSlots;
-        if (gQueue.jobs[at].semantics == batch)
+        if (__atomic_load_n(&gQueue.jobs[at].semantics, __ATOMIC_ACQUIRE) == batch)
             slot = at;
     }
     IOLockUnlock(gLock);
@@ -178,6 +289,7 @@ int prepare(const TegraNVDECSubmit &submit, TegraNVDECResolve resolve, void *con
         if (entry.kind != TEGRA_NVDEC_ENTRY_RELOC)
             continue;
         auto &block = work.blocks[i];
+        block = {};
         if (!resolve(context, entry.value, &block) || !block.backing || entry.offset > block.size) {
             *why = "relocation outside a buffer";
             return -22;
@@ -197,26 +309,71 @@ int prepare(const TegraNVDECSubmit &submit, TegraNVDECResolve resolve, void *con
         }
         work.uses[work.useCount++] = {work.blocks[i].backing, access, 0};
     }
+    TegraNVDECBlock cleanBlocks[TEGRA_NVDEC_MAX_RANGES] = {};
     for (uint32_t i = 0; i < submit.clean_count; ++i) {
         const auto &range = submit.clean[i];
-        TegraNVDECBlock block = {};
-        if (!resolve(context, range.handle, &block) || !block.backing ||
-            static_cast<uint64_t>(range.offset) + range.length > block.size) {
+        if (!resolve(context, range.handle, &cleanBlocks[i]) || !cleanBlocks[i].backing ||
+            static_cast<uint64_t>(range.offset) + range.length > cleanBlocks[i].size) {
             *why = "clean range";
             return -22;
         }
-        if (!range.length)
-            continue;
-        // The caller already wrote this range. Acquiring it must preserve those dirty CPU lines.
-        constexpr uint32_t access = SWITCH_GPU_BACKING_WRITE | SWITCH_GPU_BACKING_CPU_NO_CACHE;
-        int error = switch_gpu_backing_cpu_acquire(block.backing, range.offset, range.length, access);
-        if (error)
-            return error;
-        error = switch_gpu_backing_cpu_publish(block.backing, range.offset, range.length);
-        const int released = switch_gpu_backing_cpu_release(block.backing, range.offset, range.length, access);
-        if (error || released)
-            return error ? error : released;
     }
+    work.setupSlot = acquireSetupSlot();
+    if (work.setupSlot != kNoSetupSlot)
+        writeSetupSlot(work.setupSlot, submit, false);
+
+    constexpr uint32_t access = SWITCH_GPU_BACKING_WRITE | SWITCH_GPU_BACKING_CPU_NO_CACHE;
+    bool visited[TEGRA_NVDEC_MAX_RANGES] = {};
+    bool synced = false;
+    for (uint32_t i = 0; i < submit.clean_count; ++i) {
+        if (visited[i] || !submit.clean[i].length)
+            continue;
+        switch_gpu_backing *backing = cleanBlocks[i].backing;
+        uint64_t minOff = submit.clean[i].offset;
+        uint64_t maxEnd = minOff + submit.clean[i].length;
+        for (uint32_t j = i + 1; j < submit.clean_count; ++j) {
+            if (visited[j] || !submit.clean[j].length || cleanBlocks[j].backing != backing)
+                continue;
+            const uint64_t start = submit.clean[j].offset;
+            const uint64_t end = start + submit.clean[j].length;
+            if (start < minOff)
+                minOff = start;
+            if (end > maxEnd)
+                maxEnd = end;
+        }
+        int error = switch_gpu_backing_cpu_acquire(backing, minOff, maxEnd - minOff, access);
+        if (error) {
+            releaseSetupSlotAndWake(work.setupSlot);
+            work.setupSlot = kNoSetupSlot;
+            return error;
+        }
+        bool publishedByBacking = false;
+        for (uint32_t j = i; j < submit.clean_count && !error; ++j) {
+            if (visited[j] || !submit.clean[j].length || cleanBlocks[j].backing != backing)
+                continue;
+            visited[j] = true;
+            if (cleanBlocks[j].va) {
+                switch_dcache_clean_lines(cleanBlocks[j].va + submit.clean[j].offset, submit.clean[j].length);
+            } else {
+                error = switch_gpu_backing_cpu_publish(backing, submit.clean[j].offset, submit.clean[j].length);
+                publishedByBacking = true;
+                synced = true;
+            }
+        }
+        if (!error && !publishedByBacking) {
+            // 1-byte publish bumps host_epoch and provides the single DSB SY ordering all cleaned lines and gSetup.
+            error = switch_gpu_backing_cpu_publish(backing, minOff, 1);
+            synced = true;
+        }
+        const int released = switch_gpu_backing_cpu_release(backing, minOff, maxEnd - minOff, access);
+        if (error || released) {
+            releaseSetupSlotAndWake(work.setupSlot);
+            work.setupSlot = kNoSetupSlot;
+            return error ? error : released;
+        }
+    }
+    if (work.setupSlot != kNoSetupSlot && submit.setup_bytes && !synced)
+        switch_dcache_sync();
     return 0;
 }
 
@@ -229,6 +386,26 @@ int publish(const TegraNVDECSubmit &submit, Submission &work, const SwitchNVDECC
     SwitchHost1xDependencies dependencies;
     Results::Reservation outcome;
 
+    struct SetupGuard {
+        uint32_t &slot;
+
+        ~SetupGuard()
+        {
+            if (slot != kNoSetupSlot) {
+                const uint32_t s = slot;
+                slot = kNoSetupSlot;
+                releaseSetupSlotAndWake(s);
+            }
+        }
+
+        uint32_t take()
+        {
+            const uint32_t s = slot;
+            slot = kNoSetupSlot;
+            return s;
+        }
+    } setupGuard{work.setupSlot};
+
     struct Batch {
         switch_gpu_event_waits *value = nullptr;
 
@@ -238,19 +415,49 @@ int publish(const TegraNVDECSubmit &submit, Submission &work, const SwitchNVDECC
         }
     } batch;
 
+    bool setupWritten = work.setupSlot != kNoSetupSlot;
+    if (!setupWritten) {
+        work.setupSlot = acquireSetupSlot();
+        if (work.setupSlot != kNoSetupSlot) {
+            writeSetupSlot(work.setupSlot, submit, true);
+            setupWritten = true;
+        }
+    }
+
     if (const int error = switch_gpu_event_waits_prepare(nullptr, 0, &batch.value))
         return error;
     for (;;) {
         if (const int error = outcome.renew())
             return error;
         IOLockLock(gLock);
-        while ((gSuspended || gQueue.full() || __atomic_load_n(&gCancelling, __ATOMIC_ACQUIRE)) && !gFailed) {
-            *waitedForRoom = true;
+        while (!gFailed) {
+            if (gSuspended || gQueue.full() || __atomic_load_n(&gCancelling, __ATOMIC_ACQUIRE)) {
+                *waitedForRoom = true;
+            } else if (work.setupSlot == kNoSetupSlot) {
+                work.setupSlot = acquireSetupSlot();
+                if (work.setupSlot != kNoSetupSlot)
+                    break;
+            } else {
+                break;
+            }
+            QueueWaiterGuard waiter;
+            if (!gSuspended && !gQueue.full() && !__atomic_load_n(&gCancelling, __ATOMIC_ACQUIRE) &&
+                work.setupSlot == kNoSetupSlot) {
+                work.setupSlot = acquireSetupSlot();
+                if (work.setupSlot != kNoSetupSlot)
+                    break;
+            }
             IOLockSleep(gLock, &gQueue.count, THREAD_UNINT);
         }
         if (gFailed || gQueue.next() == 0) {
             IOLockUnlock(gLock);
             return -19;
+        }
+        if (!setupWritten) {
+            IOLockUnlock(gLock);
+            writeSetupSlot(work.setupSlot, submit, true);
+            setupWritten = true;
+            continue;
         }
         switch_gpu_backing_token token = {};
         if (const int error = Results::prepare(outcome.value, gQueue.next(), gQueue.next(), &token)) {
@@ -355,6 +562,11 @@ int publish(const TegraNVDECSubmit &submit, Submission &work, const SwitchNVDECC
                 return submitted;
             continue;
         }
+        if (const int failed = dependencies.failed()) {
+            switch_gpu_backing_abort(&transaction);
+            IOLockUnlock(gLock);
+            return failed;
+        }
         uint32_t bridgeSyncpoint = 0, bridgeThreshold = 0;
         const bool bridged = dependencies.acquire(&bridgeSyncpoint, &bridgeThreshold);
         const uint32_t waits = (bridged ? 1 : 0) + producers.foreignCount(gSyncpt);
@@ -383,9 +595,7 @@ int publish(const TegraNVDECSubmit &submit, Submission &work, const SwitchNVDECC
             if (producers.foreign(i, gSyncpt))
                 n += tegra_host1x_op_wait_syncpt(work.words + n, producers.tokens[i].queue,
                                                  static_cast<uint32_t>(producers.tokens[i].value));
-        const uint64_t slot = static_cast<uint64_t>(gQueue.tail()) * kSetupStride;
-        memcpy(gSetup.va + slot, submit.setup, submit.setup_bytes);
-        switch_dcache_clean(gSetup.va + slot, submit.setup_bytes);
+        const uint64_t slot = static_cast<uint64_t>(work.setupSlot) * kSetupStride;
         work.words[n++] = tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_NVDEC, 0, 0);
         const auto method = [&](uint32_t offset, uint32_t value) {
             work.words[n++] = tegra_host1x_op_incr(kThiMethod0 / 4, 2);
@@ -409,6 +619,7 @@ int publish(const TegraNVDECSubmit &submit, Submission &work, const SwitchNVDECC
                                             : SwitchNVDECQueue::kSlots;
         const switch_gpu_bridge *bridge = nullptr;
         if (!error) {
+            gSlotSetup[queued] = setupGuard.take();
             gQueue.publish(began, dependencies.takeBridge(), batch.value, outcome.take(), completion);
             if (batch.value)
                 switch_gpu_event_waits_retain(batch.value);
@@ -421,7 +632,6 @@ int publish(const TegraNVDECSubmit &submit, Submission &work, const SwitchNVDECC
             if (const int failed = Stages::start(queued, gSyncpt, *fence, bridge != nullptr, job.semantics != nullptr,
                                                  kWaitBoundUs, producers, ahead, bridgeSyncpoint, bridgeThreshold))
                 Retirement::unarmed(queued, failed);
-            IOLockWakeup(gLock, &gQueue.count, false);
         } else {
             switch_gpu_backing_abort(&transaction);
         }
@@ -440,6 +650,11 @@ bool switch_nvdec_jobs_start(const switch_dma_buffer &setup, uint32_t syncpt, ui
         return false;
     gSetup = setup;
     gSyncpt = syncpt;
+    gQueueWaiters = 0;
+    gSetupInUse = 0;
+    gSubmissionInUse = 0;
+    for (uint32_t &slot : gSlotSetup)
+        slot = kNoSetupSlot;
     gQueue.submitted = gQueue.completed = completed;
     __atomic_store_n(&gCompleted, completed, __ATOMIC_RELEASE);
     const switch_gpu_backing_engine operations = {status, wait, retain, release, 64};
@@ -470,7 +685,7 @@ int run(const TegraNVDECSubmit *submit, TegraNVDECResolve resolve, void *context
         *why = "counts";
         return -22;
     }
-    auto *work = IONewZero(Submission, 1);
+    auto *work = acquireSubmission();
     if (!work)
         return -12;
     int error = prepare(*submit, resolve, context, check, *work, why);
@@ -479,8 +694,11 @@ int run(const TegraNVDECSubmit *submit, TegraNVDECResolve resolve, void *context
     if (!error) {
         error = publish(*submit, *work, completion ? *completion : SwitchNVDECCompletion{}, fence, waitedForRoom);
         switch_nvdec_power_done();
+    } else if (work->setupSlot != kNoSetupSlot) {
+        releaseSetupSlotAndWake(work->setupSlot);
+        work->setupSlot = kNoSetupSlot;
     }
-    IODelete(work, Submission, 1);
+    releaseSubmission(work);
     return error;
 }
 
@@ -552,8 +770,11 @@ bool switch_nvdec_jobs_park(bool drain)
     const bool parked = drain || (!gQueue.count && !__atomic_load_n(&gCancelling, __ATOMIC_ACQUIRE));
     if (parked)
         gSuspended = true;
-    while (parked && gQueue.count)
-        IOLockSleep(gLock, &gQueue.count, THREAD_UNINT);
+    if (parked && gQueue.count) {
+        QueueWaiterGuard waiter;
+        while (gQueue.count)
+            IOLockSleep(gLock, &gQueue.count, THREAD_UNINT);
+    }
     IOLockUnlock(gLock);
     return parked;
 }
@@ -567,8 +788,8 @@ void switch_nvdec_jobs_resume(bool ready, uint32_t completed)
     switch_nvdec_semantics_physical(gQueue.completed);
     __atomic_store_n(&gFailed, !ready, __ATOMIC_RELEASE);
     gSuspended = false;
-    IOLockWakeup(gLock, &gQueue.count, false);
-    IOLockWakeup(gLock, &gQueue.completed, false);
+    if (__atomic_load_n(&gQueueWaiters, __ATOMIC_RELAXED))
+        IOLockWakeup(gLock, &gQueue.count, false);
     IOLockUnlock(gLock);
     switch_gpu_backing_completed();
 }

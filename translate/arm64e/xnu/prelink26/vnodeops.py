@@ -77,7 +77,8 @@ def name(kc, fix, in_kernel, apple_starts, names, ours, oname, oaddr, our_starts
         if len(same) != 1:
             continue
         for desc, function in vector.items():
-            answers.setdefault(function, set()).add(sorted(oaddr[same[0][desc]])[0])
+            if oaddr.get(same[0][desc]):
+                answers.setdefault(function, set()).add(sorted(oaddr[same[0][desc]])[0])
 
     def body_apple(a):
         i = bisect.bisect_right(apple_starts, a)

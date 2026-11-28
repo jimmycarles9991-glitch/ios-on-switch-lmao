@@ -99,12 +99,22 @@ tool_output(
         "$(execpath :ipsw)",
         "--out",
         "{out}",
-    ],
+    ] + select({
+        "//ipsw:ios27": [
+            "--arm64e",
+            "$(execpath //translate/arm64e:arm64e)",
+        ],
+        "//conditions:default": [],
+    }),
     binary = "//tools/install_policy:installd",
     message = "Preparing the selected IPSW's installd policy dependency",
     mnemonic = "InstallPolicy",
     requirements = [
         "requires-darwin",
     ],
+    tools = select({
+        "//ipsw:ios27": ["//translate/arm64e"],
+        "//conditions:default": [],
+    }),
     xcode = False,
 )

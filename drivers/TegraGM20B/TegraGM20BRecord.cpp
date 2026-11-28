@@ -35,30 +35,24 @@ OSDefineMetaClassAndStructors(SwitchGpuSurfaceRecord, OSObject);
 
 namespace
 {
-SwitchGpuSurfaceRecord *copyRecord(IOMemoryDescriptor *memory)
+SwitchGpuSurfaceRecord *borrowRecord(IOMemoryDescriptor *memory)
 {
-	OSObject *object = SwitchMemoryAttachment::copyGpu(memory);
-	auto *record = OSDynamicCast(SwitchGpuSurfaceRecord, object);
-	if (object && !record)
-		object->release();
-	return record;
+	return OSDynamicCast(SwitchGpuSurfaceRecord, SwitchMemoryAttachment::borrowGpu(memory));
 }
 
 // Unretained: the descriptor's own reference keeps the record while the memory lives
 SwitchGpuSurfaceRecord *recordOf(IOMemoryDescriptor *memory)
 {
-	SwitchGpuSurfaceRecord *record = copyRecord(memory);
-	if (!record) {
-		auto *made = OSTypeAlloc(SwitchGpuSurfaceRecord);
-		if (made && !made->init())
-			OSSafeReleaseNULL(made);
-		if (made && !SwitchMemoryAttachment::replaceGpu(memory, nullptr, made))
-			OSSafeReleaseNULL(made);
-		record = made ? made : copyRecord(memory);
-	}
-	if (record)
-		record->release();
-	return record;
+	if (auto *record = borrowRecord(memory))
+		return record;
+	auto *made = OSTypeAlloc(SwitchGpuSurfaceRecord);
+	if (made && !made->init())
+		OSSafeReleaseNULL(made);
+	if (!made)
+		return nullptr;
+	const bool published = SwitchMemoryAttachment::publishGpu(memory, made);
+	made->release();
+	return published ? made : borrowRecord(memory);
 }
 }  // namespace
 
@@ -100,22 +94,19 @@ extern "C" struct tgm_coh *tgm_record_take(struct tgm_record *record)
 extern "C" void tegra_gm20b_surface_engine_rows(OSObject *surface)
 {
 	IOMemoryDescriptor *memory = surface ? tegra_vic_ios_memory(surface) : nullptr;
-	SwitchGpuSurfaceRecord *record = memory ? copyRecord(memory) : nullptr;
+	SwitchGpuSurfaceRecord *record = memory ? borrowRecord(memory) : nullptr;
 	if (!record)
 		return;
 	tgm_coherency_engine_rows(reinterpret_cast<tgm_record *>(record));
-	record->release();
 }
 
 extern "C" int tgm_record_is_surface(const struct tgm_record *record, uint32_t id)
 {
 	OSObject *surface = tgm_surface_lookup(id, current_task());
 	IOMemoryDescriptor *memory = surface ? tegra_vic_ios_memory(surface) : nullptr;
-	SwitchGpuSurfaceRecord *found = memory ? copyRecord(memory) : nullptr;
+	SwitchGpuSurfaceRecord *found = memory ? borrowRecord(memory) : nullptr;
 	const int same = static_cast<int>(found != nullptr &&
 					  reinterpret_cast<const tgm_record *>(found) == record);
-	if (found)
-		found->release();
 	if (surface)
 		surface->release();
 	return same;

@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #include <gtest/gtest.h>
+#include <atomic>
+#include <condition_variable>
 #include <functional>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 #include "../SwitchEngineGate.h"
 
@@ -20,6 +24,7 @@ struct Model {
     {
         EXPECT_FALSE(locked);
         locked = true;
+        locks++;
     }
 
     void unlock()
@@ -42,11 +47,12 @@ struct Model {
     void arm(uint32_t ms)
     {
         armedMs = ms;
+        arms++;
     }
 
     uint64_t nowUs()
     {
-        return now += 250;
+        return now;
     }
 
     void log(const char *line)
@@ -54,8 +60,14 @@ struct Model {
         lines.emplace_back(line);
     }
 
+    void advanceUs(uint64_t deltaUs)
+    {
+        now += deltaUs;
+    }
+
     void fire()
     {
+        now += static_cast<uint64_t>(armedMs) * 1000;
         armedMs = 0;
         fire_(context_);
     }
@@ -63,8 +75,8 @@ struct Model {
     void (*fire_)(void *) = nullptr;
     void *context_ = nullptr;
     bool locked = false;
-    uint32_t armedMs = 0, wakes = 0;
-    uint64_t now = 0;
+    uint32_t armedMs = 0, wakes = 0, locks = 0, arms = 0;
+    uint64_t now = 1000000;
     std::function<void()> meanwhile = [] {};
     std::vector<std::string> lines;
 };
@@ -72,11 +84,15 @@ struct Model {
 struct Engine {
     int onResult = 0, offResult = SWITCH_ENGINE_GATE_OFF;
     uint32_t ons = 0, offs = 0, drains = 0;
+    uint64_t *clock = nullptr;
+    std::function<void()> duringOff = [] {};
 
     static int on(void *self)
     {
         auto *e = static_cast<Engine *>(self);
         e->ons++;
+        if (e->clock)
+            *e->clock += 250;
         return e->onResult;
     }
 
@@ -85,6 +101,7 @@ struct Engine {
         auto *e = static_cast<Engine *>(self);
         e->offs++;
         e->drains += drain;
+        e->duringOff();
         return drain ? SWITCH_ENGINE_GATE_OFF : e->offResult;
     }
 };
@@ -95,6 +112,7 @@ struct Fixture {
 
     Fixture()
     {
+        engine.clock = &gate.platform().now;
         EXPECT_TRUE(gate.start({"TegraTest", &engine, Engine::on, Engine::off}));
     }
 
@@ -303,4 +321,188 @@ TEST(SwitchEngineGate, SleepWaitsForAHoldsReleaseBeforeItPowersOff)
     EXPECT_EQ(offsBeforeRelease, 0u);
     EXPECT_EQ(f.engine.drains, 1u);
     EXPECT_FALSE(f.gate.powered());
+}
+
+TEST(SwitchEngineGate, PoweredHotPathTakesNoLockAndDoesNotRearmTimer)
+{
+    Fixture f;
+    const uint32_t locksBefore = f.model().locks;
+    const uint32_t armsBefore = f.model().arms;
+    for (int i = 0; i < 120; ++i) {
+        f.model().advanceUs(16000);
+        ASSERT_EQ(f.gate.use(), 0);
+        f.gate.done();
+        f.gate.idle();
+    }
+    EXPECT_EQ(f.model().locks, locksBefore) << "powered use/done/idle take no power lock";
+    EXPECT_EQ(f.model().arms, armsBefore) << "timer already armed is not re-armed per frame";
+    EXPECT_EQ(f.engine.ons, 0u);
+    EXPECT_EQ(f.engine.offs, 0u);
+    EXPECT_TRUE(f.gate.powered());
+}
+
+TEST(SwitchEngineGate, IdleTimerChecksLastActivityLazilyAndRearmsForRemainingTime)
+{
+    Fixture f;
+    EXPECT_EQ(f.model().armedMs, 500u);
+    const uint32_t armsAtStart = f.model().arms;
+
+    f.model().advanceUs(300000);
+    ASSERT_EQ(f.gate.use(), 0);
+    f.gate.done();
+    EXPECT_EQ(f.model().arms, armsAtStart);
+
+    f.model().advanceUs(200000);
+    f.model().armedMs = 0;
+    f.gate.expire();
+    EXPECT_TRUE(f.gate.powered());
+    EXPECT_EQ(f.engine.offs, 0u);
+    EXPECT_EQ(f.model().armedMs, 300u);
+    EXPECT_EQ(f.model().arms, armsAtStart + 1);
+
+    f.model().fire();
+    EXPECT_FALSE(f.gate.powered());
+    EXPECT_EQ(f.engine.offs, 1u);
+}
+
+TEST(SwitchEngineGate, IdleRacingWithBusyPowerOffArmsFreshTimer)
+{
+    Fixture f;
+    f.engine.offResult = SWITCH_ENGINE_GATE_BUSY;
+    f.engine.duringOff = [&f] {
+        f.gate.idle();
+    };
+    f.model().fire();
+    EXPECT_TRUE(f.gate.powered());
+    EXPECT_EQ(f.model().armedMs, SwitchEngineGate<Model>::kIdleMs);
+    f.engine.duringOff = [] {};
+    f.engine.offResult = SWITCH_ENGINE_GATE_OFF;
+    f.model().fire();
+    EXPECT_FALSE(f.gate.powered());
+}
+
+namespace {
+struct FrozenClockModel : Model {
+    uint64_t fixed = 0;
+
+    uint64_t nowUs()
+    {
+        return fixed;
+    }
+
+    void fireFrozen()
+    {
+        armedMs = 0;
+        fire_(context_);
+    }
+};
+
+struct ThreadedModel {
+    bool start(void (*fire)(void *), void *context)
+    {
+        fire_ = fire;
+        context_ = context;
+        return true;
+    }
+
+    void lock() __attribute__((no_thread_safety_analysis))
+    {
+        mu_.lock();
+    }
+
+    void unlock() __attribute__((no_thread_safety_analysis))
+    {
+        mu_.unlock();
+    }
+
+    void sleep(void *) __attribute__((no_thread_safety_analysis))
+    {
+        std::unique_lock<std::mutex> lk(mu_, std::adopt_lock);
+        cv_.wait(lk);
+        lk.release();
+    }
+
+    void wake(void *)
+    {
+        cv_.notify_all();
+    }
+
+    void arm(uint32_t ms)
+    {
+        armedCount.fetch_add(1, std::memory_order_relaxed);
+        lastArmedMs.store(ms, std::memory_order_relaxed);
+    }
+
+    uint64_t nowUs()
+    {
+        return clockUs.fetch_add(1000, std::memory_order_relaxed);
+    }
+
+    void log(const char *)
+    {}
+
+    void (*fire_)(void *) = nullptr;
+    void *context_ = nullptr;
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::atomic<uint64_t> clockUs{1000000};
+    std::atomic<uint32_t> armedCount{0}, lastArmedMs{0};
+};
+}  // namespace
+
+TEST(SwitchEngineGate, FrozenClockModelsPowerOffWhenExpireRunsDirectly)
+{
+    for (uint64_t fixed : {uint64_t(0), uint64_t(1000000)}) {
+        Engine engine;
+        SwitchEngineGate<FrozenClockModel> gate;
+        gate.platform().fixed = fixed;
+        ASSERT_TRUE(gate.start({"TegraFrozen", &engine, Engine::on, Engine::off}));
+        ASSERT_EQ(gate.use(), 0);
+        gate.done();
+        gate.platform().fireFrozen();
+        EXPECT_FALSE(gate.powered()) << "fixed clock " << fixed;
+        EXPECT_EQ(engine.offs, 1u);
+    }
+}
+
+TEST(SwitchEngineGate, ConcurrentHotPathExpireAndSleepStayConsistent)
+{
+    Engine engine;
+    SwitchEngineGate<ThreadedModel> gate;
+    ASSERT_TRUE(gate.start({"TegraMT", &engine, Engine::on, Engine::off}));
+    std::atomic<bool> stop{false};
+
+    std::vector<std::thread> workers;
+    for (int t = 0; t < 3; ++t) {
+        workers.emplace_back([&] {
+            for (int i = 0; i < 400; ++i) {
+                ASSERT_EQ(gate.use(), 0);
+                gate.done();
+                if ((i & 3) == 0)
+                    gate.idle();
+            }
+        });
+    }
+    std::thread timer([&] {
+        while (!stop.load(std::memory_order_acquire)) {
+            gate.platform().clockUs.fetch_add(600000, std::memory_order_relaxed);
+            gate.expire();
+        }
+    });
+    std::thread sleeper([&] {
+        for (int i = 0; i < 20; ++i) {
+            gate.suspend();
+            gate.resume();
+        }
+    });
+
+    for (auto &w : workers)
+        w.join();
+    sleeper.join();
+    stop.store(true, std::memory_order_release);
+    timer.join();
+
+    gate.platform().clockUs.fetch_add(1000000, std::memory_order_relaxed);
+    gate.expire();
+    EXPECT_FALSE(gate.powered());
 }

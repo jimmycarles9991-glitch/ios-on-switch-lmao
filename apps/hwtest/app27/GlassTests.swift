@@ -1,7 +1,9 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
 import HWTestKit
+import HWTestShared
 import UIKit
 
 /// A Liquid Glass panel (UIGlassEffect, regular) across the middle of vertical stripes and of flat grey. Outside it the
@@ -22,9 +24,9 @@ struct UIGlassTest: HWTest {
     static let reference = (columnSpread: 8, contrast: 29, greySpread: 8)
 
     func run(_ context: TestContext) async throws -> Outcome {
-        GlassProbe.post("split-capture")
+        DriverSwitch.post("split-capture")
         let (outside, inside) = await Self.snapshot(context)
-        GlassProbe.post("split-capture-off")
+        DriverSwitch.post("split-capture-off")
         var metrics = Metrics()
         metrics.set("reference", "\(Self.reference.columnSpread)/\(Self.reference.contrast)")
         var reasons: [String] = []
@@ -112,20 +114,17 @@ struct UIGlassMotionTest: HWTest {
         var black: [Int] = []
         var blackAt: [Int] = []
         var darkest: Float = 3
-        var encodings = ""
-        var blackSignature: String?
         var saved: [String] = []
         var previous: Raster?
         var saveNext = false
         let started = Date()
         let directory = context.documents.appendingPathComponent("ui").appendingPathComponent(id)
         for frame in 0 ..< Self.frames {
-            let (composited, recording) = await MainActor.run { () -> (Raster, GlassRecording) in
+            let composited = await MainActor.run { () -> Raster in
                 stage.stripes.transform = CGAffineTransform(translationX: CGFloat(frame % 8) * 8, y: 0)
                 stage.glass.transform = CGAffineTransform(translationX: 0, y: CGFloat(frame % 4) * 4)
-                return GlassRecording.around { Snapshots.composited(stage.root) }
+                return Snapshots.composited(stage.root)
             }
-            encodings += recording.encoding
             let level = GlassStage.level(composited)
             darkest = min(darkest, level)
             let isBlack = GlassStage.black(level)
@@ -135,7 +134,6 @@ struct UIGlassMotionTest: HWTest {
             if isBlack {
                 black.append(frame)
                 blackAt.append(Int(Date().timeIntervalSince(started) * 1000))
-                blackSignature = blackSignature ?? recording.signature
                 if let previous, frame > 0, !black.contains(frame - 1) {
                     saved.append(Self.save(previous, "frame-\(frame - 1).png", directory))
                 }
@@ -152,8 +150,6 @@ struct UIGlassMotionTest: HWTest {
         metrics.set("frames", Self.frames)
         metrics.set("first_black", black.first ?? -1)
         metrics.set("black", black.isEmpty ? "-" : black.map(String.init).joined(separator: ","))
-        metrics.set("encodings", encodings)
-        metrics.set("black_sig", blackSignature ?? "-")
         metrics.set("black_at_ms", blackAt.isEmpty ? "-" : blackAt.map(String.init).joined(separator: ","))
         metrics.set("frames_ms", Int(Date().timeIntervalSince(started) * 1000))
         metrics.set("darkest", Int((darkest / 3 * 255).rounded()))
@@ -169,11 +165,6 @@ struct UIGlassMotionTest: HWTest {
     }
 }
 
-/// ui.glass_motion's black frames came first after the stage was built: each round here builds a new glass hierarchy,
-/// waits as ui.glass_motion does and composites it once. Black in every round makes the first frame of a new glass layer
-/// the trigger; black in none puts it on what moves. encodings= is each round's encoding (GlassRecording: A regenerated
-/// the backdrop pyramid, B reused it) and sigs= each round's render server command buffers (draws/encoders[Llevels]);
-/// each black round is saved as black-<round>.png (pngs=).
 struct UIGlassFirstFrameTest: HWTest {
     let id = "ui.glass_first"
     let name = "UIGlassEffect's first composited frame, over a newly built hierarchy each round"
@@ -183,15 +174,11 @@ struct UIGlassFirstFrameTest: HWTest {
     func run(_ context: TestContext) async throws -> Outcome {
         var black: [Int] = []
         var darkest: Float = 3
-        var encodings = ""
-        var signatures: [String] = []
         var saved: [String] = []
         let directory = context.documents.appendingPathComponent("ui").appendingPathComponent(id)
         for round in 0 ..< Self.rounds {
             let result = await GlassRound.run(context)
             darkest = min(darkest, result.level)
-            encodings += result.recording.encoding
-            signatures.append(result.recording.signature)
             if result.black {
                 black.append(round)
                 try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -202,9 +189,7 @@ struct UIGlassFirstFrameTest: HWTest {
         metrics.set("black_rounds", black.count)
         metrics.set("rounds", Self.rounds)
         metrics.set("black", black.isEmpty ? "-" : black.map(String.init).joined(separator: ","))
-        metrics.set("encodings", encodings)
         metrics.set("darkest", Int((darkest / 3 * 255).rounded()))
-        metrics.set("sigs", String(signatures.joined(separator: ";").prefix(480)))
         metrics.set("pngs", saved.isEmpty ? "-" : saved.joined(separator: ","))
         return black.isEmpty
             ? .pass(metrics)

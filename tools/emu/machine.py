@@ -20,6 +20,8 @@ class Inputs:
     icount: bool = True
     usb: tuple[str, ...] = ()  # usbdev.DEVICES on the USB-C port
     cache_log: bool = False  # cachecheck.py's log of cache maintenance and xHCI DMA
+    # A data command's card time (patch 0057): latency in us, plus us per KiB moved. 0, 0 completes at once.
+    sd_card_time: tuple[int, int] = (0, 0)
 
 
 def _load(path: str, address: int) -> list[str]:
@@ -77,4 +79,10 @@ def command(run: Path, inputs: Inputs) -> list[str]:
         args += ['-drive', f'if=sd,index=0,format=vmdk,file={inputs.sd},snapshot=on']
     if inputs.cache_log:
         args += ['-global', f'driver=tegra.xusb,property=cache-log,value={run / "cache.bin"}']
+    latency_us, us_per_kib = inputs.sd_card_time
+    if latency_us or us_per_kib:
+        args += [
+            '-global', f'driver=generic-sdhci,property=latency-us,value={latency_us}',
+            '-global', f'driver=generic-sdhci,property=us-per-kib,value={us_per_kib}',
+        ]  # fmt: skip
     return args + usbdev.qemu_args(run, list(inputs.usb))

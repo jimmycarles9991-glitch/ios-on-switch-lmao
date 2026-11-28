@@ -72,18 +72,21 @@ static inline int switch_nvram_chrp_valid(const uint8_t *image, uint32_t bytes)
     return switch_nvram_get32(image + 16) == (high << 16 | low) ? 1 : 0;
 }
 
-// Fills one slot (switch_nvram_store_stride(bytes) bytes at slot) for image.
+// Fills one slot (switch_nvram_store_stride(bytes) bytes at slot) for image; image may alias slot + HEADER.
 static inline void switch_nvram_store_fill(uint8_t *slot, const uint8_t *image, uint32_t bytes, uint64_t sequence)
 {
-    memset(slot, 0, switch_nvram_store_stride(bytes));
+    const uint32_t stride = switch_nvram_store_stride(bytes);
+    memset(slot, 0, SWITCH_NVRAM_STORE_HEADER);
+    if (slot + SWITCH_NVRAM_STORE_HEADER != image)
+        memcpy(slot + SWITCH_NVRAM_STORE_HEADER, image, bytes);
+    memset(slot + SWITCH_NVRAM_STORE_HEADER + bytes, 0, stride - SWITCH_NVRAM_STORE_HEADER - bytes);
     memcpy(slot, switch_nvram_store_magic, sizeof(switch_nvram_store_magic));
     switch_nvram_put32(slot + 8, SWITCH_NVRAM_STORE_VERSION);
     switch_nvram_put32(slot + 12, bytes);
     switch_nvram_put32(slot + 16, (uint32_t)sequence);
     switch_nvram_put32(slot + 20, (uint32_t)(sequence >> 32));
-    memcpy(slot + SWITCH_NVRAM_STORE_HEADER, image, bytes);
     const uint32_t crc = switch_crc32(0, slot, 28);
-    switch_nvram_put32(slot + 28, switch_crc32(crc, image, bytes));
+    switch_nvram_put32(slot + 28, switch_crc32(crc, slot + SWITCH_NVRAM_STORE_HEADER, bytes));
 }
 
 // The image in slot n of the file's first length bytes, if that slot checks out for a bank of bytes; else NULL.

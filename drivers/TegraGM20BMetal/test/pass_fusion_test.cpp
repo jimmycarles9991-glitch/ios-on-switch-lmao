@@ -169,6 +169,25 @@ TEST(AttachmentLifetime, EverySimultaneousScratchMaskHasDisjointStorage)
     }
 }
 
+// A pass the driver makes (a resolve, a YCbCr or planar target's store passes, a turn copy) takes none of Metal's pass's
+// transient colour tags: backings of one tag share memory, and its pool-image targets' copy-in would land in a memoryless
+// backing of that pass a later one of them reads
+TEST(AttachmentLifetime, ADriverPassesScratchTagsAreNoMetalPassesTags)
+{
+    for (unsigned reader = 1; reader < 256; ++reader) {
+        std::set<uint32_t> read;
+        for (const auto tag : gm20b::transientColorTags(uint8_t(reader), gm20b::kDriverPassColorTag))
+            if (tag) {
+                ASSERT_GE(tag, gm20b::kDriverPassColorTag);
+                ASSERT_LT(tag, gm20b::kDriverPassColorTag + 8);
+                read.insert(tag);
+            }
+        for (unsigned pass = 1; pass < 256; ++pass)
+            for (const auto tag : gm20b::transientColorTags(uint8_t(pass)))
+                ASSERT_EQ(read.count(tag), 0u) << reader << " " << pass;
+    }
+}
+
 TEST(AttachmentLifetime, DisjointPassesUsePeakLiveStorageAcrossAllSlotPermutations)
 {
     for (unsigned first = 0; first < 256; ++first)

@@ -123,6 +123,13 @@ bool Device::privateCompressed(const Texture &t)
     return it != privateComp_.end() && t.comptags;
 }
 
+uint32_t Device::privateKind(const Texture &t)
+{
+    std::lock_guard<gm20b::Mutex> l(lock_);
+    const auto it = privateComp_.find(&t);
+    return it != privateComp_.end() && t.comptags ? it->second.kind : 0;
+}
+
 void Device::noteView(const Texture &of, Texture &view)
 {
     if (of.comptags)
@@ -360,6 +367,8 @@ bool Device::compressedFromPlain(Texture &t)
         privateComp_[&t] = {bo, kind};
     }
     movedPlain_.push_back(std::move(moved));
+    SWITCH_METAL_DIAGNOSTIC(stats.compressedMoves++);
+    SWITCH_METAL_DIAGNOSTIC(stats.compressedMoveBytes += bytes);
     const uint64_t from = t.va;
     t.va = bo.va;
     t.cpu = nullptr;
@@ -374,14 +383,8 @@ bool Device::compressedFromPlain(Texture &t)
         v->storage = t.storageRange();
         v->comptags = true;
     }
+    noteTicWrite();
     SWITCH_METAL_DIAGNOSTIC(stats.privateCompressedMoves++);
-#if SWITCH_METAL_DIAGNOSTICS
-    if (glassMem)
-        for (const uint32_t tic : movedPlain_.back().tics)
-            glassMem->rewriting(tic, true);
-    os_log(OS_LOG_DEFAULT, "SwitchMetal: private %ux%u f%u moved to compressed memory kind 0x%x (%llu KiB)", t.width,
-           t.height, t.format, kind, (unsigned long long)(bo.bytes >> 10));
-#endif
     return true;
 }
 
@@ -397,20 +400,17 @@ void Device::freeMovedPlain()
             continue;
         }
         // its job was on a channel since lost, which may have stopped before it: none of that channel's work runs now
-        if (lost)
+        if (lost) {
             for (size_t i = 0; i < it->tics.size(); i++)
                 memcpy(tic_.cpu + 32 * it->tics[i], it->headers.cpu + 32 * i, 32);
+            noteTicWrite();
+        }
         Lease *none = nullptr;
         if (it->zeta < kZetaFormats)
             tiledFree(zChunks_[it->zeta], it->span, deferred);
         else
             freeSpan(l, it->span, Memory::Bl, none, deferred);
         freeSpan(l, it->headers.span, memoryOf(it->headers), it->headers.lease, deferred);
-#if SWITCH_METAL_DIAGNOSTICS
-        if (glassMem)
-            for (const uint32_t tic : it->tics)
-                glassMem->rewriting(tic, false);
-#endif
         it = movedPlain_.erase(it);
     }
 }

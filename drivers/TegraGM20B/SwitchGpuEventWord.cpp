@@ -102,7 +102,7 @@ int switch_gpu_event_signal_release(switch_gpu_event_signal *signal, switch_gpu_
 			   payload && offset < TegraGM20BEventReleaseLimit &&
 			   payload > word->last && payload > word->poisoned;
 	if (valid) {
-		__atomic_add_fetch(&word->pending, 1u, __ATOMIC_RELAXED);
+		__atomic_store_n(&word->pending, word->pending + 1u, __ATOMIC_RELAXED);
 		signal->wordPrevious = word->last;
 		word->last = payload;
 		switch_gpu_event_word_retain(word);
@@ -140,7 +140,7 @@ int switch_gpu_event_word_result_locked(const switch_gpu_event_signal *signal)
 void switch_gpu_event_word_settle_locked(switch_gpu_event_signal *signal, int result, bool released)
 {
 	auto *word = signal->word;
-	__atomic_sub_fetch(&word->pending, 1u, __ATOMIC_RELEASE);
+	__atomic_store_n(&word->pending, word->pending - 1u, __ATOMIC_RELEASE);
 	switch_gpu_event_stats_settled(released);
 	if (released || wordValue(word) >= signal->payload)
 		return;
@@ -153,7 +153,7 @@ void switch_gpu_event_word_settle_locked(switch_gpu_event_signal *signal, int re
 void switch_gpu_event_word_aborted_locked(switch_gpu_event_signal *signal)
 {
 	auto *word = signal->word;
-	__atomic_sub_fetch(&word->pending, 1u, __ATOMIC_RELEASE);
+	__atomic_store_n(&word->pending, word->pending - 1u, __ATOMIC_RELEASE);
 	if (signal->wordPrevious < word->last)
 		word->last = signal->wordPrevious;
 }

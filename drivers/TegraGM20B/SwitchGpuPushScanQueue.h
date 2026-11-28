@@ -20,6 +20,7 @@ template <uint32_t Records, uint32_t Pushes> struct SwitchGpuPushScanQueue {
 		char owner[17];
 		bool metalMacros, compositor;
 		uint32_t count;
+		uint32_t submits;  // the submissions its read stands for (tgm_scan::scanWeight)
 		// its channel's fence word (an offset in the fence pool), that page's owner then, and its last seqno
 		uint32_t fence, fenceOwner, seqno;
 		switch_gpu_scan_words push[Pushes];

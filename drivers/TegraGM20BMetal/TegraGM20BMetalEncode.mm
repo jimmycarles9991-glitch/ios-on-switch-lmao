@@ -80,6 +80,7 @@ __attribute__((objc_externally_retained)) bool SwitchMetalRangeEncode::open(Swit
     ahead_ = !whole;
     abandoned_ = false;
     veto_ = 0;
+    namedBytesChunk_ = UINT32_MAX;
     sampledShadows_ = whole && cb->_sampledShadows;
     standIns_ = whole && cb->_standIns;
     gm20b::Device &d = *d_;
@@ -104,6 +105,9 @@ __attribute__((objc_externally_retained)) bool SwitchMetalRangeEncode::open(Swit
 #endif
     if (whole && !producersOrdered())
         return false;
+    // before any write the encode makes (first contents, conversions), which must mark a carried region stale
+    if (whole && from)
+        rc_->resumeZcull((__bridge const void *)cb, from);
     if (whole)
         firstContents_.emplace(cb, from, to, *rc_);
     else
@@ -140,6 +144,7 @@ __attribute__((objc_externally_retained)) bool SwitchMetalRangeEncode::open(Swit
 bool SwitchMetalRangeEncode::resources(size_t from, size_t to)
 {
     gm20b::CommandBuffer *rc = rc_;
+    rc->namingResources(true);
     const auto buffers = [&](auto visit) {
         cb_->_plan.forEachResource(from, to, SwitchMetalResourceKind::Buffer, visit);
     };
@@ -151,10 +156,20 @@ bool SwitchMetalRangeEncode::resources(size_t from, size_t to)
             rc->requirePitch(buffer->_raw.import, use.access & gm20b::ResourceUse::Write);
     };
     buffers(pitchBuffer);
+    bool hasNativePlaneWrite = false;
     textures([&](const SwitchMetalRangeResource &use) {
         pitchBuffer(use);
         __unsafe_unretained SwitchMetalTexture *texture = (__bridge SwitchMetalTexture *)use.object;
         const bool writes = use.access & gm20b::ResourceUse::Write;
+        const bool eligibleNativeWrite =
+            writes && !(use.access & gm20b::ResourceUse::Explicit) && !(use.access & gm20b::ResourceUse::Sample) &&
+            texture->_raw.nativePlane != ~0u && texture->_raw.import && !texture->_raw.planar && !texture->_raw.ycbcr &&
+            !texture->_raw.standIn && !texture->_raw.rotation && !texture->_raw.luma && !texture->_raw.chroma &&
+            texture->_raw.type == gm20b::fx::kTexTwoD;
+        if (eligibleNativeWrite) {
+            hasNativePlaneWrite = true;
+            return;
+        }
         if (writes || (use.access & gm20b::ResourceUse::Explicit) || !(use.access & gm20b::ResourceUse::Sample)) {
             rc->requirePitch(texture->_raw.import, writes);
             for (const gm20b::Texture *plane : {texture->_raw.luma, texture->_raw.chroma})
@@ -162,6 +177,39 @@ bool SwitchMetalRangeEncode::resources(size_t from, size_t to)
                     rc->requirePitch(plane->import, writes);
         }
     });
+    if (hasNativePlaneWrite) {
+        for (size_t at = from; at < to; ++at) {
+            const Cmd c = cb_->_plan.legacy(at);
+            if (c.op == OpBlit || c.op == OpCompute) {
+                const size_t end = std::min(cb_->_plan.encoderEnd(at), to);
+                cb_->_plan.forEachResource(
+                    at, end, SwitchMetalResourceKind::Texture, [&](const SwitchMetalRangeResource &use) {
+                        __unsafe_unretained SwitchMetalTexture *texture = (__bridge SwitchMetalTexture *)use.object;
+                        if (texture->_raw.nativePlane != ~0u)
+                            rc->requirePitch(texture->_raw.import, use.access & gm20b::ResourceUse::Write);
+                    });
+            } else if (c.op == OpRender) {
+                const SwitchMetalPass &pass = cb_->_passes[c.x];
+                for (const SwitchMetalPass::Color &a : pass.color) {
+                    if (__unsafe_unretained SwitchMetalTexture *t = (SwitchMetalTexture *)a.texture;
+                        t && t->_raw.nativePlane != ~0u &&
+                        (a.level || a.slice || pass.layers > 1 || a.resolve || t->_raw.planarStandIn ||
+                         t->_raw.planar || t->_raw.ycbcr || t->_raw.standIn || t->_raw.rotation))
+                        rc->requirePitch(t->_raw.import, true);
+                    if (__unsafe_unretained SwitchMetalTexture *r = (SwitchMetalTexture *)a.resolve;
+                        r && r->_raw.nativePlane != ~0u)
+                        rc->requirePitch(r->_raw.import, true);
+                }
+            }
+        }
+        textures([&](const SwitchMetalRangeResource &use) {
+            if (!(use.access & gm20b::ResourceUse::Write))
+                return;
+            __unsafe_unretained SwitchMetalTexture *texture = (__bridge SwitchMetalTexture *)use.object;
+            if (texture->_raw.nativePlane != ~0u && rc->writeTexture(&texture->_raw) == &texture->_raw)
+                rc->requirePitch(texture->_raw.import, true);
+        });
+    }
     textures([&](const SwitchMetalRangeResource &use) {
         if (!(use.access & gm20b::ResourceUse::Sample))
             return;
@@ -189,6 +237,7 @@ bool SwitchMetalRangeEncode::resources(size_t from, size_t to)
         if (__unsafe_unretained SwitchMetalHeap *heap = (__bridge SwitchMetalHeap *)use.object; heap->_members)
             rc->useHeap(*heap->_members);
     });
+    rc->namingResources(false);
     return true;
 }
 
@@ -256,23 +305,8 @@ uint32_t SwitchMetalRangeEncode::ineligible(size_t from, size_t until, size_t &s
         });
         if (planar)
             return VetoPlanar;
-        if (op == OpRender && loadsAStoredDepth(plan.legacy(at).x))
-            return VetoZcull;
     }
     return 0;
-}
-
-// The pass at `x` loads a depth an earlier pass of the command buffer stores: whether that one keeps its zcull region
-// (gm20b::DepthStencilAttachment::loadedLater) is read from the passes after it, which only the whole range's encode has
-bool SwitchMetalRangeEncode::loadsAStoredDepth(size_t x)
-{
-    const SwitchMetalPass *passes = cb_->_passes.data();
-    const SwitchMetalPass &pass = passes[x];
-    return pass.depth && pass.depthLoad == MTLLoadActionLoad &&
-           std::any_of(passes, passes + x, [&](const SwitchMetalPass &earlier) {
-               return earlier.depth == pass.depth && (earlier.zeta[0].store != MTLStoreActionDontCare ||
-                                                      earlier.zeta[1].store != MTLStoreActionDontCare);
-           });
 }
 
 // Encoded ahead, the encoder at `begin` is entered: its resources named, its opaque borders' sampler headers made, the
@@ -383,9 +417,10 @@ void SwitchMetalRangeEncode::reset()
     serialCompute_ = computeUnit_ = continuing_ = encoderShadows_ = encoderTracked_ = false;
     kernelShadows_ = {};
     stateCursor_ = {};
+    namedBytesChunk_ = UINT32_MAX;
     fused_ = {};
     fusedAt_ = renderBegin_ = encoder_ = freshAt_ = SIZE_MAX;
-    planned_ = {};
+    planned_.reset();
     standInLoads_.clear();
     planesWritten_.clear();
     overlapStores_.clear();

@@ -2,11 +2,11 @@ import Foundation
 import OSLog
 
 /// This process's own log, as a test that judges a driver line reads it
-enum ProcessLog {
-    static let metal = "com.brunostjohn.switch.TegraGM20BMetal", refusal = "com.brunostjohn.switch.refusal"
+public enum ProcessLog {
+    public static let metal = "com.brunostjohn.switch.TegraGM20BMetal", refusal = "com.brunostjohn.switch.refusal"
 
     /// The lines of `subsystem` and `category` since `start` that contain `text`; nil when the log cannot be read
-    static func lines(
+    public static func lines(
         _ subsystem: String, _ category: String, containing text: String, since start: Date
     ) -> [String]? {
         guard let store = try? OSLogStore(scope: .currentProcessIdentifier),

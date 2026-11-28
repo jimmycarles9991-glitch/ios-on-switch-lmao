@@ -83,26 +83,40 @@ bool SwitchMetalRangeEncode::storeOverlappingPlanes()
 
 // A pass fused into the open one (beginPass's continuing_) draws on the targets that one's begin laid out: the colours
 // its draws bind as storage are taken where that layout holds them (gm20b::RenderEncoder::takeStorage)
-static bool storageLaidOut(SwitchMetalCommandBuffer *cb, gm20b::RenderEncoder &open, size_t next)
+static bool storageLaidOut(SwitchMetalCommandBuffer *cb, gm20b::RenderEncoder &open, size_t next, bool own)
 {
     gm20b::PassDesc b;
-    passStorageMasks(cb, next, b);
+    b.mayFetch = false;
+    passStorageMasks(cb, next, b, own);
+    if (!open.mayFetch() && b.mayFetch)
+        return false;
     return !b.storageMask || open.takeStorage(b.storageMask, b.arrayedStorageMask);
 }
 
-// A Depth16Unorm a draw of the pass after `open` tests in its shader is the converted zeta only where `open` began it so
-// (TegraGM20BMetalRangeForms.mm depth16Tested); a zeta of any other format is the same however its pass began
-static bool testedLaidOut(SwitchMetalCommandBuffer *cb, size_t open, size_t next)
+// A Depth16Unorm a draw of the pass after `open` tests in its shader is the converted zeta only where `open` began it
+// so (TegraGM20BMetalRangeForms.mm depth16Tested), and a depth-only pass testing or writing stencil cannot fuse across
+// pass boundaries because Metal starts each pass's hidden stencil at 0
+static bool testedLaidOut(SwitchMetalCommandBuffer *cb, size_t open, size_t next, bool own)
 {
-    const SwitchMetalPass &pass = cb->_passes[cb->_plan.legacy(next).x];
+    const SwitchMetalPass &first =
+        own ? cb->_passes.own(cb->_plan.ownBegin(open).pass) : cb->_passes[cb->_plan.begin(open).pass];
+    const SwitchMetalPass &pass =
+        own ? cb->_passes.own(cb->_plan.ownBegin(next).pass) : cb->_passes[cb->_plan.begin(next).pass];
     __unsafe_unretained SwitchMetalTexture *depth = (SwitchMetalTexture *)pass.zeta[0].texture;
-    return !pass.shaderTestsDepth || !depth || depth->_raw.format != MTLPixelFormatDepth16Unorm ||
-           cb->_passes[cb->_plan.legacy(open).x].shaderTestsDepth;
+    if (!depth)
+        return true;
+    if (depth->_raw.format == MTLPixelFormatDepth32Float ||
+        (depth->_raw.format == MTLPixelFormatDepth32Float_Stencil8 && !(pass.zetaAspects & 2)))
+        return !pass.testsStencil && !first.testsStencil;
+    if (depth->_raw.format == MTLPixelFormatDepth16Unorm)
+        return !pass.testsStencil && !first.testsStencil && (!pass.shaderTestsDepth || first.shaderTestsDepth);
+    return true;
 }
 
 bool SwitchMetalRangeEncode::endEncoder(size_t at)
 {
     SwitchMetalCommandBuffer *cb = cb_;
+    const bool own = !ahead_;
     if (re_)
         re_->finishVisibility();
     // encoded ahead, the fresh textures the next encoder uses first are written between the two, so it fuses with none;
@@ -117,20 +131,26 @@ bool SwitchMetalRangeEncode::endEncoder(size_t at)
         freshAt_ = at + 1;
         fresh = firstContents_->claim(cb, at + 1, cb->_plan.encoderEnd(at + 1));
     }
-    if (re_ && !fresh && at + 1 < to_ && cb->_plan.operation(at + 1).op == OpRender) {
+    if (re_ && !fresh && at + 1 < to_ &&
+        (own ? cb->_plan.ownOperation(at + 1).op : cb->_plan.operation(at + 1).op) == OpRender) {
         if (gm20bContinuesPass(cb, at + 1)) {
             continuing_ = true;
             return true;
         }
-        if (!re_->turned() && !gm20bGroupedPass(cb, renderBegin_) && !gm20bGroupedPass(cb, at + 1) &&
-            !counters_->at(at) && !counters_->at(at + 1)) {
+        const SwitchMetalPass &openPass = own ? cb->_passes.own(cb->_plan.ownBegin(renderBegin_).pass)
+                                              : cb->_passes[cb->_plan.begin(renderBegin_).pass];
+        const SwitchMetalPass &nextPass =
+            own ? cb->_passes.own(cb->_plan.ownBegin(at + 1).pass) : cb->_passes[cb->_plan.begin(at + 1).pass];
+        if (!re_->turned() && canFusePassHeaders(openPass, nextPass) && !gm20bGroupedPass(cb, renderBegin_) &&
+            !gm20bGroupedPass(cb, at + 1) && !counters_->at(at) && !counters_->at(at + 1)) {
             // the next pass's facts are the next boundary's first pass's
             const bool shadows = sampledShadows_ || standIns_;
-            const gm20b::FusionPass first = fusedAt_ == renderBegin_ ? fused_ : fusionPass(cb, renderBegin_, shadows);
-            fused_ = fusionPass(cb, at + 1, shadows);
+            const gm20b::FusionPass first =
+                fusedAt_ == renderBegin_ ? fused_ : fusionPass(cb, renderBegin_, shadows, own);
+            fused_ = fusionPass(cb, at + 1, shadows, own);
             fusedAt_ = at + 1;
-            if (gm20b::canFusePasses(first, fused_) && testedLaidOut(cb, renderBegin_, at + 1) &&
-                storageLaidOut(cb, *re_, at + 1)) {
+            if (gm20b::canFusePasses(first, fused_) && testedLaidOut(cb, renderBegin_, at + 1, own) &&
+                storageLaidOut(cb, *re_, at + 1, own)) {
                 continuing_ = true;
                 return true;
             }
@@ -192,13 +212,15 @@ bool SwitchMetalRangeEncode::seal(size_t to)
     encoder_ = SIZE_MAX;
     uint32_t seq = 0;
     prepareSharedEvents(cb, rc);
+    gm20bNameResidencySets(cb, rc);
     rc->quietEnd = cb->_rangeQuiet;
     const bool lastRange = cb->_segNext + 1 == cb->_segs.size() && cb->_promised.load(std::memory_order_acquire);
     if (lastRange) {
-        std::lock_guard<gm20b::Mutex> l(cb->_lock);
+        std::lock_guard<gm20b::UnfairMutex> l(cb->_lock);
         cb->_promisesTaken = true;
         rc->promises = cb->_promises;
     }
+    carryZcull(to);
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     splitCaptureCommitted(*rc);
 #endif
@@ -214,7 +236,7 @@ bool SwitchMetalRangeEncode::seal(size_t to)
                 },
                 armed);
             if (!cb->_resourceReady) {
-                std::lock_guard<gm20b::Mutex> lock(cb->_lock);
+                std::lock_guard<gm20b::UnfairMutex> lock(cb->_lock);
                 cb->_segError = [NSError
                     errorWithDomain:MTLCommandBufferErrorDomain
                                code:MTLCommandBufferErrorInternal
@@ -222,7 +244,10 @@ bool SwitchMetalRangeEncode::seal(size_t to)
                                NSLocalizedDescriptionKey : @"Resource readiness notification could not be armed"
                            }];
             }
-            rc->abandon();
+            if (cb->_resourceReady)
+                rc->abandonForRetry();
+            else
+                rc->abandon();
             return false;
         }
         // its promises were given up at the holder's bound before this keep: it fails as one held past it
@@ -240,14 +265,15 @@ bool SwitchMetalRangeEncode::seal(size_t to)
         // process's GPU write of its surface) would be refused again
         if (rc->nativeError == kIOReturnNotReady)
             rc->invalidateNativeReads();
-        if (rc->nativeError && !rc->partial)
-            failCommandBuffer(cb,
-                              rc->nativeError == kIOReturnNotReady
-                                  ? @"A surface it reads changed while it was submitted"
-                                  : @"Native ownership or event dependency failed",
-                              MTLCommandBufferErrorInternal, PredEncKernel);
         char reason[192];
         rc->describeRefusal(reason, sizeof reason);
+        if (rc->nativeError && !rc->partial)
+            failCommandBuffer(
+                cb,
+                rc->nativeError == kIOReturnNotReady
+                    ? @"A surface it reads changed while it was submitted"
+                    : [NSString stringWithFormat:@"Native ownership or event dependency failed: %s", reason],
+                MTLCommandBufferErrorInternal, PredEncKernel);
         // as Metal fails a command buffer its driver could not submit: nothing of it runs elsewhere
         if (!ahead_ && !rc->partial && !rc->nativeError)
             failCommandBuffer(
@@ -260,7 +286,8 @@ bool SwitchMetalRangeEncode::seal(size_t to)
                                                          @"kernel refused the rest: %s",
                                                          reason],
                               MTLCommandBufferErrorInternal);
-        return fail(PredEncKernel, "the kernel refused the submission", uint32_t(rc->kernelResult), 0, reason);
+        return fail(PredEncKernel, "the kernel refused the submission",
+                    uint32_t(rc->kernelResult ? rc->kernelResult : rc->nativeError), 0, reason);
     }
     firstContents_->submitted(cb);
     if (rc->skips)
@@ -268,12 +295,13 @@ bool SwitchMetalRangeEncode::seal(size_t to)
              "a draw Apple's driver draws nothing defined for: skipped", rc->skips);
     publishSharedEvents(cb);
     if (rc->promisesKept) {
-        std::lock_guard<gm20b::Mutex> l(cb->_lock);
+        std::lock_guard<gm20b::UnfairMutex> l(cb->_lock);
         cb->_promises.clear();
     }
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     cb->_probeTaken.add(rc->probeTaken());
-    noteReplayShape(cb, from_, to);
+#endif
+#if SWITCH_METAL_PROF
     d_->stats.slotsCompared += stateCursor_.slotsCompared;
     d_->stats.slotsInTables += stateCursor_.slotsInTables;
 #endif

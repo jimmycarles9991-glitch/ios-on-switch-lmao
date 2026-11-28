@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// Blits into and out of Shared 552 and 553 textures (gpu/XrCopyClamp.swift), every arm against an M4 Max's: a 64x64 one

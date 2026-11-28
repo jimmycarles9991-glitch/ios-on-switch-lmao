@@ -45,8 +45,11 @@ template <class... T> [[noreturn]] void panic(const char *, T...)
 }
 
 struct Loop {
+    unsigned actions = 0;
+
     template <class Function, class... Args> void runAction(Function action, OSObject *owner, Args... args)
     {
+        ++actions;
         action(owner, args..., nullptr, nullptr);
     }
 };
@@ -82,7 +85,8 @@ public:
     Loop object;
     Loop *loop = &object;
     Registers mcRegs;
-    switch_display::MemoryState memoryState;
+    switch_display::MemoryState memoryState, memoryCommitted;
+    uint32_t memorySeq = 0;
     bool memoryQualified = true, memoryDirty = false, fixed = false;
     uint32_t memoryAppliedKhz = 0;
     unsigned carRate = 0;
@@ -100,6 +104,7 @@ public:
     }
 
     unsigned memoryFloor(unsigned) const;
+    void publishMemorySnapshot();
     void uncoveredDisplayMemory(uint32_t, const char *);
 
     bool displayMemoryReady() const
@@ -282,9 +287,11 @@ TEST_F(MemoryAdapter, WarmIdenticalAdmissionDoesNoRegisterOrClockWork)
     const auto head = request();
     ASSERT_EQ(emc.reserveMemory(head), 0);
     const unsigned writes = emc.mcRegs.writes;
+    const unsigned actions = emc.object.actions;
     for (unsigned i = 0; i != 100; ++i)
         ASSERT_EQ(emc.reserveMemory(head), 0);
     EXPECT_EQ(emc.mcRegs.writes, writes);
+    EXPECT_EQ(emc.object.actions, actions) << "identical head plan hits lock-free fast path without runAction";
     EXPECT_TRUE(requestedRates.empty());
 }
 

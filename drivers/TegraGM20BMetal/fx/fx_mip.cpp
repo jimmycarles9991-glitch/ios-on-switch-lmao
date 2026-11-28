@@ -97,11 +97,12 @@ void surface(Push &p, uint32_t base, uint32_t fmt, bool blockLinear, uint32_t yL
 constexpr size_t kSurfaceWords = 1 + 4 + 2 + 1 + 4;  // the larger (block-linear destination) form
 
 // One blit: the whole destination rectangle (dx, dy, w, h) from source rectangle origin (sx, sy) with steps du, dv (32.32), the
-// source invalidated in the texture data cache first (the 2D engine reads its source through it: a level the step before wrote)
+// source invalidated in the texture data cache first when `invalidateTex` is set
 void blit(Push &p, uint32_t filter, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h, uint64_t du, uint64_t dv,
-          uint64_t sx, uint64_t sy, uint32_t origin = SAMPLE_CENTER)
+          uint64_t sx, uint64_t sy, uint32_t origin = SAMPLE_CENTER, bool invalidateTex = true)
 {
-    p.m(TWOD_INVALIDATE_TEXTURE_DATA_CACHE, TEXCACHE_L1, kSubc2D);
+    if (invalidateTex)
+        p.m(TWOD_INVALIDATE_TEXTURE_DATA_CACHE, TEXCACHE_L1, kSubc2D);
     p.m(TWOD_SET_PIXELS_FROM_MEMORY_SAMPLE_MODE, origin | filter, kSubc2D);
     p.inc(TWOD_SET_PIXELS_FROM_MEMORY_DST_X0, {dx, dy, w, h}, kSubc2D);
     p.inc(TWOD_SET_PIXELS_FROM_MEMORY_DU_DX_FRAC, {uint32_t(du), uint32_t(du >> 32), uint32_t(dv), uint32_t(dv >> 32)},
@@ -232,6 +233,10 @@ void readLevel(const MipChain &c, const uint8_t *chainCpu, uint32_t l, uint32_t 
     });
 }
 
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+std::atomic<uint8_t> probeSectorPromotion{0};
+#endif
+
 void mipChainTic(const MipChain &c, uint64_t va, uint32_t tic0, bool srgb, uint32_t baseLevel, uint32_t levelCount,
                  uint32_t out[8], uint32_t textureType)
 {
@@ -255,7 +260,11 @@ void mipChainTic(const MipChain &c, uint64_t va, uint32_t tic0, bool srgb, uint3
     setField(out, 143, 128, c.width - 1);   // WIDTH_MINUS_ONE
     setField(out, 150, 150, srgb ? 1 : 0);  // S_R_G_B_CONVERSION
     setField(out, 154, 151, textureType);   // TEXTURE_TYPE
-    setField(out, 156, 155, 0);             // SECTOR_PROMOTION NO_PROMOTION
+    uint32_t promotion = 0;                 // SECTOR_PROMOTION NO_PROMOTION
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    promotion = probeSectorPromotion.load(std::memory_order_relaxed);
+#endif
+    setField(out, 156, 155, promotion);
     setField(out, 159, 157, 7);             // BORDER_SIZE BORDER_SAMPLER_COLOR
     setField(out, 175, 160, c.height - 1);  // HEIGHT_MINUS_ONE
     // DEPTH_MINUS_ONE: a 3D image's depth, an array's layers, a cube array's cubes
@@ -395,6 +404,45 @@ void emitPointGenerate(Push &p, const MipChain &c, uint64_t chainVa, uint32_t fm
         axis(s.width, du, sx);
         axis(s.height, dv, sy);
         blit(p, FILTER_POINT, 0, 0, d.width, d.height, du, dv, sx, sy, SAMPLE_CORNER);
+    }
+    end(p);
+}
+
+void emitGenerateLayersRange(Push &p, const MipChain &c, uint64_t chainVa, uint32_t fmt2d, uint32_t firstLevel,
+                             uint32_t lastLevel, uint32_t firstLayer, uint32_t layers, bool point, Sampling sampling)
+{
+    if (!c.levels || lastLevel >= c.levels || firstLevel >= lastLevel || !layers)
+        return;
+    const auto axis = [](uint32_t source, uint64_t &step, uint64_t &start) {
+        step = source > 1 ? 2ull << 32 : 1ull << 32;
+        start = source > 1 ? 3ull << 31 : 1ull << 31;
+    };
+    begin(p);
+    for (uint32_t l = firstLevel; l < lastLevel; l++) {
+        const MipLevel &s = c.level[l], &d = c.level[l + 1];
+        if (l > firstLevel)
+            p.m(TWOD_WAIT_FOR_IDLE, 0, kSubc2D);
+        // One L1 invalidate per mip transition covers all slices of level l before level l+1 reads them.
+        p.m(TWOD_INVALIDATE_TEXTURE_DATA_CACHE, TEXCACHE_L1, kSubc2D);
+        uint64_t du = 0, dv = 0, sx = 0, sy = 0;
+        uint32_t filter = FILTER_BILINEAR, orig = sampling.corner ? 1u : SAMPLE_CENTER;
+        if (point) {
+            axis(s.width, du, sx);
+            axis(s.height, dv, sy);
+            filter = FILTER_POINT;
+            orig = SAMPLE_CORNER;
+        } else {
+            du = ratio(s.width, d.width);
+            dv = ratio(s.height, d.height);
+            sx = origin(sampling, du);
+            sy = origin(sampling, dv);
+        }
+        for (uint32_t layer = firstLayer; layer < firstLayer + layers; layer++) {
+            const uint64_t layerVa = chainVa + layer * c.arrayStride;
+            surface(p, TWOD_SET_DST_FORMAT, fmt2d, true, d.yLog2, 0, d.width, d.height, layerVa + d.offset);
+            surface(p, TWOD_SET_SRC_FORMAT, fmt2d, true, s.yLog2, 0, s.width, s.height, layerVa + s.offset);
+            blit(p, filter, 0, 0, d.width, d.height, du, dv, sx, sy, orig, false);
+        }
     }
     end(p);
 }

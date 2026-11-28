@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// The 2D engine's code resolve into part of a texture: a 64x64 4x RGBA8Snorm or BGR10_XR (554) target, each sample

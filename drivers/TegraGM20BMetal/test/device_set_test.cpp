@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <vector>
 
 namespace {
 
@@ -381,6 +382,59 @@ TEST_F(DeviceSet, AHeapsArenaPurgedOnceTheCommandBufferNamingItCompletedLeavesNo
     EXPECT_EQ(model.setRefusals, 0u) << refusal();
     EXPECT_EQ(model.refusedHandle, 0u) << refusal();
     EXPECT_EQ(dev.setCounts().refusals, 0u) << dev.setLastRefusal();
+}
+
+// Shared buffers live in VOL=1 write-combined chunks, which no CPU lease takes out of the set (createBuffer skips the
+// lease, and a write-combined buffer's invalidateForCpu takes none): such a chunk is a written member from the start, so
+// the first GPU write to one of its buffers names no use of the chunk and does not make the set again
+TEST_F(DeviceSet, AWriteToASharedBufferNamesNoUseAndKeepsTheSetsGeneration)
+{
+    gm20b::Buffer a, b;
+    ASSERT_TRUE(dev.createBuffer(768, a, true, true, true));
+    ASSERT_TRUE(dev.createBuffer(768, b, true, true, true));
+    ASSERT_TRUE(a.gpuVolatile);
+    ASSERT_EQ(a.span.chunk, b.span.chunk) << "the test wants both in one chunk";
+    uint64_t chunk = 0;
+    for (const auto &[va, bound] : model.binds)
+        if (a.va >= va && a.va - va < bound.second)
+            chunk = bound.first;
+    ASSERT_NE(chunk, 0u);
+    EXPECT_TRUE(listedAccess(chunk) & TegraGM20BSurfaceWrite) << "the chunk joined the set read";
+    {
+        gm20b::CommandBuffer *warm = dev.begin();
+        ASSERT_NE(warm, nullptr);
+        uint32_t seqno = 0;
+        ASSERT_TRUE(warm->commit(seqno));
+    }
+    const auto generations = [] {
+        std::vector<uint32_t> g;
+        for (const kernel_model::SetState &set : model.sets)
+            g.push_back(set.live ? set.generation : 0);
+        return g;
+    };
+    const std::vector<uint32_t> before = generations();
+    const size_t first = model.jobs.size();
+    gm20b::CommandBuffer *cb = dev.begin();
+    gm20b::BlitEncoder *e = cb ? cb->blit() : nullptr;
+    ASSERT_NE(e, nullptr);
+    cb->use(b, false);
+    cb->use(a, true);
+    e->copyBytes(b.va, a.va, 768);
+    e->end();
+    uint32_t seqno = 0;
+    ASSERT_TRUE(cb->commit(seqno));
+    EXPECT_EQ(generations(), before) << "the write made the set again for its chunk";
+    ASSERT_GT(model.jobs.size(), first);
+    // a job's uses in the model are its listed ones and then the set's members, and the model refuses a job that lists
+    // a member: the chunk once, through the set
+    for (size_t j = first; j < model.jobs.size(); ++j) {
+        size_t named = 0;
+        for (const TegraGM20BAbiSurfaceUse &u : model.jobs[j].uses)
+            named += u.handle == chunk;
+        EXPECT_LE(named, 1u) << "a job lists the chunk beside the set that names it";
+    }
+    dev.destroyBuffer(a);
+    dev.destroyBuffer(b);
 }
 
 }  // namespace

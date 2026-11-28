@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A multisampled Depth32Float texture and Stencil8 texture as one pass's attachments, resolved (pass.ds took a pair with a

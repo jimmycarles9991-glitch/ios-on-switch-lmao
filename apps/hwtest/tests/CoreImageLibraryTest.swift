@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestKit
 import Metal
 
 /// Core Image opens its function libraries (metallib file type 1) with newLibraryWithURL:, and CoreUI, Vision, PencilKit

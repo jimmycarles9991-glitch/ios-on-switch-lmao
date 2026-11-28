@@ -6,13 +6,16 @@ namespace tgm_uc
 {
 
 PoolOrphan *gPoolOrphans;
+volatile uint64_t gSmmuCompressibleBytes;
+#if TGM_STATS
 // Coherent BOs the pool did not serve (tgm_pool::FromSystem), since boot: count and bytes (the stats line's "system")
 volatile uint64_t gSystemCoherent, gSystemCoherentBytes;
 // Pool BOs of clients other than the compositor, and pool pages freed but still behind their view's release (orphans)
 volatile uint64_t gClientPoolBytes, gOrphanBytes, gOrphans;
 // Compressible BOs (pool chunks), every client's
 volatile uint64_t gCompressibleBytes, gCompressibles;
-volatile uint64_t gSmmuCompressibleBytes, gSmmuCompressibles;
+volatile uint64_t gSmmuCompressibles;
+#endif
 
 void pushOrphan(PoolOrphan *orphan)
 {
@@ -52,8 +55,10 @@ void releaseOrphans()
 			continue;
 		}
 		orphan->view->release();
+#if TGM_STATS
 		__atomic_sub_fetch(&gOrphanBytes, orphan->bytes, __ATOMIC_RELAXED);
 		__atomic_sub_fetch(&gOrphans, 1, __ATOMIC_RELAXED);
+#endif
 		if (!(orphan->zero && poolZeroLater(orphan->va, orphan->pa, orphan->bytes)))
 			tgm_pool_free(orphan->va, orphan->bytes, orphan->pa);
 		IODelete(orphan, PoolOrphan, 1);
@@ -109,11 +114,12 @@ bool poolZeroLater(void *va, uint64_t pa, uint64_t bytes)
 	p->poolDirty = z;
 	p->poolZeroing += bytes;
 	IOLockUnlock(p->lock);
-	thread_call_enter(p->call);
+	thread_call_enter(p->recycleCall);
 	return true;
 }
 }  // namespace tgm_uc
 
+#if TGM_STATS
 extern "C" void tgm_pool_breakdown(uint64_t *client_bytes, uint64_t *orphan_bytes,
 				   uint64_t *orphans, uint64_t *compressible_bytes,
 				   uint64_t *compressibles, uint64_t *system_bytes,
@@ -127,3 +133,4 @@ extern "C" void tgm_pool_breakdown(uint64_t *client_bytes, uint64_t *orphan_byte
 	*system_bytes = __atomic_load_n(&gSystemCoherentBytes, __ATOMIC_RELAXED);
 	*systems = __atomic_load_n(&gSystemCoherent, __ATOMIC_RELAXED);
 }
+#endif

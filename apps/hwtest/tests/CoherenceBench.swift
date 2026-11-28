@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestKit
 
 /// The bench's stale cells in its own shape: a 64x64 BGRA8 target the GPU writes and the bench frees, then one of the
 /// same size on the same span, filled by the CPU and blended into by a program the bench has placed before.
@@ -27,9 +28,12 @@ enum CoherenceBench {
             tally.failure = "the bench did not open: \(error)"
             return tally
         }
+        var cpu = [UInt8](repeating: 0, count: CoherenceRewriteTest.side * CoherenceRewriteTest.side * 4)
+        let (write, fillTemplate) = try experiments(cpu)
         for round in 0 ..< rounds {
-            let cpu = CoherenceRewriteTest.cpuBytes(round)
-            let (write, fill) = try experiments(cpu)
+            CoherenceRewriteTest.fillCpuBytes(&cpu, round: round)
+            var fill = fillTemplate
+            fill.fill = Data(cpu)
             let wrote = runner.run(write)
             let filled = runner.run(fill)
             guard wrote.status == "ok", filled.status == "ok", let first = wrote.texels, let out = filled.texels,
@@ -38,17 +42,9 @@ enum CoherenceBench {
                 tally.failure = "round \(round): \(wrote.status) \(wrote.why) / \(filled.status) \(filled.why)"
                 return tally
             }
-            let gpu = [UInt8](first)
-            tally.cpuStale +=
-                stride(from: 0, to: gpu.count, by: 4).filter { at in
-                    !(0 ..< 4).allSatisfy { abs(Int(gpu[at + $0]) - 16) <= 1 }
-                }.count
             // the GPU's last write to the span: the first experiment's draw (D = its colour), or the empty clearing pass
             // the bench's liveness check ends a fill-less experiment with (D = 0)
-            tally.count(
-                [UInt8](out), cpu: cpu, added: { p, c in Int(gpu[p * 4 + c]) },
-                older: [{ p, c in min(255, 2 * Int(gpu[p * 4 + c])) }, { p, c in Int(gpu[p * 4 + c]) }]
-            )
+            tally.countBench(out: out, cpu: cpu, gpu: first)
         }
         return tally
     }
@@ -89,34 +85,27 @@ struct CoherenceTally {
 
     var clean: Bool { rounds > 0 && stalePixels == 0 && wrongPixels == 0 }
 
-    /// `out` against the CPU's bytes plus `added`, and, where it misses, against each of `older`: what the draw makes of
-    /// one of the GPU's own earlier writes
-    mutating func count(_ out: [UInt8], cpu: [UInt8], added: (Int, Int) -> Int, older: [(Int, Int) -> Int]) {
+    mutating func countConstantOlder(_ out: [UInt8], cpu: [UInt8], added: SIMD4<Int>, older: SIMD4<Int>) {
         rounds += 1
-        guard out.count == cpu.count else {
-            wrongPixels += cpu.count / 4
-            return
+        let r = CoherenceCheck.countConstantOlder(out: out, cpu: cpu, added: added, older: older)
+        stalePixels += r.stale
+        staleRounds += r.stale > 0 ? 1 : 0
+        wrongPixels += r.wrong
+    }
+
+    mutating func countBench(out: Data, cpu: [UInt8], gpu: Data) {
+        rounds += 1
+        let r = out.withUnsafeBytes { ob in
+            gpu.withUnsafeBytes { gb in CoherenceCheck.countBench(out: ob, cpu: cpu, gpu: gb) }
         }
-        var stale = 0
-        for p in 0 ..< (cpu.count / 4) {
-            var fresh = true
-            var old = [Bool](repeating: true, count: older.count)
-            for c in 0 ..< 4 {
-                let v = Int(out[p * 4 + c])
-                fresh = fresh && abs(v - min(255, Int(cpu[p * 4 + c]) + added(p, c))) <= 1
-                for (k, earlier) in older.enumerated() { old[k] = old[k] && abs(v - earlier(p, c)) <= 1 }
-            }
-            if !fresh {
-                if old.contains(true) { stale += 1 } else { wrongPixels += 1 }
-            }
-        }
-        stalePixels += stale
-        staleRounds += stale > 0 ? 1 : 0
+        cpuStale += r.cpuStale
+        stalePixels += r.stale
+        staleRounds += r.stale > 0 ? 1 : 0
+        wrongPixels += r.wrong
     }
 
     static func differing(_ bytes: [UInt8], from texel: [UInt8]) -> Int {
-        stride(from: 0, to: bytes.count, by: 4).filter { at in !(0 ..< 4).allSatisfy { bytes[at + $0] == texel[$0] } }
-            .count
+        ByteCompare.wordWrongCount(bytes, want: ByteCompare.word(texel[0], texel[1], texel[2], texel[3]))
     }
 
     func report(into metrics: inout Metrics) {

@@ -1,4 +1,5 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
 import Metal
@@ -59,19 +60,34 @@ enum StandInResolveCases {
         )
     }
 
-    static func samplesOff(_ gpu: GPU, _ f: WordMipFormat, _ drawn: Drawn) async throws -> Int {
+    static func samplesOff(_ gpu: GPU, _ f: WordMipFormat, _ drawn: Drawn) async throws -> SampleRouteReadings {
         let samples = drawn.texture.sampleCount
         let stored = try await sampleReads(gpu, drawn.texture)
-        var off = 0
+        let reader = try gpu.render(fragment: "texel_read", format: .rgba32Float)
+        let texels = 0 ..< side * side
+        var readings = SampleRouteReadings()
         for sample in 0 ..< samples {
-            let alone = try await oneSampleReads(
-                gpu,
-                f,
-                (0 ..< side * side).map { drawn.values[$0 * samples + sample] }
-            )
-            off += (0 ..< side * side).filter { stored[$0 * samples + sample] != alone[$0] }.count
+            let alone = try await oneSampleTexture(gpu, f, texels.map { drawn.values[$0 * samples + sample] })
+            let fragment = try await YcbcrPackedTargetTest.read(gpu, reader, alone)
+            readings.fragmentOff += texels.filter { stored[$0 * samples + sample] != fragment[$0] }.count
+            guard readings.computeRefusal == nil else { continue }
+            do {
+                let compute = try await gpu.texels(alone)
+                readings.computeOff += texels.filter { stored[$0 * samples + sample] != compute[$0] }.count
+                readings.routesDiffer += texels.filter { compute[$0] != fragment[$0] }.count
+                if readings.firstDiffer == "-", let at = texels.first(where: { compute[$0] != fragment[$0] }) {
+                    let bytes = try await gpu.read(alone, bytesPerPixel: f.bytes)
+                    let code = bytes[at * f.bytes ..< (at + 1) * f.bytes].map { String(format: "%02x", $0) }.joined()
+                    let sampleRead = stored[at * samples + sample]
+                    readings.firstDiffer =
+                        "t\(at) s\(sample) bytes \(code) compute \(compute[at].x),\(compute[at].w) fragment "
+                            + "\(fragment[at].x),\(fragment[at].w) stored \(sampleRead.x)"
+                }
+            } catch {
+                readings.computeRefusal = GPU.describe(error)
+            }
         }
-        return off
+        return readings
     }
 
     static func drawSamples(
@@ -125,8 +141,7 @@ enum StandInResolveCases {
         return (0 ..< width * height * samples).map { bytes.loaded(as: SIMD4<Float>.self, at: $0) }
     }
 
-    static func oneSampleReads(_ gpu: GPU, _ f: WordMipFormat, _ values: [SIMD4<Float>]) async throws -> [SIMD4<Float>]
-    {
+    static func oneSampleTexture(_ gpu: GPU, _ f: WordMipFormat, _ values: [SIMD4<Float>]) async throws -> MTLTexture {
         let texture = try gpu.texture(f.format, side, side)
         let state = try gpu.render(fragment: "texel_values", format: f.format)
         let data = try gpu.buffer(values)
@@ -145,7 +160,7 @@ enum StandInResolveCases {
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             encoder.endEncoding()
         }
-        return try await gpu.texels(texture)
+        return texture
     }
 
     static func judged(_ f: WordMipFormat, _ got: [UInt8], apple: [UInt8]) -> (off: Int, far: Int, worst: Int) {

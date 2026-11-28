@@ -32,6 +32,16 @@ inline uint32_t addressPushWords(const NmbDirectDraw &d)
     return mask;
 }
 
+// The push words each draw writes a buffer slot's Metal address to (RenderEncoder::guestBaseWords), two words each: the
+// probe's addresses there are no constant, and the record's push words leave them out
+inline uint32_t guestBasePushWords(const NmbDirectDraw &d)
+{
+    uint32_t mask = 0;
+    for (const uint8_t word : d.guestBaseWord)
+        mask |= pushFieldMask(word, 2);
+    return mask;
+}
+
 // The words of a tessellation state's control stage (m2v control::PUSH_FIELDS), which every patch draw writes
 constexpr uint32_t kControlWords = 6;
 
@@ -59,7 +69,8 @@ inline uint32_t constantPushWords(const NmbDirectState &state)
     uint32_t mask = state.draws[0].pushMask & ~controlPushMask(state) & ~drawnPushMask(state.draws[0]);
     for (const NmbDirectDraw &d : state.draws) {
         mask &= ~(pushFieldMask(d.halfBlendColorWord, 4) | pushFieldMask(d.depthTestWord, 4) |
-                  pushFieldMask(d.stencilTestWord, 4) | pushFieldMask(d.shadowStencilWord, 2) | addressPushWords(d));
+                  pushFieldMask(d.stencilTestWord, 4) | pushFieldMask(d.shadowStencilWord, 2) | addressPushWords(d) |
+                  guestBasePushWords(d));
         for (uint32_t i = 0; i < 32; i++)
             if (!(d.pushMask >> i & 1) || d.push[i] != state.draws[0].push[i])
                 mask &= ~(1u << i);

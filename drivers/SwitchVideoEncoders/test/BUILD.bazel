@@ -74,6 +74,8 @@ host_library(
         "ReorderCheck.h",
         "TileCheck.c",
         "TileCheck.h",
+        "//drivers/SwitchVideoEncoders:AVE/AVEEmitter.c",
+        "//drivers/SwitchVideoEncoders:AVE/AVEEmitter.h",
         "//drivers/SwitchVideoEncoders:AVE/AVEEncoder.h",
         "//drivers/SwitchVideoEncoders:AVE/AVEInput.c",
         "//drivers/SwitchVideoEncoders:AVE/AVELayoutProbe.c",
@@ -208,6 +210,28 @@ host_test(
     name = "ave_host_test",
     srcs = ["ave_host_test.cpp"],
     deps = [":ave_host"],
+)
+
+host_library(
+    name = "nvenc_listener",
+    srcs = [
+        "//drivers/SwitchVideoEncoders:AVE/NVENCClient.h",
+        "//drivers/SwitchVideoEncoders:AVE/NVENCListener.c",
+        "//drivers/TegraNVENC:nvidia/clc5b7.h",
+        "//drivers/TegraNVENC:nvidia/nvenc_drv.h",
+        "//kits/SwitchRefusal:SwitchRefusal.c",
+        "//kits/SwitchRefusal:SwitchRefusal.h",
+    ],
+    hdrs = [
+        "//drivers/SwitchVideoEncoders:AVE/NVENCListener.h",
+        "//drivers/TegraNVENC:TegraNVENCABI.h",
+    ],
+)
+
+host_test(
+    name = "nvenc_listener_test",
+    srcs = ["nvenc_listener_test.cpp"],
+    deps = [":nvenc_listener"],
 )
 
 # H264H7EncoderRegister waits for TegraNVENC or the kernel's TegraNVENCAbsent resource before deciding, and the kernel

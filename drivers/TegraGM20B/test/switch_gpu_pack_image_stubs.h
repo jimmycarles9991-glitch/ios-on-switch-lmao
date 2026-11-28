@@ -45,6 +45,7 @@ constexpr IOReturn kIOReturnAborted = -4;
 constexpr IOReturn kIOReturnNotPermitted = -5;
 constexpr IOReturn kIOReturnNotOpen = -6;
 constexpr IOReturn kIOReturnExclusiveAccess = -7;
+constexpr IOReturn kIOReturnNoResources = -8;
 
 constexpr kern_return_t KERN_SUCCESS = 0;
 constexpr kern_return_t KERN_FAILURE = 5;
@@ -61,6 +62,7 @@ constexpr int THREAD_UNINT = 0;
 constexpr int THREAD_ABORTSAFE = 1;
 constexpr int THREAD_AWAKENED = 0;
 constexpr int THREAD_INTERRUPTED = 2;
+constexpr int THREAD_TIMED_OUT = 1;
 
 #ifndef PAGE_SHIFT
 #define PAGE_SHIFT 14
@@ -149,11 +151,22 @@ inline void IOLockUnlock(IOLock *lock) __attribute__((no_thread_safety_analysis)
 }
 
 int switch_pack_test_sleep(IOLock *lock, void *event, int interruptible);
+int switch_pack_test_sleep_deadline(IOLock *lock, void *event, uint64_t deadline,
+				    int interruptible);
 
 inline int IOLockSleep(IOLock *lock, void *event, int interruptible)
 {
 	return switch_pack_test_sleep(lock, event, interruptible);
 }
+
+inline int IOLockSleepDeadline(IOLock *lock, void *event, uint64_t deadline, int interruptible)
+{
+	return switch_pack_test_sleep_deadline(lock, event, deadline, interruptible);
+}
+
+#define NSEC_PER_SEC 1000000000ull
+void clock_interval_to_deadline(uint32_t interval, uint32_t scale_factor, uint64_t *result);
+[[noreturn]] void panic(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 inline void IOLockWakeup(IOLock *lock, void *, bool)
 {

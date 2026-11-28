@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <sys/acl.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
@@ -29,6 +30,15 @@ static bool switch_migration_generation(NSString *text)
 static bool switch_migration_phase(NSString *text)
 {
     return switch_migration_token(text, @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-", 1, 64);
+}
+
+static bool switch_migration_positive_int(NSString *text, int *value)
+{
+    const int parsed = text.intValue;
+    if (parsed <= 0 || ![text isEqualToString:[NSString stringWithFormat:@"%d", parsed]])
+        return false;
+    *value = parsed;
+    return true;
 }
 
 static int switch_migration_validate(int fd, dev_t device, bool directory)
@@ -79,7 +89,7 @@ static int switch_migration_directory(NSString *base, int *directory, dev_t *dev
 }
 
 static int switch_migration_parse(NSString *line, NSString *expected, SwitchMigrationStatus *status, NSString **phase,
-                                  int *recordedError)
+                                  int *recordedError, unsigned *attempt)
 {
     if (![line hasSuffix:@"\n"])
         return EINVAL;
@@ -87,15 +97,23 @@ static int switch_migration_parse(NSString *line, NSString *expected, SwitchMigr
     if (fields.count < 2 || !switch_migration_generation(fields[1]))
         return EINVAL;
     SwitchMigrationStatus value;
+    int parsedError = 0;
+    int parsedAttempt = 0;
     if (fields.count == 2 && [fields[0] isEqualToString:@"complete"]) {
         value = SwitchMigrationComplete;
     } else if (fields.count == 2 && [fields[0] isEqualToString:@"repair"]) {
         value = SwitchMigrationRepair;
-    } else if (fields.count == 3 && [fields[0] isEqualToString:@"working"] && switch_migration_phase(fields[2])) {
+    } else if ((fields.count == 3 || fields.count == 4) && [fields[0] isEqualToString:@"working"] &&
+               switch_migration_phase(fields[2])) {
+        parsedAttempt = 1;
+        if (fields.count == 4 && !switch_migration_positive_int(fields[3], &parsedAttempt))
+            return EINVAL;
         value = SwitchMigrationWorking;
-    } else if (fields.count == 4 && [fields[0] isEqualToString:@"failed"] && switch_migration_phase(fields[2]) &&
-               fields[3].intValue > 0 &&
-               [fields[3] isEqualToString:[NSString stringWithFormat:@"%d", fields[3].intValue]]) {
+    } else if ((fields.count == 4 || fields.count == 5) && [fields[0] isEqualToString:@"failed"] &&
+               switch_migration_phase(fields[2]) && switch_migration_positive_int(fields[3], &parsedError)) {
+        parsedAttempt = 1;
+        if (fields.count == 5 && !switch_migration_positive_int(fields[4], &parsedAttempt))
+            return EINVAL;
         value = SwitchMigrationFailed;
     } else {
         return EINVAL;
@@ -105,13 +123,15 @@ static int switch_migration_parse(NSString *line, NSString *expected, SwitchMigr
         if (phase && fields.count >= 3)
             *phase = fields[2];
         if (recordedError && value == SwitchMigrationFailed)
-            *recordedError = fields[3].intValue;
+            *recordedError = parsedError;
+        if (attempt && (value == SwitchMigrationWorking || value == SwitchMigrationFailed))
+            *attempt = (unsigned)parsedAttempt;
     }
     return 0;
 }
 
 int switch_migration_read(NSString *base, NSString *generation, SwitchMigrationStatus *status, NSString **phase,
-                          int *recordedError)
+                          int *recordedError, unsigned *attempt)
 {
     if (!status)
         return EINVAL;
@@ -120,6 +140,8 @@ int switch_migration_read(NSString *base, NSString *generation, SwitchMigrationS
         *phase = nil;
     if (recordedError)
         *recordedError = 0;
+    if (attempt)
+        *attempt = 0;
     if (!switch_migration_generation(generation))
         return EINVAL;
     int directory;
@@ -150,7 +172,7 @@ int switch_migration_read(NSString *base, NSString *generation, SwitchMigrationS
     if (error || length == sizeof(bytes))
         return error ?: EINVAL;
     NSString *line = [[NSString alloc] initWithBytes:bytes length:length encoding:NSASCIIStringEncoding];
-    return switch_migration_parse(line, generation, status, phase, recordedError);
+    return switch_migration_parse(line, generation, status, phase, recordedError, attempt);
 }
 
 static int switch_migration_check_existing(int directory, dev_t device, const char *name)
@@ -199,16 +221,16 @@ static int switch_migration_save(int directory, dev_t device, NSData *record)
 }
 
 int switch_migration_write(NSString *base, NSString *generation, SwitchMigrationStatus status, const char *phase,
-                           int error)
+                           int error, unsigned attempt)
 {
-    if (!switch_migration_generation(generation))
+    if (!switch_migration_generation(generation) || !attempt || attempt > (unsigned)INT_MAX)
         return EINVAL;
     NSString *step = phase ? [NSString stringWithUTF8String:phase] : nil;
     NSString *line;
     switch (status) {
     case SwitchMigrationComplete:
     case SwitchMigrationRepair:
-        if (error)
+        if (error || attempt != 1)
             return EINVAL;
         line = [NSString
             stringWithFormat:@"%@ %@\n", status == SwitchMigrationComplete ? @"complete" : @"repair", generation];
@@ -216,12 +238,14 @@ int switch_migration_write(NSString *base, NSString *generation, SwitchMigration
     case SwitchMigrationWorking:
         if (error || !switch_migration_phase(step))
             return EINVAL;
-        line = [NSString stringWithFormat:@"working %@ %@\n", generation, step];
+        line = attempt == 1 ? [NSString stringWithFormat:@"working %@ %@\n", generation, step]
+                            : [NSString stringWithFormat:@"working %@ %@ %u\n", generation, step, attempt];
         break;
     case SwitchMigrationFailed:
         if (error <= 0 || !switch_migration_phase(step))
             return EINVAL;
-        line = [NSString stringWithFormat:@"failed %@ %@ %d\n", generation, step, error];
+        line = attempt == 1 ? [NSString stringWithFormat:@"failed %@ %@ %d\n", generation, step, error]
+                            : [NSString stringWithFormat:@"failed %@ %@ %d %u\n", generation, step, error, attempt];
         break;
     default:
         return EINVAL;

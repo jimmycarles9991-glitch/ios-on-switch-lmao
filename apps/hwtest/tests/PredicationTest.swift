@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Metal's command predication SPI on the driver (drivers/TegraGM20BMetal/predication.h): each of the

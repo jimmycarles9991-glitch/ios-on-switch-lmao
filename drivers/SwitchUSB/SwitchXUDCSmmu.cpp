@@ -53,7 +53,8 @@ const Run *SwitchXUDC::viewOf(const Request &r, uint32_t runCount, uint32_t *cou
 bool SwitchXUDC::remap(Request &r, uint32_t runCount)
 {
     const uint32_t pages = runPages(scratchRuns, runCount, [](uint32_t, uint64_t) {});
-    const int64_t index = smmu.map(pages, kIovaAlignPages, [this, runCount](auto mapPage) {
+    // All SwitchXUDC callers run on its single IOWorkLoop.
+    const int64_t index = smmu.mapUnlocked(pages, kIovaAlignPages, [this, runCount](auto mapPage) {
         bool ok = true;
         runPages(scratchRuns, runCount, [&ok, &mapPage](uint32_t i, uint64_t pa) {
             ok = ok && mapPage(i, pa);
@@ -75,7 +76,7 @@ void SwitchXUDC::releaseMemory(Request &r)
         r.md->complete();
     r.prepared = false;
     if (r.iovaPages)
-        smmu.unmap(r.iovaIndex, r.iovaPages);
+        smmu.unmapUnlocked(r.iovaIndex, r.iovaPages);
     r.iovaPages = 0;
 }
 

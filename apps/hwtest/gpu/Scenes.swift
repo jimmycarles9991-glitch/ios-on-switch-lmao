@@ -1,4 +1,5 @@
 import Foundation
+import HWTestGPU
 
 /// Every GPU scene in the order the app runs them: the first Core Animation surface before anything else touches the
 /// GPU, since it is the process's first command buffer that it reproduces.
@@ -48,4 +49,5 @@ public enum Scenes {
     /// QuartzCore 27's Liquid Glass (scenes27), which only iOS 27's app runs.
     public static let glass: any GPUScene = CAGlassScene()
     public static let glassSplit: any GPUScene = CAGlassSplitScene()
+    public static let glassAxes: any GPUScene = CAGlassAxesScene()
 }

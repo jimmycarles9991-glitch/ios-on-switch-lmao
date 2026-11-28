@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// METALMAP d1 (F11) and d24: what new buffers hold, and textures over buffers at offsets and rows 16 mod 32.

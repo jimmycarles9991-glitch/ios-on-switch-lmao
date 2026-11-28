@@ -2,6 +2,40 @@
 // The stats line's GPU clock (gpu_internal.h TRIM_GPC0_NCGPCCLK_*), with what fed the GPC clock when each count started.
 #include "gpu_internal.h"
 
+#if TGM_DEBUG_PROBES
+#include "TegraGM20BNapllMath.h"
+
+int switch_gpu_gpc_khz(void)
+{
+	struct nvkm_device *device;
+	u32 cfg, dvfs, coeff, sel, out, m, n, pl;
+	int rate = -EIO;
+
+	/* A diagnostic read of a gated rail must not wake it and change the measurement. */
+	if (READ_ONCE(tgm_gpu.stage) < 3 || !gate_try())
+		return -EBUSY;
+	device = tgm_gpu.device;
+	if (tgm_idle.clk)
+		nvxnu_mutex_lock(tgm_idle.clk);
+	cfg = nvkm_rd32(device, TGM_GPCPLL_CFG_R);
+	dvfs = nvkm_rd32(device, TGM_GPCPLL_DVFS1_R);
+	coeff = nvkm_rd32(device, TGM_GPCPLL_COEFF_R);
+	sel = nvkm_rd32(device, TGM_SEL_VCO_R);
+	out = nvkm_rd32(device, TGM_GPC2CLK_OUT_R);
+	m = coeff & TGM_GPCPLL_COEFF_MDIV_MASK;
+	n = (coeff & TGM_GPCPLL_COEFF_NDIV_MASK) >> TGM_GPCPLL_COEFF_NDIV_SHIFT;
+	pl = (coeff & TGM_GPCPLL_COEFF_PLDIV_MASK) >> TGM_GPCPLL_COEFF_PLDIV_SHIFT;
+	if (!badf(cfg) && !badf(dvfs) && !badf(coeff) && !badf(sel) && !badf(out) &&
+	    tgm_napll_cfg_running(cfg, dvfs) && (sel & TGM_SEL_VCO_GPC2CLK_OUT) &&
+	    !(out & TGM_GPC2CLK_OUT_VCODIV_MASK) && m && n && pl)
+		rate = (int)((u64)gk20a_clk(device->clk)->parent_rate * n / (2000u * m * pl));
+	if (tgm_idle.clk)
+		nvxnu_mutex_unlock(tgm_idle.clk);
+	gate_leave();
+	return rate;
+}
+#endif
+
 #if TGM_STATS
 /* Read right after a count starts, inside its 21 us: GPCPLL_COEFF (M 7:0, N 15:8, PL 21:16), GPC2CLK_OUT (VCO divider
  * 13:8, bypass divider 5:0), CLK_SLOWDOWN_0 (THERM's slowdown factor 21:16) and THERM_GATE_CTRL(0) (GR's ELCG mode 1:0).

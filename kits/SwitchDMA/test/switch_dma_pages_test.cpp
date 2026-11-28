@@ -120,6 +120,18 @@ TEST_F(SwitchDMAPages, AllocatesScatteredZeroedAndCleanBuffers)
     EXPECT_EQ(buffer.count, 0u);
 }
 
+TEST_F(SwitchDMAPages, WriteCombinedSkipsCacheMaintenanceAndPublishes)
+{
+    gPages.segments = {{0x80010000, 0x4000}};
+    switch_dma_pages buffer;
+    ASSERT_TRUE(switch_dma_pages_alloc(&buffer, 0x4000, kIOMapWriteCombineCache));
+    const switch_dcache_event *events;
+    const size_t count = switch_dcache_recorded(&events);
+    ASSERT_EQ(count, 1u);
+    EXPECT_STREQ(events[0].op, "oshst");
+    switch_dma_pages_free(&buffer);
+}
+
 TEST_F(SwitchDMAPages, LeavesNothingBehindOnFailure)
 {
     switch_dma_pages buffer;

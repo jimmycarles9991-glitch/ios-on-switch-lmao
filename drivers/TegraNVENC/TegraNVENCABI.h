@@ -86,18 +86,22 @@ typedef struct {
     uint32_t abi_version, nvenc_version;  // nvenc_version 0x50: NVENC 5.0 (T210)
     uint32_t codecs;                      // bit n: TEGRA_NVENC_CODEC_* n is accepted by Submit
     uint32_t max_width, max_height, max_mbs;
-    uint32_t input_layout;       // TEGRA_NVENC_LAYOUT_*
-    uint32_t chroma_mode;        // TEGRA_NVENC_CHROMA_*
-    uint32_t p_frames;           // 1: P pictures predicted from NVENC's own reconstruction; 0: intra only
-    uint32_t features;           // TEGRA_NVENC_FEATURE_*
-    uint32_t surface_row_align;  // SURFACE_INPUT: a surface's rows VIC reads are multiples of this (bytes)
-    uint32_t reserved;
+    uint32_t input_layout;               // TEGRA_NVENC_LAYOUT_*
+    uint32_t chroma_mode;                // TEGRA_NVENC_CHROMA_*
+    uint32_t p_frames;                   // 1: P pictures predicted from NVENC's own reconstruction; 0: intra only
+    uint32_t features;                   // TEGRA_NVENC_FEATURE_*
+    uint32_t surface_row_align;          // SURFACE_INPUT: a surface's rows VIC reads are multiples of this (bytes)
+    uint32_t jobs_in_flight;             // jobs the engine queues at once
     uint64_t memory_limit, memory_free;  // what every session's buffers together may wire, and what is left
 } TegraNVENCInfo;
 
 enum {
     TEGRA_NVENC_FEATURE_SURFACE_INPUT = 1u << 0,  // Submit takes a TegraNVENCSource into a block-linear input
+    TEGRA_NVENC_FEATURE_COMPLETION = 1u << 1,     // notification port completions + kernel bitstream invalidation
 };
+
+#define SWITCH_NVENC_COMPLETION_PORT 0x4e45  // 'NE': IOConnectSetNotificationPort's type for job completions
+#define SWITCH_NVENC_COMPLETION_ARGS 4       // fence, error_status, ucode_error_status, total_bit_count
 
 typedef struct {
     uint64_t size;

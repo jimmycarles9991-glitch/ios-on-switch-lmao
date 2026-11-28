@@ -31,10 +31,10 @@ TEST(GM20BWriterPromiseSource, AHeldCommandBufferPromisesItsWritesBeforeItsWaitR
     // the submit worker takes a commit (applyChange): one held at once promises its writes before it is marked held
     const std::string commit = Between(schedule, "static void applyChange(", "\n}\n");
     expectBefore(commit, "r.waiting.commit(", "promiseWrites(cb, writtenSurfaces(cb));");
-    expectBefore(commit, "promiseWrites(cb, writtenSurfaces(cb));", "cb->_held = true;");
-    expectBefore(commit, "cb->_held = true;", "gm20bChanged(cb);");
+    expectBefore(commit, "promiseWrites(cb, writtenSurfaces(cb));", "cb->_held.store(true, std::memory_order_release);");
+    expectBefore(commit, "cb->_held.store(true, std::memory_order_release);", "gm20bChanged(cb);");
     const std::string mark = Between(schedule, "static void markHeld(", "\n}\n");
-    expectBefore(mark, "promiseWrites(cb, writtenSurfaces(cb));", "cb->_held = held;");
+    expectBefore(mark, "promiseWrites(cb, writtenSurfaces(cb));", "cb->_held.store(held, std::memory_order_release);");
     const std::string promise = Between(schedule, "static void promiseWrites(", "\n}\n");
     expectBefore(promise, "gRM->raw->promise(part, id)", "late = cb->_promisesTaken;");
     EXPECT_THAT(promise, HasSubstr("gRM->raw->cancelPromise(id);"));  // its last range went meanwhile: given back

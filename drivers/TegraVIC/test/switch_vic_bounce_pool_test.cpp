@@ -184,3 +184,45 @@ TEST_F(Pool, AnUnusedLargeSideDoesNotPreventAFreeSlotFromFittingBudget)
     EXPECT_EQ(b->buffers[1].capacity, 0u);
     switch_vic_bounce_release(b);
 }
+
+TEST_F(Pool, AlternatingSingleSidedBouncesKeepBothSidesWarm)
+{
+    auto d = shape(1024, 512);
+    SwitchVICBounceSlot *slot = nullptr;
+    ASSERT_EQ(switch_vic_bounce_acquire(&d, &d, &slot), 0);
+    auto *srcBacking = slot->buffers[0].backing;
+    auto *dstBacking = slot->buffers[1].backing;
+    switch_vic_bounce_release(slot);
+    const int warmAllocs = allocations;
+    const int warmDestroyed = destroyed;
+
+    ASSERT_EQ(switch_vic_bounce_acquire(&d, nullptr, &slot), 0);
+    EXPECT_EQ(slot->buffers[0].backing, srcBacking);
+    EXPECT_EQ(slot->buffers[1].backing, dstBacking);
+    switch_vic_bounce_release(slot);
+
+    ASSERT_EQ(switch_vic_bounce_acquire(nullptr, &d, &slot), 0);
+    EXPECT_EQ(slot->buffers[0].backing, srcBacking);
+    EXPECT_EQ(slot->buffers[1].backing, dstBacking);
+    switch_vic_bounce_release(slot);
+
+    EXPECT_EQ(allocations, warmAllocs);
+    EXPECT_EQ(destroyed, warmDestroyed);
+    EXPECT_EQ(maps, 2);
+}
+
+TEST_F(Pool, SmallGrowthRoundsToAvoidRepeatedReallocation)
+{
+    auto a = shape(320, 320);  // ~480 KiB bounced -> rounded to 512 KiB
+    auto b = shape(336, 336);  // slightly larger, still within 512 KiB -> reuses warm allocation
+    SwitchVICBounceSlot *slot = nullptr;
+    ASSERT_EQ(switch_vic_bounce_acquire(&a, nullptr, &slot), 0);
+    auto *backing = slot->buffers[0].backing;
+    switch_vic_bounce_release(slot);
+    const int afterFirst = allocations;
+
+    ASSERT_EQ(switch_vic_bounce_acquire(&b, nullptr, &slot), 0);
+    EXPECT_EQ(slot->buffers[0].backing, backing);
+    EXPECT_EQ(allocations, afterFirst);
+    switch_vic_bounce_release(slot);
+}

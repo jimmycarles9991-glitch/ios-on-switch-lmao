@@ -27,6 +27,9 @@ struct SwitchMetalPlanBegin {
     size_t end = 0;
     uint32_t rasterBegin = 0, rasterCount = 0;
     uint32_t range = gm20b::kNoSnapshot;  // its own prepared range (SwitchMetalCommandPlan::rangeIndex_), once it ended
+    uint32_t unfinalDraws = 0;
+    bool hasWaitFence = false;
+    bool hasNonDraw = false;
 };
 
 struct SwitchMetalPlanRasterGroup {
@@ -208,7 +211,8 @@ class SwitchMetalCommandPlan {
     // The render use lists resolved last, by resource revision and pipeline: a revision moves with every bind of
     // another resource, so only draws close together share one (a state switched back to over the same resources)
     static constexpr uint32_t kRecentRenderUses = 4;
-    std::array<ResourceKey, kRecentRenderUses> recentRenderKeys_{};
+    std::array<ResourceKey, kRecentRenderUses> recentRenderKeys_{
+        {{UINT64_MAX, 0}, {UINT64_MAX, 0}, {UINT64_MAX, 0}, {UINT64_MAX, 0}}};
     std::array<uint32_t, kRecentRenderUses> recentRenderUses_{};
     uint32_t recentRenderAt_ = 0;
     uint32_t drawUses(uint32_t base, void *indices, void *arguments);
@@ -239,11 +243,125 @@ public:
     // `resolvesUses`: a draw's caller resolves its uses (resolveRenderUses) right after, so its state's uses of every
     // bound resource are not listed
     bool record(const Cmd &c, const uint64_t *extra, size_t extraWords = 0, bool resolvesUses = false);
+    void recordDraw(uint8_t primitive, uint32_t first, uint32_t count, uint32_t instances, uint32_t baseInstance,
+                    bool resolvesUses);
 
     // A binding or raster command (record's setters, one that takes no operation), as record takes it
     void bind(const Cmd &c, const uint64_t *extra)
     {
         setter(c, extra);
+    }
+
+    void bindBytes(uint32_t stage, uint32_t slot, uint32_t chunk, uint32_t offset, uint32_t length, uint32_t shadow)
+    {
+        if (stage >= 2 || slot >= 31)
+            return;
+        bool resourcesChanged = false;
+        buffers[stage].setUnchecked(slot, [&](gm20b::BufferBinding &dst) {
+            resourcesChanged = dst.source == gm20b::BufferBinding::Source::Buffer && dst.object != nullptr;
+            dst.source = gm20b::BufferBinding::Source::Bytes;
+            dst.object = nullptr;
+            dst.offset = offset;
+            dst.chunk = chunk;
+            dst.length = length;
+            dst.stride = gm20b::kStaticStride;
+            dst.shadow = shadow;
+        });
+        if (resourcesChanged)
+            ++resourceRevision_[0];
+        ++renderGeneration_;
+        ++eligibilityGeneration_;
+    }
+
+    void bindPipeline(void *pipeline, void *nativePipeline)
+    {
+        const bool changed = raster.update([&](gm20b::RasterState &state) {
+            using R = gm20b::RasterState;
+            bool diff = !(state.set & R::Pipeline);
+            diff |= gm20b::assignState(state.pipeline, pipeline);
+            diff |= gm20b::assignState(state.nativePipeline, nativePipeline);
+            diff |= gm20b::assignState(state.nativeVariant, static_cast<void *>(nullptr));
+            state.set |= R::Pipeline;
+            return diff;
+        });
+        if (changed) {
+            ++renderGeneration_;
+            ++eligibilityGeneration_;
+        }
+    }
+
+    void recordRenderBegin(void *descriptor, uint32_t pass)
+    {
+        if (encoder_ != OpEnd && recordingError_ == SwitchMetalPlanError::None)
+            recordingError_ = SwitchMetalPlanError::NestedEncoder;
+        encoder_ = OpRender;
+        encoderBegin_ = size();
+        ++stateEpoch_;
+        ++eligibilityGeneration_;
+        ++resourceRevision_[0];
+        ++resourceRevision_[1];
+        for (auto &state : buffers)
+            state.resetCurrent();
+        for (auto &state : textures)
+            state.resetCurrent();
+        kernelTextures.resetCurrent();
+        for (auto &state : samplers)
+            state.resetCurrent();
+        raster.resetCurrent();
+        kernel.resetCurrent();
+        ++renderGeneration_;
+        ++kernelGeneration_;
+        const uint32_t payload = static_cast<uint32_t>(begins_.size());
+        SwitchMetalPlanBegin *begin = begins_.emplaceUninit();
+        *begin = SwitchMetalPlanBegin{descriptor, pass, 0};
+        begin->rasterBegin = uint32_t(rasterGroups_.size());
+        lastRasterGroup_ = gm20b::kNoSnapshot;
+        operations_.push_back({OpRender, payload, 0});
+    }
+
+    void recordEnd()
+    {
+        if (encoder_ != OpEnd)
+            begins_.own(operations_.own(encoderBegin_).payload).end = size() + 1;
+        encoder_ = OpEnd;
+        operations_.push_back({OpEnd, 0, 0});
+    }
+
+    void bindScissor(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
+    {
+        const bool changed = raster.update([&](gm20b::RasterState &state) {
+            const std::array<uint32_t, 4> value{x, y, w, h};
+            bool diff = !(state.set & gm20b::RasterState::Scissor);
+            diff |= gm20b::assignState(state.scissor, value);
+            diff |= gm20b::assignState(state.scissors, uint16_t(1));
+            diff |= gm20b::assignState(state.scissorsAt, uint32_t(0));
+            state.set |= gm20b::RasterState::Scissor;
+            return diff;
+        });
+        if (changed)
+            ++renderGeneration_;
+    }
+
+    void bindTexture(uint32_t stage, uint32_t slot, void *object)
+    {
+        if (stage >= 2)
+            return;
+        if (textures[stage].bind(slot, object)) {
+            ++resourceRevision_[0];
+            ++renderGeneration_;
+            ++eligibilityGeneration_;
+        }
+    }
+
+    void bindSampler(uint32_t stage, uint32_t slot, void *object)
+    {
+        if (stage >= 2)
+            return;
+        if (samplers[stage].bind(slot, object)) {
+            ++resourceRevision_[0];
+            ++renderGeneration_;
+            ++eligibilityGeneration_;
+        }
     }
 
     // `build` fills the list it is handed with the dispatch's uses, where the kernel and resource revision are new
@@ -306,6 +424,11 @@ public:
         return operations_[at];
     }
 
+    const SwitchMetalPlanOperation &ownOperation(size_t at) const
+    {
+        return operations_.own(at);
+    }
+
     SwitchMetalPlanError recordingError() const
     {
         return recordingError_ != SwitchMetalPlanError::None ? recordingError_
@@ -318,6 +441,11 @@ public:
         return begins_[operations_[at].payload];
     }
 
+    const SwitchMetalPlanBegin &ownBegin(size_t at) const
+    {
+        return begins_.own(operations_.own(at).payload);
+    }
+
     const SwitchMetalPlanEvent &event(size_t at) const
     {
         return events_[operations_[at].payload];
@@ -326,6 +454,11 @@ public:
     const SwitchMetalPlanDraw &draw(size_t at) const
     {
         return draws_[operations_[at].payload];
+    }
+
+    const SwitchMetalPlanDraw &drawAt(uint32_t payload, bool own = false) const
+    {
+        return own ? draws_.own(payload) : draws_[payload];
     }
 
     // The writer's (as the draw is recorded)
@@ -339,12 +472,16 @@ public:
         return patches_[draw(at).patches];
     }
 
-    template <typename F> void forEachRasterGroup(size_t begin, F visit) const
+    template <typename F> void forEachRasterGroup(size_t begin, F visit, bool own = false) const
     {
-        const auto &pass = begins_[operations_[begin].payload];
+        const auto &pass = own ? begins_.own(operations_.own(begin).payload) : begins_[operations_[begin].payload];
+        if (!pass.rasterCount)
+            return;
+        const SwitchMetalPlanRasterGroup *groups = own ? rasterGroups_.ownData() : rasterGroups_.data();
+        const gm20b::RasterState *states = raster.valuesData(own);
         for (uint32_t i = 0; i < pass.rasterCount; ++i) {
-            const auto &group = rasterGroups_[pass.rasterBegin + i];
-            visit(raster[group.state], group.draws);
+            const auto &group = groups[pass.rasterBegin + i];
+            visit(states[group.state], group.draws);
         }
     }
 
@@ -453,6 +590,7 @@ public:
 
     size_t storageBytes() const;
     void clear();
+    void swapClean(SwitchMetalCommandPlan &other) noexcept;
 
     template <typename F> void forEachOperationUse(size_t from, size_t to, F visit) const
     {

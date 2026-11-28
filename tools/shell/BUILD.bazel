@@ -1,0 +1,29 @@
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+py_library(
+    name = "shell_lib",
+    srcs = ["shell.py"],
+    deps = ["//tools/common:paths"],
+)
+
+py_binary(
+    name = "shell",
+    srcs = ["shell.py"],
+    main = "shell.py",
+    deps = [":shell_lib"],
+)
+
+py_test(
+    name = "shell_test",
+    size = "small",
+    srcs = ["shell_test.py"],
+    data = ["BUILD.bazel"],
+    deps = [":shell_lib"],
+)

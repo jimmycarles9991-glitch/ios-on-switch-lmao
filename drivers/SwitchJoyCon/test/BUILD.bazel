@@ -112,6 +112,17 @@ host_test(
     deps = [":rx_ring"],
 )
 
+host_library(
+    name = "link",
+    hdrs = ["//drivers/SwitchJoyCon:SwitchJoyConLink.h"],
+)
+
+host_test(
+    name = "switch_joycon_link_test",
+    srcs = ["switch_joycon_link_test.cpp"],
+    deps = [":link"],
+)
+
 host_test(
     name = "switch_joycon_personality_test",
     srcs = ["switch_joycon_personality_test.cpp"],

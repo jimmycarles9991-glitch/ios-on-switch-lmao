@@ -6,7 +6,7 @@ static int chan_completion(struct tgm_chan *chan)
 {
 	u32 done = tgm_chan_completed(chan);
 	u64 now = 0;
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 	if (chan == tgm_present.chan)
 		tgm_copy_reset_nonstall();
 #endif

@@ -184,10 +184,15 @@ bool recorded(switch_gpu_backing *backing, const switch_gpu_backing_token &token
 	return false;
 }
 
-bool order_held()
+bool lock_held(switch_gpu_backing *backing)
 {
 	const auto &held = ioLocksHeld();
-	return std::find(held.begin(), held.end(), switch_gpu_backing_order()) != held.end();
+	return std::find(held.begin(), held.end(), backing->lock) != held.end();
+}
+
+bool any_lock_held()
+{
+	return !ioLocksHeld().empty();
 }
 
 uint64_t status_reads()

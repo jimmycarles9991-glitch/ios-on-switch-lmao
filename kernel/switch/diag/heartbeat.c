@@ -56,7 +56,7 @@ static void switch_heartbeat_drain(void)
 static bool switch_heartbeat_running(void)
 {
     return __atomic_load_n(&switch_heartbeat_on, __ATOMIC_ACQUIRE) &&
-           !__atomic_load_n(&switch_heartbeat_holds, __ATOMIC_SEQ_CST) && !panic_active();
+           !__atomic_load_n(&switch_heartbeat_holds, __ATOMIC_ACQUIRE) && !panic_active();
 }
 
 static bool switch_heartbeat_programmed(void)
@@ -213,7 +213,7 @@ static void __dead2 switch_heartbeat_main(void *arg __unused, wait_result_t resu
 
 void switch_heartbeat_hold(unsigned why)
 {
-    __atomic_fetch_or(&switch_heartbeat_holds, why, __ATOMIC_SEQ_CST);
+    __atomic_fetch_or(&switch_heartbeat_holds, why, __ATOMIC_ACQ_REL);
     if (__atomic_load_n(&switch_heartbeat_on, __ATOMIC_ACQUIRE)) {
         switch_heartbeat_stop();
     }
@@ -223,7 +223,7 @@ void switch_heartbeat_hold(unsigned why)
  * hold, so it starts them again, told before the hold ends. */
 void switch_heartbeat_release(unsigned why)
 {
-    const uint32_t holds = __atomic_load_n(&switch_heartbeat_holds, __ATOMIC_SEQ_CST);
+    const uint32_t holds = __atomic_load_n(&switch_heartbeat_holds, __ATOMIC_RELAXED);
     if (!(holds & why)) {
         return;
     }
@@ -235,7 +235,7 @@ void switch_heartbeat_release(unsigned why)
         (void)switch_heartbeat_program();
         switch_power_trail_beat(now);
     }
-    __atomic_fetch_and(&switch_heartbeat_holds, ~why, __ATOMIC_SEQ_CST);
+    __atomic_fetch_and(&switch_heartbeat_holds, ~why, __ATOMIC_ACQ_REL);
     if (on && !switch_heartbeat_running()) {
         switch_heartbeat_stop();
     }
@@ -324,7 +324,7 @@ const char *switch_heartbeat_arm(bool *armed)
         return switch_heartbeat_arm_line;
     }
     thread_t thread = THREAD_NULL;
-    if (kernel_thread_start_priority(switch_heartbeat_main, NULL, MAXPRI_KERNEL, &thread) != KERN_SUCCESS) {
+    if (kernel_thread_start_priority(switch_heartbeat_main, NULL, BASEPRI_KERNEL, &thread) != KERN_SUCCESS) {
         switch_heartbeat_stop();
         return "heartbeat not armed: no thread";
     }
@@ -333,7 +333,7 @@ const char *switch_heartbeat_arm(bool *armed)
     kdp_register_callout(switch_heartbeat_debugger, NULL);
     __atomic_store_n(&switch_heartbeat_last_beat, switch_heartbeat_now(), __ATOMIC_RELEASE);
     __atomic_store_n(&switch_heartbeat_on, true, __ATOMIC_RELEASE);
-    if (__atomic_load_n(&switch_heartbeat_holds, __ATOMIC_SEQ_CST)) {
+    if (__atomic_load_n(&switch_heartbeat_holds, __ATOMIC_ACQUIRE)) {
         switch_heartbeat_stop();
     }
     *armed = true;

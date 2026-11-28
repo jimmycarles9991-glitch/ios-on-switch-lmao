@@ -4,6 +4,7 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include "TegraVICSurface.h"
 #include "TegraVIC.h"
+#include "SwitchVICSurfaceRange.h"
 #include "../TegraGM20B/SwitchGpuBacking.h"
 #include "../TegraGM20B/TegraGM20BViews.h"
 
@@ -83,11 +84,26 @@ switch_gpu_backing *adopt(const TegraVICSurface *surface, switch_gpu_backing *ba
     return backing;
 }
 
-switch_gpu_backing *cached(const TegraVICSurface *surface)
+uint64_t registrationLength(const TegraVICSurface *surface)
+{
+    const uint64_t length = surface->desc.length;
+    if (!length || length > (256ULL << 20))
+        return 0;
+    // Register the whole VM-page-rounded descriptor when this surface owns it so a later GPU BoImport matches page count.
+    if (surface->memory) {
+        const uint64_t memoryLength = surface->memory->getLength();
+        if (memoryLength <= (256ULL << 20) &&
+            switch_vic_surface_owns_descriptor(memoryLength, surface->baseOffset, length, PAGE_SIZE))
+            return memoryLength;
+    }
+    return length;
+}
+
+switch_gpu_backing *cached(const TegraVICSurface *surface, uint64_t length)
 {
     for (auto &item : gSurfaces) {
         if (item.surface == surface->surface && item.memory == surface->memory && item.base == surface->baseOffset &&
-            item.length == surface->desc.length) {
+            item.length == length) {
             item.used = ++gClock;
             switch_gpu_backing_retain(item.backing);
             return item.backing;
@@ -99,12 +115,12 @@ switch_gpu_backing *cached(const TegraVICSurface *surface)
 
 switch_gpu_backing *switch_vic_surface_backing(const TegraVICSurface *surface)
 {
-    const uint64_t length = surface->desc.length;
-    if (!length || length > (256ULL << 20) || !initialize())
+    const uint64_t length = registrationLength(surface);
+    if (!length || !initialize())
         return nullptr;
     IOLockLock(gLock);
     noteLock();
-    auto *backing = cached(surface);
+    auto *backing = cached(surface, length);
     IOLockUnlock(gLock);
     if (backing)
         return adopt(surface, backing);
@@ -119,6 +135,7 @@ switch_gpu_backing *switch_vic_surface_backing(const TegraVICSurface *surface)
         return nullptr;
     }
     *owner = *surface;
+    owner->desc.length = length;
     owner->prepared = false;
     owner->surface->retain();
     uint32_t actual = 0;
@@ -133,7 +150,7 @@ switch_gpu_backing *switch_vic_surface_backing(const TegraVICSurface *surface)
         return adopt(surface, backing);
     IOLockLock(gLock);
     noteLock();
-    auto *existing = cached(surface);
+    auto *existing = cached(surface, length);
     if (!existing) {
         while (gBytes + ((length + 4095) & ~4095ULL) > kSurfaceCacheBytes) {
             CachedSurface *victim = nullptr;

@@ -1,4 +1,5 @@
 # The userland overlay: manifest.json and the files it names (moved from out/native-a57/root-v1/tree/overlay by the layout move).
+load("@bazel_skylib//lib:selects.bzl", "selects")
 load("//bazel/lint:defs.bzl", "lint_files")
 
 package(default_visibility = ["//visibility:public"])
@@ -9,18 +10,30 @@ exports_files([
     "manifest.json",
     "supplemental/com.brunostjohn.switch.shadercompiler.jetsam.plist",
     "supplemental/com.brunostjohn.switch.bootstrap.jetsam.plist",
+    "supplemental/com.brunostjohn.switch.appregd.jetsam.plist",
 ])
 
+selects.config_setting_group(
+    name = "with_hwtest",
+    match_all = [
+        "//bazel:hwtest_on",
+        "//install:from_local",
+    ],
+)
+
 # The jetsam properties overlay iOS 27's launchd reads for our daemons in the Supplemental cryptex's LaunchDaemons, one
-# file (tools/package/jetsam_overlay.py): the shader compiler's limits, and in debug the texture peer's, which the
-# manifest stages in debug alone.
+# file (tools/package/jetsam_overlay.py): the shader compiler's limits, the bootstrap helper's and the app registration
+# daemon's (J181's Daemon Override Global gives an unlisted daemon 6 MB, under one LaunchServices registration: on
+# 25 Nov switch-appregd crossed it mid-registration, 5.6 MB internal, and left a corpse for ReportCrash), and the texture
+# peer's when HW Test is staged (on by default in debug, off in release unless --//bazel:hwtest=true).
 genrule(
     name = "jetsam_properties",
     srcs = [
         "supplemental/com.brunostjohn.switch.shadercompiler.jetsam.plist",
         "supplemental/com.brunostjohn.switch.bootstrap.jetsam.plist",
+        "supplemental/com.brunostjohn.switch.appregd.jetsam.plist",
     ] + select({
-        "//bazel:debug": ["//apps/hwtest:peer/com.brunostjohn.switch.texpeer.jetsam.plist"],
+        ":with_hwtest": ["//apps/hwtest:peer/com.brunostjohn.switch.texpeer.jetsam.plist"],
         "//conditions:default": [],
     }),
     outs = ["supplemental/com.apple.jetsamproperties.cryptex.plist"],

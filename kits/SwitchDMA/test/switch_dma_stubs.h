@@ -18,7 +18,7 @@ using mach_vm_address_t = uint64_t;
 using task_t = void *;
 constexpr IOReturn kIOReturnSuccess = 0, kIOReturnNoResources = 0x2be;
 constexpr IOOptionBits kIODirectionInOut = 3, kIOMemoryPhysicallyContiguous = 0x10, kIOMemoryMapperNone = 0x800,
-                       kIOMapWriteCombineCache = 0x400;
+                       kIOMapCacheMask = 0x700, kIOMapInhibitCache = 0x100, kIOMapWriteCombineCache = 0x400;
 inline task_t kernel_task = nullptr;
 
 inline void bzero(void *p, size_t n)

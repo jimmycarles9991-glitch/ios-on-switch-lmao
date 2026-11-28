@@ -11,8 +11,13 @@
  * - libMobileGestalt (.11), MGIOMFBSupport.c's static screen info: main-screen-scale is the scale's float instead of
  *   the property's value converted. IconServices, TextInputCore, GraphicsServices, CoreMaterial, WebCore and others
  *   size bitmaps from MobileGestalt rather than UIScreen; at 1 those would be drawn scaled up. The register that held
- *   the property holds the float's bits (movz/movk over its read, fmov over the scvtf). Its one other use, the screen
- *   class lookup, finds no class for this panel at any scale. QuartzCore's own scale stays 1 (fcvtzu).
+ *   the property holds the float's bits (movz/movk over its read, fmov over the scvtf). QuartzCore's own scale stays 1
+ *   (fcvtzu). Its one other use is main-screen-class, a table keyed by dot pitch, integer scale and panel size, whose
+ *   every miss answers -1: the float's bits miss it at every scale, and so would this panel at 1. UIKit, SpringBoard,
+ *   IconServices, ProgressUI and some forty other readers then take a class no device has (ProgressUI logs
+ *   "Unsupported screen class -1" at the boot logo). A miss answers J120's class instead, 11 (264 ppi, 2x,
+ *   2048x2732). With /chosen/display-scale 1 (the display probe's), the float at scale 1 is the stock answer, so the
+ *   site applies at every scale.
  * - CoreUI (.11), -[CUINamedVectorPDFImage rasterizeImageUsingScaleFactor:forTargetSize:] and its SVG twin: the
  *   bitmap is trunc(w * scale) pixels wide but its row bytes were trunc(w * scale * bytes per pixel), which is not a
  *   multiple of the pixel at a fractional pixel width (34 points at 1.6: 54 pixels, 217 bytes). CGBitmapContextCreate
@@ -94,12 +99,14 @@ static const struct switch_us_site switch_us_sites_21H461[] = {
 			/* 0x1a0215754: mov w4, #1; bl (the display-scale read); mov x19, x0 */
 			{ 0x531754ULL, 12, 4, 8, SWITCH_US_MG_SCALE,
 			  { 0x24, 0x00, 0x80, 0x52, 0x05, 0xe9, 0xff, 0x97, 0xf3, 0x03, 0x00, 0xaa }, { 0 } },
-			/* 0x1a021594c: str w21, [sp, #0x68]; scvtf s0, w19; stp s0, s8, [sp, #0x6c] -> fmov s0, w19 */
-			{ 0x53194cULL, 12, 4, 4, SWITCH_US_FIXED,
-			  { 0xf5, 0x6b, 0x00, 0xb9, 0x60, 0x02, 0x22, 0x1e, 0xe0, 0xa3, 0x0d, 0x2d },
-			  { 0x60, 0x02, 0x27, 0x1e } },
+			/* 0x1a0215944: mov w8, #-1 (no class); stp w22, w23, [sp, #0x60]; str w21, [sp, #0x68];
+			 * scvtf s0, w19; stp s0, s8, [sp, #0x6c] -> mov w8, #11; fmov s0, w19 */
+			{ 0x531944ULL, 20, 0, 16, SWITCH_US_FIXED,
+			  { 0x08, 0x00, 0x80, 0x12, 0xf6, 0x5f, 0x0c, 0x29, 0xf5, 0x6b, 0x00, 0xb9, 0x60, 0x02, 0x22, 0x1e,
+			    0xe0, 0xa3, 0x0d, 0x2d },
+			  { 0x68, 0x01, 0x80, 0x52, 0xf6, 0x5f, 0x0c, 0x29, 0xf5, 0x6b, 0x00, 0xb9, 0x60, 0x02, 0x27, 0x1e } },
 		},
-		"MobileGestalt", "main-screen-scale", false,
+		"MobileGestalt", "main-screen-scale and screen class", true,
 	},
 	{   /* .11 */
 		{ 0x70, 0x56, 0x7d, 0x89, 0x4c, 0xe6, 0x3e, 0xc6, 0xa4, 0xde, 0xe7, 0xb4, 0xf4, 0xec, 0x60, 0x41 },
@@ -249,7 +256,7 @@ static const struct switch_us_site switch_us_sites_21H461[] = {
 
 static const struct switch_us_cache switch_us_cache_21H461 = {
 	"21H461", "dyld_v1   arm64", switch_us_sites_21H461,
-	sizeof(switch_us_sites_21H461) / sizeof(switch_us_sites_21H461[0]),
+	sizeof(switch_us_sites_21H461) / sizeof(switch_us_sites_21H461[0]), 11,
 };
 
 #endif /* _VM_SWITCH_UI_SCALE_SITES_21H461_H_ */

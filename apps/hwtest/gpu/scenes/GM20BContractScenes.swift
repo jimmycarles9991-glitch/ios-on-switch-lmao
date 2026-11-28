@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// A 64x64 pattern whose neighbouring texels differ in every channel, uploaded to a private texture.

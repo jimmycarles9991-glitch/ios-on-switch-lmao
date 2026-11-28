@@ -513,8 +513,12 @@ fn compile_backend<'a>(
     nir: &'a nir_shader,
     sm: &'a ShaderModelInfo,
     has_task_shader: bool,
+    fs_key: Option<&nak_fs_key>,
 ) -> (Shader<'a>, bool) {
     let mut s = nak_shader_from_nir(nak, nir, sm, has_task_shader);
+    if let Some(key) = fs_key {
+        s.opt_unorm_outputs(key.unorm_targets);
+    }
 
     if DEBUG.print() {
         eprintln!("NAK IR:\n{}", &s);
@@ -588,13 +592,15 @@ fn nak_compile_shader_internal(
 
     let sm = ShaderModelInfo::new(nak.sm, nak.warps_per_sm);
     let first_fit = sm.first_fit();
-    let (mut s, moved) = compile_backend(nak, nir, &sm, has_task_shader);
+    let (mut s, moved) =
+        compile_backend(nak, nir, &sm, has_task_shader, fs_key);
     // Spreading sources over register banks can cost a parallel copy that
     // first-fit avoids: where the allocation moved any value, compile again
     // first-fit and keep the cheaper program (an extra MOV and an extra
     // same-bank read each cost a cycle on GM20B), the shorter on a tie
     if sm.reg_banks() && moved {
-        let (f, _) = compile_backend(nak, nir, &first_fit, has_task_shader);
+        let (f, _) =
+            compile_backend(nak, nir, &first_fit, has_task_shader, fs_key);
         if cost(&f) < cost(&s) {
             s = f;
         }

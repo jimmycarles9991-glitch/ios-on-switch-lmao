@@ -94,10 +94,16 @@ int32_t render(const Prepared &p, const Libraries &libraries, gm20b::Direct &dir
     if (!d)
         return TegraGM20BCompileUnavailable;
     gm20b::RuntimeRecord record;
+    const gm20b::PackForm form = gm20b::withoutFull(p.request.form) == gm20b::RequestForm::Barrier
+                                     ? gm20b::PackForm::Barrier
+                                     : gm20b::PackForm::Default;
+    const bool full = gm20b::fullForm(p.request.form);
+    direct.makeVariants(full);
     const gm20b::CompileOutcome outcome =
-        direct.make(d, p.packKey, record, why, gm20b::probeTexturesOf(p.request.variant));
+        direct.make(d, p.packKey, record, why, gm20b::probeTexturesOf(p.request.variant), nullptr, full, form);
+    direct.makeVariants(false);
     if (outcome != gm20b::CompileOutcome::Failed)
-        entry = gm20b::encodeEntry(p.key, outcome == gm20b::CompileOutcome::Made ? &record : nullptr, why);
+        entry = gm20b::encodeEntry(p.content, outcome == gm20b::CompileOutcome::Made ? &record : nullptr, why);
     return resultOf(outcome);
 }
 
@@ -152,7 +158,7 @@ int32_t kernel(const Prepared &p, const Libraries &libraries, gm20b::Direct &dir
     gm20b::ComputeRecord record;
     const gm20b::CompileOutcome outcome = direct.kernel(d, dispatch, p.packKey, record, why);
     if (outcome != gm20b::CompileOutcome::Failed)
-        entry = gm20b::encodeKernelEntry(p.key, outcome == gm20b::CompileOutcome::Made ? &record : nullptr, why);
+        entry = gm20b::encodeKernelEntry(p.content, outcome == gm20b::CompileOutcome::Made ? &record : nullptr, why);
     return resultOf(outcome);
 }
 
@@ -171,11 +177,20 @@ int32_t reflection(const Prepared &p, const Libraries &libraries, uint64_t stack
             return TegraGM20BCompileUnavailable;
         made = offline::renderReflection(d, blob, why);
     }
-    entry = gm20b::encodeReflectionEntry(p.key, made ? &blob : nullptr, why);
+    entry = gm20b::encodeReflectionEntry(p.content, made ? &blob : nullptr, why);
     return made ? TegraGM20BCompileMade : TegraGM20BCompileRefused;
 }
 
 }  // namespace
+
+std::string asPrimary(const Prepared &p, const std::string &entry)
+{
+    gm20b::RuntimeRecord record;
+    std::string refusal;
+    if (gm20b::decodeEntry(entry, p.content, record, refusal) != gm20b::RecordCache::Found::Record)
+        return std::string();
+    return gm20b::encodeEntry(p.primaryContent, &record, "");
+}
 
 bool functions(const gm20b::CompileRequest &r, const Libraries &libraries, std::vector<id<MTLFunction>> &out,
                std::string &why)

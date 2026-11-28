@@ -58,7 +58,8 @@ public:
         }
     };
 
-    // The encoder begins with every shadowed texture of its dispatches filled
+    // The encoder begins with every shadowed texture of its dispatches filled. A texture over several spans (a two-plane
+    // texture's planes in pools of their own) is one use a span: each span is tracked, and its images move together.
     void begin(const KernelUse *uses, size_t count)
     {
         shadowed_.clear();
@@ -67,9 +68,9 @@ public:
         writes_.clear();
         clock_ = 0;
         for (size_t i = 0; i < count; ++i) {
-            if (uses[i].shadowed && !find(uses[i].object))
+            if (uses[i].shadowed && !find(uses[i]))
                 shadowed_.push_back({uses[i].object, uses[i].span, 0});
-            if (uses[i].derived && !findDerived(uses[i].object))
+            if (uses[i].derived && !findDerived(uses[i]))
                 derived_.push_back({uses[i].object, uses[i].span, 0, false});
         }
     }
@@ -80,35 +81,39 @@ public:
         steps_.copyBack.clear();
         steps_.fill.clear();
         steps_.redraw.clear();
+        for (const Write &w : written_)
+            if (std::any_of(uses, uses + count, [&](const KernelUse &u) {
+                    return u.object != w.object && u.span.overlaps(w.span);
+                }))
+                addOnce(steps_.copyBack, w.object);
         for (auto w = written_.begin(); w != written_.end();) {
-            const bool reached = std::any_of(uses, uses + count, [&](const KernelUse &u) {
-                return u.object != w->object && u.span.overlaps(w->span);
-            });
-            if (!reached) {
+            if (!listed(steps_.copyBack, w->object)) {
                 ++w;
                 continue;
             }
-            steps_.copyBack.push_back(w->object);
             writes_.push_back({w->object, w->span, clock_++});
             w = written_.erase(w);
         }
         for (size_t i = 0; i < count; ++i) {
-            if (!uses[i].shadowed ||
-                std::find(steps_.fill.begin(), steps_.fill.end(), uses[i].object) != steps_.fill.end())
+            if (!uses[i].shadowed)
                 continue;
-            Shadowed *s = find(uses[i].object);
-            const bool stale = !s || std::any_of(writes_.begin(), writes_.end(), [&](const Write &w) {
-                return w.object != s->object && w.tick >= s->filled && w.span.overlaps(s->span);
-            });
-            if (!stale)
-                continue;
+            Shadowed *s = find(uses[i]);
             if (!s) {
                 shadowed_.push_back({uses[i].object, uses[i].span, clock_});
-            } else {
-                s->filled = clock_;
+                s = &shadowed_.back();
+                addOnce(steps_.fill, uses[i].object);
             }
-            steps_.fill.push_back(uses[i].object);
+            if (listed(steps_.fill, uses[i].object))
+                continue;
+            const bool stale = std::any_of(writes_.begin(), writes_.end(), [&](const Write &w) {
+                return w.object != s->object && w.tick >= s->filled && w.span.overlaps(s->span);
+            });
+            if (stale)
+                addOnce(steps_.fill, uses[i].object);
         }
+        for (Shadowed &s : shadowed_)
+            if (listed(steps_.fill, s.object))
+                s.filled = clock_;
         for (size_t i = 0; i < count; ++i)
             if (uses[i].derived && !uses[i].writes && staleDerived(uses[i]))
                 steps_.redraw.push_back(uses[i].object);
@@ -121,12 +126,13 @@ public:
         for (size_t i = 0; i < count; ++i) {
             if (!uses[i].writes)
                 continue;
-            if (Derived *d = findDerived(uses[i].object))
-                d->dirty = true;
+            for (Derived &d : derived_)
+                if (d.object == uses[i].object)
+                    d.dirty = true;
             if (!uses[i].shadowed)
                 writes_.push_back({uses[i].object, uses[i].span, clock_});
             else if (std::none_of(written_.begin(), written_.end(), [&](const Write &w) {
-                         return w.object == uses[i].object;
+                         return w.object == uses[i].object && same(w.span, uses[i].span);
                      }))
                 written_.push_back({uses[i].object, uses[i].span, clock_});
         }
@@ -138,7 +144,7 @@ public:
     {
         std::vector<const void *> back;
         for (const Write &w : written_)
-            back.push_back(w.object);
+            addOnce(back, w.object);
         written_.clear();
         return back;
     }
@@ -163,40 +169,59 @@ private:
         bool dirty;      // its own texels or image written since
     };
 
-    Shadowed *find(const void *object)
+    static bool same(const ByteSpan &a, const ByteSpan &b)
+    {
+        return a.va == b.va && a.bytes == b.bytes;
+    }
+
+    static bool listed(const std::vector<const void *> &list, const void *object)
+    {
+        return std::find(list.begin(), list.end(), object) != list.end();
+    }
+
+    static void addOnce(std::vector<const void *> &list, const void *object)
+    {
+        if (!listed(list, object))
+            list.push_back(object);
+    }
+
+    Shadowed *find(const KernelUse &u)
     {
         for (Shadowed &s : shadowed_)
-            if (s.object == object)
+            if (s.object == u.object && same(s.span, u.span))
                 return &s;
         return nullptr;
     }
 
-    Derived *findDerived(const void *object)
+    Derived *findDerived(const KernelUse &u)
     {
         for (Derived &d : derived_)
-            if (d.object == object)
+            if (d.object == u.object && same(d.span, u.span))
                 return &d;
         return nullptr;
     }
 
-    // Whether the stand-in `u` reads holds every write before this dispatch; if not it is drawn again now
+    // Whether the stand-in `u` reads holds every write before this dispatch; if not it is drawn again now, for all its
+    // spans at once
     bool staleDerived(const KernelUse &u)
     {
-        if (std::find(steps_.redraw.begin(), steps_.redraw.end(), u.object) != steps_.redraw.end())
+        if (listed(steps_.redraw, u.object))
             return false;
-        Derived *d = findDerived(u.object);
+        Derived *d = findDerived(u);
         if (!d) {
             derived_.push_back({u.object, u.span, 0, false});
             d = &derived_.back();
         }
-        const bool refilled = std::find(steps_.fill.begin(), steps_.fill.end(), u.object) != steps_.fill.end();
+        const bool refilled = listed(steps_.fill, u.object);
         const bool stale = refilled || d->dirty || std::any_of(writes_.begin(), writes_.end(), [&](const Write &w) {
                                return w.tick >= d->drawn && w.span.overlaps(d->span);
                            });
-        if (stale) {
-            d->drawn = clock_;
-            d->dirty = false;
-        }
+        if (stale)
+            for (Derived &x : derived_)
+                if (x.object == u.object) {
+                    x.drawn = clock_;
+                    x.dirty = false;
+                }
         return stale;
     }
 

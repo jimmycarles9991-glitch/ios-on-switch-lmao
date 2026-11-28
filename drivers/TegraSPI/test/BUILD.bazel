@@ -1,0 +1,19 @@
+# TegraSPI's FIFO words on the host (TegraSPIWords.h): unpacked bytes, packed fours, and a block's words back to bytes.
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_test")
+
+lint_files()
+
+host_test(
+    name = "tegra_spi_words_test",
+    srcs = [
+        "tegra_spi_words_test.cpp",
+        "//drivers/TegraSPI:TegraSPIWords.h",
+    ],
+)
+
+host_test(
+    name = "tegra_spi_source_test",
+    srcs = ["tegra_spi_source_test.cpp"],
+    data = ["//drivers/TegraSPI:TegraSPI.cpp"],
+)

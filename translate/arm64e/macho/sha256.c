@@ -1,5 +1,42 @@
 #include "sha256.h"
 
+#ifdef __APPLE__
+
+void a64x_sha256_init(struct a64x_sha256 *s)
+{
+    CC_SHA256_Init(&s->cc);
+}
+
+void a64x_sha256_update(struct a64x_sha256 *s, const void *data, size_t size)
+{
+    const uint8_t *p = data;
+    while (size > 0) {
+        CC_LONG chunk = size > 0x40000000u ? 0x40000000u : (CC_LONG)size;
+        CC_SHA256_Update(&s->cc, p, chunk);
+        p += chunk;
+        size -= chunk;
+    }
+}
+
+void a64x_sha256_final(struct a64x_sha256 *s, uint8_t digest[32])
+{
+    CC_SHA256_Final(digest, &s->cc);
+}
+
+void a64x_sha256(const void *data, size_t size, uint8_t digest[32])
+{
+    if (size <= 0x40000000u) {
+        CC_SHA256(data, (CC_LONG)size, digest);
+        return;
+    }
+    struct a64x_sha256 s;
+    a64x_sha256_init(&s);
+    a64x_sha256_update(&s, data, size);
+    a64x_sha256_final(&s, digest);
+}
+
+#else
+
 #include <string.h>
 
 static const uint32_t k[64] = {
@@ -109,3 +146,5 @@ void a64x_sha256(const void *data, size_t size, uint8_t digest[32])
     a64x_sha256_update(&s, data, size);
     a64x_sha256_final(&s, digest);
 }
+
+#endif

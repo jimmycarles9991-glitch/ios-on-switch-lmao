@@ -57,13 +57,18 @@ bool UsbSmmuSpace::attach(uint32_t asidReg, uint32_t translationReg, uint32_t tr
     return true;
 }
 
-void UsbSmmuSpace::unmap(uint32_t index, uint32_t pages)
+void UsbSmmuSpace::unmapUnlocked(uint32_t index, uint32_t pages)
 {
-    IOLockLock(lock_);
     domain_.unmap(window_.iova(index), pages);
     publish();
     window_.give(index, pages);
-    IOLockUnlock(lock_);
+}
+
+void UsbSmmuSpace::unmap(uint32_t index, uint32_t pages)
+{
+    lock();
+    unmapUnlocked(index, pages);
+    unlock();
 }
 
 uint64_t UsbSmmuSpace::translate(uint64_t address)
@@ -78,11 +83,11 @@ uint64_t UsbSmmuSpace::translate(uint64_t address)
 
 void UsbSmmuSpace::publish()
 {
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
     const uint64_t entered = mach_absolute_time();
 #endif
     switch_smmu_publish(domain_, asid_, SWITCH_DCACHE_CLEAN_INVALIDATE);
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
     ++cost_.flushes;
     cost_.flushTicks += mach_absolute_time() - entered;
 #endif

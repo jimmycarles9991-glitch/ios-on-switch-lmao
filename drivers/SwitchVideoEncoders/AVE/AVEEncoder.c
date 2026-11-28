@@ -24,23 +24,21 @@
 // Pixel buffers are asked for as NV12 ('420v'/'420f') with rows and planes VIC reads (AVEInput.c); VideoToolbox's
 // pixel transfer converts anything else (BGRA screen captures) before EncodeFrame.
 //
-// Per picture (synchronous, on VideoToolbox's encode thread): the submit names the picture's IOSurface and VIC writes it
-// into the session's input buffer in the layout NVENC reads (AVEInput.c; no CPU copy in a session with surface input),
-// the setup built (H264NVENC.c) with the QP the rate control picked (RateControl.h), the job queued on host1x channel 0,
-// and the thread sleeps on the syncpoint interrupt; then NVENC's Annex B slice becomes a length-prefixed sample with
-// the format description of this plug-in's own SPS/PPS, and goes out at once unless the session reorders
-// (AVEReorder.h). A P picture predicts from the previous picture's reconstruction (two buffers in turn); a key frame is
-// an IDR. A P picture NVENC refuses (its status says why, one error line) is coded again as an IDR and the next
-// picture is a P picture as usual.
-//
-// Tile sessions (HEIC grids through VTTileCompressionSession): AVETiles.c, on the same stream setup.
+// Per picture: the submit names the picture's IOSurface and VIC writes it into the session's input buffer in the
+// layout NVENC reads (AVEInput.c), the setup built (H264NVENC.c) with the QP the rate control picked (RateControl.h),
+// the job queued on host1x channel 0 off e->lock, and completion arrives via the kernel's Mach notification port
+// (which also invalidates the produced bitstream slice in the kernel, avoiding Wait ioctls altogether). Then NVENC's
+// Annex B slice becomes a length-prefixed sample and goes out off e->lock. Tile sessions pipeline multiple IDRs
+// asynchronously across tile slots (AVETiles.c / AVEEmitter.c).
 //
 // Log (subsystem com.brunostjohn.switch.ave, category encoder): per session, one line when it starts and one when it ends
 // (frames, bytes, inputs by VIC and copied, mean input and encode time). Refusals (a size, TegraNVENC refusing the
 // process, a property) are kits/SwitchRefusal's, category AVE: one error line per process and reason.
 #include <CoreFoundation/CoreFoundation.h>
 #include <dispatch/dispatch.h>
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
 #include <mach/mach_time.h>
+#endif
 #include <os/log.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -70,6 +68,7 @@ static Encoder *storage(CMBaseObjectRef object)
     return CMBaseObjectGetDerivedStorage(object);
 }
 
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
 static double ticksToMs(uint64_t ticks)
 {
     static mach_timebase_info_data_t base;
@@ -77,6 +76,7 @@ static double ticksToMs(uint64_t ticks)
         mach_timebase_info(&base);
     return (double)ticks * base.numer / base.denom / 1e6;
 }
+#endif
 
 static void replace(CFTypeRef *slot, CFTypeRef value)
 {
@@ -140,6 +140,23 @@ static uint8_t matrixCode(CFTypeRef v)
     return 2;
 }
 
+void ave_begin_encode(Encoder *e)
+{
+    while (e->encoding) {
+        e->busyWaiters++;
+        pthread_cond_wait(&e->busyCond, &e->lock);
+        e->busyWaiters--;
+    }
+    e->encoding = true;
+}
+
+void ave_end_encode(Encoder *e)
+{
+    e->encoding = false;
+    if (e->busyWaiters)
+        pthread_cond_broadcast(&e->busyCond);
+}
+
 static void releaseBuffers(Encoder *e)
 {
     for (unsigned i = 0; i < e->bufferCount; i++)
@@ -161,6 +178,63 @@ static int allocBuffer(Encoder *e, uint64_t size, uint32_t *handle, uint8_t **va
 int ave_alloc_buffer(Encoder *e, uint64_t size, uint32_t *handle)
 {
     return allocBuffer(e, size, handle, NULL);
+}
+
+void ave_tile_record_stats(void *context, OSStatus status, size_t bytes, uint64_t copyTicks, uint64_t encodeTicks)
+{
+    Encoder *e = context;
+    pthread_mutex_lock(&e->lock);
+    if (status) {
+        e->errors++;
+    } else {
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+        e->copyTicks += copyTicks;
+        e->encodeTicks += encodeTicks;
+#else
+        (void)copyTicks;
+        (void)encodeTicks;
+#endif
+        e->frames++;
+        e->keyFrames++;
+        e->tiles++;
+        e->bytes += bytes;
+    }
+    pthread_mutex_unlock(&e->lock);
+}
+
+bool ave_wait_job(Encoder *e, uint32_t fence, uint32_t auxHandle, const uint8_t *auxVA, uint32_t bitsHandle,
+                  uint32_t bitsLimit, AVEJobStatus *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (e->emitter) {
+        if (!ave_emitter_await(e->emitter, fence, out)) {
+            out->result = -5;
+            return false;
+        }
+        return out->result == 0;
+    }
+    TegraNVENCWait wait = {.fence = fence, .timeout_us = 1000000, .invalidate_count = 1};
+    wait.invalidate[0] = (TegraNVENCRange){auxHandle, 0, sizeof(nvenc_pic_stat_s), 0};
+    if (nvenc_wait(e->client, &wait)) {
+        out->result = -5;
+        return false;
+    }
+    const nvenc_pic_stat_s *stat = (const nvenc_pic_stat_s *)auxVA;
+    out->error_status = stat->error_status;
+    out->ucode_error_status = stat->ucode_error_status;
+    out->total_bit_count = stat->total_bit_count;
+    if (!(e->info.features & TEGRA_NVENC_FEATURE_COMPLETION)) {
+        const uint32_t produced = (stat->total_bit_count + 7) / 8;
+        if (!stat->ucode_error_status && produced && produced <= bitsLimit) {
+            TegraNVENCWait bits = {.fence = fence, .timeout_us = 1000000, .invalidate_count = 1};
+            bits.invalidate[0] = (TegraNVENCRange){bitsHandle, 0, produced, 0};
+            if (nvenc_wait(e->client, &bits)) {
+                out->result = -5;
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 static OSStatus startStream(Encoder *e, CFTypeRef primaries, CFTypeRef transfer, CFTypeRef matrix);
@@ -212,6 +286,31 @@ OSStatus ave_configure(Encoder *e, CVPixelBufferRef image)
     return status;
 }
 
+static void setupTileSlots(Encoder *e)
+{
+    e->tileSlotCount = 0;
+    if (!e->tileSession || !e->emitter)
+        return;
+    uint32_t want = e->info.jobs_in_flight ? e->info.jobs_in_flight : AVE_TILE_SLOTS;
+    if (want > AVE_TILE_SLOTS)
+        want = AVE_TILE_SLOTS;
+    e->tileSlots[0] =
+        (AVETileSlot){e->handles.input, e->handles.bitstream, e->handles.aux, e->inputVA, e->bitstreamVA, e->auxVA};
+    uint32_t count = 1;
+    const H264EncLayout *l = &e->layout;
+    for (uint32_t i = 1; i < want; i++) {
+        AVETileSlot slot = {0};
+        if (allocBuffer(e, l->input.bytes, &slot.inputHandle, &slot.inputVA) ||
+            allocBuffer(e, l->bitstream_bytes, &slot.bitstreamHandle, &slot.bitstreamVA) ||
+            allocBuffer(e, l->aux_bytes, &slot.auxHandle, &slot.auxVA))
+            break;
+        e->tileSlots[count++] = slot;
+    }
+    if (ave_emitter_configure_tiles(e->emitter, e->tileSession, e->format, e->tileSlots, count, l->bitstream_bytes,
+                                    ave_tile_record_stats, e))
+        e->tileSlotCount = count;
+}
+
 // The kernel buffers, the format description of this stream's parameter sets, and the rate control.
 static OSStatus startStream(Encoder *e, CFTypeRef primaries, CFTypeRef transfer, CFTypeRef matrix)
 {
@@ -230,6 +329,7 @@ static OSStatus startStream(Encoder *e, CFTypeRef primaries, CFTypeRef transfer,
         // The H.264 config above stays the input copy's (h264enc_put_input); the stream is the HEVC config's.
         e->hevc = (HEVCEncConfig){.width = c->width,
                                   .height = c->height,
+                                  .fast = e->realTime || e->prioritizeSpeed,
                                   .full_range = c->full_range,
                                   .colour_description = c->colour_description,
                                   .colour_primaries = c->colour_primaries,
@@ -291,6 +391,7 @@ static OSStatus startStream(Encoder *e, CFTypeRef primaries, CFTypeRef transfer,
     if (status)
         return status;
 
+    setupTileSlots(e);
     const double fps = e->expectedFrameRate > 0 ? e->expectedFrameRate : 30;
     const bool cbr = e->constantBitRate > 0;
     rc_init(&e->rc, cbr ? e->constantBitRate : e->averageBitRate, cbr, e->quality, fps, c->width, c->height);
@@ -328,8 +429,8 @@ bool ave_wants_key(const Encoder *e, CMTime pts, CFDictionaryRef options, uint32
     return false;
 }
 
-static OSStatus emitSample(Encoder *e, VTVideoEncoderFrame frame, size_t size, const H264EncPicture *picture,
-                           CMTime pts, CMTime duration, CMTime dts)
+static OSStatus buildSample(const Encoder *e, size_t size, const H264EncPicture *picture, bool allowTemporal,
+                            CMTime pts, CMTime duration, CMTime dts, CMSampleBufferRef *out)
 {
     const bool key = picture->type == H264ENC_IDR;
     const bool reference = picture->type != H264ENC_B && !picture->unreferenced;
@@ -352,132 +453,177 @@ static OSStatus emitSample(Encoder *e, VTVideoEncoderFrame frame, size_t size, c
         CFDictionarySetValue(a, kCMSampleAttachmentKey_NotSync, key ? kCFBooleanFalse : kCFBooleanTrue);
         CFDictionarySetValue(a, kCMSampleAttachmentKey_DependsOnOthers, key ? kCFBooleanFalse : kCFBooleanTrue);
         CFDictionarySetValue(a, kCMSampleAttachmentKey_IsDependedOnByOthers,
-                             reference && e->info.p_frames && e->allowTemporal ? kCFBooleanTrue : kCFBooleanFalse);
+                             reference && e->info.p_frames && allowTemporal ? kCFBooleanTrue : kCFBooleanFalse);
     }
-    status = VTEncoderSessionEmitEncodedFrame(e->session, frame, noErr, 0, sample);
-    CFRelease(sample);
-    return status;
+    *out = sample;
+    return noErr;
 }
 
-// `plan`: a reordering session's picture (ave_encode_planned), else the next picture of a session that does not
-// reorder, its type and references this function's own.
+// Called with e->lock held and e->encoding true; drops e->lock across NVENC submit/wait and VideoToolbox emit.
 static OSStatus encodePicture(Encoder *e, VTVideoEncoderFrame frame, CVPixelBufferRef image, CMTime pts,
                               CMTime duration, CFDictionaryRef options, AVEPlan *plan)
 {
     if (CVPixelBufferGetWidth(image) != (size_t)e->size.width ||
         CVPixelBufferGetHeight(image) != (size_t)e->size.height || CVPixelBufferGetPlaneCount(image) != 2)
         return kVTPixelTransferNotSupportedErr;
-    const bool key = plan ? plan->picture.type == H264ENC_IDR : ave_wants_key(e, pts, options, e->sinceKey);
     const bool hevc = e->codec == kCMVideoCodecType_HEVC;
-    const uint64_t began = mach_absolute_time();
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     CVPixelBufferRetain(image);
     CVPixelBufferRelease(e->probeSource);
     e->probeSource = image;
 #endif
-    if (key && !plan) {
-        e->frameNum = 0;
-        e->pocCount = 0;
-    }
-    H264EncPicture picture = {
-        .type = key ? H264ENC_IDR : H264ENC_P,
-        .frame_num = e->frameNum,
-        .poc_lsb = (2 * e->pocCount) & 0xffff,
-    };
-    if (plan)
-        picture = plan->picture;
-    picture.qp = (uint8_t)(picture.type == H264ENC_B ? rc_qp_b(&e->rc) : rc_qp(&e->rc, key));
-    picture.idr_pic_id = e->idrPicId;
-    picture.picture_index = e->pictureIndex++;
-    const H264EncHandles *handles = plan ? &plan->handles : &e->handles;
-    TegraNVENCSubmit *submit = malloc(sizeof(*submit));
-    if (!submit)
-        return kVTAllocationFailedErr;
-    if (hevc) {
-        const HEVCEncPicture coded = {
-            .idr = key, .poc = e->pocCount, .qp = picture.qp, .picture_index = picture.picture_index};
-        hevcnvenc_fill_submit(&e->hevc, e->config.input_layout, e->info.chroma_mode, &e->layout, &coded, &e->handles,
-                              submit);
-    } else {
-        h264enc_fill_submit(&e->config, &e->layout, &picture, handles, submit);
-    }
-    const AVERegion whole = {0, 0, e->config.width, e->config.height};
-    if (!ave_input_put(e, image, &whole, submit)) {
-        free(submit);
-        e->errors++;
-        return kVTVideoEncoderMalfunctionErr;
-    }
-    const uint64_t copied = mach_absolute_time();
-    // A job that ends without writing its record must not leave the previous picture's record to be read as its own.
-    memset(e->auxVA, 0, sizeof(nvenc_pic_stat_s));
-    submit->clean[submit->clean_count++] = (TegraNVENCRange){e->handles.aux, 0, sizeof(nvenc_pic_stat_s), 0};
-    TegraNVENCWait wait = {.timeout_us = 1000000, .invalidate_count = 1};
-    wait.invalidate[0] = (TegraNVENCRange){e->handles.aux, 0, sizeof(nvenc_pic_stat_s), 0};
-    const int submitted = ave_input_submit(e, submit, &wait.fence);
-    free(submit);
-    if (submitted || nvenc_wait(e->client, &wait)) {
-        e->errors++;
-        e->keyPending = true;
-        return kVTVideoEncoderMalfunctionErr;
-    }
-    const nvenc_pic_stat_s *stat = (const nvenc_pic_stat_s *)e->auxVA;
-    const uint32_t produced = (stat->total_bit_count + 7) / 8;
-    // NVENC 5.0's H.264 and H.265 apps put 2 in error_status of every status record they write (nvenc.bin 0x7d29 and
-    // 0x1382b, before the record's DMA out); their errors are ucode_error_status.
-    if (stat->ucode_error_status || !produced || produced > e->layout.bitstream_bytes) {
-        const bool bPicture = picture.type == H264ENC_B;
-        os_log_error(gLog, "AVE: NVENC %{public}s picture failed: error_status %u ucode %#x, %u bits%{public}s",
-                     key        ? "IDR"
-                     : bPicture ? "B"
-                                : "P",
-                     stat->error_status, stat->ucode_error_status, stat->total_bit_count,
-                     key        ? ""
-                     : bPicture ? "; coded again as an I picture"
-                                : "; coded again as an IDR");
-        e->errors++;
-        if (!bPicture)
-            e->keyPending = true;
-        if (key)
-            return kVTVideoEncoderMalfunctionErr;
-        if (plan) {
-            plan->refused = true;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        const bool key = plan ? plan->picture.type == H264ENC_IDR : ave_wants_key(e, pts, options, e->sinceKey);
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+        const uint64_t began = mach_absolute_time();
+#endif
+        if (key && !plan) {
+            e->frameNum = 0;
+            e->pocCount = 0;
+        }
+        H264EncPicture picture = {
+            .type = key ? H264ENC_IDR : H264ENC_P,
+            .frame_num = e->frameNum,
+            .poc_lsb = (2 * e->pocCount) & 0xffff,
+        };
+        if (plan)
+            picture = plan->picture;
+        picture.qp = (uint8_t)(picture.type == H264ENC_B ? rc_qp_b(&e->rc) : rc_qp(&e->rc, key));
+        picture.idr_pic_id = e->idrPicId;
+        picture.picture_index = e->pictureIndex++;
+        const H264EncHandles handles = plan ? plan->handles : e->handles;
+        const bool allowTemporal = e->allowTemporal;
+        const uint32_t pocCount = e->pocCount;
+
+        TegraNVENCSubmit *submit = nvenc_submit_buffer(e->client);
+        if (!submit)
+            return kVTAllocationFailedErr;
+        if (hevc) {
+            const HEVCEncPicture coded = {
+                .idr = key, .poc = pocCount, .qp = picture.qp, .picture_index = picture.picture_index};
+            hevcnvenc_fill_submit(&e->hevc, e->config.input_layout, e->info.chroma_mode, &e->layout, &coded, &handles,
+                                  submit);
+        } else {
+            h264enc_fill_submit(&e->config, &e->layout, &picture, &handles, submit);
+        }
+        const AVERegion whole = {0, 0, e->config.width, e->config.height};
+
+        pthread_mutex_unlock(&e->lock);
+        bool inputRefused = false;
+        const bool putOk = ave_input_put_buffer(e, image, &whole, handles.input, e->inputVA, submit, &inputRefused);
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+        uint64_t copied = began;
+#endif
+        int submitted = -1;
+        uint32_t fence = 0, route = TEGRA_NVENC_INPUT_CPU;
+        AVEJobStatus job = {0};
+        bool waitedOk = false;
+        if (putOk) {
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+            copied = mach_absolute_time();
+#endif
+            // A job that ends without writing its record must not leave the previous picture's record behind.
+            memset(e->auxVA, 0, sizeof(nvenc_pic_stat_s));
+            submit->clean[submit->clean_count++] = (TegraNVENCRange){handles.aux, 0, sizeof(nvenc_pic_stat_s), 0};
+            submitted = ave_input_submit_raw(e->client, submit, &fence, &route);
+            if (!submitted)
+                waitedOk =
+                    ave_wait_job(e, fence, handles.aux, e->auxVA, handles.bitstream, e->layout.bitstream_bytes, &job);
+        }
+        const uint32_t produced = (job.total_bit_count + 7) / 8;
+        const bool nvencRefused =
+            waitedOk && (job.ucode_error_status || !produced || produced > e->layout.bitstream_bytes);
+        size_t size = 0;
+        CMSampleBufferRef sample = NULL;
+        OSStatus sampleStatus = noErr;
+        if (waitedOk && !nvencRefused) {
+            size = h264enc_annexb_to_avcc(e->bitstreamVA, produced, e->avcc, e->avccCap);
+            if (size)
+                sampleStatus =
+                    buildSample(e, size, &picture, allowTemporal, pts, duration, plan ? plan->dts : pts, &sample);
+        }
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+        const uint64_t finished = mach_absolute_time();
+#endif
+
+        pthread_mutex_lock(&e->lock);
+        if (inputRefused)
+            e->inputRefused++;
+        if (putOk)
+            ave_input_record_route(e, submit, submitted, route);
+
+        if (!putOk) {
+            e->errors++;
             return kVTVideoEncoderMalfunctionErr;
         }
-        return encodePicture(e, frame, image, pts, duration, options, NULL);  // the same picture again, as an IDR
+        if (submitted || !waitedOk) {
+            e->errors++;
+            e->keyPending = true;
+            return kVTVideoEncoderMalfunctionErr;
+        }
+        // NVENC 5.0 puts 2 in error_status of every status record; real errors are in ucode_error_status.
+        if (nvencRefused) {
+            const bool bPicture = picture.type == H264ENC_B;
+            os_log_error(gLog, "AVE: NVENC %{public}s picture failed: error_status %u ucode %#x, %u bits%{public}s",
+                         key        ? "IDR"
+                         : bPicture ? "B"
+                                    : "P",
+                         job.error_status, job.ucode_error_status, job.total_bit_count,
+                         key        ? ""
+                         : bPicture ? "; coded again as an I picture"
+                                    : "; coded again as an IDR");
+            e->errors++;
+            if (!bPicture)
+                e->keyPending = true;
+            if (key)
+                return kVTVideoEncoderMalfunctionErr;
+            if (plan) {
+                plan->refused = true;
+                return kVTVideoEncoderMalfunctionErr;
+            }
+            continue;  // retry the same picture as an IDR
+        }
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+        e->encodeTicks += finished - copied;
+        e->copyTicks += copied - began;
+#endif
+        if (!size) {
+            e->errors++;
+            e->keyPending = true;
+            return kVTVideoEncoderMalfunctionErr;
+        }
+        if (sampleStatus)
+            return sampleStatus;
+        rc_update(&e->rc, (double)size, key);
+        if (!plan) {
+            const uint32_t recon = e->handles.recon;
+            e->handles.recon = e->handles.ref;
+            e->handles.ref = recon;
+            e->frameNum = (e->frameNum + 1) & 0xffff;
+            e->pocCount++;
+        }
+        e->haveRef = true;
+        e->keyPending = false;
+        if (key) {
+            e->idrPicId = (e->idrPicId + 1) & 0xffff;
+            e->sinceKey = 0;
+            e->lastKeyTime = pts;
+            e->keyFrames++;
+        } else {
+            e->sinceKey++;
+        }
+        e->frames++;
+        e->bytes += size;
+        VTVideoEncoderSession session = e->session;
+        pthread_mutex_unlock(&e->lock);
+        OSStatus emitStatus = noErr;
+        if (session)
+            emitStatus = VTEncoderSessionEmitEncodedFrame(session, frame, noErr, 0, sample);
+        CFRelease(sample);
+        pthread_mutex_lock(&e->lock);
+        return emitStatus;
     }
-    TegraNVENCWait bits = {.fence = wait.fence, .timeout_us = 1000000, .invalidate_count = 1};
-    bits.invalidate[0] = (TegraNVENCRange){e->handles.bitstream, 0, produced, 0};
-    if (nvenc_wait(e->client, &bits))
-        return kVTVideoEncoderMalfunctionErr;
-    const size_t size = h264enc_annexb_to_avcc(e->bitstreamVA, produced, e->avcc, e->avccCap);
-    e->encodeTicks += mach_absolute_time() - copied;
-    e->copyTicks += copied - began;
-    if (!size) {
-        e->errors++;
-        e->keyPending = true;
-        return kVTVideoEncoderMalfunctionErr;
-    }
-    rc_update(&e->rc, (double)size, key);
-    if (!plan) {  // the reconstruction is the next picture's reference
-        const uint32_t recon = e->handles.recon;
-        e->handles.recon = e->handles.ref;
-        e->handles.ref = recon;
-        e->frameNum = (e->frameNum + 1) & 0xffff;
-        e->pocCount++;
-    }
-    e->haveRef = true;
-    e->keyPending = false;
-    if (key) {
-        e->idrPicId = (e->idrPicId + 1) & 0xffff;
-        e->sinceKey = 0;
-        e->lastKeyTime = pts;
-        e->keyFrames++;
-    } else {
-        e->sinceKey++;
-    }
-    e->frames++;
-    e->bytes += size;
-    return emitSample(e, frame, size, &picture, pts, duration, plan ? plan->dts : pts);
+    return kVTVideoEncoderMalfunctionErr;
 }
 
 OSStatus ave_encode_planned(Encoder *e, AVEPlan *plan)
@@ -507,6 +653,13 @@ OSStatus ave_open_engine(Encoder *e)
         switch_refusal("AVE", "this kernel's NVENC has no H.265", "no HEVC encoder here");
         return kVTCouldNotFindVideoEncoderErr;
     }
+    if (e->info.features & TEGRA_NVENC_FEATURE_COMPLETION) {
+        AVEEmitter *emitter = ave_emitter_create();
+        if (emitter && nvenc_listen(e->client, ave_emitter_queue(emitter), ave_emitter_completed, emitter))
+            e->emitter = emitter;
+        else
+            ave_emitter_destroy(emitter);
+    }
     return noErr;
 }
 
@@ -535,6 +688,7 @@ static OSStatus encodeFrame(VTVideoEncoderRef ref, VTVideoEncoderFrame frame, CV
     if (info)
         *info = 0;
     pthread_mutex_lock(&e->lock);
+    ave_begin_encode(e);
     OSStatus status = e->failed ? kVTVideoEncoderMalfunctionErr : noErr;
     if (!status && !e->configured && (status = ave_configure(e, image))) {
         e->failed = true;
@@ -546,9 +700,11 @@ static OSStatus encodeFrame(VTVideoEncoderRef ref, VTVideoEncoderFrame frame, CV
     if (!status)
         status = e->reorder.on ? ave_reorder_frame(e, frame, image, pts, duration, options)
                                : encodePicture(e, frame, image, pts, duration, options, NULL);
-    if (status && e->session)
-        VTEncoderSessionEmitEncodedFrame(e->session, frame, status, kVTEncodeInfo_FrameDropped, NULL);
+    VTVideoEncoderSession session = e->session;
+    ave_end_encode(e);
     pthread_mutex_unlock(&e->lock);
+    if (status && session)
+        VTEncoderSessionEmitEncodedFrame(session, frame, status, kVTEncodeInfo_FrameDropped, NULL);
     return noErr;  // the frame was answered (with its status) above
 }
 
@@ -558,8 +714,10 @@ static OSStatus completeFrames(VTVideoEncoderRef ref, CMTime until)
     (void)until;
     Encoder *e = storage(ref);
     pthread_mutex_lock(&e->lock);
+    ave_begin_encode(e);
     if (e->reorder.on)
         ave_reorder_flush(e);
+    ave_end_encode(e);
     pthread_mutex_unlock(&e->lock);
     return noErr;
 }
@@ -668,6 +826,8 @@ static OSStatus setProperty(CMBaseObjectRef ref, CFStringRef key, CFTypeRef valu
         e->allowTemporal = !value || CFGetTypeID(value) != CFBooleanGetTypeID() || CFBooleanGetValue(value);
     } else if (CFEqual(key, kVTCompressionPropertyKey_RealTime)) {
         e->realTime = value && CFGetTypeID(value) == CFBooleanGetTypeID() && CFBooleanGetValue(value);
+    } else if (CFEqual(key, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality)) {
+        e->prioritizeSpeed = value && CFGetTypeID(value) == CFBooleanGetTypeID() && CFBooleanGetValue(value);
     } else if (CFEqual(key, kVTCompressionPropertyKey_DataRateLimits)) {
         // [bytes, seconds, ...]: the first pair is enforced.
         double bytes = 0, seconds = 0;
@@ -700,7 +860,6 @@ static OSStatus setProperty(CMBaseObjectRef ref, CFStringRef key, CFTypeRef valu
         e->maxFrameDelay = number(value, &v) ? (int32_t)v : -1;
     } else if (CFEqual(key, kVTCompressionPropertyKey_AllowOpenGOP) ||
                CFEqual(key, kVTCompressionPropertyKey_MaximizePowerEfficiency) ||
-               CFEqual(key, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality) ||
                CFEqual(key, kVTCompressionPropertyKey_SourceFrameCount) ||
                CFEqual(key, kVTCompressionPropertyKey_ExpectedDuration)) {
         // Accepted: closed GOPs whatever is asked; nothing to tune on a fixed-function engine.
@@ -738,37 +897,47 @@ static OSStatus copyProperty(CMBaseObjectRef ref, CFStringRef key, CFAllocatorRe
         *(CFTypeRef *)value = CFRetain(kCFBooleanTrue);
         return noErr;
     }
-    if (CFEqual(key, kVTCompressionPropertyKey_AverageBitRate)) {
-        *(CFTypeRef *)value = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &e->averageBitRate);
-        return noErr;
-    }
-    if (CFEqual(key, kVTCompressionPropertyKey_MaxKeyFrameInterval)) {
-        *(CFTypeRef *)value = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &e->maxKeyInterval);
-        return noErr;
-    }
-    if (CFEqual(key, kVTCompressionPropertyKey_AllowTemporalCompression)) {
-        *(CFTypeRef *)value = CFRetain(e->allowTemporal ? kCFBooleanTrue : kCFBooleanFalse);
-        return noErr;
-    }
-    if (CFEqual(key, kVTCompressionPropertyKey_ProfileLevel) && e->profileLevel) {
-        *(CFTypeRef *)value = CFRetain(e->profileLevel);
-        return noErr;
-    }
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-    if (CFEqual(key, kSwitchEncoderRoutesKey)) {
-        pthread_mutex_lock(&e->lock);
-        *(CFTypeRef *)value = ave_copy_routes(e);
-        pthread_mutex_unlock(&e->lock);
-        return *(CFTypeRef *)value ? noErr : kVTAllocationFailedErr;
-    }
     if (CFEqual(key, kSwitchEncoderLayoutProbeKey)) {
-        pthread_mutex_lock(&e->lock);
         *(CFTypeRef *)value = ave_copy_layout_probe(e);
-        pthread_mutex_unlock(&e->lock);
         return *(CFTypeRef *)value ? noErr : -12783;
     }
 #endif
-    return -12783;  // kCMBaseObjectError_ValueNotAvailable
+    OSStatus status = -12783;  // kCMBaseObjectError_ValueNotAvailable
+    pthread_mutex_lock(&e->lock);
+    if (CFEqual(key, kVTCompressionPropertyKey_AverageBitRate)) {
+        *(CFTypeRef *)value = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &e->averageBitRate);
+        status = noErr;
+    } else if (CFEqual(key, kVTCompressionPropertyKey_MaxKeyFrameInterval)) {
+        *(CFTypeRef *)value = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &e->maxKeyInterval);
+        status = noErr;
+    } else if (CFEqual(key, kVTCompressionPropertyKey_AllowTemporalCompression)) {
+        *(CFTypeRef *)value = CFRetain(e->allowTemporal ? kCFBooleanTrue : kCFBooleanFalse);
+        status = noErr;
+    } else if (CFEqual(key, kVTCompressionPropertyKey_RealTime)) {
+        *(CFTypeRef *)value = CFRetain(e->realTime ? kCFBooleanTrue : kCFBooleanFalse);
+        status = noErr;
+    } else if (CFEqual(key, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality)) {
+        *(CFTypeRef *)value = CFRetain(e->prioritizeSpeed ? kCFBooleanTrue : kCFBooleanFalse);
+        status = noErr;
+    } else if (CFEqual(key, kVTCompressionPropertyKey_AllowFrameReordering)) {
+        *(CFTypeRef *)value = CFRetain(e->allowReordering ? kCFBooleanTrue : kCFBooleanFalse);
+        status = noErr;
+    } else if (CFEqual(key, kVTCompressionPropertyKey_MaxFrameDelayCount)) {
+        *(CFTypeRef *)value = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &e->maxFrameDelay);
+        status = noErr;
+    } else if (CFEqual(key, kVTCompressionPropertyKey_ProfileLevel) && e->profileLevel) {
+        *(CFTypeRef *)value = CFRetain(e->profileLevel);
+        status = noErr;
+    }
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    else if (CFEqual(key, kSwitchEncoderRoutesKey)) {
+        *(CFTypeRef *)value = ave_copy_routes(e);
+        status = *(CFTypeRef *)value ? noErr : kVTAllocationFailedErr;
+    }
+#endif
+    pthread_mutex_unlock(&e->lock);
+    return status;
 }
 
 static OSStatus invalidate(CMBaseObjectRef ref)
@@ -777,14 +946,22 @@ static OSStatus invalidate(CMBaseObjectRef ref)
     pthread_mutex_lock(&e->lock);
     e->session = NULL;
     e->tileSession = NULL;
+    AVEEmitter *emitter = e->emitter;
     pthread_mutex_unlock(&e->lock);
+    if (emitter)
+        ave_emitter_close(emitter);
     return noErr;
 }
 
 static void finalize(CMBaseObjectRef ref)
 {
     Encoder *e = storage(ref);
+    if (e->client)
+        nvenc_stop_listening(e->client);
+    ave_emitter_destroy(e->emitter);
+    e->emitter = NULL;
     if (e->frames)
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
         os_log(
             gLog,
             "AVE: session %ux%u in %{public}s ended: %u pictures on NVENC (%u key), %u failed, %llu bytes, inputs "
@@ -793,6 +970,14 @@ static void finalize(CMBaseObjectRef ref)
             e->config.width, e->config.height, getprogname(), e->frames, e->keyFrames, e->errors,
             (unsigned long long)e->bytes, e->inputDirect, e->inputVIC, e->inputBounced, e->inputCopies, e->inputRefused,
             ticksToMs(e->copyTicks) / e->frames, ticksToMs(e->encodeTicks) / e->frames);
+#else
+        os_log(gLog,
+               "AVE: session %ux%u in %{public}s ended: %u pictures on NVENC (%u key), %u failed, %llu bytes, inputs "
+               "%u read in place, %u by VIC (%u through the copy engine), %u copied, %u VIC could not take",
+               e->config.width, e->config.height, getprogname(), e->frames, e->keyFrames, e->errors,
+               (unsigned long long)e->bytes, e->inputDirect, e->inputVIC, e->inputBounced, e->inputCopies,
+               e->inputRefused);
+#endif
     ave_reorder_release(e);
     if (e->client) {
         releaseBuffers(e);
@@ -808,6 +993,7 @@ static void finalize(CMBaseObjectRef ref)
                             (CFTypeRef *)&e->transfer, (CFTypeRef *)&e->matrix};
     for (unsigned i = 0; i < 5; i++)
         replace(strings[i], NULL);
+    pthread_cond_destroy(&e->busyCond);
     pthread_mutex_destroy(&e->lock);
 }
 
@@ -853,6 +1039,7 @@ static OSStatus createInstance(FourCharCode codec, CFAllocatorRef allocator, VTV
     Encoder *e = storage(object);
     memset(e, 0, sizeof(*e));
     pthread_mutex_init(&e->lock, NULL);
+    pthread_cond_init(&e->busyCond, NULL);
     e->codec = codec;
     e->allowTemporal = true;
     e->allowReordering = true;

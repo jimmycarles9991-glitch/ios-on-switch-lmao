@@ -1,13 +1,15 @@
 """One session on the device, one report: pull the log archive and the reports over USB, then attribute what was slow.
 
 `pull` copies the running Switch's log archive (`idevicesyslog archive`) and its crash reports (`idevicecrashreport`)
-into a new folder and writes the report there; `report` reads an archive (or ndjson files) already on disk; `symbols`
-extracts reusable unslid symbol tables under ~/Library/Application Support/switch-ios/symbols/<build>/.
+into a new folder and writes the report there, with every device check (tools/devicerun) in checks.txt; `report`
+reads an archive (or ndjson files) already on disk; `symbols` extracts reusable unslid symbol tables under
+~/Library/Application Support/switch-ios/symbols/<build>/.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import shutil
 import subprocess
 import sys
@@ -15,9 +17,28 @@ import tarfile
 from datetime import UTC, datetime
 from pathlib import Path
 
+from tools.devicerun import devicerun
 from tools.perf import dumps, ips, report, session, source, symbols
 
 KCDATA = Path(__file__).resolve().parents[2] / 'kernel/xnu-12377.121.6/tools/lldbmacros/kcdata.py'
+SESSION = '%Y%m%d-%H%M%S'  # a pulled session's folder: the time of its pull
+PULL_OVERLAP_S = 60
+
+
+def pull_age(out: Path, asked_s: int, now: datetime) -> int:
+    """Return the seconds of log a pull takes: what was asked, or back to the last pull under out if that is longer.
+
+    On 25 Nov two pulls of 15 minutes each, at 19:49:44 and 20:13:23, left 19:49:45-19:58:24 pulled by neither.
+    """
+    pulls = []
+    for d in out.iterdir() if out.is_dir() else ():
+        try:
+            pulls.append(datetime.strptime(d.name, SESSION).replace(tzinfo=UTC))
+        except ValueError:
+            continue
+    if not pulls:
+        return asked_s
+    return max(asked_s, int((now - max(pulls)).total_seconds()) + PULL_OVERLAP_S)
 
 
 def pull_commands(out: Path, udid: str | None, age_s: int) -> list[list[str]]:
@@ -30,8 +51,12 @@ def pull_commands(out: Path, udid: str | None, age_s: int) -> list[list[str]]:
 
 
 def pull(out: Path, udid: str | None, age_s: int) -> Path:
-    """Pull a session into a new folder under out and return its .logarchive."""
-    folder = out / datetime.now(UTC).strftime('%Y%m%d-%H%M%S')
+    """Pull a session into a new folder under out and return its .logarchive: from the last pull's end at least."""
+    now = datetime.now(UTC)
+    if (reach := pull_age(out, age_s, now)) > age_s:
+        print(f'pulling {reach} s of log, back to the last pull under {out}, not {age_s} s', file=sys.stderr)
+    age_s = reach
+    folder = out / now.strftime(SESSION)
     (folder / 'crash').mkdir(parents=True)
     for cmd in pull_commands(folder, udid, age_s):
         if not shutil.which(cmd[0]):
@@ -47,6 +72,15 @@ def pull(out: Path, udid: str | None, age_s: int) -> Path:
     if staging.exists():
         staging.rmdir()
     return archive
+
+
+def write_checks(logs: str, crashes: str | None, folder: Path, ndjson: bool = False) -> Path:
+    """Every devicerun check over the pulled logs into folder/checks.txt (and .tsv), the owed checks' rows last."""
+    out = folder / 'checks.txt'
+    argv = [logs, '--tsv', str(folder / 'checks.tsv'), *(['--crashes', crashes] if crashes else [])]
+    with out.open('w') as text, contextlib.redirect_stdout(text):
+        devicerun.main(argv + (['--ndjson'] if ndjson else []))
+    return out
 
 
 def archive_root(folder: Path) -> Path:
@@ -66,9 +100,25 @@ def _detect_build(reports: list[ips.Report], boots: set[str]) -> str:
     return next((r.build for r in reports if r.build), '')
 
 
+def dumps_only(crashes: str, kcdata: str | None, syms: symbols.Symbols) -> str:
+    """Return the recorder dumps of a crash folder pulled without its log archive, each summarised."""
+    found = dumps.find(crashes)
+    out = [f'# Flight recorder dumps in {crashes}: {len(found)}, no log archive (pull one for the rest of the report)']
+    for ring, shot in found:
+        try:
+            out += ['', *dumps.summary(ring, shot, kcdata, {}, syms)]
+        except (ValueError, OSError) as exc:
+            out += ['', f'{Path(ring).name}: unreadable dump ({exc})']
+    return '\n'.join(out) + '\n'
+
+
 def write_reports(paths: list[str], crashes: str | None, args: argparse.Namespace) -> list[str]:
-    recs, images = source.read(paths, args.start, args.end)
     kcdata = args.kcdata or (str(KCDATA) if KCDATA.is_file() else None)
+    if not paths:
+        if not crashes:
+            raise SystemExit('report needs a log archive, a crash folder (--crashes), or both')
+        return [dumps_only(crashes, kcdata, symbols.load(args.dsc, args.kernel, args.symbols, args.build))]
+    recs, images = source.read(paths, args.start, args.end)
     scanned = ips.scan(crashes)
     boots = {b.upper() for b in source.by_boot(recs) if b}
     build = args.build or _detect_build(scanned, boots)
@@ -119,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--kcdata', help="XNU's tools/lldbmacros/kcdata.py, which reads a dump's stackshot")
     sub = parser.add_subparsers(dest='command', required=True)
     rep = sub.add_parser('report', help='report on archives already pulled')
-    rep.add_argument('logs', nargs='+', help='.logarchive folders (absolute under bazel run) or ndjson files')
+    rep.add_argument('logs', nargs='*', help='.logarchive folders (absolute under bazel run) or ndjson files')
     rep.add_argument('--crashes', help='the pulled crash folder (idevicecrashreport -e)')
     pul = sub.add_parser('pull', help='pull a session from the device over USB, then report on it')
     pul.add_argument('folder', help='where the session folder is made (absolute under bazel run)')
@@ -148,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f'wrote {args.out}', file=sys.stderr)
     else:
         sys.stdout.write(text)
+    if args.command == 'pull':
+        print(f'wrote {write_checks(logs[0], crashes, Path(logs[0]).parent)}', file=sys.stderr)
     return 0
 
 

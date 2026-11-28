@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import HWTestCore
+import HWTestKit
 
 /// File IO in the app's sandbox with F_NOCACHE, so the numbers are the SD card and its driver, not the page cache.
 enum Disk {

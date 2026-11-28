@@ -1,0 +1,56 @@
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
+
+lint_files()
+
+host_shims(
+    name = "buttons_kernel",
+    headers = [
+        "IOKit/IOInterruptEventSource.h",
+        "IOKit/IOLib.h",
+        "IOKit/IOReturn.h",
+        "IOKit/IOService.h",
+        "IOKit/IOTimerEventSource.h",
+        "IOKit/IOWorkLoop.h",
+        "kern/clock.h",
+        "os/log.h",
+    ],
+    stubs = "switch_buttons_stubs.h",
+)
+
+host_library(
+    name = "buttons_headers",
+    hdrs = [
+        "//drivers/ArmGIC:SwitchInterrupts.h",
+        "//drivers/NativeMobileDisplay:SwitchPortrait.h",
+        "//drivers/SwitchButtons:SwitchButtons.h",
+        "//drivers/SwitchPower:SwitchPower.h",
+        "//drivers/SwitchSuspend:SwitchWake.h",
+        "//drivers/SwitchSuspend:SwitchWakeSources.h",
+        "//drivers/SwitchTouch:SwitchHID.h",
+        "//drivers/TegraGPIO:TegraGPIO.h",
+        "//drivers/TegraI2C:TegraI2C.h",
+        "//kits/SwitchCAR:SwitchPMC.h",
+    ],
+)
+
+host_test(
+    name = "switch_buttons_test",
+    srcs = ["switch_buttons_test.cpp"],
+    additional_compiler_inputs = ["//drivers/SwitchButtons:SwitchButtons.cpp"],
+    copts = [
+        "-DDEVELOPMENT=1",
+        "-DSWITCH_IPSW_KIND_21H461=1",
+        "-Wno-unused-parameter",
+    ],
+    deps = [
+        ":buttons_headers",
+        ":buttons_kernel",
+    ],
+)
+
+host_test(
+    name = "switch_buttons_source_test",
+    srcs = ["switch_buttons_source_test.cpp"],
+    data = ["//drivers/SwitchButtons:SwitchButtons.cpp"],
+)

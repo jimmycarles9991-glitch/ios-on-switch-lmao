@@ -122,6 +122,11 @@
       "mangled": "__ZNK11IOHIDDevice21newSerialNumberStringEv",
       "pac": "_ZNK11IOHIDDevice21newSerialNumberStringEv"
     },
+    "newLocationIDNumber": {
+      "decl": "virtual OSNumber *newLocationIDNumber() const",
+      "mangled": "__ZNK11IOHIDDevice19newLocationIDNumberEv",
+      "pac": "_ZNK11IOHIDDevice19newLocationIDNumberEv"
+    },
     "newReportDescriptor": {
       "decl": "virtual IOReturn newReportDescriptor(IOMemoryDescriptor **) const = 0",
       "pac": "_ZNK11IOHIDDevice19newReportDescriptorEPP18IOMemoryDescriptor"

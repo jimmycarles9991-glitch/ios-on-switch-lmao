@@ -15,6 +15,7 @@
 
 #include <kern/clock.h>
 #include <kern/counter.h>
+#include <kern/kalloc.h>
 #include <kern/processor.h>
 #include <kern/recount.h>
 #include <kern/simple_lock.h>
@@ -24,19 +25,22 @@
 #include <os/log.h>
 #include <string.h>
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED
 
 #define LINE              900u /* under the 1 KiB os_log record */
 #define BOOT_TASK_LOG_MAX 128u
 
 #if XNU_12377_121_6
 extern int kernel_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
+extern size_t switch_a64x_trap_window(char *out, size_t size); /* translate/a64x_traps.c */
 #endif
 
 /* Exits on any core and the report both take a process's counts from the same rows. */
 static SIMPLE_LOCK_DECLARE(tasks_lock, 0);
 static struct switch_cpu_tasks cpu_tasks;
 static struct switch_cpu_core cores_seen[SWITCH_CPU_CORES];
+static uint32_t exits_total; /* under tasks_lock: every exit since boot and the CPU those processes used */
+static uint64_t exit_user_total, exit_sys_total;
 
 static uint64_t task_key(task_t task)
 {
@@ -76,6 +80,9 @@ void switch_sched_cpu_exited(task_t task)
     switch_task_name(task, name, sizeof(name));
     simple_lock(&tasks_lock, LCK_GRP_NULL);
     switch_cpu_exited(&cpu_tasks, task_key(task), task_pid(task), name, times.rtm_user, times.rtm_system);
+    exits_total++;
+    exit_user_total += times.rtm_user;
+    exit_sys_total += times.rtm_system;
     simple_unlock(&tasks_lock);
     if ((os_atomic_load(&switch_sched_busy_watching, relaxed) & SWITCH_SCHED_BUSY_SPRINGBOARD) == 0) {
         boot_task_exited(task, name, &times);
@@ -173,6 +180,82 @@ static size_t append_a64x(char *line, size_t at)
     return at;
 }
 
+/*
+ * Every live process's CPU since it began, and what the processes that exited used, once, at the first report after
+ * System Boot Complete: the whole boot by process, where each window names only its top SWITCH_CPU_TOP.
+ */
+void switch_sched_cpu_boot_totals(char *line, uint64_t boot_ns)
+{
+    mach_timebase_info_data_t tb;
+    uint64_t now_ns = 0;
+    uint32_t exits = 0, count = 0, lines = 0;
+    uint64_t exit_user = 0, exit_sys = 0;
+    const uint32_t cap = (uint32_t)os_atomic_load(&tasks_count, relaxed) + 64u;
+    struct switch_cpu_task *all = kalloc_data(cap * sizeof(*all), Z_WAITOK | Z_ZERO);
+    task_t task = TASK_NULL;
+
+    if (all == NULL) {
+        return;
+    }
+    clock_timebase_info(&tb);
+    absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
+    lck_mtx_lock(&tasks_threads_lock);
+    queue_iterate(&tasks, task, task_t, tasks)
+    {
+        if (count == cap) {
+            break;
+        }
+        const struct recount_times_mach times = recount_task_times(task);
+
+        all[count].pid = task_pid(task);
+        all[count].user = times.rtm_user;
+        all[count].sys = times.rtm_system;
+        switch_task_name(task, all[count].name, sizeof(all[count].name));
+        count++;
+    }
+    lck_mtx_unlock(&tasks_threads_lock);
+    simple_lock(&tasks_lock, LCK_GRP_NULL);
+    exits = exits_total;
+    exit_user = exit_user_total;
+    exit_sys = exit_sys_total;
+    simple_unlock(&tasks_lock);
+    switch_cpu_tasks_sort(all, count);
+    os_log(OS_LOG_DEFAULT,
+           "SwitchSched totals (System Boot Complete at %llu.%llu s, taken at %llu.%llu s; ms user+system each process "
+           "used since it began): %u live, %u exited (%llu+%llu)",
+           boot_ns / NSEC_PER_SEC, boot_ns % NSEC_PER_SEC / 100000000, now_ns / NSEC_PER_SEC,
+           now_ns % NSEC_PER_SEC / 100000000, count, exits,
+           (unsigned long long)switch_cpu_ms(exit_user, tb.numer, tb.denom),
+           (unsigned long long)switch_cpu_ms(exit_sys, tb.numer, tb.denom));
+    for (uint32_t first = 0; first < count; lines++) {
+        const size_t at = MIN((size_t)snprintf(line, LINE, "SwitchSched totals %u: ", lines + 1), LINE - 1);
+        const uint32_t next = switch_cpu_totals_format(line + at, LINE - at, all, count, first, tb.numer, tb.denom);
+
+        if (next == first) {
+            break;
+        }
+        os_log(OS_LOG_DEFAULT, "%s", line);
+        first = next;
+    }
+    kfree_data(all, cap * sizeof(*all));
+}
+
+/* The translator's traps in the window by class and by process, when it had any (iOS 27's translator; none on 17). */
+static void report_a64x(char *line, uint64_t window_ns)
+{
+#if XNU_12377_121_6
+    size_t at = (size_t)snprintf(
+        line, LINE, "SwitchSched a64x (%llu ms; traps the translator handled): ", window_ns / NSEC_PER_MSEC);
+
+    at = MIN(at, LINE - 1);
+    if (switch_a64x_trap_window(line + at, LINE - at) != 0) {
+        os_log(OS_LOG_DEFAULT, "%s", line);
+    }
+#else
+    (void)line, (void)window_ns;
+#endif
+}
+
 void switch_sched_cpu_report(char *line, uint64_t window_ns)
 {
     static bool primed;
@@ -206,6 +289,7 @@ void switch_sched_cpu_report(char *line, uint64_t window_ns)
     at += switch_cpu_cores_format(line + at, LINE - at, cores, count, window, tb.numer, tb.denom);
     at = append_a64x(line, at);
     os_log(OS_LOG_DEFAULT, "%s", line);
+    report_a64x(line, window_ns);
 
     at = (size_t)snprintf(line, LINE,
                           "SwitchSched tasks (%llu ms; ms user+system, top %u by both): ", window_ns / NSEC_PER_MSEC,

@@ -55,6 +55,7 @@ struct switch_idle_counts {
     uint64_t residency[2], entries[2], skipped;
     uint64_t frame_wakes;
     uint64_t timer_exits, exit_ticks, exit_max, exits_late;
+    uint64_t pmu_saves, pmu_save_ticks; /* the PMU's counters folded in before a C7 power-down */
 };
 
 int switch_idle_read_counts(uint32_t cpu, struct switch_idle_counts *out);

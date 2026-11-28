@@ -31,8 +31,8 @@ constexpr uint32_t kIpiSgi = 0, kTimerPpi = 27, kSpurious = 1020;
 //   * PPI 27: an ISB before the EOI. XNU's rtclock_intr re-arms the timer with an MSR to CNTV_TVAL_EL0 and no ISB
 //     (ml_set_decrementer, both trees); the ISB puts that write, and the timer's level drop with it, in effect before
 //     the EOI, so the GIC does not take the level PPI again. A DSB does not synchronize an MSR.
-//   * SPIs: a DSB before the EOI, so the driver's status clear, or ArmGIC's mask of the line (runVector), reaches its
-//     device before the EOI and a level line is not taken again.
+//   * SPIs: direct handlers clear their device status; soft-disabled lines masked by ArmGIC (runVector) issue a
+//     dsb oshst after ICENABLER before the EOI so the mask takes effect at the distributor before deactivation.
 //   * the spurious read that ends the loop: nothing is read on its account and nothing is ended.
 // No barrier after the EOI (Linux has none either): the next GICC_IAR read goes to the same Device peripheral, so the EOI
 // arrives before it, and the exception return synchronizes.
@@ -51,7 +51,6 @@ template <class Cpu> void acknowledgeLoop(Cpu &cpu)
             cpu.ipi(acknowledge);
         } else {
             cpu.other(intid);
-            SWITCH_GIC_BARRIER("dsb sy");
         }
         cpu.end(acknowledge);
     }
@@ -71,7 +70,7 @@ template <class Write> void sendSgi(Write write)
 // for interruptActive to clear. Setting it is ordered before the read of interruptDisabledSoft by a full barrier
 // (store against load: neither side may read before its own store is seen); clearing it is a release store, which
 // orders the handler's accesses before it without holding back the EOI's. `run` calls the handler; `mask` writes the
-// line's ICENABLER bit (and the Tegra LIC's), with no barrier: the acknowledge loop's DSB before the EOI covers it.
+// line's ICENABLER bit (and the Tegra LIC's), followed by dsb oshst so the mask completes before the EOI.
 template <class Vector, class Run, class Mask> void runVector(Vector &vector, Run run, Mask mask)
 {
     __atomic_store_n(&vector.interruptActive, 1, __ATOMIC_RELAXED);
@@ -81,6 +80,7 @@ template <class Vector, class Run, class Mask> void runVector(Vector &vector, Ru
     if (__atomic_load_n(&vector.interruptDisabledSoft, __ATOMIC_RELAXED) && !vector.interruptDisabledHard) {
         vector.interruptDisabledHard = 1;
         mask();
+        SWITCH_GIC_BARRIER("dsb oshst");
     }
     __atomic_store_n(&vector.interruptActive, 0, __ATOMIC_RELEASE);
 }

@@ -33,7 +33,7 @@ public:
 
 class IOMemoryDescriptor : public OSObject {
 public:
-    unsigned prepares = 0;
+    unsigned prepares = 0, prepareCalls = 0, segmentCalls = 0;
     bool fail = false;
 
     int prepare(int)
@@ -41,6 +41,7 @@ public:
         if (fail)
             return -1;
         ++prepares;
+        ++prepareCalls;
         return 0;
     }
 
@@ -52,6 +53,7 @@ public:
     uint64_t getPhysicalSegment(uint64_t at, IOByteCount *length, int)
     {
         EXPECT_GT(prepares, 0u) << "IOGMD: getPhysicalSegment requires a prepared descriptor";
+        ++segmentCalls;
         *length = 4096;
         return 0x80000000 + at;
     }
@@ -127,6 +129,7 @@ struct Display {
         bool tiled;
         SwitchNativeScanout *read = nullptr;
         uint64_t allocationId = 0, allocationGeneration = 0, sourceOffset = 0;
+        addr64_t firstPa = 0;
     } slots[kSlots] = {};
 
     TegraScanoutRing ring;
@@ -431,4 +434,24 @@ TEST_F(DirectSlots, LayoutAndCompressionLookupsPrepareAndCompleteUnwiredDescript
     EXPECT_EQ(display->surfaceBlockLog2(&memory), -1);
     EXPECT_FALSE(display->surfaceCompressed(&memory));
     EXPECT_EQ(memory.prepares, 0u);
+}
+
+TEST_F(DirectSlots, DirectScanoutCacheHitDoesZeroPrepareAndZeroSegmentLookups)
+{
+    int holdToken = 1;
+    nextHoldPtr = &holdToken;
+    ASSERT_EQ(offer(), 3);
+    EXPECT_EQ(memory.prepares, 1u);
+    const unsigned preparesAfterMiss = memory.prepareCalls;
+    const unsigned segmentsAfterMiss = memory.segmentCalls;
+
+    for (int frame = 0; frame < 5; ++frame) {
+        const addr64_t pa = display->directFirstPa(&memory);
+        EXPECT_NE(pa, 0u);
+        EXPECT_EQ(display->surfaceBlockLog2Pa(pa), -1);
+        EXPECT_FALSE(display->surfaceCompressedPa(pa));
+        EXPECT_EQ(offer(), 3);
+    }
+    EXPECT_EQ(memory.prepareCalls, preparesAfterMiss);
+    EXPECT_EQ(memory.segmentCalls, segmentsAfterMiss);
 }

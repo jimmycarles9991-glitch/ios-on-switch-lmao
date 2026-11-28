@@ -13,6 +13,8 @@ use std::ops::Range;
 #[cfg(test)]
 mod alu_tests;
 #[cfg(test)]
+mod interlock_tests;
+#[cfg(test)]
 mod layout_tests;
 #[cfg(test)]
 mod ld_cache_tests;
@@ -22,7 +24,8 @@ mod texs;
 pub use texs::bound_texture_cbuf;
 pub mod xmad;
 
-// Measured on GM20B by the bench loop; the doubles, HSET2, HSETP2 and HMNMX2 were not timed and keep NAK's guess.
+// Measured on GM20B by the bench loop; the doubles and HMNMX2 were not timed and keep NAK's guess. HSET2 and HSETP2
+// take every other compare's: NVIDIA's GM20B code reads HSETP2's predicate 13 cycles after it.
 pub fn instr_latency(_sm: u8, op: &Op, dst_idx: usize) -> u32 {
     let file = match &op.dsts_as_slice()[dst_idx] {
         Dst::None => return 0,
@@ -36,8 +39,6 @@ pub fn instr_latency(_sm: u8, op: &Op, dst_idx: usize) -> u32 {
         | Op::DMnMx(_)
         | Op::DMul(_)
         | Op::DSetP(_)
-        | Op::HSet2(_)
-        | Op::HSetP2(_)
         | Op::HMnMx2(_) => (13, 14),
         _ => (6, 13),
     };
@@ -137,10 +138,34 @@ impl ShaderModel for ShaderModel50 {
         &self,
         write: &Op,
         dst_idx: usize,
-        _read: &Op,
+        read: &Op,
         _src_idx: usize,
     ) -> u32 {
-        instr_latency(self.sm, write, dst_idx)
+        let latency = instr_latency(self.sm, write, dst_idx);
+        let gpr = match &write.dsts_as_slice()[dst_idx] {
+            Dst::SSA(vec) => vec.file() == RegFile::GPR,
+            Dst::Reg(reg) => reg.file() == RegFile::GPR,
+            Dst::None => false,
+        };
+        // XMAD stays out: NVIDIA's code never reads it before 6, and no bench
+        // row times an XMAD writer yet
+        if !gpr
+            || !write.has_fixed_latency(self.sm)
+            || latency != 6
+            || matches!(write, Op::Xmad(_))
+        {
+            return latency;
+        }
+        // A variable-latency reader collects its operands after it issues:
+        // NVIDIA's GM20B code issues these 2 cycles after a fixed-latency
+        // GPR write, and LDC 4
+        match read {
+            Op::MuFu(_) | Op::F2F(_) | Op::F2I(_) | Op::I2F(_) | Op::Flo(_) => {
+                2
+            }
+            Op::Ldc(_) => 4,
+            _ => latency,
+        }
     }
 
     fn war_latency(
@@ -1371,8 +1396,16 @@ impl SM50Op for OpIAdd2 {
             b.copy_alu_src_and_lower_ineg(src0, GPR, SrcType::I32);
         }
         b.copy_alu_src_if_not_reg(src0, GPR, SrcType::I32);
-        if !self.carry_out.is_none() {
-            b.copy_alu_src_if_ineg_imm(src1, GPR, SrcType::I32);
+        // The immediate forms have no negation bit for the immediate. Without
+        // a carry out its negation is exact in the value; with one, the carry
+        // of x + -k is not the carry of x - k, so it takes a register
+        match src1.src_ref {
+            SrcRef::Imm32(k)
+                if src1.src_mod.is_ineg() && self.carry_out.is_none() =>
+            {
+                *src1 = k.wrapping_neg().into();
+            }
+            _ => b.copy_alu_src_if_ineg_imm(src1, GPR, SrcType::I32),
         }
     }
 
@@ -1680,6 +1713,16 @@ impl SM50Op for OpISetP {
 impl SM50Op for OpLop2 {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
         use RegFile::GPR;
+        // LOP encodes only a source's inversion
+        for src in &mut self.srcs {
+            match src.src_mod {
+                SrcMod::None | SrcMod::BNot => {}
+                SrcMod::INeg => {
+                    b.copy_alu_src_and_lower_ineg(src, GPR, SrcType::I32)
+                }
+                _ => b.copy_alu_src_and_lower_fmod(src, GPR, SrcType::F32),
+            }
+        }
         let [src0, src1] = &mut self.srcs;
         match self.op {
             LogicOp2::PassB => {
@@ -3124,6 +3167,7 @@ impl SM50Op for OpMemBar {
         e.set_field(
             8..10,
             match self.scope {
+                _ if self.vc => 3_u8,
                 MemScope::CTA => 0_u8,
                 MemScope::GPU => 1_u8,
                 MemScope::System => 2_u8,

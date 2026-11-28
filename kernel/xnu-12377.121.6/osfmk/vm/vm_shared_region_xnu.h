@@ -175,6 +175,7 @@ typedef struct vm_shared_region_slide_info {
 	vm_object_t             si_slide_object;    /* The source object for the pages to be modified */
 	mach_vm_size_t          si_slide_info_size; /* size of dyld provided relocation information */
 	vm_shared_region_slide_info_entry_t si_slide_info_entry; /* dyld provided relocation information */
+	const struct switch_fvariant_cache *si_switch_fvariant; /* the pager fills these slots (switch/fvariant.h) */
 } *vm_shared_region_slide_info_t;
 
 /*
@@ -207,6 +208,7 @@ struct vm_shared_region {
 	bool                    sr_uuid_copied;
 	bool                    sr_stale;              /* This region should never be used again. */
 	bool                    sr_driverkit;
+	const struct switch_fvariant_cache *sr_switch_fvariant; /* its pinned slots, set before its mappings slide */
 
 #if __has_feature(ptrauth_calls)
 	bool                    sr_reslide;            /* Special shared region for suspected attacked processes */

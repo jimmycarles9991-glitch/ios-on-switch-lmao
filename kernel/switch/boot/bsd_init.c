@@ -67,7 +67,11 @@ static void switch_boot_load_mobile_graphics(void)
 void switch_boot_bufferinit_done(void)
 {
     extern void sheng_pmgr_run(void);
+    extern int switch_nvram_publish(void);
     sheng_pmgr_run();
+    // Register before bsd_autoconf/IOKitBSDInit so AppleImage4's first NVRAM sync finds _nvramController.
+    if (switch_nvram_publish())
+        printf("Switch: NVRAM controller not registered\n");
 }
 
 void switch_boot_vfs_ready(void)

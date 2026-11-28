@@ -476,7 +476,6 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 		}
 	}
 
-	if ((flags & MAP_JIT) && a64x_subtype_translated(p->p_cputype, p->p_cpusubtype)) return ENOTSUP;
 	/* Entitlement check against code signing monitor */
 	if ((flags & MAP_JIT) && (vm_map_csm_allow_jit(user_map) != KERN_SUCCESS)) {
 		printf("[%d] code signing monitor denies JIT mapping\n", proc_pid(p));

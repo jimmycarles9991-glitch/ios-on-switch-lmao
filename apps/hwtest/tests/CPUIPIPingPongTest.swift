@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import HWTestCore
+import HWTestKit
 import SwitchIPIProbe
 
 /// Two threads waking each other through Mach semaphores (cpu/switch_ipi_probe.c), each waker keeping its own core

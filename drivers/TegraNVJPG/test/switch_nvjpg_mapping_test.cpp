@@ -66,10 +66,10 @@ SwitchNVJPGMapping *mapped(switch_gpu_backing &backing, uint32_t extent, uint64_
 }
 
 // The GPU driver's retirement worker, run while the engine thread is inside a decode: the first time the decode takes
-// gStateLock with the job lock held.
+// gFlightLock with the job lock held.
 void retireDuringTheRun(IOLock *lock)
 {
-    if (lock != gStateLock || !gRetiring || !gJobLock->locked)
+    if (lock != gFlightLock || !gRetiring || !gJobLock->locked)
         return;
     switch_gpu_backing *backing = gRetiring;
     gRetiring = nullptr;
@@ -211,9 +211,7 @@ TEST_F(NVJPGGate, RetirementUnmapsWhileADecodeHoldsTheJobLock)
     switch_test_lock_taken = retireDuringTheRun;
     TegraNVJPGJob job = decodeJob();
     nvjpg_dec_status status = {};
-    tegra_nvjpg_lock();
-    EXPECT_NO_THROW(tegra_nvjpg_run(&job, &status, nullptr));
-    tegra_nvjpg_unlock();
+    EXPECT_NO_THROW(runDecode(&job, &status));
     switch_test_lock_taken = nullptr;
     EXPECT_TRUE(gRetiredDuringRun);
     EXPECT_FALSE(gMapLock->locked);

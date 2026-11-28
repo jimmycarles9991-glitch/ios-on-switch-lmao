@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 
 /// A new 4x memoryless target's first pass clears compressed memory: the device asks for a multisampled memoryless

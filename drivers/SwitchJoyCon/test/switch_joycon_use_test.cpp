@@ -1,4 +1,5 @@
-// drivers/SwitchJoyCon/SwitchJoyConUse.h: which rail reports are the user playing, and when the pair goes idle.
+// drivers/SwitchJoyCon/SwitchJoyConUse.h: deliberate brush-resistant publish, active use tracking,
+// touch preemption (only when idle without IMU/rumble), and 900 s pure-inactivity fallback.
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -13,7 +14,8 @@ namespace {
 using switch_joycon_fixture::Report;
 using switch_joycon_fixture::report;
 
-struct Use : ::testing::Test {
+class Use : public ::testing::Test {
+protected:
     switch_joycon_use u{};
     switch_joycon_stick stick = switch_joycon_fixture::capturedStick();
 
@@ -25,6 +27,11 @@ struct Use : ::testing::Test {
     bool take(const Report &r)
     {
         return switch_joycon_use_report(&u, &stick, r.data(), r.size());
+    }
+
+    bool wake(const Report &r)
+    {
+        return switch_joycon_use_observe(&u, &stick, r.data(), r.size(), false);
     }
 
     unsigned uses(const std::vector<Report> &reports)
@@ -56,7 +63,7 @@ TEST_F(Use, APushIsUseFromItsFirstReportOutAndHoldingItIsNot)
             at.push_back(static_cast<unsigned>(i));
     }
     ASSERT_FALSE(at.empty());
-    EXPECT_EQ(at.front(), 1u);  // 1841 + 157 is still in, 1841 + 314 is out
+    EXPECT_EQ(at.front(), 1u);
     EXPECT_LT(at.back(), 6u);
 }
 
@@ -89,11 +96,61 @@ TEST_F(Use, AStickThatRestsOutOfItsDeadZoneIsNotUseUntilItMoves)
 {
     std::vector<Report> worn;
     for (const Report &r : switch_joycon_fixture::resting(2000, 2)) {
-        const unsigned x = (r[6] | (r[7] & 0x0f) << 8) + 260;
-        worn.push_back(report(true, x, r[7] >> 4 | r[8] << 4));
+        const unsigned x = (static_cast<unsigned>(r[6]) | ((static_cast<unsigned>(r[7]) & 0x0fu) << 8)) + 260u;
+        const unsigned y = (static_cast<unsigned>(r[7]) >> 4) | (static_cast<unsigned>(r[8]) << 4);
+        worn.push_back(report(true, x, y));
     }
     EXPECT_EQ(uses(worn), 0u);
     EXPECT_TRUE(take(report(true, 1841 + 260 + 300, 2088)));
+}
+
+TEST_F(Use, BrushResistantPublishRejectsTransientGlitchesAndAcceptsSustainedInput)
+{
+    // Arm stick at rest.
+    EXPECT_FALSE(wake(report(true, 1841, 2088)));
+
+    // Single-tick accidental button bump does not publish.
+    Report btn = report(true, 1841, 2088);
+    btn[3] = 0x08;
+    EXPECT_FALSE(wake(btn));
+    EXPECT_FALSE(wake(report(true, 1841, 2088)));
+
+    // Sustained 2-tick button press publishes.
+    EXPECT_FALSE(wake(btn));
+    EXPECT_TRUE(wake(btn));
+
+    // Reset and test light stick brush (just past dead_zone, <= 2x dead_zone) for 2 ticks: rejected.
+    switch_joycon_use_reset(&u);
+    EXPECT_FALSE(wake(report(true, 1841, 2088)));
+    const Report brush = report(true, 0x75c + 0xae + 30, 0x83b);
+    EXPECT_FALSE(wake(brush));
+    EXPECT_FALSE(wake(brush));
+    EXPECT_FALSE(wake(report(true, 1841, 2088)));
+
+    // Sustained moderate stick deflection (3 ticks) publishes.
+    EXPECT_FALSE(wake(brush));
+    EXPECT_FALSE(wake(brush));
+    EXPECT_TRUE(wake(brush));
+
+    // Strong stick deflection (> 2x dead_zone): 1 tick rejected, 2 ticks publishes.
+    switch_joycon_use_reset(&u);
+    EXPECT_FALSE(wake(report(true, 1841, 2088)));
+    const Report strong = report(true, 0x75c + 0xae * 2 + 50, 0x83b);
+    EXPECT_FALSE(wake(strong));
+    EXPECT_FALSE(wake(report(true, 1841, 2088)));
+    EXPECT_FALSE(wake(strong));
+    EXPECT_TRUE(wake(strong));
+}
+
+TEST_F(Use, BrushResistantPublishIgnoresWornStickRestingOutsideDeadZone)
+{
+    const Report worn = report(true, 0x75c + 260, 0x83b);
+    for (unsigned i = 0; i < 100; ++i)
+        EXPECT_FALSE(wake(worn));
+    // Deliberate push past dead_zone from its worn rest position publishes after 2 ticks.
+    const Report pushed = report(true, 0x75c + 260 + 300, 0x83b);
+    EXPECT_FALSE(wake(pushed));
+    EXPECT_TRUE(wake(pushed));
 }
 
 TEST_F(Use, EveryGamepadButtonIsUse)
@@ -118,6 +175,7 @@ TEST_F(Use, HomeCaptureGripAndRailButtonsAreNotUse)
         Report r = report(true, 1841, 2088);
         r[byte] = bit;
         EXPECT_FALSE(take(r)) << "byte " << byte << " bit " << unsigned{bit};
+        EXPECT_FALSE(wake(r)) << "byte " << byte << " bit " << unsigned{bit};
     }
 }
 
@@ -156,6 +214,25 @@ TEST(SwitchJoyConUse, AJoyConRsOtherStickBytesAreNotItsStick)
     EXPECT_FALSE(switch_joycon_use_report(&u, &stick, r.data(), r.size()));
     switch_joycon_fixture::putStick(r, false, 2048 + 600, 2048);
     EXPECT_TRUE(switch_joycon_use_report(&u, &stick, r.data(), r.size()));
+}
+
+TEST(SwitchJoyConUse, TouchPreemptsIdleRailGamepadAfterGraceUnlessImuOrRumbleActive)
+{
+    const uint64_t used = 10000;
+    // No touch yet, or touch before last gamepad use: never preempts.
+    EXPECT_FALSE(switch_joycon_use_touch_preempt(used, 0, false, used + 5000));
+    EXPECT_FALSE(switch_joycon_use_touch_preempt(used, used, false, used + 5000));
+    EXPECT_FALSE(switch_joycon_use_touch_preempt(used, used - 10, false, used + 5000));
+
+    // Touch after last use, before grace window expires: does not preempt yet.
+    const uint64_t touched = used + 500;
+    EXPECT_FALSE(switch_joycon_use_touch_preempt(used, touched, false, used + SWITCH_JOYCON_USE_TOUCH_GRACE_MS - 1));
+
+    // Grace window elapsed and not busy: preempts cleanly.
+    EXPECT_TRUE(switch_joycon_use_touch_preempt(used, touched, false, used + SWITCH_JOYCON_USE_TOUCH_GRACE_MS));
+
+    // Active IMU or rumble holds the controller alive even when touched.
+    EXPECT_FALSE(switch_joycon_use_touch_preempt(used, touched, true, used + 60000));
 }
 
 TEST(SwitchJoyConUse, IdleAfterGameControllersOwnTimeout)

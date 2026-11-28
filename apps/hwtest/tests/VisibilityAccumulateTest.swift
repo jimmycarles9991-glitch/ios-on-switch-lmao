@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Accumulating visibility results (MTLVisibilityResultTypeAccumulate, iOS 26) on the driver

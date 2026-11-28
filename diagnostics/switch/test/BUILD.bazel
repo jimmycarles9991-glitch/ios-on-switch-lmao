@@ -4,6 +4,7 @@
 #                             kernels only
 #   switch_diag_link_test     the selected kind's libSwitchDiag and kernel under this build's profile: in release no debug
 #                             unit, symbol or text, in every config the panic record and the root boot
+#   switch_panic_save_test    SwitchPanicSave.c warm-reset PSCI/CAR sequence and early-boot counter wait
 #
 #   bazel test //diagnostics/switch/test:all
 #   bazel test --config=release //diagnostics/switch/test:switch_diag_link_test
@@ -39,6 +40,15 @@ host_test(
         "XNU_SWITCH_VERIFIED_ROOT=1",
     ],
     deps = [":debug_view"],
+)
+
+host_test(
+    name = "switch_panic_save_test",
+    srcs = ["switch_panic_save_test.cpp"],
+    data = [
+        "//diagnostics/switch:SwitchPanicEarly.c",
+        "//diagnostics/switch:SwitchPanicSave.c",
+    ],
 )
 
 py_test(

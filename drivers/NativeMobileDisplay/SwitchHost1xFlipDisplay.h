@@ -1,21 +1,22 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // HW Test display.x1.host1x_flip, debug kernels only: window A flipped by class 0x70 streams on the display's own
 // host1x channel, each held behind a producer's syncpoint (SwitchHost1xFlipRun.h has the run). Writing N to
-// debug.switch_display_host1x_flip starts N flips (N | kForcedFailure: the middle one's producer fails); reading it
-// gives the run's line. The swaps are held and the frame end routed while it runs, as for the column scan, and nothing
-// else may write window A or a request then (completionFlipMay, mediaFlipMay, landscapeBusy, the colour and palette
-// requests). The second surface is the front's own pages mapped into a plane slot, so the run is invisible.
-// kern.switch_flips_host1x counts the flips host1x wrote and window A latched as written. The channel is the class
-// probe's too: one of them claims it at a time. Its state is static: the instance is at the 16 KiB a kalloc_type class
-// may have. Included in the class body after SwitchDcHost1xClassProbe.h.
+// debug.switch_display_host1x_flip starts N flips (N | kForcedFailure: the middle one's producer fails), for a writer
+// holding SWITCH_GPU_PROBES_ENTITLEMENT (HW Test) alone; reading it gives the run's line. The swaps are held and the
+// frame end routed while it runs, as for the column scan, and nothing else may write window A or a request then
+// (completionFlipMay, mediaFlipMay, landscapeBusy, the colour and palette requests). The second surface is the front's
+// own pages mapped into a plane slot, so the run is invisible. kern.switch_flips_host1x counts the flips host1x wrote
+// and window A latched as written. The channel is the class probe's too: one of them claims it at a time. Its state is
+// static: the instance is at the 16 KiB a kalloc_type class may have. Included in the class body after
+// SwitchDcHost1xClassProbe.h.
 
-#if SWITCH_FRAME_TIMELINE
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
 struct Host1xFlipState {
     switch_host1x_flip::Run run;
-    uint32_t syncpts[2] = {};  // producer, display
-    bool syncptsReady = false, holding = false;
+    uint32_t syncpts[SWITCH_HOST1X_PROBE_SYNCPTS] = {};  // producer, display, window A's REG_WR_SAFE and LINE_FLIPPED
+    bool holding = false;
     int aliasSlot = -1;
-    char line[360] = "host1x_flip=not_run";
+    char line[480] = "host1x_flip=not_run";
 };
 
 static Host1xFlipState host1xFlip;
@@ -34,6 +35,8 @@ static int host1xFlipSysctl(struct sysctl_oid *, void *, int, struct sysctl_req 
     if (!display)
         return ENODEV;
     if (req->newptr) {
+        if (!switch_task_entitled(current_task(), SWITCH_GPU_PROBES_ENTITLEMENT))
+            return EPERM;
         int value = 0;
         if (const int error = SYSCTL_IN(req, &value, sizeof(value)))
             return error;
@@ -87,12 +90,12 @@ void host1xFlipLine(char *line, size_t size)
     });
 }
 
-// From the sysctl's thread: the channel claimed (the class probe's flag), host1x up, the syncpoints taken once, then
-// the run begun under the gate.
+// From the sysctl's thread: the channel claimed (the class probe's flag), host1x up, the probes' syncpoints claimed,
+// then the run begun under the gate. host1xFlipFinished lets both go.
 int host1xFlipStart(uint32_t request)
 {
     const uint32_t flips = request & 0xffff;
-    if (!flips || flips > switch_host1x_flip::kMaxFlips || (request & ~(0xffffu | switch_host1x_flip::kForcedFailure)))
+    if (!flips || flips > switch_host1x_flip::kMaxFlips || (request & ~(0xffffu | switch_host1x_flip::kModes)))
         return EINVAL;
     if (!getWorkLoop())
         return ENODEV;
@@ -100,14 +103,13 @@ int host1xFlipStart(uint32_t request)
     if (__atomic_exchange_n(&dcClassBusy, true, __ATOMIC_ACQUIRE))
         return EBUSY;
     const char *why = nullptr;
-    if (tegra_host1x_start() != TEGRA_HOST1X_OK) {
+    bool claimed = false;
+    if (tegra_host1x_start() != TEGRA_HOST1X_OK)
         why = "host1x";
-    } else if (!host1xFlip.syncptsReady) {
-        for (uint32_t &id : host1xFlip.syncpts)
-            if (!why && tegra_host1x_syncpt_alloc(&id) != TEGRA_HOST1X_OK)
-                why = "no_syncpoint";
-        host1xFlip.syncptsReady = !why;
-    }
+    else if (switch_host1x_probe_syncpts_claim(host1xFlip.syncpts) != TEGRA_HOST1X_OK)
+        why = "syncpoints";
+    else
+        claimed = true;
     host1xFlipOnLoop([&] {
         if (!why)
             why = host1xFlipRefusal();
@@ -115,11 +117,13 @@ int host1xFlipStart(uint32_t request)
             snprintf(host1xFlip.line, sizeof(host1xFlip.line), "host1x_flip=not_run reason=%s", why);
             return;
         }
-        host1xFlip.run.begin(flips, (request & switch_host1x_flip::kForcedFailure) != 0u);
+        host1xFlip.run.begin(flips, request);
         host1xFlip.holding = true;
         native_legacy_frame_end_hold();
     });
     if (why) {
+        if (claimed)
+            switch_host1x_probe_syncpts_release();
         __atomic_store_n(&dcClassBusy, false, __ATOMIC_RELEASE);
         return EAGAIN;
     }
@@ -207,6 +211,32 @@ struct Host1xFlipIo {
     static uint32_t displayValue()
     {
         return tegra_host1x_syncpt_read(display());
+    }
+
+    static uint32_t window(uint32_t i)
+    {
+        return host1xFlip.syncpts[2 + i];
+    }
+
+    static uint32_t windowValue(uint32_t i)
+    {
+        return tegra_host1x_syncpt_read(window(i));
+    }
+
+    static uint32_t vblankValue()
+    {
+        return tegra_host1x_syncpt_read(switch_host1x_flip::kVblankSyncpt);
+    }
+
+    // After a teardown: window A's syncpoint client drops what its FIFO holds (TRM 24.6.5 SOFT_RESET), then the CPU
+    // raises both syncpoints to where the torn-down stream would have.
+    void settleWindow(uint32_t regWrSafeAt, uint32_t lineFlippedAt) const
+    {
+        constexpr uint32_t kWinASyncptControl = 0x009;  // DC_CMD_WIN_A_INCR_SYNCPT_CNTRL
+        d->dc[kWinASyncptControl] = 1;
+        d->dc[kWinASyncptControl] = 0;
+        tegra_host1x_syncpt_release_failed(window(0), regWrSafeAt, switch_host1x_flip::kMaxFlips);
+        tegra_host1x_syncpt_release_failed(window(1), lineFlippedAt, switch_host1x_flip::kMaxFlips);
     }
 
     static uint32_t *reserve(uint32_t capacity)
@@ -363,18 +393,22 @@ void host1xFlipFinished()
         planeDropSlot(static_cast<unsigned>(s.aliasSlot));
     s.aliasSlot = -1;
     const auto &t = r.totals;
+    const auto &w = t.window;
     snprintf(s.line, sizeof(s.line),
              "host1x_flip=%s flips=%u forced=%d host1x=%u gate=%u latched=%u not_as_written=%u unwritten=%u "
-             "teardowns=%u after_teardown=%u written=%u display_delta=%u underflows=%u waited=%u stop=%s",
+             "teardowns=%u after_teardown=%u written=%u display_delta=%u underflows=%u waited=%u stop=%s modes=%#x "
+             "reg_wr_safe=%u/%u/%u/%u line_flipped=%u/%u/%u/%u vblank=%u/%u/%u/%u",
              r.issued || r.why == nullptr ? "done" : "not_run", r.flips, r.failAt != r.kNoFlip, t.host1x, t.gate,
              t.latched, t.notAsWritten, t.unwritten, t.teardowns, t.afterTeardown, t.written,
              r.issued ? Host1xFlipIo::displayValue() - r.displayStart : 0u, t.underflows, t.waited,
-             r.why ? r.why : "none");
+             r.why ? r.why : "none", r.modes, w[0][0], w[0][1], w[0][2], w[0][3], w[1][0], w[1][1], w[1][2], w[1][3],
+             t.vblank[0], t.vblank[1], t.vblank[2], t.vblank[3]);
     IOLog("SwitchDisplay: host1x flip run: %s\n", s.line);
     if (s.holding) {
         s.holding = false;
         native_legacy_frame_end_release();
     }
+    switch_host1x_probe_syncpts_release();
     __atomic_store_n(&dcClassBusy, false, __ATOMIC_RELEASE);
 }
 

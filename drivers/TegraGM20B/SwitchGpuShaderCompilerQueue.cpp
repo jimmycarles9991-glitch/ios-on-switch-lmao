@@ -218,4 +218,196 @@ void unreserve(uint64_t size)
 	IOLockUnlock(gBroker.lock);
 }
 
+namespace
+{
+bool libraryRoom(const void *owner, uint64_t bytes)
+{
+	uint32_t mine = 0;
+	uint64_t mineBytes = 0;
+	for (const ClientLibrary *l = gBroker.libraries; l; l = l->next) {
+		if (l->owner == owner) {
+			mine++;
+			mineBytes += l->bytes;
+		}
+	}
+	return mine < TegraGM20BCompilerLibrariesPerClient &&
+	       mineBytes + bytes <= TegraGM20BCompilerLibraryBytesPerClient &&
+	       gBroker.libraryBytesTotal + bytes <= TegraGM20BCompilerLibraryBytesTotal;
+}
+
+CompilerLibraryMap *findLibraryMap(uint64_t client, uint64_t id)
+{
+	for (CompilerLibraryMap *m = gBroker.libraryMaps; m; m = m->next)
+		if (m->client == client && m->id == id)
+			return m;
+	return nullptr;
+}
+}  // namespace
+
+IOReturn registerLibrary(const void *owner, task_t task,
+			 const TegraGM20BAbiCompilerRegisterLibrary *in,
+			 TegraGM20BAbiCompilerRegisterLibraryReply *out)
+{
+	if (!in->address || !in->bytes || in->bytes > TegraGM20BCompileRequestLimit || in->flags ||
+	    in->reserved)
+		return kIOReturnBadArgument;
+	IOLockLock(gBroker.lock);
+	const bool room = libraryRoom(owner, in->bytes);
+	IOLockUnlock(gBroker.lock);
+	if (!room)
+		return kIOReturnNoResources;
+	IOMemoryDescriptor *memory = IOMemoryDescriptor::withAddressRange(
+		in->address, in->bytes,
+		IOOptionBits(kIODirectionOut) | IOOptionBits(kIOMemoryMapCopyOnWrite) |
+			IOOptionBits(kIOMemoryPersistent),
+		task);
+	if (!memory)
+		return kIOReturnVMError;
+	auto *entry = IONew(ClientLibrary, 1);
+	if (!entry) {
+		memory->release();
+		return kIOReturnNoMemory;
+	}
+	IOLockLock(gBroker.lock);
+	const uint64_t cid = libraryRoom(owner, in->bytes) ? clientId(owner) : 0;
+	if (!cid) {
+		IOLockUnlock(gBroker.lock);
+		IODelete(entry, ClientLibrary, 1);
+		memory->release();
+		return kIOReturnNoResources;
+	}
+	*entry = {gBroker.libraries, owner, cid, ++gBroker.nextLibraryId, in->bytes, memory};
+	gBroker.libraries = entry;
+	gBroker.libraryBytesTotal += in->bytes;
+	*out = {entry->id};
+	IOLockUnlock(gBroker.lock);
+	return kIOReturnSuccess;
+}
+
+IOReturn mapLibrary(const void *owner, task_t task, const TegraGM20BAbiCompilerMapLibrary *in,
+		    TegraGM20BAbiCompilerMapLibraryReply *out)
+{
+	if (!in->id || !in->client || in->flags || in->reserved)
+		return kIOReturnBadArgument;
+	IOMemoryDescriptor *memory = nullptr;
+	uint64_t bytes = 0;
+	IOLockLock(gBroker.lock);
+	if (gBroker.compiler != owner) {
+		IOLockUnlock(gBroker.lock);
+		return kIOReturnNotPermitted;
+	}
+	if (CompilerLibraryMap *existing = findLibraryMap(in->client, in->id)) {
+		*out = {uint64_t(existing->map->getAddress()), existing->bytes};
+		IOLockUnlock(gBroker.lock);
+		return kIOReturnSuccess;
+	}
+	for (ClientLibrary *l = gBroker.libraries; l; l = l->next) {
+		if (l->client == in->client && l->id == in->id) {
+			memory = l->memory;
+			bytes = l->bytes;
+			memory->retain();
+			break;
+		}
+	}
+	IOLockUnlock(gBroker.lock);
+	if (!memory)
+		return kIOReturnNotFound;
+	IOMemoryMap *map = memory->createMappingInTask(
+		task, 0, IOOptionBits(kIOMapAnywhere) | IOOptionBits(kIOMapReadOnly));
+	memory->release();
+	if (!map)
+		return kIOReturnVMError;
+	auto *node = IONew(CompilerLibraryMap, 1);
+	if (!node) {
+		map->release();
+		return kIOReturnNoMemory;
+	}
+	IOLockLock(gBroker.lock);
+	if (gBroker.compiler != owner) {
+		IOLockUnlock(gBroker.lock);
+		IODelete(node, CompilerLibraryMap, 1);
+		map->release();
+		return kIOReturnNotPermitted;
+	}
+	if (CompilerLibraryMap *existing = findLibraryMap(in->client, in->id)) {
+		*out = {uint64_t(existing->map->getAddress()), existing->bytes};
+		IOLockUnlock(gBroker.lock);
+		IODelete(node, CompilerLibraryMap, 1);
+		map->release();
+		return kIOReturnSuccess;
+	}
+	*node = {gBroker.libraryMaps, in->client, in->id, bytes, map};
+	gBroker.libraryMaps = node;
+	*out = {uint64_t(map->getAddress()), bytes};
+	IOLockUnlock(gBroker.lock);
+	return kIOReturnSuccess;
+}
+
+IOReturn unmapLibrary(const void *owner, const TegraGM20BAbiCompilerUnmapLibrary *in)
+{
+	if (!in->id || !in->client || in->flags || in->reserved)
+		return kIOReturnBadArgument;
+	CompilerLibraryMap *found = nullptr;
+	IOLockLock(gBroker.lock);
+	if (gBroker.compiler != owner) {
+		IOLockUnlock(gBroker.lock);
+		return kIOReturnNotPermitted;
+	}
+	for (CompilerLibraryMap **p = &gBroker.libraryMaps; *p; p = &(*p)->next) {
+		if ((*p)->client == in->client && (*p)->id == in->id) {
+			found = *p;
+			*p = found->next;
+			break;
+		}
+	}
+	IOLockUnlock(gBroker.lock);
+	if (!found)
+		return kIOReturnNotFound;
+	found->map->release();
+	IODelete(found, CompilerLibraryMap, 1);
+	return kIOReturnSuccess;
+}
+
+ClientLibrary *takeLibraries(const void *owner)
+{
+	ClientLibrary *dropped = nullptr;
+	for (ClientLibrary **p = &gBroker.libraries; *p;) {
+		if ((*p)->owner == owner) {
+			ClientLibrary *l = *p;
+			*p = l->next;
+			gBroker.libraryBytesTotal -= l->bytes;
+			l->next = dropped;
+			dropped = l;
+		} else {
+			p = &(*p)->next;
+		}
+	}
+	return dropped;
+}
+
+CompilerLibraryMap *takeLibraryMaps()
+{
+	CompilerLibraryMap *maps = gBroker.libraryMaps;
+	gBroker.libraryMaps = nullptr;
+	return maps;
+}
+
+void dropLibraries(ClientLibrary *list)
+{
+	while (ClientLibrary *l = list) {
+		list = l->next;
+		l->memory->release();
+		IODelete(l, ClientLibrary, 1);
+	}
+}
+
+void dropLibraryMaps(CompilerLibraryMap *list)
+{
+	while (CompilerLibraryMap *m = list) {
+		list = m->next;
+		m->map->release();
+		IODelete(m, CompilerLibraryMap, 1);
+	}
+}
+
 }  // namespace switch_gpu_compiler

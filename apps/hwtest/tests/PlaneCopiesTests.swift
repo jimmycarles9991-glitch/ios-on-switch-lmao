@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// Copies between two textures of one format over two-plane surfaces of one page (gpu/PlaneCopies.swift sameFormat):

@@ -105,10 +105,11 @@ def _filter(label):
 
 def _rust_transition_impl(settings, attr):
     key = (attr.kind, settings[_PROFILE])
+    cpu_flags = ["-Ctarget-cpu=cortex-a57"] if attr.kind == "device" else []
     return {
         _PLATFORMS: [IOS_PLATFORM] if attr.kind == "device" else settings[_PLATFORMS],
         # Strip nothing whatever the compilation mode (rules_rust strips debug info under -c opt, cargo did not).
-        _EXTRA_FLAGS: REMAP_FLAGS + _CRATE_FLAGS[key] + ["-Cstrip=none"],
+        _EXTRA_FLAGS: REMAP_FLAGS + _CRATE_FLAGS[key] + cpu_flags + ["-Cstrip=none"],
         _EXTRA_ENV: _DEPLOYMENT_ENV,
         _PER_CRATE: ["{}@{}".format(_filter(attr.crate), flag) for flag in _ROOT_FLAGS.get(key, [])],
         # Each crate's LTO form is the flags' above; rules_rust adds none of its own.

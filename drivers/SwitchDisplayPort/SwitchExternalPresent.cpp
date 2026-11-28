@@ -12,7 +12,15 @@ void SwitchExternalScreen::kickSwapQueue()
 {
     if (dcb && switch_abi_load<const void *>(this, vsyncClientList))
         dcb->frameInterrupt(true);
-    if (kicking || !dcb || pending || device != 2)
+    if (kicking || pending)
+        return;
+    if (!connected || device != 2 || selectedMode < 0) {
+        kicking = true;
+        drainSwapQueue();
+        kicking = false;
+        return;
+    }
+    if (!dcb)
         return;
     kicking = true;
     requestFrame();
@@ -58,10 +66,29 @@ uint32_t SwitchExternalScreen::gatherFence(bool &media)
     return count;
 }
 
+void SwitchExternalScreen::failFence(int result)
+{
+    gpuPending = false;
+    abandonDrawing();
+    const auto *request = pending;
+    pending = nullptr;
+    if (retryable(result)) {
+        retryWhenReady();
+        return;
+    }
+#if DEVELOPMENT || DEBUG
+    if (diagScanoutFailures < 8u) {
+        ++diagScanoutFailures;
+        IOLog("SwitchDisplayPort: frame fence failed err=%d tokens=%u\n", result, fenceCount);
+    }
+#endif
+    dropFrame(request);
+}
+
 // The windows are written once every producer of every surface they will scan has finished: at once when none is
 // pending, on the media engines' syncpoints when only VIC and NVDEC write them (switch_host1x_token_fence), otherwise
-// through a GPU fence. The GPU fence may sleep for a slot and a VIC conversion submits a job, so both go to the fence
-// thread; the work loop leaves the frame's slots alone until its completion.
+// directly through the non-blocking GPU bridge fence on the work loop. Only VIC conversions or a full bridge ring
+// (-16) defer off the work loop to fenceCall.
 void SwitchExternalScreen::fenceFrame()
 {
     fenceConverts = false;
@@ -83,63 +110,63 @@ void SwitchExternalScreen::fenceFrame()
             if (!result)
                 return;
             if (result != -16 && result != -22) {
-                gpuPending = false;
-#if DEVELOPMENT || DEBUG
-                if (diagScanoutFailures < 8u) {
-                    ++diagScanoutFailures;
-                    IOLog("SwitchDisplayPort: switch_host1x_token_fence failed err=%d tokens=%u\n", result, count);
-                }
-#endif
-                abandonDrawing();
-                const auto *request = pending;
-                pending = nullptr;
-                dropFrame(request);
+                failFence(result);
                 return;
             }
         }
+        const int result = switch_gpu_bridge_fence(fenceTokens, count, fenced, this);
+        if (!result)
+            return;
+        if (result != -16) {
+            failFence(result);
+            return;
+        }
     }
-    fenceSource->interruptOccurred(nullptr, nullptr, 0);
+    retain();
+    if (thread_call_enter(fenceCall))
+        release();
 }
 
-// A conversion VIC refuses retires the swap unshown with this line, the screen keeping its frame; one waiting for the GPU
-// (-16, STALE) is tried again when it is ready, as prepareSlot's are.
-void SwitchExternalScreen::fenceFired(OSObject *owner, IOInterruptEventSource *, int)
+void SwitchExternalScreen::fenceWork()
 {
-    auto *self = static_cast<SwitchExternalScreen *>(owner);
-    if (self->fenceConverts) {
-        if (const int error = self->runConversions()) {
-            if (!retryable(error) && self->unshownErrors++ < 8u)
+    if (__atomic_load_n(&fenceStopping, __ATOMIC_ACQUIRE))
+        return;
+    if (fenceConverts) {
+        if (const int error = runConversions()) {
+            if (!retryable(error) && unshownErrors++ < 8u)
                 IOLog("SwitchDisplayPort: VIC refused a layer's conversion (%d); the swap is not shown\n", error);
-            self->gpuComplete(error);
+            gpuComplete(error);
             return;
         }
         bool media = false;
-        const uint32_t count = self->gatherFence(media);
+        const uint32_t count = gatherFence(media);
         if (!count) {
-            self->gpuComplete(0);
+            gpuComplete(0);
             return;
         }
         if (media && count <= SWITCH_HOST1X_TOKEN_FENCE_MAX) {
-            const int result = switch_host1x_token_fence(self->fenceTokens, count, fenced, self);
+            const int result = switch_host1x_token_fence(fenceTokens, count, fenced, this);
             if (!result)
                 return;
             if (result != -16 && result != -22) {
-                self->gpuComplete(result);
+                gpuComplete(result);
                 return;
             }
         }
     }
     int error = 0;
     for (;;) {
-        error = switch_gpu_bridge_fence(self->fenceTokens, self->fenceCount, fenced, self);
+        if (__atomic_load_n(&fenceStopping, __ATOMIC_ACQUIRE))
+            return;
+        error = switch_gpu_bridge_fence(fenceTokens, fenceCount, fenced, this);
         if (error != -16)
             break;
         error = switch_gpu_bridge_wait_room();
         if (error)
             break;
     }
-    if (error)
-        self->gpuComplete(error);
+    if (error && !__atomic_load_n(&fenceStopping, __ATOMIC_ACQUIRE))
+        gpuComplete(error);
 }
 
 void SwitchExternalScreen::gpuComplete(int status)
@@ -240,7 +267,7 @@ bool SwitchExternalScreen::retire(const OriginalLegacySwapRequest *request, bool
     return true;
 }
 
-bool SwitchExternalScreen::frameEnd()
+bool SwitchExternalScreen::frameEnd(uint64_t stamp, uint64_t continuous)
 {
     if (!dcb)
         return true;
@@ -255,10 +282,14 @@ bool SwitchExternalScreen::frameEnd()
     }
     const auto *clients = switch_abi_load<const void *>(this, vsyncClientList);
     if (clients)
-        native_legacy_vsync_notify(this, mach_absolute_time(), mach_continuous_time(), interval);
+        native_legacy_vsync_notify(this, stamp ? stamp : mach_absolute_time(),
+                                   continuous ? continuous : mach_continuous_time(), interval);
     kickSwapQueue();
-    if (dcb)
-        dcb->frameInterrupt(true);
+    if (dcb) {
+        const bool needFrameEnd = latched || switch_abi_load<const void *>(this, vsyncClientList) != nullptr ||
+                                  (device == 2 && !pending && !ready && pendingSwapRequest() != nullptr);
+        dcb->frameInterrupt(needFrameEnd);
+    }
     return true;
 }
 

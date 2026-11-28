@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// The state the scroll edge keyline draws with (PBGRABsovXmw_A3Xhfc: Core Animation's solid fill blending source-over

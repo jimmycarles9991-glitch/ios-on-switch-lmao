@@ -22,7 +22,7 @@ public:
         for (;;) {
             const uint64_t seq = sequence(ticket);
             if (seq == ticket) {
-                if (__atomic_compare_exchange_n(&tail, &ticket, ticket + 1, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+                if (__atomic_compare_exchange_n(&tail, &ticket, ticket + 1, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
                     break;
             } else if (seq < ticket) {
                 return false;
@@ -40,11 +40,10 @@ public:
     template <class Take> void drain(Take take)
     {
         while (sequence(head) == head + 1) {
-            Record record;
-            memcpy(&record, &slots[head % kSlots].record, sizeof(record));
+            const Record &record = slots[head % kSlots].record;
+            take(record);
             setSequence(head, head + kSlots);
             ++head;
-            take(record);
         }
     }
 

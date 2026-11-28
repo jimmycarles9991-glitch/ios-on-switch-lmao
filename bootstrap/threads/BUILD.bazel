@@ -1,0 +1,61 @@
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_test")
+load("//kernel/rules:package.bzl", "ios_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+exports_files(["switch_threads.entitlements"])
+
+ios_binary(
+    name = "switch-threads",
+    srcs = [
+        "switch_memory.c",
+        "switch_procs.c",
+        "switch_threads.c",
+    ],
+    out = "switch-threads",
+    hdrs = [
+        "memory.h",
+        "procs.h",
+        "threads.h",
+    ],
+    copts = [
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-I.",
+    ],
+    entitlements = "switch_threads.entitlements",
+    pagesize = "4096",
+    sign_identifier = "com.brunostjohn.switch.threads",
+)
+
+host_test(
+    name = "threads_test",
+    srcs = [
+        "threads.h",
+        "threads_test.cpp",
+    ],
+)
+
+host_test(
+    name = "memory_test",
+    srcs = [
+        "memory.h",
+        "memory_test.cpp",
+    ],
+)
+
+host_test(
+    name = "memory_walk_test",
+    srcs = [
+        "memory.h",
+        "memory_walk_test.cpp",
+        "procs.h",
+        "switch_memory.c",
+        "switch_procs.c",
+    ],
+)

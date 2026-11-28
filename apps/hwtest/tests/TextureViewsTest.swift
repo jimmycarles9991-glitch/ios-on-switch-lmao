@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Texture views of a part of a texture on the driver (drivers/TegraGM20BMetal/texture_views.cpp

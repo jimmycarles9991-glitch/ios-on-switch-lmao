@@ -1,5 +1,6 @@
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 
 /// A debug kernel's GM20B register dump before the first GPU scene draws (gpu/RegDump.swift), for the diff against
 /// L4T's nvgpu at idle. Not a .metal test: a GPU test that times out gets GPUProbe's fill, which would then be the

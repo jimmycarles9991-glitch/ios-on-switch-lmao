@@ -1,5 +1,7 @@
 import AVFoundation
 import HWTestCore
+import HWTestKit
+import HWTestShared
 import HWTestVideo
 import UIKit
 
@@ -11,7 +13,8 @@ import UIKit
 /// the work loop, and none may have failed to latch as written (refused is the boot's total; a refusing unit holds
 /// these flips off for a run of sets at each one, with one SwitchDisplay line). A set whose producers finished before
 /// its swap goes out at once from the kick and is never armed (d_done_at_swap); one that waited for VIC or NVDEC is
-/// d_fenced, and of those d_declined were not armed. With none armed the test is skipped and says which. filter_share
+/// d_fenced, and of those d_declined were not armed. With none armed the test is skipped and says which counter shows
+/// why (MediaFlipSkip); with no set on windows B and C at all it fails. filter_share
 /// is the part host1x's syncpoint filter wrote earlier still. The display is held on the copy route (CopyRouteHold), so the
 /// turned clip is a set on windows B and C and not window A's column scan.
 struct MediaCompletionFlipTest: HWTest {
@@ -29,7 +32,9 @@ struct MediaCompletionFlipTest: HWTest {
         guard !before.isEmpty else {
             var metrics = Metrics()
             metrics.set("sysctl", KernelSysctl.code(unread))
-            return .skip(KernelSysctl.unreadable("kern.switch_media_flips_*", unread), metrics)
+            return .skip(
+                KernelSysctl.unreadable("kern.switch_media_flips_*", unread, flag: "--//bazel:stats_frame"), metrics
+            )
         }
         guard let clip = Clip.all.first(where: { $0.codec == .h264 && $0.height == 1080 }) else {
             return .skip("no 1080p H.264 clip", Metrics())
@@ -71,12 +76,13 @@ struct MediaCompletionFlipTest: HWTest {
         metrics.set("lead_mean_us", completion > 0 ? Double(delta("lead_us")) / Double(completion) : 0, digits: 1)
         metrics.set("filter_share", completion > 0 ? Double(delta("filter")) / Double(completion) : 0, digits: 3)
         metrics.set("dropped", dropped)
-        if armed == 0 && refused == 0 {
-            let why =
-                delta("fenced") == 0
-                    ? "every video set's producers were done at its swap (d_done_at_swap)"
-                    : "the video sets that waited for their producers were declined (d_declined)"
-            return .skip(why, metrics)
+        switch MediaFlipSkip.judge(
+            armed: armed, refused: refused, doneAtSwap: delta("done_at_swap"), fenced: delta("fenced"),
+            declined: delta("declined")
+        ) {
+        case .judge: break
+        case .skip(let why): return .skip(why, metrics)
+        case .fail(let why): return .fail(why, metrics)
         }
         return .judged(
             [

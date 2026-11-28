@@ -105,27 +105,6 @@ static inline int tgm_ccsr_acquiring(uint32_t ccsr)
 	return status == 3 || status == 4 || status == 8 || status == 14;
 }
 
-/* Debug kernels' ACQUIRE probe (gpu_acquire.c): where a channel is that stayed parked on an acquire TGM_ACQUIRE_NS with
- * no ACQUIRE interrupt. Switched out (CCSR pending_acquire), the PBDMA was not timing the acquire. On PBDMA0 at the
- * acquire with its timeout armed, the PBDMA timed it, and its interrupt was lost. */
-enum tgm_acquire_where {
-	TGM_ACQUIRE_SWITCHED_OUT,
-	TGM_ACQUIRE_LOST,
-	TGM_ACQUIRE_UNTIMED,   /* on PBDMA0 at the acquire with its timeout off */
-	TGM_ACQUIRE_ELSEWHERE, /* neither on PBDMA0 at an acquire nor switched out on one */
-};
-
-/* pbdma_chid: PBDMA0's channel; at_acquire: PBDMA0 at a semaphore acquire that has not passed (tgm_pbdma_acquiring); acquire:
- * PBDMA0's ACQUIRE word */
-static inline enum tgm_acquire_where tgm_acquire_probe_where(uint32_t chid, uint32_t ccsr,
-							     uint32_t pbdma_chid, int at_acquire,
-							     uint32_t acquire)
-{
-	if (pbdma_chid == chid && at_acquire)
-		return acquire & TGM_ACQUIRE_TIMEOUT_EN ? TGM_ACQUIRE_LOST : TGM_ACQUIRE_UNTIMED;
-	return tgm_ccsr_acquiring(ccsr) ? TGM_ACQUIRE_SWITCHED_OUT : TGM_ACQUIRE_ELSEWHERE;
-}
-
 enum tgm_acquire_kind {
 	TGM_ACQUIRE_NONE,
 	TGM_ACQUIRE_SEMAPHORE, /* NV906F SEMAPHORED with ACQUIRE, ACQ_GEQ or ACQ_AND */

@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+#include <os/lock.h>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
 
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+#if (!defined(SWITCH_DEBUG) || SWITCH_DEBUG) && defined(SWITCH_PROF_GPU) && SWITCH_PROF_GPU
+#define SWITCH_METAL_LOCK_PROFILE 1
 #include <mach/mach_time.h>
+#else
+#define SWITCH_METAL_LOCK_PROFILE 0
 #endif
 
 namespace gm20b {
 
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+#if SWITCH_METAL_LOCK_PROFILE
 // The locks the runtime took through Mutex, RecursiveMutex and CondVar's wakes, on every thread since the process began
 // (gpu.path.encode_cost's ceiling). Each thread counts its own with a plain store, no read-modify-write or barrier; a
 // read sums the threads that took one, and those that ended.
@@ -161,7 +165,29 @@ private:
     Native m_;
 };
 
+class UnfairLock {
+public:
+    void lock()
+    {
+        os_unfair_lock_lock(&lock_);
+    }
+
+    bool try_lock()
+    {
+        return os_unfair_lock_trylock(&lock_);
+    }
+
+    void unlock()
+    {
+        os_unfair_lock_unlock(&lock_);
+    }
+
+private:
+    os_unfair_lock lock_ = OS_UNFAIR_LOCK_INIT;
+};
+
 using Mutex = CountedMutex<std::mutex>;
+using UnfairMutex = CountedMutex<UnfairLock>;
 using RecursiveMutex = CountedMutex<std::recursive_mutex>;
 
 // std::condition_variable over a Mutex: a wake takes its lock again, and counts it

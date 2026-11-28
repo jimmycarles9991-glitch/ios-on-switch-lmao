@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// GPU copies into and out of a Shared BGRA10_XR (552) or BGRA10_XR_sRGB (553) texture, usage ShaderRead, of 16-bit

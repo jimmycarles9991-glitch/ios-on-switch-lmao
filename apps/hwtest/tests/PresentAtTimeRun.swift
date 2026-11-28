@@ -1,5 +1,6 @@
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 import QuartzCore
 import UIKit
@@ -63,6 +64,9 @@ final class PresentAtTimeRun: NSObject, CAMetalDisplayLinkDelegate {
     }
 
     var results: [PresentTimeVerdict.Frame] { frames.all }
+
+    /// Resumed once every drawable recorded so far has had its presented handler.
+    func everyPresented() -> Waiter<Bool> { frames.everyPresented() }
 
     func start() {
         let rate = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
@@ -150,22 +154,39 @@ final class PresentAtTimeRun: NSObject, CAMetalDisplayLinkDelegate {
 final class PresentedFrames: @unchecked Sendable {
     private let lock = NSLock()
     private var frames: [PresentTimeVerdict.Frame] = []
+    private var unreported = 0
+    private var drained: Waiter<Bool>?
 
     func add(committed: Double, target: Double) -> Int {
         lock.lock()
         defer { lock.unlock() }
         frames.append(PresentTimeVerdict.Frame(committed: committed, target: target))
+        unreported += 1
         return frames.count - 1
     }
 
     func presented(_ index: Int, at time: Double) {
         let handled = CACurrentMediaTime()
         lock.lock()
-        defer { lock.unlock() }
         let f = frames[index]
         frames[index] = PresentTimeVerdict.Frame(
             committed: f.committed, target: f.target, presented: time, handled: handled
         )
+        unreported -= 1
+        let waiter = unreported <= 0 ? drained : nil
+        if waiter != nil { drained = nil }
+        lock.unlock()
+        waiter?.resume(true)
+    }
+
+    func everyPresented() -> Waiter<Bool> {
+        let waiter = Waiter<Bool>()
+        lock.lock()
+        let done = unreported <= 0
+        if !done { drained = waiter }
+        lock.unlock()
+        if done { waiter.resume(true) }
+        return waiter
     }
 
     var all: [PresentTimeVerdict.Frame] {

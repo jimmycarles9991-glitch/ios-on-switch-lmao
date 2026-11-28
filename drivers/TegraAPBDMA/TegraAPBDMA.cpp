@@ -7,10 +7,9 @@
 // (get_current_xferred_count); in continuous mode it reloads at the wrap a little before STATUS shows the end of count
 // (tegra_dma_sg_bytes_xferred), which tegra_apbdma_moved's callers resolve against their own count.
 #include <IOKit/IOBufferMemoryDescriptor.h>
-#include <IOKit/IOFilterInterruptEventSource.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
-#include <IOKit/IOWorkLoop.h>
+#include <IOKit/IOService.h>
 #include <string.h>
 #include "TegraAPBDMA.h"
 #include "../ArmGIC/SwitchInterrupts.h"
@@ -85,10 +84,11 @@ char gWhy[96];
 struct tegra_apbdma_channel {
     unsigned number;
     volatile uint8_t *regs;
-    IOFilterInterruptEventSource *source;
     tegra_apbdma_handler handler;
     void *context;
     uint32_t size;  // of the transfer last started
+    bool active;
+    bool once;
     volatile uint32_t interrupts;
 };
 
@@ -148,23 +148,7 @@ bool bringUp()
     return true;
 }
 
-// Before a transfer starts: the controller back up if SC7 reset it since (its enable reads 0 then).
-void ensureUp()
-{
-    if (switch_car_clock_enabled(kClock) && !switch_car_reset_asserted(kClock) && (grd(GENERAL) & kGeneralEnable))
-        return;
-    switch_car_clock_enable(kClock);
-    switch_car_reset_assert(kClock);
-    (void)switch_car_reset_asserted(kClock);
-    IODelay(2);
-    switch_car_reset_deassert(kClock);
-    (void)switch_car_reset_asserted(kClock);
-    gwr(GENERAL, kGeneralEnable);
-    gwr(CONTROL, 0);
-    gwr(IRQ_MASK_SET, 0xffffffffu);
-}
-
-void stopLocked(const tegra_apbdma_channel *ch)
+void stopLocked(tegra_apbdma_channel *ch)
 {
     const uint32_t csr = rd(ch, CSR) & ~CSR_IE_EOC;
     wr(ch, CSR, csr);
@@ -172,14 +156,17 @@ void stopLocked(const tegra_apbdma_channel *ch)
     const uint32_t status = rd(ch, STATUS);
     if (status & STATUS_ISE_EOC)
         wr(ch, STATUS, status);
+    __atomic_store_n(&ch->active, false, __ATOMIC_RELEASE);
 }
 
 // Device to memory, one 32-bit APB read per request, each stored as one word (tegra_apbdma_start_rx_words).
 void startRxWords(tegra_apbdma_channel *ch, uint32_t apb, unsigned req, uint32_t pa, uint32_t bytes, uint32_t once)
 {
-    ensureUp();
-    stopLocked(ch);
+    if (__atomic_load_n(&ch->active, __ATOMIC_ACQUIRE))
+        stopLocked(ch);
     ch->size = bytes;
+    ch->once = (once != 0u);
+    __atomic_store_n(&ch->active, true, __ATOMIC_RELEASE);
     wr(ch, APB_PTR, apb);
     wr(ch, APB_SEQ, APBSEQ_BUS_WIDTH_32 | APBSEQ_WRAP_WORD_1);
     wr(ch, AHB_PTR, pa);
@@ -190,29 +177,41 @@ void startRxWords(tegra_apbdma_channel *ch, uint32_t apb, unsigned req, uint32_t
     wr(ch, CSR, csr | CSR_ENB);
 }
 
-// Primary interrupt context, CPU0: the end of count acknowledged (tegra_dma_isr writes STATUS back), then the owner.
-// Nothing for the work loop: the owner signals its own when it needs to.
-// NOLINTNEXTLINE(misc-const-correctness): IOFilterInterruptEventSource::Filter's signature
-bool filter(OSObject *, IOFilterInterruptEventSource *sender)
+// Primary interrupt context: acknowledge end-of-count, read back STATUS so the level line drops before GICC_EOIR,
+// then call the owner.
+// NOLINTNEXTLINE(misc-const-correctness): IOInterruptAction's signature
+void dmaInterrupt(OSObject *, void *refCon, IOService *, int)
 {
-    for (tegra_apbdma_channel &ch : gChannels) {
-        if (ch.source != sender)
-            continue;
-        const uint32_t status = rd(&ch, STATUS);
-        if (!(status & STATUS_ISE_EOC))
-            return false;
-        wr(&ch, STATUS, status);
-        ch.interrupts = ch.interrupts + 1;
-        if (ch.handler)
-            ch.handler(ch.context);
-        return false;
-    }
-    return false;
+    auto *ch = static_cast<tegra_apbdma_channel *>(refCon);
+    const uint32_t status = rd(ch, STATUS);
+    if (!(status & STATUS_ISE_EOC))
+        return;
+    wr(ch, STATUS, status);
+    (void)rd(ch, STATUS);
+    if (ch->once)
+        __atomic_store_n(&ch->active, false, __ATOMIC_RELEASE);
+    ch->interrupts = ch->interrupts + 1;
+    if (ch->handler)
+        ch->handler(ch->context);
 }
-
-void action(OSObject *, IOInterruptEventSource *, int)
-{}
 }  // namespace
+
+extern "C" void tegra_apbdma_resume(void)
+{
+    if (!__atomic_load_n(&gUp, __ATOMIC_ACQUIRE))
+        return;
+    switch_car_clock_enable(kClock);
+    switch_car_reset_assert(kClock);
+    (void)switch_car_reset_asserted(kClock);
+    IODelay(2);
+    switch_car_reset_deassert(kClock);
+    (void)switch_car_reset_asserted(kClock);
+    gwr(GENERAL, kGeneralEnable);
+    gwr(CONTROL, 0);
+    gwr(IRQ_MASK_SET, 0xffffffffu);
+    for (tegra_apbdma_channel &ch : gChannels)
+        __atomic_store_n(&ch.active, false, __ATOMIC_RELEASE);
+}
 
 bool tegra_apbdma_alloc(uint32_t size, tegra_apbdma_buffer *out)
 {
@@ -226,11 +225,11 @@ bool tegra_apbdma_alloc(uint32_t size, tegra_apbdma_buffer *out)
     return true;
 }
 
-tegra_apbdma_channel *tegra_apbdma_open(unsigned channel, IOWorkLoop *loop, tegra_apbdma_handler handler, void *context,
+tegra_apbdma_channel *tegra_apbdma_open(unsigned channel, IOWorkLoop *, tegra_apbdma_handler handler, void *context,
                                         char *why, size_t whySize)
 {
-    if (channel >= TEGRA_APBDMA_CHANNELS || !loop) {
-        snprintf(why, whySize, "channel %u or work loop invalid", channel);
+    if (channel >= TEGRA_APBDMA_CHANNELS) {
+        snprintf(why, whySize, "channel %u invalid", channel);
         return nullptr;
     }
     static IOLock *volatile created;
@@ -251,7 +250,7 @@ tegra_apbdma_channel *tegra_apbdma_open(unsigned channel, IOWorkLoop *loop, tegr
         if (!gDma) {
             snprintf(gWhy, sizeof(gWhy), "cannot map the controller or CAR");
         } else {
-            gUp = bringUp();
+            __atomic_store_n(&gUp, bringUp(), __ATOMIC_RELEASE);
         }
     }
     tegra_apbdma_channel *ch = &gChannels[channel];
@@ -277,14 +276,13 @@ tegra_apbdma_channel *tegra_apbdma_open(unsigned channel, IOWorkLoop *loop, tegr
         ch->handler = handler;
         ch->context = context;
         IOService *nub = switch_interrupt_nub(intidOf(channel), false);
-        ch->source =
-            nub ? IOFilterInterruptEventSource::filterInterruptEventSource(loop, &action, &filter, nub, 0) : nullptr;
-        if (!ch->source || loop->addEventSource(ch->source) != kIOReturnSuccess) {
+        // NOLINTNEXTLINE(clang-analyzer-osx.cocoa.RetainCount): ArmGIC owns its interrupt nubs
+        if (!nub || nub->registerInterrupt(0, nullptr, &dmaInterrupt, ch) != kIOReturnSuccess ||
+            nub->enableInterrupt(0) != kIOReturnSuccess) {
             char gic[160];
             switch_interrupt_describe(intidOf(channel), gic, sizeof(gic));
             panic("TegraAPBDMA: cannot attach channel %u's interrupt (INTID %u): %s", channel, intidOf(channel), gic);
         }
-        ch->source->enable();
         gOpen[channel] = true;
     }
     IOLockUnlock(gLock);
@@ -297,9 +295,11 @@ tegra_apbdma_channel *tegra_apbdma_open(unsigned channel, IOWorkLoop *loop, tegr
 
 void tegra_apbdma_start_once(tegra_apbdma_channel *ch, uint32_t apb, unsigned req, uint32_t pa, uint32_t size)
 {
-    ensureUp();
-    stopLocked(ch);
+    if (__atomic_load_n(&ch->active, __ATOMIC_ACQUIRE))
+        stopLocked(ch);
     ch->size = size;
+    ch->once = true;
+    __atomic_store_n(&ch->active, true, __ATOMIC_RELEASE);
     wr(ch, APB_PTR, apb);
     wr(ch, APB_SEQ, APBSEQ_BUS_WIDTH_8 | APBSEQ_WRAP_WORD_1);
     wr(ch, AHB_PTR, pa);
@@ -323,16 +323,16 @@ void tegra_apbdma_start_rx_words_ring(tegra_apbdma_channel *ch, uint32_t apb, un
 uint32_t tegra_apbdma_moved(const tegra_apbdma_channel *ch, bool *endPending)
 {
     const uint32_t count = rd(ch, WORD_TRANSFER) & COUNT_MASK;
-    const uint32_t status = rd(ch, STATUS);
     if (endPending)
-        *endPending = ((status & STATUS_ISE_EOC) != 0u);
+        *endPending = ((rd(ch, STATUS) & STATUS_ISE_EOC) != 0u);
     const uint32_t left = count + 4;
     return left >= ch->size ? 0 : ch->size - left;
 }
 
 void tegra_apbdma_stop(const tegra_apbdma_channel *ch)
 {
-    stopLocked(ch);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast): header keeps const for callers
+    stopLocked(const_cast<tegra_apbdma_channel *>(ch));
 }
 
 bool tegra_apbdma_running(const tegra_apbdma_channel *ch)

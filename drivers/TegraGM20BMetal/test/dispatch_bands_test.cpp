@@ -61,6 +61,15 @@ TEST(DispatchPieces, TheCountFollowsTheBudget)
     EXPECT_EQ(gm20b::pieceCount(11'500'000, TGM_APP_BAND_NS, 100, 3), 3u);
     EXPECT_EQ(gm20b::pieceCount(500'000'000, TGM_APP_BAND_NS, 10'000, gm20b::kBandsPerCommandBuffer), gm20b::kMaxBands);
     EXPECT_EQ(gm20b::pieceCount(11'500'000, 0, 100, gm20b::kBandsPerCommandBuffer), 1u);
+    EXPECT_EQ(gm20b::pieceCount(248'000'000, TGM_APP_BAND_NS, 10'000, gm20b::kMaxTileBands, gm20b::kMaxTileBands),
+              248u);
+    EXPECT_EQ(gm20b::pieceCount(10'000, TGM_APP_BAND_NS, 1000, gm20b::kMaxTileBands, gm20b::kMaxTileBands, true), 1u);
+    EXPECT_EQ(gm20b::pieceCount(248'000'000, TGM_APP_BAND_NS, 10'000, gm20b::kMaxTileBands, gm20b::kMaxTileBands, true),
+              gm20b::kMaxUnmeasuredBands);
+    EXPECT_EQ(gm20b::pieceCount(8'000'000, TGM_APP_BAND_NS, 1000, gm20b::kMaxTileBands, gm20b::kMaxTileBands, false,
+                                500'000),
+              3u);
+    EXPECT_EQ(gm20b::pieceCount(10'000, 0, 1000, gm20b::kMaxTileBands, gm20b::kMaxTileBands, true), 1u);
 }
 
 // A kernel priced by its instructions until a dispatch of it is measured, then by its time a thread

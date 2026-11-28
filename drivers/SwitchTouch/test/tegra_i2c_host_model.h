@@ -6,4 +6,4 @@
 #include <cstdint>
 uint32_t r32(volatile uint8_t *base, uint32_t offset);
 void w32(volatile uint8_t *base, uint32_t offset, uint32_t value);
-void dmaSync(const uint8_t *va, size_t size);
+void dmaInvalidate(const uint8_t *va, size_t size);

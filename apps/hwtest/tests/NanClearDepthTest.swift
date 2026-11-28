@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A depth attachment cleared to NaN (pass.ds: the driver refused it to m2v, which refuses it too). Metal stores the quiet

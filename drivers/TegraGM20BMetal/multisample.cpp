@@ -68,7 +68,8 @@ bool Device::createOwnedZeta(uint32_t width, uint32_t height, uint32_t format, u
         t.chain->va = t.va;
         uint32_t w[8];
         fx::mipChainTic(chain, t.va, kZetaFormatInfo[z].tic0, false, 0, levels, w, type);
-        memcpy(tic_.cpu + 32 * t.tic, w, 32);  // visible at the next submission's header invalidate
+        memcpy(tic_.cpu + 32 * t.tic, w, 32);
+        noteTicWrite();
     } else {
         writeTic(t);
     }

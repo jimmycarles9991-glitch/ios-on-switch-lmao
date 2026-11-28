@@ -7,13 +7,27 @@
 typedef uint32_t u32;
 typedef uint64_t u64;
 #define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
-extern unsigned switch_gpu_test_delays, switch_gpu_test_warnings;
+extern unsigned switch_gpu_test_delays, switch_gpu_test_sleeps, switch_gpu_test_warnings;
+extern unsigned long switch_gpu_test_sleep_us;
+extern int switch_gpu_test_can_sleep;
 #define WARN_ON(x) ((x) ? (++switch_gpu_test_warnings, 1) : 0)
+
+static inline int nvxnu_can_sleep(void)
+{
+	return switch_gpu_test_can_sleep;
+}
 
 static inline void udelay(unsigned value)
 {
 	(void)value;
 	++switch_gpu_test_delays;
+}
+
+static inline void usleep_range(unsigned long lo, unsigned long hi)
+{
+	(void)hi;
+	++switch_gpu_test_sleeps;
+	switch_gpu_test_sleep_us += lo;
 }
 
 struct nvif_map {

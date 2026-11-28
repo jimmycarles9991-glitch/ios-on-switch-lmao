@@ -45,17 +45,30 @@ SPECIALS = [
     0x3F800000,
     0x00800000,
     0x387FFFFF,
+    # packed half pairs: -0, +-inf, NaN, denormals of both signs, the largest half, 1
+    0x80008000,
+    0x7C007C00,
+    0xFC00FC00,
+    0x7E00FE00,
+    0x00010001,
+    0x83FF83FF,
+    0x7BFF7BFF,
+    0x3C003C00,
 ]
+# The share of words drawn from SPECIALS; the special pass draws most of them there
+SPECIAL_SHARE, SPECIAL_HEAVY = 0.15, 0.7
 OMAP_TARGET_BYTE = 576 // 8
 
 
-def word(rng: random.Random, nice: float) -> int:
+def word(rng: random.Random, nice: float, special: float = SPECIAL_SHARE) -> int:
     r = rng.random()
+    if special > SPECIAL_SHARE:
+        nice = min(nice, 1 - special - 0.05)
     if r < nice:
         return struct.unpack('<I', struct.pack('<f', rng.uniform(-0.25, 1.25)))[0]
-    if r < nice + 0.15:
+    if r < nice + special:
         return rng.choice(SPECIALS)
-    if r < nice + 0.2:
+    if r < nice + special + 0.05:
         return rng.randrange(0, 64) * 4
     return rng.getrandbits(32)
 
@@ -63,35 +76,83 @@ def word(rng: random.Random, nice: float) -> int:
 class Seeded:
     """Inputs as pure functions of (seed, invocation, operands): the same for both programs."""
 
-    def __init__(self, seed: int, invocation: int, pinned: dict | None = None):
+    def __init__(self, seed: int, invocation: int, pinned: dict | None = None, special: float = SPECIAL_SHARE):
         self.base = (seed, invocation)
         self.pinned = pinned or {}
+        self.special = special
 
     def rng(self, *key: object) -> random.Random:
         # repr, not hash(): Python salts a str's hash per process, which would make a quad's number name other inputs
         # in every run
         return random.Random(int.from_bytes(hashlib.blake2b(repr((self.base, key)).encode(), digest_size=8).digest()))
 
-    def inputs(self, lane: int = 0, bound_cbuf: int = -1, cbuf_map: tuple[int, ...] | None = None) -> Inputs:
+    def inputs(
+        self, lane: int = 0, bound_cbuf: int = -1, cbuf_map: tuple[int, ...] | None = None, data: tuple | None = None
+    ) -> Inputs:
+        """`data`: (the program's shader-data bank, its constant data's words by byte offset), which that bank reads."""
+
         def attribute(addr: int) -> int:
-            return 0x3F800000 if addr == 0x7C else word(self.rng('a', addr, lane), 0.9)
+            return 0x3F800000 if addr == 0x7C else word(self.rng('a', addr, lane), 0.9, self.special)
 
         def cbuf(bank: int, offset: int) -> int:
+            if data is not None and bank == data[0]:
+                return data[1].get(offset & 0xFFFFFFFF, 0)
             if cbuf_map is not None:
                 if not 0 <= bank < len(cbuf_map):
                     raise UnsupportedError(f'unmapped constant buffer {bank}')
                 bank = cbuf_map[bank]
-            seeded = word(self.rng('c', bank, offset & 0xFFFFFFFF), 0.6)
+            seeded = word(self.rng('c', bank, offset & 0xFFFFFFFF), 0.6, self.special)
             pin = self.pinned.get((bank, offset))
             if isinstance(pin, tuple):
                 return (seeded & ~pin[0] | pin[1]) & 0xFFFFFFFF
             return seeded if pin is None else pin
 
         def texture(operands: tuple) -> list[int]:
+            if operands[0] == 'txq' and operands[2] in TXQ_SAMPLES:
+                return txq_samples(operands[2], operands[3])
             r = self.rng('t', operands)
-            return [word(r, 0.85) for _ in range(4)]
+            return [word(r, 0.85, self.special) for _ in range(4)]
 
         return Inputs(attribute, cbuf, texture, bound_cbuf)
+
+
+# TXQ's texture-type and sample-position queries, as GM20B answers them for a 4x multisampled surface: NAK's MS image
+# addressing reads the sample count from one and, before 3da907153, the sample's place from the other; answered
+# from the fixed layout, both forms of the program are judged on the same surface
+TXQ_TEXTURE_TYPE, TXQ_SAMPLER_POS = 2, 5
+TXQ_SAMPLES = (TXQ_TEXTURE_TYPE, TXQ_SAMPLER_POS)
+MS_SAMPLES = 4
+
+
+def sample_position(s: int) -> int:
+    """Give TXQ SamplerPos of 4x sample `s`: (s & 1, s >> 1) in the 2x2 block, signed 4.12 about the centre."""
+    x, y = ((s & 1) + 0.5) / 2 - 0.5, ((s >> 1 & 1) + 0.5) / 2 - 0.5
+    return (int(x * 4096) & 0xFFFF) | (int(y * 4096) & 0xFFFF) << 16
+
+
+def txq_samples(query: int, sample: int) -> list[int]:
+    if query == TXQ_TEXTURE_TYPE:
+        return [0, 0, MS_SAMPLES, 0]
+    return [sample_position(sample & 3), 0, 0, 0]
+
+
+SHADER_DATA = 2  # pack.h CbufShaderData
+
+
+def constant_data(j: dict) -> tuple | None:
+    """A dump's fragment program's constant data as (its shader-data bank, words by byte offset), None without one."""
+    banks = j.get('fs_cbufs', [])
+    if SHADER_DATA not in banks or not j.get('fs_data'):
+        return None
+    data = bytes.fromhex(j['fs_data'])
+    return banks.index(SHADER_DATA), {4 * i: struct.unpack_from('<I', data, 4 * i)[0] for i in range(len(data) // 4)}
+
+
+def bank_map(before: list[int], after: list[int]) -> tuple[int, ...] | None:
+    """After's banks to before's by their types, where after binds the same types in another order; else None."""
+    if before == after or sorted(before) != sorted(after) or len(set(before)) != len(before):
+        return None
+    return tuple(before.index(t) for t in after)
 
 
 def run_pixel(image: bytes, quad: list[Inputs], widths: list | None = None, issued: list | None = None) -> list[tuple]:
@@ -123,8 +184,11 @@ def compare(  # noqa: PLR0913, PLR0917  the inputs' seed and pins, the state's a
     issued: tuple = (None, None),
     *,
     after_cbuf_map: tuple[int, ...] | None = None,
+    special: float = SPECIAL_SHARE,
 ) -> str:
-    """Compare two programs, each (image, the constant buffer its bound textures read handles from or -1).
+    """Compare two programs, each (image, the constant buffer its bound textures read handles from or -1[, its
+    constant data: (shader-data bank, words by byte offset)]).
+
 
     `issued`: lists that get each quad's issued instructions, before's then after's.
     `after_cbuf_map`: after's physical banks to before's logical banks, validated against their binding metadata.
@@ -138,7 +202,12 @@ def compare(  # noqa: PLR0913, PLR0917  the inputs' seed and pins, the state's a
     def run(program: tuple, i: int, counts: list | None, cbuf_map: tuple[int, ...] | None = None) -> list:
         return run_pixel(
             program[0],
-            [Seeded(seed, i, pinned).inputs(lane, program[1], cbuf_map) for lane in range(LANES)],
+            [
+                Seeded(seed, i, pinned, special).inputs(
+                    lane, program[1], cbuf_map, program[2] if len(program) > 2 else None
+                )
+                for lane in range(LANES)
+            ],
             widths,
             counts,
         )
@@ -151,6 +220,22 @@ def compare(  # noqa: PLR0913, PLR0917  the inputs' seed and pins, the state's a
         if a != b:
             lane = next(k for k in range(LANES) if a[k] != b[k])
             return f'different: quad {i} lane {lane}: {describe(a[lane], b[lane])}'
+    return 'identical'
+
+
+def compare_vertex(before: bytes, after: bytes, n: int, seed: int, special: float = SPECIAL_SHARE) -> str:
+    """Compare two vertex programs by what each lane stores: its output attributes (AST) and any memory stores."""
+    for i in range(n):
+        quad = [Seeded(seed, i, None, special).inputs(lane) for lane in range(LANES)]
+        try:
+            a = [r[-1] for r in run_quad(before[isa.HEADER_BYTES :], quad, 0)]
+            b = [r[-1] for r in run_quad(after[isa.HEADER_BYTES :], quad, 0)]
+        except UnsupportedError as e:
+            return f'unsupported: {e}'
+        if a != b:
+            lane = next(k for k in range(LANES) if a[k] != b[k])
+            at = next((k for k in range(min(len(a[lane]), len(b[lane]))) if a[lane][k] != b[lane][k]), 0)
+            return f'different: quad {i} lane {lane} store {at}'
     return 'identical'
 
 
@@ -184,15 +269,17 @@ def main() -> None:
     a = ap.parse_args()
 
     residuals = {}
+    types: dict[str, list[list[int]]] = {}
 
     def load(d: Path, variant: int | None = None) -> dict:
         out = {}
         for f in d.glob('*.json'):
             j = json.loads(f.read_text())
+            types.setdefault(j['key'], []).append(j.get('fs_cbufs', []))
             residuals[j['key']] = {(0, offset): 0 for offset in j.get('residual_words', [])}
             bound = j.get('fs_bound_textures', 0) - 1
             if variant is None:
-                out[j['key']] = (bytes.fromhex(j['fs']), bound)
+                out[j['key']] = (bytes.fromhex(j['fs']), bound, constant_data(j))
             elif (v := nakstat.fragment_variant(j, variant)) is not None:
                 out[j['key']] = (bytes.fromhex(v['code']), v.get('bound_textures', 0) - 1)
         return out
@@ -203,13 +290,15 @@ def main() -> None:
         first, last = (int(x, 0) for x in span.split('-'))
         pinned.update({(int(bank), offset): 0 for offset in range(first, last + 1, 4)})
     before, after = load(a.before), load(a.after, a.after_variant)
+    cbufs = {key: bank_map(*found) for key, found in types.items() if len(found) == 2 and a.after_variant is None}
     failed = False
     for label, key in nakstat.labelled(a.corpus):
         if key not in before or key not in after:
             print(f'{label}: missing from a dump')
             continue
         pins = pinned | residuals[key] if a.zero_residuals else pinned
-        verdict = compare(before[key], after[key], a.invocations, a.seed, pins, key)
+        banks = cbufs.get(key)
+        verdict = compare(before[key], after[key], a.invocations, a.seed, pins, key, after_cbuf_map=banks)
         failed |= verdict.startswith('different')
         print(f'{label}: {verdict}')
     sys.exit(1 if failed else 0)

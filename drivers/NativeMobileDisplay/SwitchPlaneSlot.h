@@ -23,6 +23,7 @@ struct PlaneSlot {
     SwitchNativeScanout *native = nullptr;
     uint64_t mappedAllocation = 0, mappedGeneration = 0;
     uint32_t iova = 0;
+    uint64_t firstPa = 0;
     switch_gpu_backing *scanoutBacking = nullptr;
 };
 

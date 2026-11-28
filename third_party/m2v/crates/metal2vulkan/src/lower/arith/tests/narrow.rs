@@ -2208,7 +2208,7 @@ fn normalized_division_is_correctly_rounded() {
 #[test]
 fn srgb_conversions_answer_with_metals_tables() {
     use crate::air::intrinsics::PackFormat as P;
-    use crate::lower::arith::srgb;
+    use crate::lower::arith::srgb_conversions;
     let word = int(32);
     let decode = |b: u64| {
         let c = b as f64 / 255.0;
@@ -2244,7 +2244,7 @@ fn srgb_conversions_answer_with_metals_tables() {
             &[word],
             f,
             &|fb, x| {
-                let t = srgb::declare(fb.module())?;
+                let t = srgb_conversions::declare(fb.module())?;
                 math::unpack(fb, P::Unorm4x8Srgb, f, x[0], Some(t))
             },
             &cases,
@@ -2300,7 +2300,7 @@ fn srgb_conversions_answer_with_metals_tables() {
         &[f],
         word,
         &|fb, x| {
-            let t = srgb::declare(fb.module())?;
+            let t = srgb_conversions::declare(fb.module())?;
             math::pack(fb, P::Unorm4x8Srgb, f, x[0], Some(t), NanTest::IsNan)
         },
         &cases,
@@ -2619,7 +2619,7 @@ fn a_vector_unpack_reads_every_field_value_of_every_channel() {
 #[test]
 fn srgb_conversions_are_named_apart_and_charge_their_table_once() {
     use crate::air::intrinsics::{PackDir, PackFormat as P};
-    use crate::lower::arith::{routine_words, srgb, ArithPlan, ArithStrategy};
+    use crate::lower::arith::{routine_words, srgb_conversions, ArithPlan, ArithStrategy};
     use crate::lower::select::FamilyPlans;
     use crate::lower::strategy::FamilyStrategy;
     let name = |dir, format| {
@@ -2645,7 +2645,7 @@ fn srgb_conversions_are_named_apart_and_charge_their_table_once() {
             .collect();
         assert_eq!(
             charged,
-            vec![(name(dir, P::Unorm4x8Srgb), u64::from(srgb::TABLE_WORDS))]
+            vec![(name(dir, P::Unorm4x8Srgb), u64::from(srgb_conversions::TABLE_WORDS))]
         );
     }
     assert_eq!(routine_words(&ArithPlan::default()).count(), 0);

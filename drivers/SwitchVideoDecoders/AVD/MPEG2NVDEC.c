@@ -115,21 +115,22 @@ static int64_t run(MPEG2Decoder *d, const MPEG2Picture *pic, int current, int pa
     ((uint32_t *)(mpeg_frames_input(f)->va + MPEG_FRAMES_TABLES))[d->slices] = f->bits_len;
     if (mpeg_frames_append(f, kEndOfStream, sizeof(kEndOfStream), false))
         return -3;
-    TegraNVDECSubmit submit;
-    memset(&submit, 0, sizeof(submit));
-    submit.codec = TEGRA_NVDEC_CODEC_MPEG12;
-    submit.setup_bytes = sizeof(nvdec_mpeg2_pic_s);
-    fillSetup(d, (nvdec_mpeg2_pic_s *)submit.setup, pic, second);
+    TegraNVDECSubmit stackSubmit;
+    TegraNVDECSubmit *submit = f->b.submit_buffer ? f->b.submit_buffer : &stackSubmit;
+    memset(submit, 0, sizeof(*submit));
+    submit->codec = TEGRA_NVDEC_CODEC_MPEG12;
+    submit->setup_bytes = sizeof(nvdec_mpeg2_pic_s);
+    fillSetup(d, (nvdec_mpeg2_pic_s *)submit->setup, pic, second);
     const uint32_t type =
         d->seq.mpeg2 ? NVC5B0_SET_CONTROL_PARAMS_CODEC_TYPE_MPEG2 : NVC5B0_SET_CONTROL_PARAMS_CODEC_TYPE_MPEG1;
-    mpeg_frames_entry(&submit, NVC5B0_SET_APPLICATION_ID, TEGRA_NVDEC_ENTRY_VALUE, NVC5B0_SET_APPLICATION_ID_ID_MPEG12,
+    mpeg_frames_entry(submit, NVC5B0_SET_APPLICATION_ID, TEGRA_NVDEC_ENTRY_VALUE, NVC5B0_SET_APPLICATION_ID_ID_MPEG12,
                       0);
-    mpeg_frames_entry(&submit, NVC5B0_SET_CONTROL_PARAMS, TEGRA_NVDEC_ENTRY_VALUE,
+    mpeg_frames_entry(submit, NVC5B0_SET_CONTROL_PARAMS, TEGRA_NVDEC_ENTRY_VALUE,
                       type | (1u << 4) /* GPTIMER_ON */ | (1u << 6) /* ERR_CONCEAL_ON */, 0);
-    mpeg_frames_bind(f, &submit, current, past, future);
+    mpeg_frames_bind(f, submit, current, past, future);
     const uint32_t input = mpeg_frames_input(f)->handle;
-    mpeg_frames_entry(&submit, NVC5B0_SET_SLICE_OFFSETS_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input, MPEG_FRAMES_TABLES);
-    return mpeg_frames_run(f, &submit, (TegraNVDECRange){input, MPEG_FRAMES_TABLES, (d->slices + 1) * 4, 0});
+    mpeg_frames_entry(submit, NVC5B0_SET_SLICE_OFFSETS_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input, MPEG_FRAMES_TABLES);
+    return mpeg_frames_run(f, submit, (TegraNVDECRange){input, MPEG_FRAMES_TABLES, (d->slices + 1) * 4, 0});
 }
 
 // The picture whose slices were collected: decoded into a new surface, or as the second field into its first's.

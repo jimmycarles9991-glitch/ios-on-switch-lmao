@@ -6,15 +6,28 @@ import re
 import stat
 from contextlib import ExitStack, suppress
 from pathlib import Path
+from typing import NamedTuple
 
 from tools.install import host, owners as ownership
 
 DIGEST = re.compile(rb'[0-9a-f]{64}')
 PHASE = re.compile(rb'[A-Za-z0-9._-]{1,64}')
+POSITIVE = re.compile(rb'[1-9][0-9]{0,9}')
 PENDING = 'migration.pending'
 RECEIPT = 'migration.state'
 GUARD = 'system-app-migration'
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+ECANCELED = 89
+MAX_ATTEMPTS = 3
+RETRYABLE_PHASES = frozenset({b'unscheduled', b'preparation', b'native-migration', b'registration', b'runtime'})
+
+
+class _Receipt(NamedTuple):
+    status: bytes
+    generation: bytes
+    phase: bytes | None = None
+    error: int = 0
+    attempt: int = 0
 
 
 def _check(info: os.stat_result, device: int, name: str, verify_owner: bool, owner: int = 0) -> None:
@@ -41,25 +54,62 @@ def read_record(directory: int, name: str, limit: int, verify_owner: bool, owner
         os.close(fd)
 
 
-def _generation(receipt: bytes | None) -> bytes | None:
+def _positive_int(field: bytes) -> int | None:
+    if not POSITIVE.fullmatch(field):
+        return None
+    value = int(field)
+    return value if value <= 0x7FFFFFFF else None
+
+
+def _parse_attempt(fields: list[bytes], index: int) -> int | None:
+    return 1 if len(fields) == index else _positive_int(fields[index])
+
+
+def _parse_progress(fields: list[bytes], kind: bytes, generation: bytes) -> _Receipt | None:
+    if len(fields) in (3, 4) and kind == b'working' and PHASE.fullmatch(fields[2]):
+        attempt = _parse_attempt(fields, 3)
+        if attempt is not None:
+            return _Receipt(kind, generation, fields[2], 0, attempt)
+    if len(fields) in (4, 5) and kind == b'failed' and PHASE.fullmatch(fields[2]):
+        error = _positive_int(fields[3])
+        attempt = _parse_attempt(fields, 4)
+        if error is not None and attempt is not None:
+            return _Receipt(kind, generation, fields[2], error, attempt)
+    return None
+
+
+def _parse_receipt(receipt: bytes | None) -> _Receipt | None:
     if receipt is None:
         return None
-    if receipt.endswith(b'\n'):
-        fields = receipt[:-1].split(b' ')
-        if len(fields) >= 2 and DIGEST.fullmatch(fields[1]):
-            if len(fields) == 2 and fields[0] in (b'complete', b'repair'):
-                return fields[1]
-            if len(fields) in (3, 4) and PHASE.fullmatch(fields[2]):
-                if len(fields) == 3 and fields[0] == b'working':
-                    return fields[1]
-                if (
-                    len(fields) == 4
-                    and fields[0] == b'failed'
-                    and re.fullmatch(rb'[1-9][0-9]{0,9}', fields[3])
-                    and int(fields[3]) <= 0x7FFFFFFF
-                ):
-                    return fields[1]
+    if not receipt.endswith(b'\n'):
+        raise host.HostError('bootstrap migration: invalid migration.state')
+    fields = receipt[:-1].split(b' ')
+    if len(fields) < 2 or not DIGEST.fullmatch(fields[1]):
+        raise host.HostError('bootstrap migration: invalid migration.state')
+    kind, generation = fields[0], fields[1]
+    if len(fields) == 2 and kind in (b'complete', b'repair'):
+        return _Receipt(kind, generation)
+    parsed = _parse_progress(fields, kind, generation)
+    if parsed is not None:
+        return parsed
     raise host.HostError('bootstrap migration: invalid migration.state')
+
+
+def _retryable(receipt: _Receipt | None, digest: bytes) -> bool:
+    if receipt is None or receipt.generation != digest or receipt.attempt >= MAX_ATTEMPTS:
+        return False
+    if receipt.phase not in RETRYABLE_PHASES:
+        return False
+    return receipt.status == b'working' or (receipt.status == b'failed' and receipt.error == ECANCELED)
+
+
+def _read_pending(base: int, verify_owner: bool) -> bytes | None:
+    pending = read_record(base, PENDING, 65, verify_owner)
+    if pending is not None and (
+        len(pending) != 65 or not pending.endswith(b'\n') or not DIGEST.fullmatch(pending[:-1])
+    ):
+        raise host.HostError('bootstrap migration: invalid migration.pending')
+    return pending
 
 
 def _publish(base: int, digest: bytes, verify_owner: bool) -> None:
@@ -101,6 +151,13 @@ def _rearm_native(data: int, switch: int, verify_owner: bool) -> bool:
     return True
 
 
+def _log_schedule(build: str, log: host.Log, *, published: bool, rearmed: bool) -> None:
+    if rearmed:
+        log(f'bootstrap: interrupted native migration rearmed for {build}')
+    if published:
+        log(f'bootstrap: managed package migration requested for {build}')
+
+
 def schedule(data: Path, build: str, generation: str | None, log: host.Log, owners: ownership.Owners | None) -> bool:
     if generation is None:
         return False
@@ -125,24 +182,18 @@ def schedule(data: Path, build: str, generation: str | None, log: host.Log, owne
         base = directory(build, directory('bootstrap', switch))
         fcntl.flock(base, fcntl.LOCK_EX | fcntl.LOCK_NB)
         # Deploy's noowners mount can compare receipts for scheduling only. The worker checks owners on real Data.
-        receipt = read_record(base, RECEIPT, 159, verify_owner)
-        interrupted = receipt == b'working ' + digest + b' native-migration\n'
-        if _generation(receipt) == digest and not interrupted:
+        receipt = _parse_receipt(read_record(base, RECEIPT, 159, verify_owner))
+        retryable = _retryable(receipt, digest)
+        if receipt is not None and receipt.generation == digest and not retryable:
             return False
-        pending = read_record(base, PENDING, 65, verify_owner)
-        if pending is not None and (
-            len(pending) != 65 or not pending.endswith(b'\n') or not DIGEST.fullmatch(pending[:-1])
-        ):
-            raise host.HostError('bootstrap migration: invalid migration.pending')
-        if interrupted:
-            rearmed = pending == digest + b'\n' and _rearm_native(parent, switch, verify_owner)
-            if rearmed:
-                log(f'bootstrap: interrupted native migration rearmed for {build}')
-            return rearmed
-        if pending == digest + b'\n':
+        pending = _read_pending(base, verify_owner)
+        rearmed = retryable and _rearm_native(parent, switch, verify_owner)
+        published = pending != digest + b'\n'
+        if published:
+            _publish(base, digest, verify_owner)
+        if not published and not rearmed:
             return False
-        _publish(base, digest, verify_owner)
-    if isinstance(owners, ownership.Journal):
+    if published and isinstance(owners, ownership.Journal):
         owners.set(data / 'Switch/bootstrap' / build / PENDING, 0, 0, 0o644)
-    log(f'bootstrap: managed package migration requested for {build}')
+    _log_schedule(build, log, published=published, rearmed=rearmed)
     return True

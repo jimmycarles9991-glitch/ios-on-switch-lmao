@@ -83,15 +83,6 @@ const char * gIOKernelConfigTables =
     "     'IOProbeScore'    = 1000:32;"
     "   }"
 #endif
-#if defined(XNU_NATIVE_RAM_BLOCK) && XNU_NATIVE_RAM_BLOCK
-    "   ,{"
-    "     'IOClass'         = NativeRamBlock;"
-    "     'IOMatchCategory' = NativeRamBlock;"
-    "     'IOProviderClass' = IOResources;"
-    "     'IOResourceMatch' = IOBSD;"
-    "     'IOProbeScore'    = 1000:32;"
-    "   }"
-#endif
 #if defined(XNU_NATIVE_UFS) && XNU_NATIVE_UFS
     "   ,{"
     "     'IOClass'         = NativeUfs;"

@@ -2,6 +2,8 @@ import Darwin
 import Foundation
 import GameController
 import HWTestCore
+import HWTestKit
+import HWTestShared
 
 /// The Joy-Con rails left alone, from the rail driver's counters (kern.switch_joycon, debug kernels): a Joy-Con with
 /// no input for a second is asked every 30 ms instead of 15 (SwitchJoyConCadence.h), each request costs two UART

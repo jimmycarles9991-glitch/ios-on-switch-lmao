@@ -27,6 +27,9 @@ py_binary(
     ],
 )
 
+# //tools/install:translated_tree_test checks the pinned update list names exactly the edited files.
+exports_files(["edits_24B119.json"])
+
 py_test(
     name = "translate_tree_test",
     srcs = ["translate_tree_test.py"],

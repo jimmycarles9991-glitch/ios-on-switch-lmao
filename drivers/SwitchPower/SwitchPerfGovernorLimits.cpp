@@ -158,7 +158,7 @@ void switchperf::bootDone()
     if (IOLock *lock = __atomic_load_n(&gThreadLock, __ATOMIC_SEQ_CST)) {
         IOLockLock(lock);
         __atomic_store_n(&gBootUntil, 0, __ATOMIC_RELAXED);
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_POWER
         __atomic_store_n(&gBootHints, gBootHints + 1, __ATOMIC_RELAXED);
 #endif
         if (running())

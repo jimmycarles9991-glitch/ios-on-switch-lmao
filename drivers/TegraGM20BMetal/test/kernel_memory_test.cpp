@@ -145,12 +145,33 @@ protected:
 TEST(GM20BControlMemory, MemoryTheGpuAloneTouchesPerPixelOrDrawIsCached)
 {
     using gm20b::ControlUse;
-    for (ControlUse use : {ControlUse::InterlockTickets, ControlUse::RootTable, ControlUse::ZeroPage,
-                           ControlUse::ColorTable, ControlUse::ArgumentRoots, ControlUse::HandleTables})
+    for (ControlUse use :
+         {ControlUse::InterlockTickets, ControlUse::RootTable, ControlUse::ZeroPage, ControlUse::ColorTable,
+          ControlUse::ArgumentRoots, ControlUse::HandleTables, ControlUse::ZcullStorage})
         EXPECT_EQ(gm20b::controlMapping(use), gm20b::ControlMapping::Cached) << int(use);
     for (ControlUse use : {ControlUse::TextureHeaders, ControlUse::SamplerHeaders, ControlUse::Stamps, ControlUse::Ring,
                            ControlUse::Bytes, ControlUse::TransferSlot, ControlUse::StateSegments})
         EXPECT_EQ(gm20b::controlMapping(use), gm20b::ControlMapping::Volatile) << int(use);
+}
+
+// The interlock's ticket words are the stage compile's (SR_AFFINITY & 0xff) * 256 + (ticket & 0xff): the buffer holds
+// every word that index reaches, as no fault would show one past it
+TEST(GM20BControlMemory, TheTicketBufferHoldsEveryWordTheInterlockIndexes)
+{
+    const std::string lowering =
+        switch_ios::test::SourceText("../../../third_party/mesa/src/nouveau/compiler/nak_nir_lower_fs_interlock.c");
+    std::smatch affinity, ticket, stride;
+    ASSERT_TRUE(std::regex_search(lowering, affinity, std::regex(R"(gpc_id, 0, (\d+)\))")));
+    ASSERT_TRUE(std::regex_search(lowering, ticket, std::regex(R"(ordering_ticket, 0, (\d+)\))")));
+    ASSERT_TRUE(std::regex_search(lowering, stride, std::regex(R"(nir_imul_imm\(b, gpc_id, (0x[0-9a-f]+)\))")));
+    const uint64_t perGpc = std::stoull(stride[1].str(), nullptr, 16);
+    ASSERT_GE(perGpc, uint64_t(1) << std::stoi(ticket[1].str()));
+    const uint64_t words = (uint64_t(1) << std::stoi(affinity[1].str())) * perGpc;
+    const std::string device = switch_ios::test::SourceText("../gpu.cpp");
+    std::smatch bytes;
+    ASSERT_TRUE(std::regex_search(device, bytes, std::regex(R"(kTicketBytes = (\d+) \* (\d+) \* (\d+);)")));
+    EXPECT_GE(std::stoull(bytes[1].str()) * std::stoull(bytes[2].str()) * std::stoull(bytes[3].str()), words * 4);
+    EXPECT_TRUE(std::regex_search(device, std::regex(R"(allocControl\(kTicketBytes, tickets_,)")));
 }
 
 // Device::init's allocation of each of its fixed control BOs names the use that maps it

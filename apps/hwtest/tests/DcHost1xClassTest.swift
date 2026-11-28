@@ -1,5 +1,7 @@
 import Darwin
 import HWTestCore
+import HWTestKit
+import HWTestShared
 
 /// Whether host1x routes a class 0x70 stream to DC A, and whether a WAIT_SYNCPT ahead of it holds the DC writes
 /// (drivers/NativeMobileDisplay/SwitchDcHost1xClassProbe.h, debug kernels): the kernel submits it on the display's own
@@ -8,15 +10,17 @@ import HWTestCore
 /// (display.x1.host1x_flip runs that); ignored means host1x ran past the words and DC A took none; faults means the
 /// channel stopped at them (CBSTAT's class and offset say where). Runs after every other shared test: it may stop the
 /// display's host1x channel for 50 ms.
-struct DcHost1xClassTest: HWTest {
-    let id = "gpu.x1.dc_host1x_class"
-    let name = "host1x class 0x70 stream to DC A behind a WAIT_SYNCPT"
-    let subsystem = Subsystem.display
+public struct DcHost1xClassTest: HWTest {
+    public let id = "gpu.x1.dc_host1x_class"
+    public let name = "host1x class 0x70 stream to DC A behind a WAIT_SYNCPT"
+    public let subsystem = Subsystem.display
 
-    static let sysctl = "debug.switch_display_dc_host1x_class"
-    static let verdicts: Set<String> = ["routes", "ignored", "faults", "partial"]
+    public static let sysctl = "debug.switch_display_dc_host1x_class"
+    public static let verdicts: Set<String> = ["routes", "ignored", "faults", "partial"]
 
-    func run(_ context: TestContext) async throws -> Outcome {
+    public init() {}
+
+    public func run(_ context: TestContext) async throws -> Outcome {
         var run: Int32 = 1
         guard sysctlbyname(Self.sysctl, nil, nil, &run, MemoryLayout<Int32>.size) == 0 else {
             let error = errno
@@ -47,7 +51,7 @@ struct DcHost1xClassTest: HWTest {
     }
 
     /// "key=value" tokens, and "NAME value" pairs of the channel's description.
-    static func fields(_ line: String) -> [String: String] {
+    public static func fields(_ line: String) -> [String: String] {
         let tokens = line.split(separator: " ").map(String.init)
         var fields: [String: String] = [:]
         for (index, token) in tokens.enumerated() {

@@ -21,7 +21,8 @@ struct Shape {
     uint32_t threads[3] = {};
     uint32_t edge[3] = {};
     bool regionMode = false;
-    std::string form;  // "f" or "d"
+    bool factsOnly = false;  // tg=0,0,0: populate PackComputeFacts without emitting a PackKernel
+    std::string form;        // "f" or "d"
     uint64_t options = 0;
     uint32_t maxThreads = 0;
     bool multipleOfWidth = false;
@@ -183,18 +184,26 @@ inline bool parse(const std::string &line, Shape &s, std::string &why)
         why = "an invalid dispatch form";
         return false;
     }
-    for (uint32_t i = 0; i < 3; ++i) {
-        if (!s.threads[i] || s.threads[i] > 1024 || s.edge[i] >= s.threads[i] || (!threadsForm && s.edge[i])) {
-            why = "an invalid local size or edge";
-            return false;
+    s.factsOnly =
+        !s.threads[0] && !s.threads[1] && !s.threads[2] && !s.edge[0] && !s.edge[1] && !s.edge[2] && !threadsForm;
+    if (!s.factsOnly) {
+        for (uint32_t i = 0; i < 3; ++i) {
+            if (!s.threads[i] || s.threads[i] > 1024 || s.edge[i] >= s.threads[i] || (!threadsForm && s.edge[i])) {
+                why = "an invalid local size or edge";
+                return false;
+            }
+            s.regionMode |= s.edge[i] != 0;
         }
-        s.regionMode |= s.edge[i] != 0;
     }
     std::string text;
     field(line, "tgmem", s.threadgroupMemory);
     if ((field(line, "tex", text) && !parseTextures(text, s.textures, why)) ||
         (field(line, "smp", text) && !parseSamplers(text, s.samplers, why)))
         return false;
+    if (s.factsOnly && (!s.threadgroupMemory.empty() || !s.textures.empty() || !s.samplers.empty())) {
+        why = "a facts-only compute line cannot bind dispatch resources";
+        return false;
+    }
     const size_t state = line.find(" | form=");
     const size_t k = line.find(" | k ", state);
     if (state == std::string::npos || k == std::string::npos) {

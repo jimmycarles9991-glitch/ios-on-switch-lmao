@@ -1,4 +1,5 @@
 import Foundation
+import HWTestGPU
 import Metal
 
 /// The facade's reflections (drivers/TegraGM20BMetal/TegraGM20BMetalReflection.mm): asked with argument info,

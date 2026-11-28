@@ -197,14 +197,16 @@ IOReturn AGXDeviceUserClient::surfaceLayoutInfo(const TegraGM20BAbiSurfaceLayout
 		object->retain();
 	IOLockUnlock(lock_);
 	const bool packed = switch_gpu_surface_packed(surface);
+	const bool asksLayout = in->width || in->height || in->bpp || in->bytes_per_row ||
+				(in->flags & TegraGM20BLayoutWrites);
 	const bool same = switch_gpu_surface_shape_matches(surface, in->width, in->height, in->bpp,
 							   in->bytes_per_row);
 	const bool exclusive = switch_gpu_surface_layout_exclusive(object, true) == 0;
-	const int writes =
-		tgm_layout_ask_flags(exclusive, packed, surface.client_memory, canonical || same,
-				     (in->flags & TegraGM20BLayoutWrites) != 0,
-				     tgm_surface_unwritten(object), firstAsk) |
-		(canCompress ? TGM_LAYOUT_ASK_COMPRESS : 0);
+	const int writes = tgm_layout_ask_flags(exclusive, packed, surface.client_memory,
+						asksLayout && (canonical || same),
+						(in->flags & TegraGM20BLayoutWrites) != 0,
+						tgm_surface_unwritten(object), firstAsk) |
+			   (canCompress ? TGM_LAYOUT_ASK_COMPRESS : 0);
 	const uint32_t width = uint32_t(surface.width), height = uint32_t(surface.height),
 		       pitch = uint32_t(surface.pitch);
 	const int layout =
@@ -281,12 +283,13 @@ IOReturn AGXDeviceUserClient::surfaceLayoutInfo(const TegraGM20BAbiSurfaceLayout
 	return kIOReturnSuccess;
 }
 
-// lock_ held. The connection's level from its priority and GPU denial (TegraGM20BSchedPolicy.h), for every channel
-// it has, and whether it is the compositor (tgm_compositor).
-void AGXDeviceUserClient::applyLevel(bool allChannels)
+// lock_ held. Updates the connection's level and compositor marker; channels apply it off lock_
+// via syncChannelLevel so runlist waits never hold the connection lock.
+void AGXDeviceUserClient::applyLevel()
 {
 	level_ = tgm_priority_level(priority_, backgroundPriority_,
-				    static_cast<int>(backgroundRole_));
+				    static_cast<int>(backgroundRole_),
+				    static_cast<int>(restartNoKill_));
 	const bool wasCritical = critical_;
 	critical_ = tgm_compositor(static_cast<enum tgm_level>(level_),
 				   static_cast<int>(restartNoKill_));
@@ -298,12 +301,28 @@ void AGXDeviceUserClient::applyLevel(bool allChannels)
 			      reserved ? "" : ", its event records counted as an app's");
 		}
 	}
-	if (allChannels)
-		for (uint32_t i = 0; i < kMaxChannels; ++i)
-			if (chans_[i]) {
-				tgm_chan_set_level(chans_[i], level_, static_cast<int>(critical_));
-				channelLevels_[i] = level_;
-			}
+}
+
+// Caller holds submitLocks_[slot] and submitGate_ (keeping chan alive and serialized).
+void AGXDeviceUserClient::syncChannelLevel(uint32_t slot, tgm_chan *chan, bool force)
+{
+	bool update = false;
+	uint32_t wantLevel = TGM_LEVEL_FOREGROUND;
+	bool wantCritical = false;
+	IOLockLock(lock_);
+	if (force || channelLevels_[slot] != level_) {
+		update = true;
+		wantLevel = level_;
+		wantCritical = critical_;
+	}
+	IOLockUnlock(lock_);
+	if (!update)
+		return;
+	tgm_chan_set_level(chan, wantLevel, static_cast<int>(wantCritical));
+	IOLockLock(lock_);
+	if (level_ == wantLevel && critical_ == wantCritical)
+		channelLevels_[slot] = wantLevel;
+	IOLockUnlock(lock_);
 }
 
 IOReturn AGXDeviceUserClient::channelCreate(const TegraGM20BAbiChannelCreate *in,
@@ -312,35 +331,83 @@ IOReturn AGXDeviceUserClient::channelCreate(const TegraGM20BAbiChannelCreate *in
 	const int copyOnly = switch_gpu_channel_copy_only(in->engines);
 	if (in->reserved || copyOnly < 0)
 		return kIOReturnBadArgument;
-	uint32_t slot = 0;
-	while (slot < kMaxChannels && chans_[slot])
-		slot++;
-	if (slot == kMaxChannels)
-		return kIOReturnNoResources;
+	uint32_t slot = kMaxChannels;
+	bool critical = false;
+	uint32_t level = TGM_LEVEL_FOREGROUND;
+	IOLockLock(lock_);
+	for (;;) {
+		if (submitGate_.closed()) {
+			IOLockUnlock(lock_);
+			return kIOReturnNotOpen;
+		}
+		slot = kMaxChannels;
+		bool hasRetiring = false;
+		for (uint32_t i = 0; i < kMaxChannels; ++i) {
+			if (!chans_[i] && !slotCreating_[i] && !retiringChans_[i].active) {
+				slot = i;
+				break;
+			}
+			if (retiringChans_[i].active)
+				hasRetiring = true;
+		}
+		if (slot < kMaxChannels) {
+			slotCreating_[slot] = true;
+			critical = critical_;
+			level = level_;
+			break;
+		}
+		if (!hasRetiring) {
+			IOLockUnlock(lock_);
+			return kIOReturnNoResources;
+		}
+		IOLockSleep(lock_, &retiringChans_, THREAD_UNINT);
+	}
+	IOLockUnlock(lock_);
+
 	// not reset: a slot's seqno only moves forward (tgm_chan_new continues it)
 	volatile uint32_t *fence = fence_va_ + static_cast<size_t>(slot) * 16;
 	tgm_fence_kill_clear(fence);
 	const auto create = copyOnly ? tgm_chan_new_copy : tgm_chan_new;
+	tgm_chan *made = nullptr;
 	const IOReturn ret =
 		ioreturn(create(vm_, this, fence, fence_gpu_ + static_cast<uint64_t>(slot) * 64,
-				owner_, static_cast<int>(critical_), &chans_[slot]));
-	if (ret)
+				owner_, static_cast<int>(critical), &made));
+	if (ret) {
+		IOLockLock(lock_);
+		slotCreating_[slot] = false;
+		IOLockWakeup(lock_, &retiringChans_, false);
+		IOLockUnlock(lock_);
 		return ret;
-	switch_gpu_chan_visibility(
-		chans_[slot], fence_va_ + TegraGM20BFencePageVisibleFirst / 4 + slot,
-		fence_gpu_ + TegraGM20BFencePageVisibleFirst + uint64_t(slot) * 4);
+	}
+	switch_gpu_chan_visibility(made, fence_va_ + TegraGM20BFencePageVisibleFirst / 4 + slot,
+				   fence_gpu_ + TegraGM20BFencePageVisibleFirst +
+					   uint64_t(slot) * 4);
+	switch_gpu_chan_progress(made, fence + TegraGM20BFencePageChannelProgressOffset /
+						       sizeof(uint32_t));
 	auto *semantic = reinterpret_cast<volatile TegraGM20BAbiFenceSemantic *>(fence + 4);
-	switch_gpu_chan_semantic_visibility(chans_[slot], semantic);
+	switch_gpu_chan_semantic_visibility(made, semantic);
 	auto *identity = reinterpret_cast<volatile TegraGM20BAbiFenceIdentity *>(fence + 8);
-	__atomic_store_n(&identity->channel_uid, switch_gpu_chan_identity(chans_[slot]),
-			 __ATOMIC_RELEASE);
-	if (level_ != TGM_LEVEL_FOREGROUND && !critical_)
-		tgm_chan_set_level(chans_[slot], level_, 0);
-	channelLevels_[slot] = level_;
+	__atomic_store_n(&identity->channel_uid, switch_gpu_chan_identity(made), __ATOMIC_RELEASE);
+	if (level != TGM_LEVEL_FOREGROUND && !critical)
+		tgm_chan_set_level(made, level, 0);
+
+	IOLockLock(lock_);
+	if (submitGate_.closed() || !submitGate_.beginMutation(lock_)) {
+		slotCreating_[slot] = false;
+		IOLockWakeup(lock_, &retiringChans_, false);
+		IOLockUnlock(lock_);
+		tgm_chan_del(&made);
+		return kIOReturnNotOpen;
+	}
+	chans_[slot] = made;
+	channelLevels_[slot] = critical == critical_ ? level : UINT32_MAX;
 	leanChannels_[slot] = copyOnly != 0;
 	faultLogged_[slot] = false;
+	slotCreating_[slot] = false;
 	tgm_chan_on_fence(chans_[slot], retirementFence, this);
 	tgm_chan_on_wake(chans_[slot], wakeAsked, this, slot);
+	submitGate_.endMutation(lock_);
+	IOLockUnlock(lock_);
 	out->channel = slot + 1;
 	out->fence_token = kFenceToken;
 	out->fence_offset = slot * 64;
@@ -350,22 +417,36 @@ IOReturn AGXDeviceUserClient::channelCreate(const TegraGM20BAbiChannelCreate *in
 
 IOReturn AGXDeviceUserClient::channelDestroy(const TegraGM20BAbiChannel *in)
 {
-	if (!in->channel || in->channel > kMaxChannels || !chans_[in->channel - 1])
+	if (!in->channel || in->channel > kMaxChannels)
 		return kIOReturnBadArgument;
+	const uint32_t slot = in->channel - 1;
+	IOLockLock(lock_);
+	if (submitGate_.closed() || !submitGate_.beginMutation(lock_)) {
+		IOLockUnlock(lock_);
+		return kIOReturnNotOpen;
+	}
+	tgm_chan *chan = chans_[slot];
+	if (!chan) {
+		submitGate_.endMutation(lock_);
+		IOLockUnlock(lock_);
+		return kIOReturnBadArgument;
+	}
 	logFaultBindings();
 	releasePromises(false);
-	if (tgm_chan_error(chans_[in->channel - 1]))
+	if (tgm_chan_error(chan))
 		for (auto *set : sets_)
 			if (set)
-				switch_gpu_set_killed(set, in->channel - 1);
-	hangHolder_ = current_thread();
-	tgm_chan_del(&chans_[in->channel - 1]);
-	releasePromises(false);
-	eventChannels_[in->channel - 1].reset();
-	admissions_[in->channel - 1].end();
-	admissionCookies_[in->channel - 1] = 0;
-	hangHolder_ = nullptr;
-	scheduleRetirement();
+				switch_gpu_set_killed(set, slot);
+	switch_gpu_backing_token token = {};
+	switch_gpu_chan_next_token(chan, &token);
+	chans_[slot] = nullptr;
+	retiringChans_[slot] = {chan, token.queue, token.reset_generation, true};
+	eventChannels_[slot].reset();
+	admissions_[slot].end();
+	admissionCookies_[slot] = 0;
+	submitGate_.endMutation(lock_);
+	IOLockUnlock(lock_);
+	thread_call_enter(chanRetireCall_);
 	return kIOReturnSuccess;
 }
 

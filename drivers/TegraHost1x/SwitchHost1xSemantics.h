@@ -55,7 +55,7 @@ private:
         const auto token = node->token;
         Results::semantic(token, result);
         node->batch = nullptr;
-        __atomic_sub_fetch(&pending, 1u, __ATOMIC_RELEASE);
+        __atomic_store_n(&pending, pending - 1u, __ATOMIC_RELEASE);
         IOLockUnlock(lock);
         switch_gpu_events_completed();
         if (retired)
@@ -109,7 +109,7 @@ public:
             free->token = *token;
             free->batch = batch;
             switch_gpu_event_waits_retain(batch);
-            __atomic_add_fetch(&pending, 1u, __ATOMIC_RELEASE);
+            __atomic_store_n(&pending, pending + 1u, __ATOMIC_RELEASE);
             *out = free;
         }
         IOLockUnlock(lock);

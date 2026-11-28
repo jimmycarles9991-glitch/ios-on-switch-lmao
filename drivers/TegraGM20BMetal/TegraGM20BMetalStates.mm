@@ -92,41 +92,29 @@
 }
 
 #if SWITCH_METAL_DIAGNOSTICS
-// Core Animation's glass background (Tgs*, Tgb*) and generic merge (..Xghfc) states: the draw path checks their uniforms for
-// NaN and infinity (gpu.cpp probeUniforms), its barrier form's too
-static void markUniformProbe(gm20b::Pipeline *pl, NSString *label)
-{
-    static NSString *const prefix = @"com.apple.coreanimation.";
-    if (!pl || pl->uniformProbe || ![label hasPrefix:prefix])
-        return;
-    NSString *name = [label substringFromIndex:prefix.length];
-    const bool generic = [name hasSuffix:@"Xghfc"];
-    if (![name containsString:@"_Tgs"] && ![name containsString:@"_Tgb"] && !generic)
-        return;
-    const char *kept = strdup(name.UTF8String);  // one per glass state, for the process's life
-    pl->uniformProbe = kept;
-    pl->genericState = generic;
-    if (pl->barrierTwin && !pl->barrierTwin->uniformProbe) {
-        pl->barrierTwin->uniformProbe = kept;
-        pl->barrierTwin->genericState = generic;
-    }
-}
-
-// Core Animation's states, whose draws the keyline probe logs (gpu.cpp probeDraw): a solid fill into its three-colour
-// pass (..Xmw_A3Xhfc, the scroll edge keyline's) always, any other while the probe is armed
 static void markDrawProbe(gm20b::Pipeline *pl, NSString *label)
 {
     static NSString *const prefix = @"com.apple.coreanimation.";
-    if (!pl || pl->caName || ![label hasPrefix:prefix])
+    if (!pl || ![label hasPrefix:prefix])
+        return;
+    NSString *name = [label substringFromIndex:prefix.length];
+    const bool generic = [name hasSuffix:@"Xghfc"];
+    if (generic) {
+        __atomic_store_n(&pl->genericState, true, __ATOMIC_RELAXED);
+        if (gm20b::Pipeline *twin = __atomic_load_n(&pl->barrierTwin, __ATOMIC_ACQUIRE))
+            __atomic_store_n(&twin->genericState, true, __ATOMIC_RELAXED);
+    }
+    if (__atomic_load_n(&pl->caName, __ATOMIC_ACQUIRE))
         return;
     // one per state, for the process's life
-    pl->caName = strdup([label substringFromIndex:prefix.length].UTF8String);
-    pl->fillState = [label hasSuffix:@"Xmw_A3Xhfc"];
+    const char *kept = strdup(name.UTF8String);
+    const char *expected = nullptr;
+    if (!__atomic_compare_exchange_n(&pl->caName, &expected, kept, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+        free(const_cast<char *>(kept));
 }
 
 static void markProbes(gm20b::Pipeline *pl, NSString *label)
 {
-    markUniformProbe(pl, label);
     markDrawProbe(pl, label);
 }
 #endif
@@ -231,6 +219,14 @@ SwitchMetalPipeline *gm20bPipelineShell(SwitchMetalDevice *device, MTLRenderPipe
     p->_packKey = packKey;
     SWITCH_METAL_CREATION_SINCE(keyBegan, keyTicks);
     if (lookedUp) {
+#if SWITCH_METAL_STATS
+        {
+            const gm20b::Pack &pack = gRM->raw->pack();
+            const gm20b::PackRun tierRun = held.records ? held : pack.run(packKey);
+            if (gm20bPackIsTier1(pack, tierRun) && pack.find(tierRun, gm20b::PackForm::Default))
+                gm20bPackNoteTier1Use(pack, tierRun, fast, packKey, p, d.label, own.key);
+        }
+#endif
         {
             SWITCH_METAL_CREATION_SPAN(placeTicks);
             p->_raw = held.records ? gRM->raw->pipeline(held, keyHash, gm20b::PackForm::Default, p->_caTransform)
@@ -240,7 +236,7 @@ SwitchMetalPipeline *gm20bPipelineShell(SwitchMetalDevice *device, MTLRenderPipe
         markProbes(p->_raw, d.label);
 #endif
         p->_packed = p->_raw && gRM->raw->packHolds(*p->_raw);
-        if (p->_packed && !held.records)
+        if (p->_packed && p->_packable && !held.records)
             os_log_error(gm20bLog(),
                          "SwitchMetal: pack state %016llx found by its key's text and not by its fast key %016llx: "
                          "the pack's fast keys are not the runtime's",
@@ -250,6 +246,10 @@ SwitchMetalPipeline *gm20bPipelineShell(SwitchMetalDevice *device, MTLRenderPipe
             packedVariants(p, held.records ? held : gRM->raw->pack().run(packKey));
         }
     }
+#if SWITCH_METAL_STATS
+    if (p->_completable && !p->_packed)
+        gm20bNoteMiss("render", packKey, gm20bStateKey(p), d.label);
+#endif
     // A framework's state the pack holds is the device's archive hit, as Apple's own archives hold its states for Apple's
     // GPUs; any other state is answered by the archives the creation lists alone, as Metal answers it
     const bool deviceArchive = p->_packable && p->_raw;
@@ -309,8 +309,11 @@ id<MTLRenderPipelineState> gm20bFinishState(SwitchMetalPipeline *p, MTLRenderPip
             *reflection = nil;
         return nil;
     }
-    if (!p->_packed && gRM->completion)
+    if (!p->_packed && gRM->completion) {
+        if (gRM->completion->hasFormsToRetry())
+            gRM->completion->retryForms(gm20bRecordAsk(p, d), p->_raw);
         gm20bMadeVariants(p, d);
+    }
     if (error)
         *error = nil;
     return (id<MTLRenderPipelineState>)p;
@@ -320,13 +323,15 @@ static id<MTLRenderPipelineState> makeState(SwitchMetalDevice *device, MTLRender
                                             MTLPipelineOption o, MTLAutoreleasedRenderPipelineReflection *reflection,
                                             NSError **error)
 {
-#if SWITCH_METAL_DIAGNOSTICS
+#if SWITCH_METAL_PROF
     SwitchMetalCreationMeter meter;
 #endif
     SwitchMetalPipeline *p = gm20bPipelineFor(device, d, o, error);
     id<MTLRenderPipelineState> state = p ? gm20bFinishState(p, d, o, reflection, error) : nil;
-#if SWITCH_METAL_DIAGNOSTICS
+#if SWITCH_METAL_PROF
     meter.finish(p, d);
+#elif SWITCH_METAL_STATS
+    gm20bNotePackCreation(p && p->_packed);
 #endif
     return state;
 }

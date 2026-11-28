@@ -110,6 +110,26 @@ interlock_ticket_word(nir_builder *b, const struct interlock_data *tdata,
    return nir_iadd(b, base, nir_u2u64(b, offset));
 }
 
+/* SPIR-V ends an interlock behind a device-scope release barrier on image,
+ * SSBO and global memory (spirv_to_nir), which NAK gives as MEMBAR.GL. On
+ * GM20B the release's MEMBAR.VC orders those writes ahead of the ticket's
+ * atomic add, as NVIDIA's compiler orders them, with no MEMBAR.GL.
+ */
+static void
+remove_release_barrier_before(nir_instr *instr)
+{
+   nir_instr *prev = nir_instr_prev(instr);
+   if (prev == NULL || prev->type != nir_instr_type_intrinsic)
+      return;
+
+   nir_intrinsic_instr *barrier = nir_instr_as_intrinsic(prev);
+   if (barrier->intrinsic == nir_intrinsic_barrier &&
+       nir_intrinsic_execution_scope(barrier) == SCOPE_NONE &&
+       nir_intrinsic_memory_scope(barrier) == SCOPE_DEVICE &&
+       nir_intrinsic_memory_semantics(barrier) == NIR_MEMORY_RELEASE)
+      nir_instr_remove(prev);
+}
+
 static bool
 nak_nir_lower_fs_interlock_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
                                   UNUSED void *data)
@@ -147,6 +167,8 @@ nak_nir_lower_fs_interlock_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
       ticket_wait = false;
       ticket_update = true;
 
+      if (tdata->nak->sm >= 50 && tdata->nak->sm < 70)
+         remove_release_barrier_before(&intrin->instr);
       b->cursor = nir_instr_remove(&intrin->instr);
       break;
    default:
@@ -221,6 +243,13 @@ nak_nir_lower_fs_interlock_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
           * the branch on its value. An atomic add of 0 would read the same
           * value but queue on L2's atomic unit beside every release.
           */
+         nir_variable *backoff_var = NULL;
+         if (tdata->load_spin) {
+            backoff_var = nir_local_variable_create(b->impl, glsl_uint_type(),
+                                                    "fsi_backoff");
+            nir_store_var(b, backoff_var, nir_imm_int(b, 32), 0x1);
+         }
+
          nir_loop *loop = nir_push_loop(b);
          {
             nir_def *current_gpc_ticket =
@@ -235,12 +264,39 @@ nak_nir_lower_fs_interlock_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
 
             nir_break_if(b, nir_ieq(b, nir_ushr_imm(b, current_gpc_ticket, 16),
                                     ticket_value));
+
+            if (tdata->load_spin) {
+               nir_def *delay = nir_load_var(b, backoff_var);
+               nir_def *start =
+                  nir_load_sysval_nv(b, 32, .base = NAK_SV_CLOCK_LO);
+               nir_ssa_bar_nv(b, start);
+
+               nir_loop *spin = nir_push_loop(b);
+               {
+                  nir_def *now =
+                     nir_load_sysval_nv(b, 32, .base = NAK_SV_CLOCK_LO);
+                  nir_ssa_bar_nv(b, now);
+                  nir_break_if(b, nir_uge(b, nir_isub(b, now, start), delay));
+               }
+               nir_pop_loop(b, spin);
+
+               nir_def *next_delay =
+                  nir_umin(b, nir_ishl_imm(b, delay, 1), nir_imm_int(b, 256));
+               nir_store_var(b, backoff_var, next_delay, 0x1);
+            }
          }
          nir_pop_loop(b, loop);
       }
 
       if (ticket_update) {
-         nir_barrier(b, .execution_scope = SCOPE_INVOCATION);
+         /* GM20B: NVIDIA's compiler orders every release, a demote's
+          * included, with MEMBAR.VC: the section's writes reach L2 before
+          * the ticket's atomic add
+          */
+         if (tdata->nak->sm >= 50 && tdata->nak->sm < 70)
+            nir_membar_vc_nv(b);
+         else
+            nir_barrier(b, .execution_scope = SCOPE_INVOCATION);
          nir_global_atomic(b, 32, interlock_ticket_buffer_addr,
                            ticket_increment,
                            .atomic_op = nir_atomic_op_iadd);

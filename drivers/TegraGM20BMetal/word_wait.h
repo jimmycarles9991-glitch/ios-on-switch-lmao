@@ -30,7 +30,7 @@ public:
         const uint32_t seen = word_.load();
         if (!done())
             __ulock_wait(kCompareAndWait | kNoErrno, &word_, seen, 0);
-        waiters_.fetch_sub(1);
+        waiters_.fetch_sub(1, std::memory_order_relaxed);
     }
 
     template <typename Done> void waitFor(Done &&done)
@@ -42,7 +42,7 @@ public:
                 break;
             __ulock_wait(kCompareAndWait | kNoErrno, &word_, seen, 0);
         }
-        waiters_.fetch_sub(1);
+        waiters_.fetch_sub(1, std::memory_order_relaxed);
     }
 
 private:
@@ -66,6 +66,13 @@ public:
     void clear()
     {
         setOwner(0);
+    }
+
+    // Cleared only while `expected` still owns it: an owner that handed the word on leaves the new owner in place
+    void clearIf(uint32_t expected)
+    {
+        if (expected && owner_.compare_exchange_strong(expected, 0) && waiters_.load())
+            __ulock_wake(kUnfairLock | kWakeAll | kWakeAllowNonOwner | kNoErrno, &owner_, 0);
     }
 
     bool hasOwner() const
@@ -93,7 +100,7 @@ public:
                 waited = true;
             }
         }
-        waiters_.fetch_sub(1);
+        waiters_.fetch_sub(1, std::memory_order_relaxed);
         return waited;
     }
 

@@ -1,6 +1,7 @@
 import CoreVideo
 import Foundation
 import HWTestCore
+import HWTestKit
 import HWTestVideo
 
 /// The scaler's gamut stage through a direct client (video/VICColour.swift), 64x64 sRGB-encoded BGRA surfaces tagged

@@ -157,33 +157,6 @@ static enum a64x_class classify_simd(uint32_t w)
     return A64X_OK;
 }
 
-static bool sysreg_v80_el0(uint32_t op0, uint32_t op1, uint32_t crn, uint32_t crm, uint32_t op2)
-{
-    if (op0 == 3 && op1 == 3) {
-        switch (crn) {
-        case 0:
-            return crm == 0 && (op2 == 1 || op2 == 7); /* CTR, DCZID */
-        case 4:
-            return (crm == 2 && op2 <= 1) || (crm == 4 && op2 <= 1) || crm == 5; /* NZCV DAIF FPCR FPSR DSPSR/DLR */
-        case 9:
-            return crm >= 12; /* PMU */
-        case 13:
-            return crm == 0 && (op2 == 2 || op2 == 3); /* TPIDR(RO)_EL0 */
-        case 14:
-            return (crm == 0 && op2 <= 2) || (crm >= 2 && crm <= 3) || crm >= 8; /* CNT*, PMEV* */
-        default:
-            return false;
-        }
-    }
-    if (op0 == 2 && op1 == 3) {
-        return true; /* debug comms channel */
-    }
-    if (op0 == 3 && op1 == 0 && crn == 0) {
-        return true; /* ID registers: an EL0 read traps on v8.0 and on A12 alike (not a translation issue) */
-    }
-    return false;
-}
-
 enum a64x_class a64x_classify_slow(uint32_t w)
 {
     uint32_t top = w >> 24;
@@ -312,7 +285,6 @@ enum a64x_class a64x_classify_slow(uint32_t w)
                      (crn == 13 && crm == 0 && op2 == 5))) {
                     return A64X_SYSREG_NEW; /* RNDR(RS), CNT{P,V}CTSS, TPIDR2_EL0 */
                 }
-                (void)sysreg_v80_el0;
                 return A64X_OK; /* EL1 registers and v8.0 EL0 registers */
             }
             return A64X_OK;

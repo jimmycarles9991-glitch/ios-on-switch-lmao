@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// makeAliasable on a texture of an automatic heap gives the heap back all the room the texture took: usedSize returns

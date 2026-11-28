@@ -195,17 +195,10 @@ void copiesOutOfACompressedTextureAreClamped()
     {
         std::lock_guard<std::mutex> l(kernel_model::callLock);
         ASSERT_LT(out.firstJob, out.endJob);
-        bool sawVolatile = false;
-        for (size_t j = out.firstJob; j < out.endJob; ++j) {
-            const kernel_model::Job &job = kernel_model::model.jobs[j];
-            EXPECT_EQ(job.flags & TegraGM20BJobExternal, 0u);
-            EXPECT_FALSE(job.hostWritten);
-            EXPECT_EQ(job.flags & TegraGM20BJobHostWritten, 0u);
-            sawVolatile |= (job.flags & TegraGM20BJobVolatileWrites) != 0u;
-            for (const TegraGM20BAbiSurfaceUse &u : job.uses)
-                EXPECT_EQ(u.access & TegraGM20BSurfaceHostWritten, 0u);
-        }
-        EXPECT_TRUE(sawVolatile);
+        for (size_t j = out.firstJob; j < out.endJob; ++j)
+            EXPECT_EQ(kernel_model::model.jobs[j].flags & TegraGM20BJobVolatileWrites, 0u);
+        EXPECT_NE(kernel_model::model.jobs[out.endJob - 1].flags & TegraGM20BJobExternal, 0u)
+            << "the copy's shared buffer is L2-cached: its last job flushes the L2 for the CPU reader";
     }
 }
 

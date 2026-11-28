@@ -24,6 +24,7 @@ static unsigned switch_test_readiness;
 static int switch_test_migration_error;
 static bool switch_test_alias_mode;
 static bool switch_test_alias_sync_failure;
+static unsigned switch_test_syncs;
 static NSString *switch_test_alias;
 static bool switch_test_restore_promotion;
 
@@ -85,6 +86,7 @@ static int switch_test_lchown(const char *path, uid_t, gid_t)
 static int switch_test_sync(int, int flags)
 {
     assert(flags == (SYNC_VOLUME_FULLSYNC | SYNC_VOLUME_WAIT));
+    ++switch_test_syncs;
     if (switch_test_alias_sync_failure) {
         errno = ENOSPC;
         return -1;
@@ -266,11 +268,16 @@ int main()
         switch_test_restore_promotion = true;
         switch_test_alias_sync_failure = true;
         assert(switch_bootstrap_validate_root(root) == ENOSPC);
-        assert(switch_test_readiness == 1);
+        assert(switch_test_readiness == 1 && switch_test_syncs == 1);
+        // Unchanged root and alias skip fsync_volume_np on normal boots.
+        assert(!switch_bootstrap_validate_root(root));
+        assert(switch_test_syncs == 1);
         switch_test_alias_sync_failure = false;
+        assert(!unlink(switch_test_alias.fileSystemRepresentation));
         assert(!switch_bootstrap_validate_root(root));
+        assert(switch_test_syncs == 2);
         assert(!switch_bootstrap_validate_root(root));
-        assert(switch_test_readiness == 1);
+        assert(switch_test_readiness == 1 && switch_test_syncs == 2);
         assert(!unlink(switch_test_alias.fileSystemRepresentation));
         assert(!symlink("/unrelated", switch_test_alias.fileSystemRepresentation));
         assert(switch_bootstrap_validate_root(root) == EPERM);

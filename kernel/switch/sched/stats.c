@@ -20,6 +20,7 @@
 #include <switch/xnu.h>
 
 #include "stats.h"
+#include "../diag/deployed.h"
 #include "SwitchPowerTrail.h"
 
 #include <kern/clock.h>
@@ -38,6 +39,38 @@
 #include <vm/vm_kern.h>
 
 #if DEVELOPMENT || DEBUG
+
+static uint64_t boot_complete_ns;
+
+/* IOPMrootDomain: backboardd set System Boot Complete, about 3 s after SpringBoard dismissed the boot logo. */
+void switch_sched_boot_complete(void)
+{
+    uint64_t ns = 0;
+
+    absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+    if (os_atomic_cmpxchg(&boot_complete_ns, 0, ns, relaxed)) {
+        switch_power_trail_mark(SWITCH_MARK_BOOT_DONE);
+    }
+}
+
+#if (defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED) || (defined(SWITCH_STATS_FRAME) && SWITCH_STATS_FRAME) || \
+    (defined(SWITCH_RECORDER) && SWITCH_RECORDER)
+/* The task's first thread, its main thread, with a reference (THREAD_NULL when it has none). */
+static thread_t main_thread(task_t task)
+{
+    thread_t thread = THREAD_NULL;
+
+    task_lock(task);
+    if (!queue_empty(&task->threads)) {
+        thread = (thread_t)queue_first(&task->threads);
+        thread_reference(thread);
+    }
+    task_unlock(task);
+    return thread;
+}
+#endif
+
+#if defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED
 
 #define REPORT_NS   (10ull * NSEC_PER_SEC)
 #define KERNEL_TOP  3
@@ -91,7 +124,8 @@ struct slot {
     uint32_t hist[SWITCH_SCHED_BUCKETS];
     uint32_t runs, failsafe_runs, limit_blocks;
     uint64_t limit_us;
-    uint64_t window_max_us;
+    uint64_t window_longest;             /* switch_sched_longest */
+    uint64_t window_start_ms;            /* uptime at the last report; written only by the report */
     struct switch_sched_window reported; /* the counters at the last report */
 };
 
@@ -100,7 +134,7 @@ static uint64_t watched[SLOTS]; /* thread ids, 0 for none: what the dispatch hoo
 static struct slot slots[SLOTS];
 static SIMPLE_LOCK_DECLARE(slots_lock, 0);
 static thread_call_t report_call;
-static uint64_t report_abs, report_last, boot_complete_ns;
+static uint64_t report_abs, report_last;
 
 static struct {
     uint64_t tid, cpu;
@@ -142,7 +176,12 @@ void switch_sched_dispatched(thread_t thread, uint64_t now)
     }
     os_atomic_inc(&s->hist[switch_sched_bucket(us)], relaxed);
     os_atomic_inc(&s->runs, relaxed);
-    os_atomic_max(&s->window_max_us, us, relaxed);
+    /* A slot's thread is dispatched on one core at a time and the report only exchanges the word for 0, so the max
+     * never pairs one wait's length with another's start. A dispatch racing the exchange can skip the next window's
+     * max for that one sample: the load filters, os_atomic_max decides. */
+    if (us > os_atomic_load(&s->window_longest, relaxed) >> 32) {
+        os_atomic_max(&s->window_longest, switch_sched_longest_since(us, abs_to_us(made)), relaxed);
+    }
     if (thread->sched_flags & TH_SFLAG_FAILSAFE) {
         os_atomic_inc(&s->failsafe_runs, relaxed);
     }
@@ -155,10 +194,12 @@ void switch_sched_dispatched(thread_t thread, uint64_t now)
     }
 }
 
-static void watch(enum slot_id id, uint64_t tid, int pid, const char *label, bool replace_same_pid)
+static void watch(enum slot_id id, thread_t thread, int pid, const char *label, bool replace_same_pid)
 {
+    const uint64_t tid = thread_tid(thread);
+
     if (os_atomic_load(&report_call, acquire) == NULL) {
-        thread_call_t call = thread_call_allocate_with_options(switch_sched_report, NULL, THREAD_CALL_PRIORITY_KERNEL,
+        thread_call_t call = thread_call_allocate_with_options(switch_sched_report, NULL, THREAD_CALL_PRIORITY_USER,
                                                                THREAD_CALL_OPTIONS_ONCE);
 
         nanoseconds_to_absolutetime(REPORT_NS, &report_abs);
@@ -172,100 +213,13 @@ static void watch(enum slot_id id, uint64_t tid, int pid, const char *label, boo
     if (stored) {
         slots[id].pid = pid;
         strlcpy(slots[id].label, label, sizeof(slots[id].label));
+        os_atomic_or(&thread->switch_watch_mask, SWITCH_WATCH_MASK_SCHED, relaxed);
         os_atomic_store(&watched[id], tid, relaxed);
     }
     simple_unlock(&slots_lock);
     os_atomic_store(&switch_sched_watching, 1, relaxed);
     if (stored && id == CA_RENDER) {
-        switch_sched_watch_render_server(tid);
-    }
-}
-
-/* The task's first thread, its main thread, with a reference (THREAD_NULL when it has none). */
-static thread_t main_thread(task_t task)
-{
-    thread_t thread = THREAD_NULL;
-
-    task_lock(task);
-    if (!queue_empty(&task->threads)) {
-        thread = (thread_t)queue_first(&task->threads);
-        thread_reference(thread);
-    }
-    task_unlock(task);
-    return thread;
-}
-
-static uint64_t main_thread_id(task_t task)
-{
-    uint64_t tid = 0;
-
-    task_lock(task);
-    if (!queue_empty(&task->threads)) {
-        tid = thread_tid((thread_t)queue_first(&task->threads));
-    }
-    task_unlock(task);
-    return tid;
-}
-
-/* proc_set_darwin_role (kern_resource.c), after the role is applied: RunningBoard making an app the focal one. */
-void switch_sched_role(task_t task, int role)
-{
-    char name[32];
-    char label[LABEL];
-    thread_t main = THREAD_NULL;
-    uint64_t tid = 0;
-
-    switch_stall_frame_role(task, role);
-    if (role == TASK_FOREGROUND_APPLICATION) {
-        main = main_thread(task);
-    }
-    switch_sched_busy_focal(task, role, main);
-#if SWITCH_RECORDER
-    switch_recorder_role(task, role, main);
-#endif
-    if (main == THREAD_NULL) {
-        return;
-    }
-    tid = thread_tid(main);
-    thread_deallocate(main);
-    switch_task_name(task, name, sizeof(name));
-    if (strcmp(name, "SpringBoard") == 0) {
-        watch(SB_MAIN, tid, task_pid(task), "SpringBoard.main", true);
-        return;
-    }
-    snprintf(label, sizeof(label), "%s.main", name);
-    watch(APP_MAIN, tid, task_pid(task), label, true);
-    switch_sched_watch_focal(task, tid);
-}
-
-/* bsd_setthreadname (proc_info.c): backboardd's threads as they name themselves, and its main thread with them. */
-void switch_sched_named(thread_t thread, const char *name)
-{
-    task_t task = get_threadtask(thread);
-    char process[16];
-    uint64_t main_tid = 0;
-
-    if (task == kernel_task || name == NULL) {
-        return;
-    }
-    for (unsigned int i = 0; i < sizeof(render_server_threads) / sizeof(render_server_threads[0]); i++) {
-        if (strcmp(name, render_server_threads[i].name) != 0) {
-            continue;
-        }
-        switch_task_name(task, process, sizeof(process));
-        if (strcmp(process, "backboardd") != 0) {
-            return;
-        }
-        /* A pool's threads share a name: the first of a process stands for them. */
-        watch(render_server_threads[i].slot, thread_tid(thread), task_pid(task), render_server_threads[i].label, false);
-        if (render_server_threads[i].slot == CA_RENDER) {
-            switch_stall_frame_render_server(thread);
-        }
-        main_tid = main_thread_id(task);
-        if (main_tid != 0) {
-            watch(BB_MAIN, main_tid, task_pid(task), "backboardd.main", true);
-        }
-        return;
+        switch_sched_watch_render_server(thread);
     }
 }
 
@@ -320,6 +274,9 @@ void switch_sched_limit_asked(uint8_t percentage, uint64_t interval_ns, bool lif
     }
     asked_requests++;
     simple_unlock(&asked_lock);
+    if (lifted) {
+        switch_sched_limit_shadow(percentage, interval_ns);
+    }
 }
 
 /* The requests so far, when there were new ones since the last report. */
@@ -342,17 +299,6 @@ static void report_asked(char *line)
     simple_unlock(&asked_lock);
     if (fresh) {
         os_log(OS_LOG_DEFAULT, "%s", line);
-    }
-}
-
-/* IOPMrootDomain: backboardd set System Boot Complete, about 3 s after SpringBoard dismissed the boot logo. */
-void switch_sched_boot_complete(void)
-{
-    uint64_t ns = 0;
-
-    absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
-    if (os_atomic_cmpxchg(&boot_complete_ns, 0, ns, relaxed)) {
-        switch_power_trail_mark(SWITCH_MARK_BOOT_DONE);
     }
 }
 
@@ -385,7 +331,8 @@ static struct switch_sched_window take_window(struct slot *s)
     w.failsafe_runs = now.failsafe_runs - s->reported.failsafe_runs;
     w.limit_blocks = now.limit_blocks - s->reported.limit_blocks;
     w.limit_us = now.limit_us - s->reported.limit_us;
-    w.max_us = os_atomic_xchg(&s->window_max_us, 0, relaxed);
+    s->window_start_ms = switch_sched_take_longest(&w, os_atomic_xchg(&s->window_longest, 0, relaxed),
+                                                   s->window_start_ms, abs_to_us(mach_absolute_time()));
     s->reported = now;
     return w;
 }
@@ -493,6 +440,7 @@ static size_t append_kernel_top(char *line, size_t at)
 static void switch_sched_report(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
     static uint64_t last_ns;
+    static bool boot_totals_logged, deployed_logged;
     static char line[LINE];
     uint64_t now_ns = 0;
     uint64_t window_ns = 0;
@@ -523,9 +471,107 @@ static void switch_sched_report(__unused thread_call_param_t p0, __unused thread
     append_slots(line, MIN(at, LINE - 1), FIRST_GPU, SLOTS);
     os_log(OS_LOG_DEFAULT, "%s", line);
     switch_sched_cpu_report(line, window_ns);
+    if (boot_ns != 0 && !boot_totals_logged) {
+        boot_totals_logged = true;
+        switch_sched_cpu_boot_totals(line, boot_ns);
+    }
+    if (!deployed_logged) {
+        deployed_logged = switch_log_deployed();
+    }
+    switch_sched_systime_report(line, LINE, window_ns);
+    switch_sched_callout_report(line, LINE, window_ns);
     switch_sched_watch_report(line, LINE, window_ns);
     switch_diag_pagein_report(line, LINE, window_ns);
     report_asked(line);
+    switch_sched_limit_report(line, LINE, window_ns);
+}
+
+#endif /* SWITCH_STATS_SCHED */
+
+/* proc_set_darwin_role (kern_resource.c), after the role is applied: RunningBoard making an app the focal one. */
+void switch_sched_role(task_t task, int role)
+{
+#if (defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED) || (defined(SWITCH_STATS_FRAME) && SWITCH_STATS_FRAME) || \
+    (defined(SWITCH_RECORDER) && SWITCH_RECORDER)
+    thread_t main = THREAD_NULL;
+
+    switch_stall_frame_role(task, role);
+    if (role == TASK_FOREGROUND_APPLICATION) {
+        main = main_thread(task);
+    }
+    switch_sched_busy_focal(task, role, main);
+#if SWITCH_RECORDER
+    switch_recorder_role(task, role, main);
+#endif
+    if (main == THREAD_NULL) {
+        return;
+    }
+#if defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED
+    char name[32];
+    char label[LABEL];
+
+    switch_task_name(task, name, sizeof(name));
+    if (strcmp(name, "SpringBoard") == 0) {
+        watch(SB_MAIN, main, task_pid(task), "SpringBoard.main", true);
+    } else {
+        snprintf(label, sizeof(label), "%s.main", name);
+        watch(APP_MAIN, main, task_pid(task), label, true);
+        switch_sched_watch_focal(task, main);
+    }
+#endif
+    thread_deallocate(main);
+#else
+    (void)task;
+    (void)role;
+#endif
+}
+
+/* bsd_setthreadname (proc_info.c): backboardd's threads as they name themselves, and its main thread with them. */
+void switch_sched_named(thread_t thread, const char *name)
+{
+#if defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED
+    task_t task = get_threadtask(thread);
+    char process[16];
+    thread_t bb_main = THREAD_NULL;
+
+    if (task == kernel_task || name == NULL) {
+        return;
+    }
+    for (unsigned int i = 0; i < sizeof(render_server_threads) / sizeof(render_server_threads[0]); i++) {
+        if (strcmp(name, render_server_threads[i].name) != 0) {
+            continue;
+        }
+        switch_task_name(task, process, sizeof(process));
+        if (strcmp(process, "backboardd") != 0) {
+            return;
+        }
+        /* A pool's threads share a name: the first of a process stands for them. */
+        watch(render_server_threads[i].slot, thread, task_pid(task), render_server_threads[i].label, false);
+        if (render_server_threads[i].slot == CA_RENDER) {
+            switch_stall_frame_render_server(thread);
+        }
+        bb_main = main_thread(task);
+        if (bb_main != THREAD_NULL) {
+            watch(BB_MAIN, bb_main, task_pid(task), "backboardd.main", true);
+            thread_deallocate(bb_main);
+        }
+        return;
+    }
+#elif defined(SWITCH_STATS_FRAME) && SWITCH_STATS_FRAME
+    task_t task = get_threadtask(thread);
+    char process[16];
+
+    if (task == kernel_task || name == NULL || strcmp(name, "com.apple.coreanimation.render-server") != 0) {
+        return;
+    }
+    switch_task_name(task, process, sizeof(process));
+    if (strcmp(process, "backboardd") == 0) {
+        switch_stall_frame_render_server(thread);
+    }
+#else
+    (void)thread;
+    (void)name;
+#endif
 }
 
 #endif /* DEVELOPMENT || DEBUG */

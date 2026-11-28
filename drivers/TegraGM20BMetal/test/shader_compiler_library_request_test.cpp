@@ -6,6 +6,7 @@
 #include "../TegraGM20BMetalCompileRequest.mm"
 #include "../compiler/compiler_request.mm"
 #include "../codegen_request.h"
+#include "../store_key.h"
 #include "MetallibSlice.h"
 #include "made_metallib.h"
 
@@ -52,7 +53,7 @@ TEST(LibraryRequest, ALibraryIsKeyedByItsCodeGenerationRequest)
     std::string why;
     ASSERT_TRUE(switch_compiler::prepare(gm20b::encodeRequest(r), kStack, system, p, why)) << why;
     EXPECT_EQ(p.key.key.rfind("library | 13 | ", 0), 0u) << p.key.key;
-    EXPECT_EQ(p.name, gm20b::storeName(p.key, r, {}));
+    EXPECT_EQ(p.name, gm20b::storeKeyOf(p.key, r, {}, {}).name);
 
     const gm20b::CompileRequest other =
         libraryRequest(gm20b::kCodeGenSource, gm20b::codegen::sourceRequest("kernel void j() {}", kOptions));

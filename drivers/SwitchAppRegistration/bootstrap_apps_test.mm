@@ -461,6 +461,16 @@ int main()
         switch_test_result = 0;
         assert(!switch_registration_apps(@[ @"-l" ], &output));
         assert([output containsString:@"org.coolstar.SileoStore"]);
+        [switch_test_installed removeAllObjects];
+        output = nil;
+        assert(!switch_registration_apps(@[ @"-a", @"-l" ], &output));
+        assert([output containsString:@"org.coolstar.SileoStore"]);
+        assert([output containsString:@"example.preferences"]);
+        output = nil;
+        assert(!switch_registration_apps(@[ @"-u", other, @"-l" ], &output));
+        assert([output containsString:@"org.coolstar.SileoStore"]);
+        assert(![output containsString:@"example.preferences"]);
+        assert(!switch_registration_apps(@[ @"-p", other ], &output));
         switch_test_bundle_info(app);
         switch_test_xpc();
         switch_test_plugins(app);

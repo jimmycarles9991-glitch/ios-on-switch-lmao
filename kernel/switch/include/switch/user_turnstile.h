@@ -15,6 +15,7 @@ struct turnstile;
  */
 struct switch_user_turnstile {
     struct turnstile *turnstile;
+    uint32_t waiters;
 };
 
 #ifdef __cplusplus

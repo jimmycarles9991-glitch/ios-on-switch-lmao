@@ -184,4 +184,71 @@ TEST_F(ExecWfi, HighChannelStartStampUsesWfiOnlyWhenLowBusyAndSkipsWhenIdle)
 	EXPECT_EQ(kernel.start_stamps_en, 1u);
 #endif
 }
+
+// A channel a host1x consumer gave a syncpoint (SwitchGpuTimelineSyncpt.cpp) ends each job it drains with two
+// increments, after the drain (host1x's engines read DRAM) and ahead of the fence release: a fence that landed means the
+// host issued them, so a channel torn down after it never drops them.
+TEST_F(ExecWfi, ADrainedJobIncrementsItsChannelsSyncpointAfterItsDrainAndAheadOfItsFence)
+{
+	switch_exec_set_syncpt(170);
+	uint32_t seqno = 0;
+	const auto counts = submit(SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT |
+					   SWITCH_GPU_SUBMIT_EXTERNAL_VISIBILITY,
+				   nullptr, 0, &seqno);
+	EXPECT_EQ(counts.l2_flushes, 1u);
+	EXPECT_EQ(counts.syncpt_incrs, 2u);
+	EXPECT_EQ(counts.syncpt_incrs_after_drain, 2u);
+	EXPECT_EQ(counts.syncpt_incrs_after_fence, 0u);
+	EXPECT_EQ(counts.syncpt_id, 170u);
+	EXPECT_EQ(switch_exec_syncpt_marked(), seqno);
+}
+
+// A job that leaves its writes in the L2 (internal) or flushes only the FB (volatile) would let host1x read stale data,
+// and a channel no consumer asked about has no syncpoint: none of these increments.
+TEST_F(ExecWfi, OnlyAJobThatFlushesTheL2IncrementsAndOnlyOnAChannelWithASyncpoint)
+{
+	switch_exec_set_syncpt(170);
+	const auto internal = submit(SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT, nullptr, 0);
+	EXPECT_EQ(internal.syncpt_incrs, 0u);
+	const auto volatileWrites = submit(SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT |
+						   SWITCH_GPU_SUBMIT_VOLATILE_VISIBILITY,
+					   nullptr, 0);
+	EXPECT_EQ(volatileWrites.syncpt_incrs, 0u);
+	EXPECT_EQ(switch_exec_syncpt_marked(), 0u);
+
+	switch_exec_set_syncpt(0);
+	const auto unasked = submit(SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT |
+					    SWITCH_GPU_SUBMIT_EXTERNAL_VISIBILITY,
+				    nullptr, 0);
+	EXPECT_EQ(unasked.l2_flushes, 1u);
+	EXPECT_EQ(unasked.syncpt_incrs, 0u);
+}
+
+// Host-written input drops the L2's clean lines without evicting unrelated dirty lines. Explicit retirement flushes
+// (SWITCH_GPU_SUBMIT_L2_FLUSH_INVALIDATE) flush dirty lines before invalidating with no drain; a TLB change drains first.
+TEST_F(ExecWfi, AHostWrittenAcquireInvalidatesTheL2WithoutDrainingTheGpu)
+{
+	const auto hostWritten = submit(
+		SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT | SWITCH_GPU_SUBMIT_HOST_WRITTEN, nullptr, 0);
+	EXPECT_EQ(hostWritten.l2_invalidates, 1u);
+	EXPECT_EQ(hostWritten.l2_flushes, 0u);
+	EXPECT_EQ(hostWritten.method_wfis, 0u);
+	EXPECT_EQ(hostWritten.fb_flushes, 0u);
+
+	const auto retireFlush = submit(SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT |
+						SWITCH_GPU_SUBMIT_HOST_WRITTEN |
+						SWITCH_GPU_SUBMIT_L2_FLUSH_INVALIDATE,
+					nullptr, 0);
+	EXPECT_EQ(retireFlush.l2_invalidates, 1u);
+	EXPECT_EQ(retireFlush.l2_flushes, 1u);
+	EXPECT_EQ(retireFlush.method_wfis, 0u);
+	EXPECT_EQ(retireFlush.fb_flushes, 0u);
+
+	switch_exec_chan_dirty_tlb(chan);
+	const auto tlb = submit(SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT, nullptr, 0);
+	EXPECT_EQ(tlb.l2_invalidates, 1u);
+	EXPECT_EQ(tlb.l2_flushes, 1u);
+	EXPECT_EQ(tlb.method_wfis, 1u);
+	EXPECT_EQ(tlb.fb_flushes, 2u);
+}
 }  // namespace

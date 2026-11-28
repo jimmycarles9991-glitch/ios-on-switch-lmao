@@ -69,7 +69,8 @@ struct Rig {
                 return false;
             SwitchWindow *w = r.window[i];
             const uint32_t at = uint32_t(b - w->tag);
-            if (w->image != image || w->tag != firstTag + uint64_t(i) * kSwitchWindowBlocks || at >= 32)
+            if (w->image != image || w->tag != firstTag + uint64_t(i) * kSwitchWindowBlocks ||
+                at >= kSwitchWindowBlocks)
                 return false;
             if (!(w->valid & (1u << at)) || bytes(w)[at] != content(image, b))
                 return false;
@@ -92,27 +93,27 @@ TEST(CryptexCache, AColdMissReadsItsWholeWindowOnceAndNeighboursWaitForIt)
     SwitchCacheRead reads[32];
     uint32_t n = 0;
     SwitchCacheRequest a{}, b{}, c{};
-    ASSERT_TRUE(rig.cache.plan(&a, 0, 5, 1, 100, SwitchCache::kReadAround, reads, 32, &n));
+    ASSERT_TRUE(rig.cache.plan(&a, 0, 2, 1, 100, SwitchCache::kReadAround, reads, 32, &n));
     ASSERT_EQ(n, 1u);
     EXPECT_EQ(reads[0].first, 0u);
-    EXPECT_EQ(reads[0].count, 32u);
+    EXPECT_EQ(reads[0].count, kSwitchWindowBlocks);
     EXPECT_EQ(a.waiting, 1u);
     SwitchCacheRead none[32];
     uint32_t m = 0;
-    ASSERT_TRUE(rig.cache.plan(&b, 0, 6, 2, 100, SwitchCache::kReadAround, none, 32, &m));
+    ASSERT_TRUE(rig.cache.plan(&b, 0, 3, 2, 100, SwitchCache::kReadAround, none, 32, &m));
     EXPECT_EQ(m, 0u) << "a block being read is read again";
     EXPECT_EQ(b.waiting, 1u);
     EXPECT_EQ(rig.cache.check(), nullptr);
     std::vector<SwitchCacheRequest *> ready = list(rig.finish(reads[0], true));
     EXPECT_EQ(ready.size(), 2u);
-    EXPECT_TRUE(rig.copyOut(a, 0, 5, 1));
-    EXPECT_TRUE(rig.copyOut(b, 0, 6, 2));
+    EXPECT_TRUE(rig.copyOut(a, 0, 2, 1));
+    EXPECT_TRUE(rig.copyOut(b, 0, 3, 2));
     rig.cache.release(&a, true);
     rig.cache.release(&b, true);
-    ASSERT_TRUE(rig.cache.plan(&c, 0, 31, 1, 100, SwitchCache::kReadAround, none, 32, &m));
+    ASSERT_TRUE(rig.cache.plan(&c, 0, kSwitchWindowBlocks - 1, 1, 100, SwitchCache::kReadAround, none, 32, &m));
     EXPECT_EQ(m, 0u);
     EXPECT_EQ(c.waiting, 0u) << "a held block is not ready";
-    EXPECT_TRUE(rig.copyOut(c, 0, 31, 1));
+    EXPECT_TRUE(rig.copyOut(c, 0, kSwitchWindowBlocks - 1, 1));
     rig.cache.release(&c, true);
     EXPECT_EQ(rig.cache.stats().ready, 1u);
     EXPECT_EQ(rig.cache.stats().reads, 1u);
@@ -120,19 +121,78 @@ TEST(CryptexCache, AColdMissReadsItsWholeWindowOnceAndNeighboursWaitForIt)
     EXPECT_EQ(rig.cache.check(), nullptr);
 }
 
+// A request waiting on a read another request issued is joined (SwitchCryptex.cpp then raises that read to its
+// priority); one waiting only on reads its own plan issued is not.
+TEST(CryptexCache, ARequestWaitingOnAnotherRequestsReadIsJoined)
+{
+    Rig rig(4, 8, 100, 10);
+    SwitchCacheRead reads[32];
+    uint32_t n = 0;
+    SwitchCacheRequest a{}, b{}, c{}, d{};
+    ASSERT_TRUE(rig.cache.plan(&a, 0, 2, 1, 100, SwitchCache::kReadAround, reads, 32, &n));
+    EXPECT_FALSE(a.joined);
+    SwitchCacheRead none[32];
+    uint32_t m = 0;
+    ASSERT_TRUE(rig.cache.plan(&b, 0, 3, 2, 100, SwitchCache::kReadAround, none, 32, &m));
+    EXPECT_TRUE(b.joined);
+    ASSERT_TRUE(rig.cache.plan(&c, 0, 0, kSwitchWindowBlocks, 100, SwitchCache::kCoveredOnly, none, 32, &m));
+    EXPECT_TRUE(c.joined);
+    for (SwitchCacheRequest *r : list(rig.finish(reads[0], true)))
+        rig.cache.release(r, true);
+    ASSERT_TRUE(rig.cache.plan(&d, 0, 4, 1, 100, SwitchCache::kReadAround, none, 32, &m));
+    EXPECT_FALSE(d.joined) << "every block it needs is held";
+    rig.cache.release(&d, true);
+    EXPECT_EQ(rig.cache.check(), nullptr);
+}
+
+// A window is urgent while a tier-0 request waits on its reads or XNU raised them (SwitchCryptex.cpp issueRead raises a
+// fill planned before the mark once it is queued); the mark goes when nothing is reading the window, and on reuse.
+TEST(CryptexCache, AWindowIsUrgentWhileATierZeroRequestWaitsOnItsReads)
+{
+    Rig rig(1, 8, 100, 10);
+    SwitchCacheRead reads[32], none[32];
+    uint32_t n = 0, m = 0;
+    SwitchCacheRequest a{}, b{}, c{}, d{};
+    ASSERT_TRUE(rig.cache.plan(&a, 0, 2, 1, 100, SwitchCache::kReadAround, reads, 32, &n));
+    ASSERT_EQ(n, 1u);
+    SwitchWindow *w = reads[0].window;
+    EXPECT_FALSE(w->urgent) << "its own read, at its own priority";
+    ASSERT_TRUE(rig.cache.plan(&b, 0, 3, 1, 100, SwitchCache::kReadAround, none, 32, &m));
+    EXPECT_FALSE(w->urgent) << "a joiner below tier 0";
+    ASSERT_TRUE(rig.cache.plan(&c, 0, 4, 1, 100, SwitchCache::kReadAround, none, 32, &m, true));
+    EXPECT_TRUE(c.joined);
+    EXPECT_TRUE(w->urgent);
+    for (SwitchCacheRequest *r : list(rig.finish(reads[0], true)))
+        rig.cache.release(r, true);
+    EXPECT_FALSE(w->urgent) << "nothing reading it";
+
+    rig.cache.markUrgent(0, 0, kSwitchWindowBlocks);
+    EXPECT_FALSE(w->urgent) << "a raise of blocks it holds";
+    rig.cache.markUrgent(0, 0, 0);
+    ASSERT_TRUE(rig.cache.plan(&d, 0, 40, 1, 100, SwitchCache::kReadAround, reads, 32, &n));
+    ASSERT_EQ(reads[0].window, w) << "the one window is reused";
+    rig.cache.markUrgent(0, 40, 1);
+    EXPECT_TRUE(w->urgent) << "XNU raised a fill being read";
+    for (SwitchCacheRequest *r : list(rig.finish(reads[0], true)))
+        rig.cache.release(r, true);
+    EXPECT_FALSE(w->urgent);
+    EXPECT_EQ(rig.cache.check(), nullptr);
+}
+
 TEST(CryptexCache, TheLastWindowStopsAtTheImageEnd)
 {
-    Rig rig(2, 4, 40, 10);
+    constexpr uint64_t kImage = kSwitchWindowBlocks + 3;
+    Rig rig(2, 4, kImage, 10);
     SwitchCacheRead reads[32];
     uint32_t n = 0;
     SwitchCacheRequest a{};
-    ASSERT_TRUE(rig.cache.plan(&a, 0, 35, 1, 40, SwitchCache::kReadAround, reads, 32, &n));
+    ASSERT_TRUE(rig.cache.plan(&a, 0, kSwitchWindowBlocks + 1, 1, kImage, SwitchCache::kReadAround, reads, 32, &n));
     ASSERT_EQ(n, 1u);
     EXPECT_EQ(reads[0].first, 0u);
-    EXPECT_EQ(reads[0].count, 8u);
+    EXPECT_EQ(reads[0].count, 3u);
     SwitchCacheRequest past{};
     uint32_t m = 0;
-    EXPECT_FALSE(rig.cache.plan(&past, 0, 39, 2, 40, SwitchCache::kReadAround, reads + 1, 31, &m));
+    EXPECT_FALSE(rig.cache.plan(&past, 0, kImage - 1, 2, kImage, SwitchCache::kReadAround, reads + 1, 31, &m));
     EXPECT_FALSE(rig.cache.plan(&past, 1, 10, 1, 10, SwitchCache::kReadAround, reads + 1, 31, &m));
 }
 
@@ -142,59 +202,62 @@ TEST(CryptexCache, ReadAheadReadsExactlyItsBlocksAndRequestsFindThem)
     SwitchCacheRead reads[kSwitchWindowReads];
     uint32_t n = 0;
     std::vector<SwitchCacheRead> issued;
-    for (uint64_t at = 5, end = 40; at < end;) {
-        const uint32_t covered = rig.cache.readAhead(0, at, end - at, 200, reads, &n);
+    constexpr uint64_t kStart = 2;
+    constexpr uint64_t kEnd = kSwitchWindowBlocks + 3;
+    for (uint64_t at = kStart; at < kEnd;) {
+        const uint32_t covered = rig.cache.readAhead(0, at, kEnd - at, 200, reads, &n);
         ASSERT_GT(covered, 0u);
         issued.insert(issued.end(), reads, reads + n);
         at += covered;
     }
     ASSERT_EQ(issued.size(), 2u);
-    EXPECT_EQ(issued[0].first, 5u);
-    EXPECT_EQ(issued[0].count, 27u);
+    EXPECT_EQ(issued[0].first, kStart);
+    EXPECT_EQ(issued[0].count, kSwitchWindowBlocks - kStart);
     EXPECT_EQ(issued[1].first, 0u);
-    EXPECT_EQ(issued[1].count, 8u);
+    EXPECT_EQ(issued[1].count, 3u);
     EXPECT_NE(issued[0].window, issued[1].window);
     // A request inside the read-ahead waits for it and reads only the rest of its window.
     SwitchCacheRequest a{};
     SwitchCacheRead around[32];
-    ASSERT_TRUE(rig.cache.plan(&a, 0, 10, 4, 200, SwitchCache::kReadAround, around, 32, &n));
+    ASSERT_TRUE(rig.cache.plan(&a, 0, 3, 2, 200, SwitchCache::kReadAround, around, 32, &n));
     ASSERT_EQ(n, 1u);
     EXPECT_EQ(around[0].first, 0u);
-    EXPECT_EQ(around[0].count, 5u);
+    EXPECT_EQ(around[0].count, kStart);
     EXPECT_EQ(a.waiting, 1u);
     EXPECT_TRUE(list(rig.finish(around[0], true)).empty());
     EXPECT_EQ(list(rig.finish(issued[0], true)).size(), 1u);
-    EXPECT_TRUE(rig.copyOut(a, 0, 10, 4));
+    EXPECT_TRUE(rig.copyOut(a, 0, 3, 2));
     rig.cache.release(&a, true);
     EXPECT_TRUE(list(rig.finish(issued[1], true)).empty());
     // Read ahead again: nothing left to read.
-    EXPECT_EQ(rig.cache.readAhead(0, 5, 35, 200, reads, &n), 27u);
+    EXPECT_EQ(rig.cache.readAhead(0, kStart, kEnd - kStart, 200, reads, &n), kSwitchWindowBlocks - kStart);
     EXPECT_EQ(n, 0u);
-    EXPECT_EQ(rig.cache.stats().aheadBlocks, 35u);
-    EXPECT_EQ(rig.cache.stats().aheadServed, 4u);
+    EXPECT_EQ(rig.cache.stats().aheadBlocks, kEnd - kStart);
+    EXPECT_EQ(rig.cache.stats().aheadServed, 2u);
     EXPECT_EQ(rig.cache.check(), nullptr);
 }
 
 TEST(CryptexCache, ALargeRequestIsTakenOnlyWhenItsBlocksAreAllHere)
 {
+    constexpr uint32_t kTwoWindows = 2 * kSwitchWindowBlocks;
     Rig rig(4, 8, 300, 10);
     SwitchCacheRead reads[32];
     uint32_t n = 0;
     SwitchCacheRequest big{};
-    EXPECT_FALSE(rig.cache.plan(&big, 0, 0, 64, 300, SwitchCache::kCoveredOnly, reads, 32, &n));
+    EXPECT_FALSE(rig.cache.plan(&big, 0, 0, kTwoWindows, 300, SwitchCache::kCoveredOnly, reads, 32, &n));
     EXPECT_EQ(rig.cache.stats().refused, 1u);
-    for (uint64_t at = 0; at < 64;)
-        at += rig.cache.readAhead(0, at, 64 - at, 300, reads + (at ? 1 : 0), &n);
-    ASSERT_TRUE(rig.cache.plan(&big, 0, 0, 64, 300, SwitchCache::kCoveredOnly, reads + 2, 30, &n));
+    for (uint64_t at = 0; at < kTwoWindows;)
+        at += rig.cache.readAhead(0, at, kTwoWindows - at, 300, reads + (at ? 1 : 0), &n);
+    ASSERT_TRUE(rig.cache.plan(&big, 0, 0, kTwoWindows, 300, SwitchCache::kCoveredOnly, reads + 2, 30, &n));
     EXPECT_EQ(n, 0u);
     EXPECT_EQ(big.waiting, 2u);
     EXPECT_TRUE(list(rig.finish(reads[0], true)).empty());
     EXPECT_EQ(list(rig.finish(reads[1], true)).size(), 1u);
-    EXPECT_TRUE(rig.copyOut(big, 0, 0, 64));
+    EXPECT_TRUE(rig.copyOut(big, 0, 0, kTwoWindows));
     rig.cache.release(&big, true);
     // Not all here: refused, nothing held.
     SwitchCacheRequest wider{};
-    EXPECT_FALSE(rig.cache.plan(&wider, 0, 0, 65, 300, SwitchCache::kCoveredOnly, reads, 32, &n));
+    EXPECT_FALSE(rig.cache.plan(&wider, 0, 0, kTwoWindows + 1, 300, SwitchCache::kCoveredOnly, reads, 32, &n));
     EXPECT_EQ(rig.cache.check(), nullptr);
 }
 
@@ -227,15 +290,15 @@ TEST(CryptexCache, WindowsInUseAreNeverReusedOrRetired)
     uint32_t n = 0, m = 0;
     SwitchCacheRequest a{}, b{};
     ASSERT_TRUE(rig.cache.plan(&a, 0, 3, 1, 200, SwitchCache::kReadAround, reads, 32, &n));
-    EXPECT_FALSE(rig.cache.plan(&b, 0, 40, 1, 200, SwitchCache::kReadAround, reads + 1, 31, &m));
+    EXPECT_FALSE(rig.cache.plan(&b, 0, kSwitchWindowBlocks + 2, 1, 200, SwitchCache::kReadAround, reads + 1, 31, &m));
     EXPECT_EQ(rig.cache.retire(0), nullptr);
-    EXPECT_EQ(rig.cache.readAhead(0, 64, 4, 200, reads + 1, &m), 0u);
+    EXPECT_EQ(rig.cache.readAhead(0, 2 * kSwitchWindowBlocks, 4, 200, reads + 1, &m), 0u);
     ASSERT_EQ(list(rig.finish(reads[0], true)).size(), 1u);
-    EXPECT_FALSE(rig.cache.plan(&b, 0, 40, 1, 200, SwitchCache::kReadAround, reads + 1, 31, &m));
+    EXPECT_FALSE(rig.cache.plan(&b, 0, kSwitchWindowBlocks + 2, 1, 200, SwitchCache::kReadAround, reads + 1, 31, &m));
     EXPECT_EQ(rig.cache.retire(0), nullptr);
     rig.cache.release(&a, true);
-    ASSERT_TRUE(rig.cache.plan(&b, 0, 40, 1, 200, SwitchCache::kReadAround, reads, 32, &n));
-    EXPECT_EQ(rig.cache.stats().evicted, 1u) << "31 blocks of the first window were never served";
+    ASSERT_TRUE(rig.cache.plan(&b, 0, kSwitchWindowBlocks + 2, 1, 200, SwitchCache::kReadAround, reads, 32, &n));
+    EXPECT_EQ(rig.cache.stats().evicted, 1u) << "unserved blocks of the first window were evicted";
     EXPECT_EQ(list(rig.finish(reads[0], true)).size(), 1u);
     rig.cache.release(&b, true);
     SwitchWindow *w = rig.cache.retire(0);
@@ -250,28 +313,30 @@ TEST(CryptexCache, WindowsInUseAreNeverReusedOrRetired)
 // blocks nobody asked for yet.
 TEST(CryptexCache, FullyServedWindowsAreReusedFirst)
 {
+    constexpr uint32_t kHalf = kSwitchWindowBlocks / 2;
     Rig rig(2, 4, 1000, 10);
     SwitchCacheRead reads[32];
     uint32_t n = 0;
     SwitchCacheRequest a{}, b{}, c{};
-    // Window 0: read ahead (32 blocks) and served whole; window 1: read around one block.
-    ASSERT_EQ(rig.cache.readAhead(0, 0, 32, 1000, reads, &n), 32u);
+    // Window 0: read ahead (full window) and served whole; window 1: read around one block.
+    ASSERT_EQ(rig.cache.readAhead(0, 0, kSwitchWindowBlocks, 1000, reads, &n), kSwitchWindowBlocks);
     ASSERT_EQ(n, 1u);
     rig.finish(reads[0], true);
-    ASSERT_TRUE(rig.cache.plan(&b, 0, 32, 1, 1000, SwitchCache::kReadAround, reads, 32, &n));
+    ASSERT_TRUE(rig.cache.plan(&b, 0, kSwitchWindowBlocks, 1, 1000, SwitchCache::kReadAround, reads, 32, &n));
     rig.finish(reads[0], true);
     rig.cache.release(&b, true);
-    ASSERT_TRUE(rig.cache.plan(&a, 0, 0, 16, 1000, SwitchCache::kReadAround, reads, 32, &n));
+    ASSERT_TRUE(rig.cache.plan(&a, 0, 0, kHalf, 1000, SwitchCache::kReadAround, reads, 32, &n));
     EXPECT_EQ(n, 0u);
     rig.cache.release(&a, true);
-    ASSERT_TRUE(rig.cache.plan(&a, 0, 16, 16, 1000, SwitchCache::kReadAround, reads, 32, &n));
+    ASSERT_TRUE(
+        rig.cache.plan(&a, 0, kHalf, kSwitchWindowBlocks - kHalf, 1000, SwitchCache::kReadAround, reads, 32, &n));
     rig.cache.release(&a, true);
     // A new window takes window 0 (all served), though window 1 was used longer ago.
     ASSERT_TRUE(rig.cache.plan(&c, 0, 500, 1, 1000, SwitchCache::kReadAround, reads, 32, &n));
     rig.finish(reads[0], true);
     rig.cache.release(&c, true);
     EXPECT_EQ(rig.cache.stats().evicted, 0u);
-    ASSERT_TRUE(rig.cache.plan(&b, 0, 33, 1, 1000, SwitchCache::kReadAround, reads, 32, &n));
+    ASSERT_TRUE(rig.cache.plan(&b, 0, kSwitchWindowBlocks + 1, 1, 1000, SwitchCache::kReadAround, reads, 32, &n));
     EXPECT_EQ(n, 0u) << "window 1 was reused instead";
     rig.cache.release(&b, true);
     EXPECT_EQ(rig.cache.check(), nullptr);
@@ -339,12 +404,14 @@ TEST(CryptexCache, RandomTrafficAgainstAModel)
                 q->image = uint8_t(rng() % 4 == 0);
                 const uint64_t size = rig.imageBlocks[q->image];
                 const bool large = rng() % 6 == 0;
+                constexpr uint32_t kMaxSmall = kSwitchWindowBlocks / 2;
                 q->first = rng() % size;
                 const uint64_t room = size - q->first;
-                q->blocks = uint32_t(std::min<uint64_t>(room, large ? 17 + rng() % 240 : 1 + rng() % 16));
+                q->blocks =
+                    uint32_t(std::min<uint64_t>(room, large ? kMaxSmall + 1 + rng() % 240 : 1 + rng() % kMaxSmall));
                 SwitchCacheRead reads[kSwitchAroundWindows * kSwitchWindowReads];
                 uint32_t n = 0;
-                const auto mode = q->blocks > 16 ? SwitchCache::kCoveredOnly : SwitchCache::kReadAround;
+                const auto mode = q->blocks > kMaxSmall ? SwitchCache::kCoveredOnly : SwitchCache::kReadAround;
                 if (!rig.cache.plan(&q->cr, q->image, q->first, q->blocks, size, mode, reads,
                                     kSwitchAroundWindows * kSwitchWindowReads, &n)) {
                     ASSERT_EQ(n, 0u);
@@ -445,6 +512,62 @@ TEST(CryptexCache, RandomTrafficAgainstAModel)
            failedRequests);
     EXPECT_GT(failedRequests, 0u);
     EXPECT_GT(refused, 0u);
+}
+
+TEST(CryptexCache, TryHitInlineAndLarge)
+{
+    Rig rig(8, 32, 64, 64);
+    SwitchCacheRead reads[kSwitchWindowReads];
+    uint32_t n = 0;
+    EXPECT_EQ(rig.cache.readAhead(0, 0, kSwitchWindowBlocks, rig.imageBlocks[0], reads, &n), kSwitchWindowBlocks);
+    for (uint32_t i = 0; i < n; ++i)
+        rig.finish(reads[i], true);
+    EXPECT_EQ(rig.cache.readAhead(0, kSwitchWindowBlocks, kSwitchWindowBlocks, rig.imageBlocks[0], reads, &n),
+              kSwitchWindowBlocks);
+    for (uint32_t i = 0; i < n; ++i)
+        rig.finish(reads[i], true);
+    ASSERT_EQ(rig.cache.check(), nullptr);
+
+    SwitchCacheRequest req = {};
+    bool copied = false;
+    uint32_t copiedBlocks = 0;
+    const int small = rig.cache.tryHit(
+        &req, 0, 6, 4, rig.imageBlocks[0], true,
+        [&](const SwitchWindow *w, uint64_t from, uint64_t to) {
+            copiedBlocks += static_cast<uint32_t>(to - from);
+            const uint64_t *slot = static_cast<const uint64_t *>(w->bytes);
+            for (uint64_t b = from; b < to; ++b) {
+                if (slot[b - w->tag] != content(0, b))
+                    return false;
+            }
+            return true;
+        },
+        &copied);
+    EXPECT_EQ(small, 1);
+    EXPECT_TRUE(copied);
+    EXPECT_EQ(copiedBlocks, 4u);
+    EXPECT_EQ(rig.cache.check(), nullptr);
+
+    const int large = rig.cache.tryHit(
+        &req, 0, 2, 12, rig.imageBlocks[0], false,
+        [](const SwitchWindow *, uint64_t, uint64_t) {
+            return false;
+        },
+        &copied);
+    EXPECT_EQ(large, 2);
+    EXPECT_EQ(req.windows, 2u);
+    EXPECT_TRUE(rig.copyOut(req, 0, 2, 12));
+    rig.cache.release(&req, true);
+    EXPECT_EQ(rig.cache.check(), nullptr);
+
+    EXPECT_EQ(rig.cache.tryHit(
+                  &req, 0, 32, 2, rig.imageBlocks[0], true,
+                  [](const SwitchWindow *, uint64_t, uint64_t) {
+                      return false;
+                  },
+                  &copied),
+              0);
+    EXPECT_EQ(rig.cache.check(), nullptr);
 }
 
 }  // namespace

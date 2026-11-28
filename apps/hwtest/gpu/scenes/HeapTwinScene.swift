@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 // A heap texture drawn after its backing was purged keeps its contents, sampled through a white border sampler: the raw

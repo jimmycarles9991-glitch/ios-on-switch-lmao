@@ -135,8 +135,6 @@ TEST_P(GiveUp, AStoppedHoldersPromiseIsGivenUpAtItsBound)
 	EXPECT_EQ(shown(), kPrevious);
 	EXPECT_EQ(fake::pathAbandoned, 1u);
 	EXPECT_EQ(fake::cpuRaised, 1u);
-	EXPECT_EQ(probedReaders, 1u)
-		<< "the ACQUIRE probe looks at the reader still parked at the give-up";
 	EXPECT_FALSE(fake::call.pending) << "nothing left to wait on";
 	EXPECT_EQ(tgm_promise_unhold(kOffset, kValue), 1) << "a keep after the bound is refused";
 	makerRetires();

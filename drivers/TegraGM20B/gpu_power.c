@@ -133,7 +133,7 @@ static void sleep_idle_off(void)
 static void sleep_nvkm(void)
 {
 	struct nvkm_device *device = tgm_gpu.device;
-	u64 start = TGM_STATS ? nvxnu_nanotime() : 0;
+	u64 start = TGM_DEBUG_PROBES ? nvxnu_nanotime() : 0;
 	int ret = nvif_client_suspend(&tgm_gpu.client, false);
 
 	if (ret)
@@ -141,7 +141,7 @@ static void sleep_nvkm(void)
 	tgm_journal("tegra-gm20b: sleep: nvkm objects suspended (GR contexts saved, channels off "
 		    "the runlist): %llu us",
 		    us_since(start));
-	start = TGM_STATS ? nvxnu_nanotime() : 0;
+	start = TGM_DEBUG_PROBES ? nvxnu_nanotime() : 0;
 	tgm_stamp_last = tgm_stamp_monotonic(tgm_stamp_last, nvkm_timer_read(device->timer));
 	/* nvgpu_mm_suspend cleans the comptag lines (FLUSH_L2_CLEAN_COMPTAGS) before its L2 flush: the backing store must
 	 * hold every line the L2 loses with its power */
@@ -175,7 +175,7 @@ static void sleep_nvkm(void)
 
 static void sleep_power_down(void)
 {
-	u64 start = TGM_STATS ? nvxnu_nanotime() : 0;
+	u64 start = TGM_DEBUG_PROBES ? nvxnu_nanotime() : 0;
 	int drained = 0;
 	int ret = 0;
 
@@ -194,7 +194,7 @@ static void sleep_power_down(void)
 
 static void wake_power_up(void)
 {
-	u64 start = TGM_STATS ? nvxnu_nanotime() : 0;
+	u64 start = TGM_DEBUG_PROBES ? nvxnu_nanotime() : 0;
 	int ret = tegra_gm20b_rail_ungate();
 	int uv = 0;
 
@@ -203,7 +203,7 @@ static void wake_power_up(void)
 			    ret);
 	}
 	nvxnu_irq_resume();
-	if (TGM_STATS)
+	if (TGM_DEBUG_PROBES)
 		tegra_gm20b_rail_get_uv(&uv);
 	tgm_journal("tegra-gm20b: wake: VDD_GPU %d uV, clocks on, out of reset and clamp: %llu us",
 		    uv, us_since(start));
@@ -227,7 +227,7 @@ static void stamp_reseed(struct nvkm_device *device)
 static void wake_m1(void)
 {
 	struct nvkm_device *device = tgm_gpu.device;
-	u64 start = TGM_STATS ? nvxnu_nanotime() : 0;
+	u64 start = TGM_DEBUG_PROBES ? nvxnu_nanotime() : 0;
 	u32 boot0 = nvkm_rd32(device, 0x000000);
 	u32 ring = 0;
 	int ret = 0;
@@ -264,12 +264,12 @@ static void wake_m1(void)
 static void wake_clock(void)
 {
 	struct nvkm_device *device = tgm_gpu.device;
-	u64 start = TGM_STATS ? nvxnu_nanotime() : 0;
+	u64 start = TGM_DEBUG_PROBES ? nvxnu_nanotime() : 0;
 	char line[200] = "";
 	int ret = tgm_clk_raise(line, sizeof(line));
 	int khz = 0;
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 	tgm_rail_wake_seen(nvkm_rd32(device, GPCPLL_COEFF_R));
 #endif
 	if (!ret && sc7.idle_on)
@@ -289,7 +289,7 @@ static void wake_device(void)
 {
 	struct nvkm_device *device = tgm_gpu.device;
 	struct nvkm_acr *acr = device->acr;
-	u64 start = TGM_STATS ? nvxnu_nanotime() : 0;
+	u64 start = TGM_DEBUG_PROBES ? nvxnu_nanotime() : 0;
 	u64 lo = 0;
 	u64 hi = 0;
 	const char *at = "";
@@ -319,14 +319,14 @@ static void wake_device(void)
 static void wake_nvkm(void)
 {
 	struct tgm_chan *chan = NULL;
-	u64 start = TGM_STATS ? nvxnu_nanotime() : 0;
+	u64 start = TGM_DEBUG_PROBES ? nvxnu_nanotime() : 0;
 	u32 chans = 0;
 	u32 dead = 0;
 	int ret = nvif_client_resume(&tgm_gpu.client);
 
 	if (ret)
 		nvxnu_panic("tegra-gm20b: wake: nvkm object resume failed: %d", ret);
-	if (TGM_STATS) {
+	if (TGM_DEBUG_PROBES) {
 		mutex_lock(&tgm_live_lock);
 		list_for_each_entry(chan, &tgm_live_chans, live)
 		{
@@ -429,6 +429,9 @@ void tgm_sleep(void)
 	switch_sleep_mark(SWITCH_STEP_GPU_GATE);
 	sleep_gate();
 	tgm_deadline_suspend();
+#if TGM_STATS
+	tgm_stats_suspend();
+#endif
 	switch_sleep_mark(SWITCH_STEP_GPU_FENCES);
 	sleep_fences();
 	mutex_lock(&tgm_gpu.lock);
@@ -468,6 +471,9 @@ void tgm_wake(void)
 	tgm_clkgate_enable(tgm_gpu.device);
 	wake_open();
 	tgm_deadline_resume();
+#if TGM_STATS
+	tgm_stats_resume();
+#endif
 }
 
 /* Rail-gating (TegraGM20BRail.h), from TegraGM20B.cpp's rail worker: system sleep's sleep steps, its durable trail
@@ -475,7 +481,7 @@ void tgm_wake(void)
  * without an nvkm client (it stays as it is). */
 int tgm_rail_down(void)
 {
-	u64 start = TGM_STATS ? nvxnu_nanotime() : 0;
+	u64 start = TGM_DEBUG_PROBES ? nvxnu_nanotime() : 0;
 
 	if (__atomic_load_n(&tgm_gpu.railed, __ATOMIC_SEQ_CST))
 		return 0;
@@ -483,6 +489,9 @@ int tgm_rail_down(void)
 		return -EBUSY;
 	sleep_gate();
 	tgm_deadline_suspend();
+#if TGM_STATS
+	tgm_stats_suspend();
+#endif
 	sleep_fences();
 	mutex_lock(&tgm_gpu.lock);
 	sleep_idle_off();
@@ -503,7 +512,7 @@ int tgm_rail_down(void)
  * caller's own work is the GPU's next test. `site` is the caller's return address, NULL for the display. */
 void tgm_rail_up_locked(const void *site)
 {
-	u64 start = TGM_STATS ? nvxnu_nanotime() : 0;
+	u64 start = TGM_DEBUG_PROBES ? nvxnu_nanotime() : 0;
 	const char *clock = NULL;
 
 	tgm_rail_moving();
@@ -521,7 +530,10 @@ void tgm_rail_up_locked(const void *site)
 	gate_open();
 	__atomic_store_n(&tgm_gpu.railed, 0, __ATOMIC_SEQ_CST);
 	tgm_deadline_resume();
-	if (TGM_STATS) {
+#if TGM_STATS
+	tgm_stats_resume();
+#endif
+	if (TGM_DEBUG_PROBES) {
 		if (site) {
 			if (!tgm_rail_ups.demand++)
 				tgm_rail_ups.first_site = site;

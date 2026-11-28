@@ -24,12 +24,6 @@ constexpr uint32_t kAmplificationWords = mme::kAmplificationScratchWords + mme::
 
 }  // namespace
 
-void RenderEncoder::setVertexStride(uint32_t slot, uint32_t stride)
-{
-    if (slot < 31)
-        vertexStrides_[slot] = stride;
-}
-
 void RenderEncoder::setAmplification(uint32_t count, const uint32_t (&viewports)[kAmplificationMaps],
                                      const uint32_t (&layers)[kAmplificationMaps])
 {

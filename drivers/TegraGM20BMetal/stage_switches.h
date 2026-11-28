@@ -33,10 +33,10 @@ inline void stageSwitchesOn(Push &p)
     p.m(kRasterSwitch, 1);
 }
 
-// The switches a state of `pp` and key head `keyString` turns off, into its methods `w`, and back on, into `restore`
-inline void stageSwitches(const PackPipeline &pp, const char *keyString, Push &w, std::vector<uint32_t> &restore)
+// The switches a state of `pp` and rasterisation flag turns off, into its methods `w`, and back on, into `restore`
+inline void stageSwitches(const PackPipeline &pp, bool rasterDisabled, Push &w, std::vector<uint32_t> &restore)
 {
-    const bool pixel = pixelStage(pp), raster = !rasterOff(keyString);
+    const bool pixel = pixelStage(pp), raster = !rasterDisabled;
     if (pixel && raster)
         return;
     uint32_t back[kStageSwitchWords];
@@ -50,6 +50,30 @@ inline void stageSwitches(const PackPipeline &pp, const char *keyString, Push &w
         r.m(kRasterSwitch, 1);
     }
     restore.insert(restore.end(), back, r.at);
+}
+
+inline void stageSwitches(const PackPipeline &pp, const char *keyString, Push &w, std::vector<uint32_t> &restore)
+{
+    stageSwitches(pp, rasterOff(keyString), w, restore);
+}
+
+inline void stageSwitchesRestore(const PackPipeline &pp, bool rasterDisabled, std::vector<uint32_t> &restore)
+{
+    const bool pixel = pixelStage(pp), raster = !rasterDisabled;
+    if (pixel && raster)
+        return;
+    uint32_t back[kStageSwitchWords];
+    Push r{back, back + kStageSwitchWords};
+    if (!pixel)
+        r.m(kPixelStageSwitch, kPixelStageOn);
+    if (!raster)
+        r.m(kRasterSwitch, 1);
+    restore.insert(restore.end(), back, r.at);
+}
+
+inline void stageSwitchesRestore(const PackPipeline &pp, const char *keyString, std::vector<uint32_t> &restore)
+{
+    stageSwitchesRestore(pp, rasterOff(keyString), restore);
 }
 
 }  // namespace gm20b

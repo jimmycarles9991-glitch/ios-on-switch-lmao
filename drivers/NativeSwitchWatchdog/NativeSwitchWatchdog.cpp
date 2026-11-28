@@ -64,7 +64,10 @@ class NativeSwitchWatchdog : public IOWatchdog {
     uint64_t pausedDeadline_;  // the deadline at sleep and the time it had left, 0: none paused
     uint64_t pausedLeft_;
     IOLock *verdictLock_;  // thermalmonitord's verdict, taken once at watchdogd's first open
-    bool verdictTaken_;
+    uint8_t verdictState_;
+    static constexpr uint8_t kVerdictPending = 0;
+    static constexpr uint8_t kVerdictInProgress = 1;
+    static constexpr uint8_t kVerdictDone = 2;
     static constexpr unsigned kSensorWaitMS = 180000;  // the most watchdogd's first open waits for the sensors
 
     void arm();
@@ -87,6 +90,7 @@ class NativeSwitchWatchdog : public IOWatchdog {
 
 public:
     bool start(IOService *provider) override;
+    void free() override;
     IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type, OSDictionary *properties,
                            IOUserClient **handler) override;
 
@@ -111,7 +115,8 @@ OSDefineMetaClassAndStructors(NativeSwitchWatchdog, IOWatchdog)
     leeway_ = overdue_;
     loop_ = IOWorkLoop::workLoop();
     timer_ = IOTimerEventSource::timerEventSource(this, &NativeSwitchWatchdog::expired);
-    if (!loop_ || !timer_ || loop_->addEventSource(timer_) != kIOReturnSuccess)
+    verdictLock_ = IOLockAlloc();
+    if (!loop_ || !timer_ || !verdictLock_ || loop_->addEventSource(timer_) != kIOReturnSuccess)
         return false;
     // Before it registers: watchdogd's sandbox would refuse its open of a class it does not name.
     setProperty("NativeSandboxGrantProcess", "watchdogd");
@@ -123,8 +128,35 @@ OSDefineMetaClassAndStructors(NativeSwitchWatchdog, IOWatchdog)
     setIOKitMonitoring(false);
     setProperty("IOKitQuiesceWatchdogEnabled", false);
     gWatchdog = this;
-    verdictLock_ = IOLockAlloc();
     return true;
+}
+
+void NativeSwitchWatchdog::free()
+{
+    if (power_) {
+        power_->remove();
+        power_ = nullptr;
+    }
+    if (timer_) {
+        timer_->cancelTimeout();
+        if (loop_)
+            loop_->removeEventSource(timer_);
+        OSSafeReleaseNULL(timer_);
+    }
+#if DEVELOPMENT || DEBUG
+    if (heartbeat_) {
+        heartbeat_->disable();
+        if (loop_)
+            loop_->removeEventSource(heartbeat_);
+        OSSafeReleaseNULL(heartbeat_);
+    }
+#endif
+    OSSafeReleaseNULL(loop_);
+    if (verdictLock_) {
+        IOLockFree(verdictLock_);
+        verdictLock_ = nullptr;
+    }
+    IOWatchdog::free();
 }
 
 // The original user client (entitlement-checked). watchdogd's first connection starts the deadline checks. Before the
@@ -132,16 +164,23 @@ OSDefineMetaClassAndStructors(NativeSwitchWatchdog, IOWatchdog)
 IOReturn NativeSwitchWatchdog::newUserClient(task_t owningTask, void *securityID, UInt32 type, OSDictionary *properties,
                                              IOUserClient **handler)
 {
-    if (verdictLock_)
+    if (verdictLock_) {
         IOLockLock(verdictLock_);
-    if (!verdictTaken_) {
-        verdictTaken_ = true;
-        char why[256] = "";
-        if (!switch_sensors_wait_ready(kSensorWaitMS, why, sizeof(why)))
-            loop_->runAction(&NativeSwitchWatchdog::thermalOffGated, this, why);
-    }
-    if (verdictLock_)
+        if (verdictState_ == kVerdictPending) {
+            verdictState_ = kVerdictInProgress;
+            IOLockUnlock(verdictLock_);
+            char why[256] = "";
+            if (!switch_sensors_wait_ready(kSensorWaitMS, why, sizeof(why)))
+                loop_->runAction(&NativeSwitchWatchdog::thermalOffGated, this, why);
+            IOLockLock(verdictLock_);
+            verdictState_ = kVerdictDone;
+            IOLockWakeup(verdictLock_, &verdictState_, false);
+        } else {
+            while (verdictState_ != kVerdictDone)
+                IOLockSleep(verdictLock_, &verdictState_, THREAD_UNINT);
+        }
         IOLockUnlock(verdictLock_);
+    }
     const IOReturn opened = IOWatchdog::newUserClient(owningTask, securityID, type, properties, handler);
     if (opened == kIOReturnSuccess)
         loop_->runAction(&NativeSwitchWatchdog::connectedGated, this);

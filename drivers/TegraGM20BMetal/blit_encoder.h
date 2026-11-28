@@ -41,8 +41,8 @@ public:
     void copyRect(uint64_t src, uint32_t srcPitch, uint64_t dst, uint32_t dstPitch, uint32_t width, uint32_t lines,
                   uint32_t bpp);
     // `w` x `h` texels from (sx, sy) of plane sz of `src` to (dx, dy) of plane dz of `dst`, each pitch or block-linear (a 2D
-    // texture's plane is 0) (vkCmdCopyImage)
-    void copyTexels(const Texture &src, uint32_t sx, uint32_t sy, uint32_t sz, const Texture &dst, uint32_t dx,
+    // texture's plane is 0) (vkCmdCopyImage). False only when an overlapping copy cannot allocate staging memory.
+    bool copyTexels(const Texture &src, uint32_t sx, uint32_t sy, uint32_t sz, const Texture &dst, uint32_t dx,
                     uint32_t dy, uint32_t dz, uint32_t w, uint32_t h, uint8_t aspect = kAspectWhole);
     // `w` x `h` texels from the origin of plane z of `t` (a chain level: chainLevelImage) each set to `fill`'s texel
     void fillTexels(const Texture &t, uint32_t z, uint32_t w, uint32_t h, const CopyFill &fill);
@@ -124,6 +124,7 @@ private:
     // the engine of the work before it and where its opening ended: an encoder that sent nothing after its opening
     // changed no engine, and leaves the command buffer's as it found it
     BarrierEngine before_ = BarrierEngine::None;
+    bool beforePassShaderFlushed_ = false, beforeComputeReleased_ = false;
     uint32_t *opened_ = nullptr;
     static constexpr uint8_t kAccesses = 16;
     const void *read_[kAccesses] = {}, *written_[kAccesses] = {};

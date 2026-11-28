@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #define SWITCH_PREFETCH_IMPL 1
 #include "prefetch_internal.h"
+#include "prefetch_naming.h"
 #include "prefetch_pace.h"
 
 #include <kern/clock.h>
@@ -16,6 +17,8 @@
 #include <sys/fcntl.h>
 #include <sys/mount.h>
 #include <sys/param.h>
+#include <sys/resource.h>
+#include <sys/systm.h>
 #include <sys/vnode.h>
 #include <vm/vnode_pager.h>
 #if XNU_12377_121_6
@@ -36,7 +39,7 @@ static struct {
     uint32_t thread_active;
     uint32_t thread_done;
     int done_event;
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
     thread_call_t diag_call;
     uint32_t diag_stop;
     uint64_t prev_demand_bytes[SWITCH_PREFETCH_VOLUME_COUNT];
@@ -62,7 +65,7 @@ static inline mount_t switch_prefetch_mount_at(unsigned index)
     return (mount_t)__atomic_load_n(&g_prefetch.ready.mounts[index], __ATOMIC_ACQUIRE);
 }
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
 static uint64_t switch_abs_to_ms(uint64_t abs_ticks)
 {
     uint64_t ns = 0;
@@ -74,6 +77,11 @@ static uint64_t switch_delta(uint64_t cur, uint64_t prev)
 {
     return cur >= prev ? cur - prev : 0u;
 }
+
+#if CONFIG_IOSCHED
+/* XNU's busy-page raises: queued (vm_object.c) and the device's answer to each (vnode_pager.c) */
+extern uint64_t switch_reprio_requested, switch_reprio_delivered, switch_reprio_failed;
+#endif
 
 static void switch_prefetch_diag_tick(thread_call_param_t p0 __unused, thread_call_param_t p1 __unused)
 {
@@ -128,6 +136,19 @@ static void switch_prefetch_diag_tick(thread_call_param_t p0 __unused, thread_ca
         "demand %llu/%llu",
         r_mib, u_mib, x_mib, l_mib, b_mib, d_cx + d_root + d_data, d_cx, d_root, d_data, replay_ms, demand_ms,
         replay_gt64k, replay_reqs, demand_gt64k, demand_reqs);
+    os_log(
+        OS_LOG_DEFAULT,
+        "SwitchBootPrefetch: recorded %llu reads, %llu MiB through cluster_io, %llu MiB through decmpfs, %llu MiB of "
+        "first uses; the replay's decmpfs page-ins %llu MiB, %llu MiB of them tagged",
+        io.record_entries, io.record_bytes[SWITCH_RECORD_CLUSTER] >> 20, io.record_bytes[SWITCH_RECORD_DECMPFS] >> 20,
+        io.record_bytes[SWITCH_RECORD_FIRST_USE] >> 20, pace.replay_decmp_bytes >> 20,
+        pace.replay_decmp_tagged_bytes >> 20);
+#if CONFIG_IOSCHED
+    os_log(OS_LOG_DEFAULT, "SwitchBootPrefetch: busy-page raises requested %llu delivered %llu refused %llu",
+           (unsigned long long)__atomic_load_n(&switch_reprio_requested, __ATOMIC_RELAXED),
+           (unsigned long long)__atomic_load_n(&switch_reprio_delivered, __ATOMIC_RELAXED),
+           (unsigned long long)__atomic_load_n(&switch_reprio_failed, __ATOMIC_RELAXED));
+#endif
 
     if (__atomic_load_n(&g_prefetch.diag_stop, __ATOMIC_SEQ_CST) == 0u) {
         uint64_t deadline = 0;
@@ -281,8 +302,9 @@ static struct switch_prefetch_run *switch_prefetch_load_list(const struct switch
     return runs;
 }
 
+/* files: run_count slots for the files it opens, which the save names this boot's reads by. Returns how many. */
 static uint32_t switch_prefetch_replay_runs(const struct switch_prefetch_run *runs, uint32_t run_count,
-                                            uint8_t *replayed_bits)
+                                            struct switch_named_file *files)
 {
     uint64_t list_bytes = 0;
     for (uint32_t i = 0; i < run_count; ++i) {
@@ -292,6 +314,7 @@ static uint32_t switch_prefetch_replay_runs(const struct switch_prefetch_run *ru
     const uint64_t bound = switch_vm_prefetch_begin(list_vm_pages, current_thread());
     if (bound == 0u) {
         switch_vm_prefetch_end_replay();
+        switch_vm_prefetch_forget_replay_thread();
         return 0u;
     }
     switch_cluster_record_set_skip_thread(current_thread());
@@ -302,9 +325,25 @@ static uint32_t switch_prefetch_replay_runs(const struct switch_prefetch_run *ru
     uint8_t vp_volume = 0xffu;
     struct switch_prefetch_file_meta vp_meta = {0};
     bool vp_valid = false;
-    uint32_t replayed = 0;
+    uint32_t file_count = 0;
+    uint64_t second_abs = 0;
+    nanoseconds_to_absolutetime(NSEC_PER_SEC, &second_abs);
+    const uint64_t start_abs = mach_absolute_time();
 
     for (uint32_t i = 0; i < run_count; ++i) {
+        const uint64_t due_abs =
+            start_abs + switch_pace_run_due_s(runs[i].when, SWITCH_PREFETCH_LOOKAHEAD_S) * second_abs;
+        if (mach_absolute_time() < due_abs) {
+            if (vp != NULLVP) {
+                vnode_put(vp);
+                vp = NULLVP;
+            }
+            vp_volume = 0xffu;
+            vp_valid = false;
+            if (!switch_vm_prefetch_wait_until(due_abs)) {
+                break;
+            }
+        }
         if (!switch_vm_prefetch_can_issue_now()) {
             /* Release any vnode iocount before blocking so unmount never waits on the replay thread. */
             if (vp != NULLVP) {
@@ -331,6 +370,16 @@ static uint32_t switch_prefetch_replay_runs(const struct switch_prefetch_run *ru
             vp_volume = run->volume;
             vp_valid =
                 switch_prefetch_vget_regular(mp, g_prefetch.fsids[run->volume], run->file_id, ctx, &vp, &vp_meta);
+            if (vp_valid && files != NULL && file_count < run_count) {
+                const struct switch_named_file file = {vp,
+                                                       vnode_vid(vp),
+                                                       run->volume,
+                                                       run->file_id,
+                                                       vp_meta.file_size,
+                                                       vp_meta.mtime_sec,
+                                                       vp_meta.mtime_nsec};
+                files[file_count++] = file;
+            }
         } else if (vp_valid && (run->volume == SWITCH_PREFETCH_VOL_DATA || vnode_isrecycled(vp))) {
             /* Re-validate writable Data vnodes across consecutive runs so truncation or unlink skips cleanly. */
             if (!switch_prefetch_vnode_meta(vp, mp, run->file_id, ctx, NULL, &vp_meta)) {
@@ -348,13 +397,7 @@ static uint32_t switch_prefetch_replay_runs(const struct switch_prefetch_run *ru
             continue;
         }
         int err = 0;
-        const int rc = vnode_pagein(vp, NULL, 0, in.offset, (upl_size_t)in.length, 0, &err);
-        if (rc == PAGER_SUCCESS) {
-            if (replayed_bits != NULL) {
-                switch_prefetch_bit_set(replayed_bits, i);
-            }
-            replayed = i + 1u;
-        }
+        (void)vnode_pagein(vp, NULL, 0, in.offset, (upl_size_t)in.length, 0, &err);
     }
     if (vp != NULLVP) {
         vnode_put(vp);
@@ -362,20 +405,25 @@ static uint32_t switch_prefetch_replay_runs(const struct switch_prefetch_run *ru
     switch_cluster_record_set_skip_thread(NULL);
     switch_vm_prefetch_end_replay();
     switch_vm_prefetch_wait_inflight_drain();
-    return replayed;
+    switch_vm_prefetch_forget_replay_thread();
+    return file_count;
 }
 
 static void switch_prefetch_thread(void *parameter, wait_result_t w __unused)
 {
     struct switch_record_entry *log = (struct switch_record_entry *)parameter;
     const size_t log_bytes = (size_t)SWITCH_PREFETCH_LOG_ENTRIES * sizeof(*log);
+    /* Passive: the replay's reads go to the card in tier 0 but must not open XNU's throttle windows. Its 1.6 GB of
+     * speculative reads held every lower-tier thread in throttle_lowpri_io for the whole replay (17-117 threads in each
+     * boot stackshot), and processes that waited on those daemons waited with them. */
+    throttle_set_thread_io_policy(IOPOL_PASSIVE);
     struct switch_prefetch_header key;
     struct switch_prefetch_run *runs = NULL;
-    uint8_t *replayed_bits = NULL;
-    size_t replayed_bits_bytes = 0;
+    struct switch_named_file *files = NULL;
+    size_t files_bytes = 0;
     uint32_t run_count = 0;
     size_t runs_bytes = 0;
-    uint32_t replayed = 0;
+    uint32_t file_count = 0;
     bool have_key = false;
 
     if (switch_vm_prefetch_boot_stop_reason() == SWITCH_PREFETCH_STOP_NONE) {
@@ -388,13 +436,13 @@ static void switch_prefetch_thread(void *parameter, wait_result_t w __unused)
             if (runs == NULL) {
                 os_log(OS_LOG_DEFAULT, "SwitchBootPrefetch: no list to replay (%s); this boot records one", why);
             } else if (run_count != 0u) {
-                replayed_bits_bytes = ((size_t)run_count + 7u) / 8u;
-                replayed_bits = (uint8_t *)kalloc_data(replayed_bits_bytes, Z_WAITOK | Z_ZERO);
+                files_bytes = (size_t)run_count * sizeof(*files);
+                files = (struct switch_named_file *)kalloc_data(files_bytes, Z_WAITOK);
             }
         }
     }
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
     if (have_key && switch_vm_prefetch_boot_stop_reason() == SWITCH_PREFETCH_STOP_NONE) {
         g_prefetch.diag_call = thread_call_allocate_with_options(switch_prefetch_diag_tick, NULL,
                                                                  THREAD_CALL_PRIORITY_LOW, THREAD_CALL_OPTIONS_ONCE);
@@ -407,12 +455,16 @@ static void switch_prefetch_thread(void *parameter, wait_result_t w __unused)
 #endif
 
     if (runs != NULL && switch_vm_prefetch_replay_stop_reason() == SWITCH_PREFETCH_STOP_NONE) {
-        replayed = switch_prefetch_replay_runs(runs, run_count, replayed_bits);
+        file_count = switch_prefetch_replay_runs(runs, run_count, files);
+    }
+    if (runs != NULL) {
+        kfree_data(runs, runs_bytes);
+        runs = NULL;
     }
 
     const uint32_t stop_reason = switch_vm_prefetch_wait_stop();
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
     if (g_prefetch.diag_call != NULL) {
         thread_call_t call = g_prefetch.diag_call;
         __atomic_store_n(&g_prefetch.diag_stop, 1u, __ATOMIC_SEQ_CST);
@@ -431,18 +483,15 @@ static void switch_prefetch_thread(void *parameter, wait_result_t w __unused)
         for (unsigned v = 0; v < SWITCH_PREFETCH_VOLUME_COUNT; ++v) {
             mounts[v] = switch_prefetch_mount_at(v);
         }
-        switch_prefetch_save_next(log, appended, runs, replayed, replayed_bits, &key, mounts, g_prefetch.fsids,
+        switch_prefetch_save_next(&log, log_bytes, appended, files, file_count, &key, mounts, g_prefetch.fsids,
                                   SWITCH_PREFETCH_VOLUME_COUNT);
     }
 
     if (log != NULL) {
         kfree_data(log, log_bytes);
     }
-    if (replayed_bits != NULL) {
-        kfree_data(replayed_bits, replayed_bits_bytes);
-    }
-    if (runs != NULL) {
-        kfree_data(runs, runs_bytes);
+    if (files != NULL) {
+        kfree_data(files, files_bytes);
     }
 
     __atomic_store_n(&g_prefetch.thread_done, 1u, __ATOMIC_SEQ_CST);
@@ -535,18 +584,31 @@ void switch_boot_io_complete(void)
     (void)switch_vm_prefetch_stop(SWITCH_PREFETCH_STOP_BOOT_COMPLETE);
 }
 
+/* The replay thread's exit after a stop waits for its in-flight reads (at most 1.5 MiB at the card) and, after Boot
+ * Complete, for the list save, which stops at its next file once shutdown has begun. One still running this long into
+ * shutdown means a read or a save step that never completed; shutdown would hang on it with nothing logged, and
+ * release kernels have no other shutdown watchdog. */
+#define SWITCH_PREFETCH_SHUTDOWN_S 20u
+
 void switch_prefetch_shutdown(void)
 {
     (void)switch_vm_prefetch_stop(SWITCH_PREFETCH_STOP_SHUTDOWN);
     if (__atomic_load_n(&g_prefetch.thread_active, __ATOMIC_SEQ_CST) == 0u) {
         return;
     }
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(SWITCH_PREFETCH_SHUTDOWN_S, NSEC_PER_SEC, &deadline);
     while (__atomic_load_n(&g_prefetch.thread_done, __ATOMIC_SEQ_CST) == 0u) {
-        assert_wait((event_t)&g_prefetch.done_event, THREAD_UNINT);
+        assert_wait_deadline((event_t)&g_prefetch.done_event, THREAD_UNINT, deadline);
         if (__atomic_load_n(&g_prefetch.thread_done, __ATOMIC_SEQ_CST) != 0u) {
             clear_wait(current_thread(), THREAD_AWAKENED);
             break;
         }
-        thread_block(THREAD_CONTINUE_NULL);
+        if (thread_block(THREAD_CONTINUE_NULL) == THREAD_TIMED_OUT &&
+            __atomic_load_n(&g_prefetch.thread_done, __ATOMIC_SEQ_CST) == 0u) {
+            panic("SwitchBootPrefetch: the replay thread is still running %u s into shutdown: a replay read or a list "
+                  "save step never completed",
+                  SWITCH_PREFETCH_SHUTDOWN_S);
+        }
     }
 }

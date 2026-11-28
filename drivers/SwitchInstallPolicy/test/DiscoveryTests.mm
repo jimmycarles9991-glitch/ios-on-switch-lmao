@@ -79,6 +79,8 @@ int main(void)
         NSURL *linkedInfo = switch_discovery_fixture(app, @"LinkedInfo", nil);
         assert(!symlink([outside URLByAppendingPathComponent:@"Info.plist"].fileSystemRepresentation,
             [linkedInfo URLByAppendingPathComponent:@"Info.plist"].fileSystemRepresentation));
+        assert([@"asset" writeToURL:[app URLByAppendingPathComponent:@"Icon.png"]
+                         atomically:YES encoding:NSUTF8StringEncoding error:nil]);
         SwitchDiscoveryFixtureBundle *parent = [SwitchDiscoveryFixtureBundle new];
         parent.bundleURL = app;
         SwitchDiscoveryFixtureBundle *known = [SwitchDiscoveryFixtureBundle new];
@@ -101,6 +103,8 @@ int main(void)
         NSUInteger calls = switch_discovery_calls;
         assert(switch_discover_extensions(parent, SwitchDiscoveryFixtureBundle.class, NO, @[], &error) == plugins);
         assert(calls == switch_discovery_calls);
+        // ExtensionKit reuses the single cached directory walk from the PluginKit discovery call.
+        switch_discovery_fixture(app, @"Extensions/AddedAfterScan", modern);
         NSArray *extensions = switch_discover_extensions(parent, SwitchDiscoveryFixtureModern.class, YES, @[], &error);
         assert(extensions.count == 2 && !error);
         for (SwitchDiscoveryFixtureBundle *bundle in extensions)

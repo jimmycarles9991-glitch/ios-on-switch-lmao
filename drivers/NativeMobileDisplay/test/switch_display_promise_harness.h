@@ -530,6 +530,11 @@ struct Display : OSObject {
         return false;
     }
 
+    static bool dcChannelProbed()
+    {
+        return false;
+    }
+
     bool landscapeOn() const
     {
         return false;

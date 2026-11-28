@@ -1,6 +1,7 @@
 import CoreBluetooth
 import Foundation
 import HWTestCore
+import HWTestKit
 import Network
 import UIKit
 import UniformTypeIdentifiers

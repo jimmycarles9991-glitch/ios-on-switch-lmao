@@ -43,6 +43,9 @@ unsigned int switch_soctherm_gpu_throttle_status(void);
 
 #ifdef __cplusplus
 }
+
+class IOWorkLoop;
+void switch_soctherm_use_workloop(IOWorkLoop *workLoop);
 #endif
 
 #endif

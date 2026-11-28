@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A second state over the same stages takes them from the shader compiler's first compile. Boot 2's compiler compiled

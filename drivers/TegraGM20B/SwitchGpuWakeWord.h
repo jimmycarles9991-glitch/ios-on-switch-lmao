@@ -38,10 +38,8 @@ static inline int switch_gpu_wake_other(struct switch_gpu_wake_word *w)
 /* Around a sleep on the word: on before it reads the sequences, off once it is awake. */
 static inline void switch_gpu_wake_sleep(struct switch_gpu_wake_word *w, int on)
 {
-	if (on != 0) {
+	if (on != 0)
 		__atomic_fetch_add(&w->sleepers, 1u, __ATOMIC_SEQ_CST);
-		__atomic_thread_fence(__ATOMIC_SEQ_CST);
-	} else {
+	else
 		__atomic_fetch_sub(&w->sleepers, 1u, __ATOMIC_RELEASE);
-	}
 }

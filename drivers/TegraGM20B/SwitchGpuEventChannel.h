@@ -25,7 +25,7 @@ private:
 	IOLock *lock_ = nullptr;
 	Record *records_ = nullptr, **last_ = &records_;
 	switch_gpu_event_waits *tail_ = nullptr;
-	uint32_t count_ = 0, failedSeq_ = 0;
+	uint32_t count_ = 0, failedSeq_ = 0, active_ = 0;
 	uint64_t generation_ = 1;
 	int failure_ = 0;
 };

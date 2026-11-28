@@ -1,6 +1,9 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 import QuartzCore
 import UIKit
@@ -93,6 +96,16 @@ struct ProbeMacroWfiTest: HWTest {
         }
 
         let connection = GPUConnection()
+        if case .unreadable("release_kernel", ENOENT) = GPUPaths.read(connection) {
+            await MainActor.run { layer.removeFromSuperlayer() }
+            await context.clearStage()
+            metrics.fitLog(within: 720, keeping: Self.judged)
+            if !failures.isEmpty { return .fail(failures.joined(separator: "; "), metrics) }
+            let why = KernelSysctl.isReleaseKernel()
+                ? "no preemption counters: a release kernel"
+                : "no preemption counters (build with --//bazel:stats_gpu)"
+            return .skip(why, metrics)
+        }
         for (arm, macroOn) in [("_cpu", false), ("_macro", true)] {
             Self.macroBands(gpu.device, macroOn)
             _ = GPUPaths.read(connection)

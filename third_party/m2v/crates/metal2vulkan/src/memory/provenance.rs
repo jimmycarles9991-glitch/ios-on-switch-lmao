@@ -1153,8 +1153,10 @@ impl<'a> Cx<'a> {
                     ops: [o],
                 }) => {
                     if !matches!(self.ty(k.ty), Some(Type::Ptr { .. }))
-                        || self.space_of(k.ty)
-                            != self.e.module.consts().ty(*o).and_then(|t| self.space_of(t))
+                        || !same_or_array_ref(
+                            self.space_of(k.ty),
+                            self.e.module.consts().ty(*o).and_then(|t| self.space_of(t)),
+                        )
                     {
                         return Err(not_lowered());
                     }
@@ -1359,9 +1361,13 @@ impl<'a> Cx<'a> {
                 PtrFact::unknown(s)
             }
             InstKind::Cast {
-                op: CastOp::Bitcast,
+                op: CastOp::Bitcast | CastOp::AddrSpaceCast,
                 v,
-            } if self.value_ty(*v).and_then(|t| self.space_of(t)) == self.space_of(inst.ty) => {
+            } if same_or_array_ref(
+                self.value_ty(*v).and_then(|t| self.space_of(t)),
+                self.space_of(inst.ty),
+            ) =>
+            {
                 self.get(*v, m)?
             }
             InstKind::Call(call) => {
@@ -1501,6 +1507,15 @@ fn alloca_shape(shape: Shape) -> Option<alloca::Shape> {
     }
 }
 
+fn same_or_array_ref(a: Option<AddrSpace>, b: Option<AddrSpace>) -> bool {
+    a == b
+        || matches!(
+            (a, b),
+            (Some(AddrSpace::Thread), Some(AddrSpace::ArrayRef))
+                | (Some(AddrSpace::ArrayRef), Some(AddrSpace::Thread))
+        )
+}
+
 /// The handle class of the parameter entry binding `b` binds when it is an array of resource
 /// handles (`array<texture2d<T>, N>` or `array_ref<texture2d<T>>`): an ABI handle role whose
 /// parameter is a thread-space pointer to its handles (the ABI's role check admits a thread
@@ -1516,7 +1531,11 @@ pub fn handle_array_of(e: &Entry, b: &ParamBinding) -> Option<HandleClass> {
         Type::Function { params, .. } => *params.get(p as usize)?,
         _ => return None,
     };
-    (e.module.types().ptr_space(ty)? == AddrSpace::Thread).then(|| HandleClass::of_abi(h))
+    matches!(
+        e.module.types().ptr_space(ty)?,
+        AddrSpace::Thread | AddrSpace::ArrayRef
+    )
+    .then(|| HandleClass::of_abi(h))
 }
 
 /// The pointer operand of the load that an `inttoptr` of `v` to a pointer of type `ty` round-trips:
@@ -1576,7 +1595,11 @@ pub fn buffer_table_of(e: &Entry, b: &ParamBinding) -> Option<BufferTable> {
         Type::Function { params, .. } => *params.get(p as usize)?,
         _ => return None,
     };
-    (e.module.types().ptr_space(ty)? == AddrSpace::Thread).then_some(BufferTable {
+    matches!(
+        e.module.types().ptr_space(ty)?,
+        AddrSpace::Thread | AddrSpace::ArrayRef
+    )
+    .then_some(BufferTable {
         first: arg.location.index,
         count: arg.location.count,
         space: arg.space,
@@ -1931,7 +1954,7 @@ pub fn analyze(e: &Entry, layouts: &TypeLayouts, m: &mut Meter) -> Result<Proven
         }
         InstKind::Freeze(v)
         | InstKind::Cast {
-            op: CastOp::Bitcast,
+            op: CastOp::Bitcast | CastOp::AddrSpaceCast,
             v,
         } => f(*v),
         _ => {}
@@ -2933,7 +2956,7 @@ impl Walk<'_, '_> {
                 }
             }
             InstKind::Cast {
-                op: CastOp::Bitcast,
+                op: CastOp::Bitcast | CastOp::AddrSpaceCast,
                 v,
             } if self.is_ptr(this) => self.merge(this, *v, m)?,
             InstKind::ICmp { a, b: other, .. } if self.is_ptr(*a) => {

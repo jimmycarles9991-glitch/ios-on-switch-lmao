@@ -8,7 +8,7 @@
 #include "TegraGM20BGpu.h"
 #include "TegraGM20BReadbackABI.h"
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 IOReturn tgm_readback_call(const void *owner, const TegraGM20BAbiReadback *in,
 			   TegraGM20BAbiReadbackReply *out);
 // The owner's buffer behind a Done reply's token, retained; null for anything else.

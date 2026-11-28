@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestKit
 
 /// A fixed integer-and-float workload: a xorshift stream folded into a CRC-like hash, and a Mandelbrot row.
 enum Workload {

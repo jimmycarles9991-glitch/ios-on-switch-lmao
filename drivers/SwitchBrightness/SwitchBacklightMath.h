@@ -97,5 +97,42 @@ inline uint32_t rawToMilliNits(unsigned raw)
 {
     return static_cast<uint32_t>((static_cast<uint64_t>(rawToNits(raw)) * 1000 + 32768) >> 16);
 }
+
+constexpr uint64_t kRequestPending = 1ULL << 63;
+constexpr uint32_t kRequestMaxFadeMS = 10000;
+
+inline uint64_t packRequest(uint32_t value, uint64_t fadeNS)
+{
+    const uint32_t clampedValue = value > kMax ? kMax : value;
+    uint64_t fadeMS = fadeNS / 1000000ULL;
+    if (fadeMS > kRequestMaxFadeMS)
+        fadeMS = kRequestMaxFadeMS;
+    return kRequestPending | (fadeMS << 18) | clampedValue;
+}
+
+inline uint32_t unpackRequestValue(uint64_t packed)
+{
+    return static_cast<uint32_t>(packed & 0x3ffffu);
+}
+
+inline uint64_t unpackRequestFadeNS(uint64_t packed)
+{
+    return ((packed >> 18) & 0x3fffu) * 1000000ULL;
+}
+
+// Absolute deadline for the next ramp step, or 0 when the step is already due (reschedule via kickSource).
+inline uint64_t nextRampDeadline(uint64_t nowAfter, uint64_t rampStart, uint64_t rampLength, uint64_t lastSend,
+                                 uint64_t sendInterval, bool didSend)
+{
+    const uint64_t rampEnd = rampStart + rampLength;
+    if (nowAfter >= rampEnd)
+        return 0;
+    if (didSend && lastSend + sendInterval <= nowAfter)
+        return 0;
+    uint64_t due = nowAfter + sendInterval;
+    if (lastSend && lastSend + sendInterval > nowAfter)
+        due = lastSend + sendInterval;
+    return due < rampEnd ? due : rampEnd;
+}
 }  // namespace switch_backlight
 #endif

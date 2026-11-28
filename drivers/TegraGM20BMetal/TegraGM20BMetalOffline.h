@@ -10,13 +10,15 @@
 #include "TegraGM20BMetalDirect.h"
 #include "translate/NativeMetalTranslate.h"
 
-// The device calls the line parsers make of a library: newLibraryWithURL:error: and newLibraryWithData:error:; and the
-// shader compiler's newSealedLibraryWithURL:error: of a sealed system volume's library (nmb_offline_library_new_held).
+// The device calls the line parsers make of a library: newLibraryWithURL:error: and newLibraryWithData:error:, each a
+// library of its own translator scope; and the shader compiler's newSealedLibraryWithURL:error: of a sealed system
+// volume's library and newLibraryWithData:scope:error: of an app's, read in the app's scope (nmb_offline_scope_new).
 // Each library reads its file or data in place.
 @interface GM20BOfflineDevice : NSObject
 - (id<MTLLibrary>)newLibraryWithURL:(NSURL *)url error:(NSError **)error;
 - (id<MTLLibrary>)newSealedLibraryWithURL:(NSURL *)url error:(NSError **)error;
 - (id<MTLLibrary>)newLibraryWithData:(dispatch_data_t)data error:(NSError **)error;
+- (id<MTLLibrary>)newLibraryWithData:(dispatch_data_t)data scope:(uint64_t)scope error:(NSError **)error;
 @end
 
 namespace offline {

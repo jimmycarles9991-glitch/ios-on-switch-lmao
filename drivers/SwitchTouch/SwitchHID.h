@@ -17,6 +17,7 @@
 #include "../NativeMobileDisplay/SwitchPortrait.h"
 
 class IOService;
+class IOWorkLoop;
 class OSObject;
 
 enum SwitchHIDKind : unsigned {
@@ -27,12 +28,15 @@ enum SwitchHIDKind : unsigned {
     kSwitchHIDGyro = 4,
     kSwitchHIDOrientation = 5,
     kSwitchHIDTemperature = 6,  // switch_hid_create_temperature only
+    kSwitchHIDDeviceMotion = 7,
 };
 
 // Touch screen, report ID 1: ten finger slots, slot n always carries contact n. Coordinates are panel pixels in
 // the landscape frame iOS draws in (0..1279 left to right, 0..719 top to bottom); the descriptor's logical range
 // is the whole panel, so backboardd scales them to whatever logical size the UI uses.
 constexpr unsigned kSwitchTouchSlots = 10, kSwitchTouchWidth = 1280, kSwitchTouchHeight = 720;
+constexpr uint32_t kSwitchTouchReportIntervalUs = 8000;
+constexpr uint32_t kSwitchLightReportIntervalUs = 116662;
 // Portrait-native (SwitchPortrait.h): reports carry the panel's own frame instead, the one iOS is given as its screen
 // (0..719 left to right, 0..1279 top to bottom of the portrait panel): landscape (x, y) is reported as (y, 1279 - x),
 // the display's own mapping. backboardd's digitizer-to-panel rotation is 0, and iOS turns touches into its landscape
@@ -42,7 +46,8 @@ constexpr unsigned kSwitchTouchReportWidth = SWITCH_PORTRAIT_NATIVE ? kSwitchTou
 
 enum : unsigned {
     kSwitchTouchTip = 1u << 0,
-    kSwitchTouchValid = 1u << 1
+    kSwitchTouchValid = 1u << 1,
+    kSwitchTouchInRange = 1u << 3
 };  // bit 2 (Untouch) stays 0
 
 struct __attribute__((packed)) SwitchTouchSlot {
@@ -53,6 +58,8 @@ struct __attribute__((packed)) SwitchTouchSlot {
 struct __attribute__((packed)) SwitchTouchReport {
     uint8_t id;  // 1
     SwitchTouchSlot slot[kSwitchTouchSlots];
+    uint8_t contactCount;
+    uint16_t scanTime;  // 100 us units
 };
 
 // Buttons, report ID 1: one bit per Consumer usage (Power 0x30, Volume Increment 0xE9, Volume Decrement 0xEA, Menu 0x40:
@@ -132,6 +139,27 @@ struct __attribute__((packed)) SwitchOrientationReport {
     uint64_t timestamp;      // strictly increasing from report to report
 };
 
+// Device motion, AppleVendorMotion 0xff0c / 5: the 6-axis device motion a real iPad's motion coprocessor fuses, which
+// CoreMotion's CLSensorFusionService6AxisSPU opens: on 21H461 when J120's capability word has bit 3, as shipped; on
+// 24B119 when J181's has bit 4, which switch_ui_scale_sites_24B119.h keeps. Input report 1 is one payload element,
+// inside an AppleVendor Message collection, so IOHIDEventDriver dispatches each report as one vendor-defined event
+// carrying the payload's bytes at the report's time (../SwitchMotion/SwitchMotionFusion.h has the payload); feature
+// report 1 is the motion sensors' Report Interval and Report Latency. CoreMotion sets only ReportInterval, its update
+// interval. The payload's length is the build's own: populateDeviceMotion turns any other into "Bad device motion
+// report" (its size table by report type: 21H461 {5, 100, 52, 52}, 24B119 {5, 108, 60, 60}).
+#if SWITCH_IPSW_KIND_24B119
+constexpr size_t kSwitchDeviceMotionPayload = 60;
+#elif SWITCH_IPSW_KIND_21H461
+constexpr size_t kSwitchDeviceMotionPayload = 52;
+#else
+#error "SwitchHID.h: no device motion report length for this IPSW kind (CoreMotion populateDeviceMotion's size table)"
+#endif
+
+struct __attribute__((packed)) SwitchDeviceMotionReport {
+    uint8_t id;  // 1
+    uint8_t payload[kSwitchDeviceMotionPayload];
+};
+
 // Temperature sensors (../SwitchPower/SwitchSensors.cpp): thermalmonitord's HID sensors, Apple vendor 0xff00 /
 // TemperatureSensor 0x0005 (the PrimaryUsagePage/PrimaryUsage it matches), one device per sensor, each with its own
 // Product (thermalmonitord's matchName) and LocationID (the 4CC as a big-endian integer). No input reports: thermalmonitord
@@ -171,8 +199,10 @@ SwitchHIDHook switch_hid_temperature_hook(IOService *device);
 OSObject *switch_hid_temperature_event(uint64_t timestamp, int32_t fixed);
 
 // Creates, attaches (under IOResources) and starts the device. The first call loads IOHIDFamily, registers the
-// device class and adds the IOHIDEventDriver personalities. Thread context; panics with the reason on failure.
+// device class and adds the IOHIDEventDriver personalities. Thread context; panics with the reason on failure. The
+// device comes back unretained: its attachment under IOResources keeps it.
 IOService *switch_hid_create(SwitchHIDKind kind);
+IOService *switch_hid_create(SwitchHIDKind kind, IOWorkLoop *sharedLoop);
 
 // Hands one input report to the device (and from there synchronously to its IOHIDEventDriver). Reports sent before
 // the event driver has opened the device are dropped by IOHIDFamily. Call from one thread per device.
@@ -190,6 +220,7 @@ bool switch_hid_supports_timestamps(IOService *device);
 // Hands an IOHIDEvent to the device's IOHIDEventDriver as if the driver had made it (IOHIDEventService::dispatchEvent,
 // the driver's slot 198). kIOReturnNotReady until the driver has opened the device. Call from one thread per device.
 IOReturn switch_hid_dispatch_event(IOService *device, OSObject *event);
+void switch_hid_set_light_copy_handler(IOService *device, SwitchHIDCopyEventHandler handler, void *context);
 
 // Feature reports the event system sends the device: IOHIDEventDriver::setProperties writes a client's ReportInterval
 // (microseconds; 0 when the last client stops) into the Report Interval element, and IOHIDDevice::postElementValues
@@ -198,6 +229,14 @@ IOReturn switch_hid_dispatch_event(IOService *device, OSObject *event);
 // it must not wait for anything. Devices without a handler answer kIOReturnUnsupported, as the original setReport does.
 typedef void (*SwitchHIDFeatureHandler)(void *context, const uint8_t *report, size_t length);
 void switch_hid_set_feature_handler(IOService *device, SwitchHIDFeatureHandler handler, void *context);
+
+// Device motion only: drops the event its fast path answers (SwitchHIDFastPath.cpp), when a session ends, so the next
+// session's first copy is never the last one's sample.
+void switch_hid_forget_latest(const IOService *device);
+#if DEVELOPMENT || DEBUG
+// The fast path copies that answered an event, since boot (SwitchMotion's DeviceMotionFastPathCopies).
+uint64_t switch_hid_fastpath_copies();
+#endif
 
 // Touch only: bit n set = contact n began within the edge band. Its finger events then carry
 // kIOHIDDigitizerEventFromEdgeTip, which UIKit needs for the home and app-switcher edge gestures.

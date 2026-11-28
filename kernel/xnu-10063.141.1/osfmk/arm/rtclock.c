@@ -424,6 +424,10 @@ SetIdlePop(void)
 		return FALSE;
 	}
 
+	if (cdp->cpu_idle_latency == 0x0ULL) {
+		return TRUE;
+	}
+
 	time = cdp->rtcPop - cdp->cpu_idle_latency;
 
 	delay_time = deadline_to_decrementer(time, current_time);
@@ -443,6 +447,9 @@ ClearIdlePop(
 	cpu_data_t * cdp;
 
 	cdp = getCpuDatap();
+	if (wfi && cdp->cpu_idle_pop == 0x0ULL) {
+		return;
+	}
 	cdp->cpu_idle_pop = 0x0ULL;
 
 	/*

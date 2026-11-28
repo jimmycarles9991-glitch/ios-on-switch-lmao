@@ -75,8 +75,10 @@ protected:
     }
 
     // One draw of `pl` into attachment `a` in a pass of `layers` layers: empty, or why it was refused. `declared`: the pass
-    // names the colors the layered record binds as arrays (TegraGM20BMetalEncode.mm passArrayedStorageMask)
-    std::string draw(gm20b::Pipeline *pl, const gm20b::ColorAttachment &a, uint32_t layers, bool declared = true)
+    // names the colors the layered record binds as arrays (TegraGM20BMetalEncode.mm passArrayedStorageMask); drawn at
+    // `amplifications`, the command buffer's draws in `draws`
+    std::string draw(gm20b::Pipeline *pl, const gm20b::ColorAttachment &a, uint32_t layers, bool declared = true,
+                     uint32_t amplifications = 1, uint32_t *draws = nullptr)
     {
         gm20b::CommandBuffer *cb = dev.begin();
         if (!cb)
@@ -94,9 +96,15 @@ protected:
             return "no pass";
         }
         e->setPipeline(pl);
+        if (amplifications > 1) {
+            const uint32_t offsets[gm20b::RenderEncoder::kAmplificationMaps] = {};
+            e->setAmplification(amplifications, offsets, offsets);
+        }
         const char *why = nullptr;
         const bool ok = e->draw(kStrip, 0, 4, 1, 0, &why);
         e->end();
+        if (draws)
+            *draws = cb->draws;
         uint32_t seqno = 0;
         if (!ok || !cb->commit(seqno)) {
             cb->abandon();
@@ -201,6 +209,36 @@ TEST_F(DeviceLayeredFetch, TheLayeredFormInAPassOfOneLayerIsAnArrayOfOne)
     EXPECT_EQ(made[0].va, t.va);
     EXPECT_EQ(made[0].type, gm20b::fx::kTexTwoDArray);
     EXPECT_EQ(made[0].layers, 1u);
+}
+
+// A fetching state of vertex amplification compiles to the layered storage form (m2v draws it one amplification at a
+// time, each into its layer), as Weather's VFX particles do: in a pass of one layer each amplification is a draw of its
+// own over one array header of that layer
+TEST_F(DeviceLayeredFetch, AnAmplifiedStorageFormDrawsEachAmplificationOverAnArrayOfThePassesLayer)
+{
+    gm20b::RuntimeRecord r = fetching(0x1f10, true, true);
+    r.pipeline.amplificationMax = 2;
+    r.pipeline.amplificationIdWord = 5;
+    r.pipeline.pushMask |= 1u << 4;
+    std::string why;
+    gm20b::Pipeline *pl = dev.addRecord(r, false, why);
+    ASSERT_NE(pl, nullptr) << why;
+    gm20b::Texture t;
+    ASSERT_TRUE(dev.createTexture(64, 64, kRGBA8, t, false, true));
+    gm20b::ColorAttachment a;
+    a.texture = &t;
+    for (const uint32_t count : {1u, 2u}) {
+        uint32_t draws = 0;
+        EXPECT_EQ(draw(pl, a, 1, true, count, &draws), "") << count;
+        EXPECT_EQ(draws, count);
+    }
+    const auto made = headers(kR32UintWord0);
+    ASSERT_FALSE(made.empty());
+    for (const Header &h : made) {
+        EXPECT_EQ(h.va, t.va);
+        EXPECT_EQ(h.type, gm20b::fx::kTexTwoDArray);
+        EXPECT_EQ(h.layers, 1u);
+    }
 }
 
 TEST_F(DeviceLayeredFetch, APitchTargetOfTheLayeredFormRendersThroughABlockLinearBacking)

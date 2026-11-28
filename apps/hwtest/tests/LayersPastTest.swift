@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// renderTargetArrayLength past some attachments' layers (LayersPastCases.mixed): each attachment keeps the layers it

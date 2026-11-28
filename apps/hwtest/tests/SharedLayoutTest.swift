@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Shared-storage textures in block-linear memory (drivers/TegraGM20BMetal/TegraGM20BMetalDevice.mm

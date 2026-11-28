@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestKit
 import SwitchBench
 
 /// MapSparse on a TegraGM20B connection of the test's own (bench/bench_sparse.cpp), every read and write by the copy

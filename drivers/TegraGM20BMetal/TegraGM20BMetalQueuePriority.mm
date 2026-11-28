@@ -8,40 +8,51 @@
 
 namespace {
 
-gm20b::Mutex gLock;
-switch_metal::QueuePriorities gPriorities;
-uint32_t gApplied = switch_metal::QueuePriorities::kDefault,
-         gAppliedBackground = switch_metal::QueuePriorities::kDefaultBackground;
+struct QueuePriorityState {
+    gm20b::UnfairMutex lock;
+    switch_metal::QueuePriorities priorities;
+    uint32_t applied = switch_metal::QueuePriorities::kDefault;
+    uint32_t appliedBackground = switch_metal::QueuePriorities::kDefaultBackground;
+};
 
-// gLock held
-void apply()
+// Never destroyed: the detached completion thread may release a command buffer's last reference to its queue while
+// the process exits, after static destructors ran.
+QueuePriorityState &priorityState()
 {
-    const uint32_t priority = gPriorities.priority(), background = gPriorities.backgroundPriority();
-    if (priority == gApplied && background == gAppliedBackground)
+    static QueuePriorityState *s = new QueuePriorityState;
+    return *s;
+}
+
+void apply(QueuePriorityState &s)
+{
+    const uint32_t priority = s.priorities.priority(), background = s.priorities.backgroundPriority();
+    if (priority == s.applied && background == s.appliedBackground)
         return;
     if (!gRM || !gRM->raw->gpuPriority(priority, background)) {
         SWITCH_REFUSE("gm20b", "queue.priority", "the kernel did not take the queues' GPU priority");
         return;
     }
-    gApplied = priority;
-    gAppliedBackground = background;
+    s.applied = priority;
+    s.appliedBackground = background;
 }
 
 }  // namespace
 
 void queuePriorityAdd(SwitchMetalQueue *queue)
 {
-    std::lock_guard<gm20b::Mutex> l(gLock);
+    QueuePriorityState &s = priorityState();
+    std::lock_guard<gm20b::UnfairMutex> l(s.lock);
     queue->_gpuPriority = switch_metal::QueuePriorities::kDefault;
     queue->_backgroundGpuPriority = switch_metal::QueuePriorities::kDefaultBackground;
-    gPriorities.add(queue->_gpuPriority, queue->_backgroundGpuPriority);
+    s.priorities.add(queue->_gpuPriority, queue->_backgroundGpuPriority);
 }
 
 void queuePriorityRemove(SwitchMetalQueue *queue)
 {
-    std::lock_guard<gm20b::Mutex> l(gLock);
-    gPriorities.remove(queue->_gpuPriority, queue->_backgroundGpuPriority);
-    apply();
+    QueuePriorityState &s = priorityState();
+    std::lock_guard<gm20b::UnfairMutex> l(s.lock);
+    s.priorities.remove(queue->_gpuPriority, queue->_backgroundGpuPriority);
+    apply(s);
 }
 
 // NO for a value Metal does not have, or on a kernel without the call (as m2v's queue answers)
@@ -49,11 +60,12 @@ static BOOL setPriority(SwitchMetalQueue *queue, NSUInteger priority, bool backg
 {
     if (priority > switch_metal::QueuePriorities::kMax || !gRM || !gRM->raw->hasGpuPriority())
         return NO;
-    std::lock_guard<gm20b::Mutex> l(gLock);
-    gPriorities.remove(queue->_gpuPriority, queue->_backgroundGpuPriority);
+    QueuePriorityState &s = priorityState();
+    std::lock_guard<gm20b::UnfairMutex> l(s.lock);
+    s.priorities.remove(queue->_gpuPriority, queue->_backgroundGpuPriority);
     (background ? queue->_backgroundGpuPriority : queue->_gpuPriority) = uint32_t(priority);
-    gPriorities.add(queue->_gpuPriority, queue->_backgroundGpuPriority);
-    apply();
+    s.priorities.add(queue->_gpuPriority, queue->_backgroundGpuPriority);
+    apply(s);
     return YES;
 }
 
@@ -73,13 +85,15 @@ static BOOL setPriority(SwitchMetalQueue *queue, NSUInteger priority, bool backg
 
 - (NSUInteger)getGPUPriority
 {
-    std::lock_guard<gm20b::Mutex> l(gLock);
+    QueuePriorityState &s = priorityState();
+    std::lock_guard<gm20b::UnfairMutex> l(s.lock);
     return _gpuPriority;
 }
 
 - (NSUInteger)getBackgroundGPUPriority
 {
-    std::lock_guard<gm20b::Mutex> l(gLock);
+    QueuePriorityState &s = priorityState();
+    std::lock_guard<gm20b::UnfairMutex> l(s.lock);
     return _backgroundGpuPriority;
 }
 

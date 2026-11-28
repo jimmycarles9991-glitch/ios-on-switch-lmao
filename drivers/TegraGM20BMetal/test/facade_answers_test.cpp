@@ -4,11 +4,14 @@
 // creations the answers promise (eight amplifications, patches in an indirect command buffer, a dynamic stride).
 #include "facade_harness.h"
 #include "MetalABI.h"
+#include "SwitchRefusal.h"
 #include "../../../kits/SwitchGM20BEmit/SwitchGM20BMacroSlots.h"
+#include "../archive.h"
 #include "../device_answers.h"
 #include "bazel/testing/fresh_process.h"
 
 #include <gtest/gtest.h>
+#include <objc/runtime.h>
 #include <string_view>
 
 namespace {
@@ -73,6 +76,17 @@ void answers()
         EXPECT_EQ(flag(device, pointers), 0u) << pointers << ": no visible function tables";
     }
     free(methods);
+
+    if (Class targetCls = NSClassFromString(@"MTLTargetDeviceArchitecture")) {
+        id target = ((id (*)(id, SEL))objc_msgSend)(device, sel_registerName("targetDeviceArchitecture"));
+        ASSERT_NE(target, nil);
+        EXPECT_TRUE([target isKindOfClass:targetCls]);
+        EXPECT_EQ(((unsigned int (*)(id, SEL))objc_msgSend)(target, sel_registerName("cpuType")),
+                  unsigned(gm20b::kAppleGpuCpuType));
+        EXPECT_EQ(((unsigned int (*)(id, SEL))objc_msgSend)(target, sel_registerName("subType")),
+                  unsigned(gm20b::answers::kThisKind.gpuSubtype));
+        EXPECT_EQ(((unsigned long long (*)(id, SEL))objc_msgSend)(target, sel_registerName("driverVersion")), 0ull);
+    }
 }
 
 // A state of eight amplifications is made; one past the amplify macro's mapping words is refused at creation
@@ -178,6 +192,50 @@ void wideTargets()
     expectRaw(device, cb);
 }
 
+void resourceSpiSelectors()
+{
+    id<MTLDevice> device = facade::device();
+    ASSERT_TRUE(device != nil);
+    id<MTLBuffer> buf = [device newBufferWithLength:256 options:MTLResourceStorageModeShared];
+    MTLTextureDescriptor *td =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kPacked width:16 height:16 mipmapped:NO];
+    td.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> tex = [device newTextureWithDescriptor:td];
+    MTLHeapDescriptor *hd = [MTLHeapDescriptor new];
+    hd.size = 65536;
+    hd.storageMode = MTLStorageModePrivate;
+    id<MTLHeap> heap = [device newHeapWithDescriptor:hd];
+    ASSERT_TRUE(buf != nil && tex != nil && heap != nil);
+
+    const SEL setResponsible = sel_registerName("setResponsibleProcess:");
+    const SEL setOwner = sel_registerName("setOwnerWithIdentity:");
+    const uint64_t zeroKey = switch_refusal_key("gm20b", "selector.zero");
+
+    for (id obj : std::initializer_list<id>{buf, tex, heap}) {
+        Class cls = object_getClass(obj);
+        EXPECT_TRUE([obj respondsToSelector:setResponsible]) << class_getName(cls);
+        EXPECT_TRUE([obj respondsToSelector:setOwner]) << class_getName(cls);
+
+        Method m = class_getInstanceMethod(cls, setResponsible);
+        ASSERT_NE(m, nullptr) << class_getName(cls);
+        char retType[8] = {}, argType[8] = {};
+        method_getReturnType(m, retType, sizeof retType);
+        method_getArgumentType(m, 2, argType, sizeof argType);
+        EXPECT_STREQ(retType, "v");
+        EXPECT_STREQ(argType, "i");
+
+        ((void (*)(id, SEL, pid_t))objc_msgSend)(obj, setResponsible, pid_t(1234));
+        const kern_return_t kr = ((kern_return_t (*)(id, SEL, mach_port_t))objc_msgSend)(obj, setOwner, 0);
+        EXPECT_EQ(kr, KERN_SUCCESS);
+
+        // Neither selector fell through to forwardInvocation / answerZero (gm20b:selector.zero).
+        const uint64_t respKey = switch_refusal_key_with(zeroKey, uintptr_t(setResponsible) * 31 + uintptr_t(cls));
+        const uint64_t ownerKey = switch_refusal_key_with(zeroKey, uintptr_t(setOwner) * 31 + uintptr_t(cls));
+        EXPECT_TRUE(switch_refusal_first(respKey)) << class_getName(cls);
+        EXPECT_TRUE(switch_refusal_first(ownerKey)) << class_getName(cls);
+    }
+}
+
 }  // namespace
 
 TEST(GM20BFacadeAnswers, AnswersAboveTheIdentityAreGm20bs)
@@ -198,4 +256,9 @@ TEST(GM20BFacadeAnswers, ALayeredPassThatDrawsStaysRaw)
 TEST(GM20BFacadeAnswers, EightTargetsOfTheWidestFormatStayRaw)
 {
     switch_ios::test::ExpectPassesInFreshProcess(wideTargets);
+}
+
+TEST(GM20BFacadeAnswers, ResourceSpiSelectorsAreDirectNoOps)
+{
+    switch_ios::test::ExpectPassesInFreshProcess(resourceSpiSelectors);
 }

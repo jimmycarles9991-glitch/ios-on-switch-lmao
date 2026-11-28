@@ -4,6 +4,8 @@
 #   smmu_owner_source_test    only TegraSMMU.cpp programs the MC's global SMMU registers (reads every driver's C++)
 #   smmu_attachments_test     the swgroups tegra_smmu_resume programs again after SC7 (TegraSMMUAttachments.h)
 #   smmu_space_test           an engine's IOVA allocation (TegraSMMUSpace.h)
+#   smmu_identity_test        RAM at its own addresses, a page translating only while held, each commit's flushes
+#                             (TegraSMMUIdentity.h)
 #   smmu_flush_range_test     a page-entry change flushes only its PTE groups and its IOVAs' TLB sections, a directory
 #                             change everything, no change nothing; nothing under the MC lock locks, sleeps or allocates
 #   mc_hot_reset_owner_test   tegra_mc_hot_reset is the one writer of the MC's hot-reset registers
@@ -14,6 +16,16 @@ load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
 
 lint_files()
+
+host_test(
+    name = "smmu_stats_test",
+    srcs = [
+        "smmu_stats_test.cpp",
+        "//drivers/TegraSMMU:SwitchSmmuRegisters.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//drivers/TegraSMMU:TegraSMMUAttachments.h",
+    ],
+)
 
 host_test(
     name = "smmu_domain_test",
@@ -29,6 +41,16 @@ host_test(
     srcs = [
         "smmu_space_test.cpp",
         "//drivers/TegraSMMU:TegraSMMUSpace.h",
+    ],
+)
+
+host_test(
+    name = "smmu_identity_test",
+    srcs = [
+        "smmu_identity_test.cpp",
+        "//drivers/TegraSMMU:TegraSMMUDomain.h",
+        "//drivers/TegraSMMU:TegraSMMUIdentity.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
     ],
 )
 
@@ -75,6 +97,7 @@ host_library(
         "//drivers/SwitchDisplayPort:SwitchExternalWindows.h",
         "//drivers/SwitchDisplayPort:TegraDisplayB.cpp",
         "//drivers/SwitchDisplayPort:TegraDisplayB.h",
+        "//drivers/SwitchPower:SwitchDisplayBandwidth.h",
         "//drivers/SwitchPower:SwitchDisplayMemory.h",
         "//drivers/TegraDisplayFlip:SwitchDisplayPriority.h",
         "//drivers/TegraGM20B:platform.c",
@@ -203,6 +226,7 @@ host_shims(
         "IOKit/IOLocks.h",
         "IOKit/IOWorkLoop.h",
         "kern/clock.h",
+        "kern/sched_prim.h",
         "kern/thread.h",
     ],
     stubs = "mc_errors_stubs.h",
@@ -219,7 +243,10 @@ host_library(
         "//kits/SwitchMMIO:SwitchMMIO.h",
         "//kits/SwitchMMIO:SwitchMMIOKernel.h",
     ],
-    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_MMIO_HOST_MODEL=1",
+    ],
     deps = [":mc_errors_kernel"],
 )
 

@@ -65,7 +65,7 @@ void eventError(SwitchMetalCommandBuffer *cb, bool signal, const char *why)
 @end
 
 // The committed command buffers that wait for a shared event, until scheduled.
-gm20b::Mutex gHoldersLock;
+gm20b::UnfairMutex gHoldersLock;
 std::set<SwitchMetalCommandBuffer *> gHolders;
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
 std::map<SwitchMetalCommandBuffer *, SwitchMetalEventWaitNote> gEventWaits;
@@ -84,7 +84,7 @@ void unhold(SwitchMetalCommandBuffer *cb)
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     if (!cb->_inHolders.exchange(false, std::memory_order_acq_rel))
         return;
-    std::lock_guard<gm20b::Mutex> l(gHoldersLock);
+    std::lock_guard<gm20b::UnfairMutex> l(gHoldersLock);
     gHolders.erase(cb);
     gEventWaits.erase(cb);
 #else
@@ -118,7 +118,7 @@ void heldTooLong(SwitchMetalCommandBuffer *cb, uint64_t value, uint64_t reached)
                 @"a wait on a shared event held its queue's head for 5 s: the command buffer fails "
                 @"MTLCommandBufferErrorTimeout, as Metal's GPU fails it, and the queue goes on");
     hit(cb, PredEventTimeout, value);
-    std::lock_guard<gm20b::Mutex> l(cb->_lock);
+    std::lock_guard<gm20b::UnfairMutex> l(cb->_lock);
     if (!cb->_segError) {
         cb->_segError = timeout;
         cb->_failedBy = PredEventTimeout;
@@ -134,7 +134,7 @@ gm20b::EventReadiness eventReadiness(SwitchMetalCommandBuffer *cb, gm20b::EventD
             return Readiness::blocked;
         cb->_resourceReady.reset();
         if (result != KERN_SUCCESS) {
-            std::lock_guard<gm20b::Mutex> lock(cb->_lock);
+            std::lock_guard<gm20b::UnfairMutex> lock(cb->_lock);
             cb->_segError = [NSError
                 errorWithDomain:MTLCommandBufferErrorDomain
                            code:MTLCommandBufferErrorInternal
@@ -148,7 +148,7 @@ gm20b::EventReadiness eventReadiness(SwitchMetalCommandBuffer *cb, gm20b::EventD
     if (!sharedWaitsReady(cb, native))
         return Readiness::blocked;
     if (!cb->_gpuEventWaits.empty()) {
-        std::lock_guard<gm20b::Mutex> lock(cb->_lock);
+        std::lock_guard<gm20b::UnfairMutex> lock(cb->_lock);
         switch (gm20b::eventDependencies(cb->_gpuEventWaits, gRM->raw->channelGeneration(), native)) {
         case gm20b::EventDependencyState::blocked:
             return Readiness::blocked;
@@ -170,7 +170,7 @@ gm20b::EventReadiness eventReadiness(SwitchMetalCommandBuffer *cb, gm20b::EventD
     if (c.op == OpSignalEvent) {
         if (range.gpuSignal || signalOrderedOnGpu(cb, range))
             return Readiness::ready;
-        std::lock_guard<gm20b::Mutex> l(cb->_lock);
+        std::lock_guard<gm20b::UnfairMutex> l(cb->_lock);
         return cb->_finishState.pending() ? Readiness::blocked : Readiness::ready;
     }
     id event = (__bridge id)c.obj;
@@ -183,20 +183,20 @@ gm20b::EventReadiness eventReadiness(SwitchMetalCommandBuffer *cb, gm20b::EventD
         cb->_nativeWaitEvent = c.obj;
         gm20b::EventTimeline::Promise promise;
         {
-            std::lock_guard<gm20b::Mutex> lock(gRM->eventValues);
+            std::lock_guard<gm20b::UnfairMutex> lock(gRM->eventValues);
             promise = gRM->events.observe(reinterpret_cast<uintptr_t>(c.obj), c.c,
                                           reinterpret_cast<uintptr_t>((__bridge void *)cb->_queue),
                                           gRM->raw->channelGeneration());
         }
         if (promise) {
             SWITCH_METAL_DIAGNOSTIC(gRM->stats.waitsOnPromise++);
-            std::lock_guard<gm20b::Mutex> lock(cb->_lock);
+            std::lock_guard<gm20b::UnfairMutex> lock(cb->_lock);
             cb->_gpuEventWaits.push_back(std::move(promise));
             return Readiness::ready;
         }
     }
     {
-        std::lock_guard<gm20b::Mutex> l(cb->_lock);
+        std::lock_guard<gm20b::UnfairMutex> l(cb->_lock);
         if (cb->_finishState.pending())
             return Readiness::
                 blocked;  // timeout belongs to execution at this position, not time spent on earlier GPU work
@@ -208,7 +208,7 @@ gm20b::EventReadiness eventReadiness(SwitchMetalCommandBuffer *cb, gm20b::EventD
         cb->_eventWaits.push_back(range.from);
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
         {
-            std::lock_guard<gm20b::Mutex> h(gHoldersLock);
+            std::lock_guard<gm20b::UnfairMutex> h(gHoldersLock);
             gEventWaits[cb] = {c.obj, c.c, nowUs(), 0};
             cb->_inHolders.store(true, std::memory_order_release);
         }
@@ -238,7 +238,7 @@ gm20b::EventReadiness eventReadiness(SwitchMetalCommandBuffer *cb, gm20b::EventD
 
 bool promisedEvent(void *event, uint64_t value)
 {
-    std::lock_guard<gm20b::Mutex> lock(gRM->eventValues);
+    std::lock_guard<gm20b::UnfairMutex> lock(gRM->eventValues);
     return gRM->events.promised(reinterpret_cast<uintptr_t>(event), value);
 }
 
@@ -253,10 +253,10 @@ std::vector<SwitchMetalNativeEventSignal> publishRawEventSignals(SwitchMetalComm
     if (!cb->_gpuPrefixEligible || cb->_segNext + 1 >= cb->_segs.size() || !cb->_segs[cb->_segNext + 1].event)
         return signals;
     {
-        std::lock_guard<gm20b::Mutex> lock(cb->_lock);
+        std::lock_guard<gm20b::UnfairMutex> lock(cb->_lock);
         if (cb->_segError)
             return signals;
-        std::lock_guard<gm20b::Mutex> events(gRM->eventValues);
+        std::lock_guard<gm20b::UnfairMutex> events(gRM->eventValues);
         for (size_t at = cb->_segNext + 1; at < cb->_segs.size(); ++at) {
             auto &range = cb->_segs[at];
             if (!range.event)
@@ -284,7 +284,7 @@ void retireEventSignals(const std::vector<SwitchMetalNativeEventSignal> &signals
     for (const auto &signal : signals) {
         std::vector<uintptr_t> wake;
         {
-            std::lock_guard<gm20b::Mutex> lock(gRM->eventValues);
+            std::lock_guard<gm20b::UnfairMutex> lock(gRM->eventValues);
             gRM->events.retire(reinterpret_cast<uintptr_t>(signal.event), signal.promise, success, &wake);
         }
         if (success) {
@@ -303,7 +303,7 @@ gm20b::EventDependencyState validateNativeEventWaits(SwitchMetalCommandBuffer *c
 {
     if (cb->_gpuEventWaits.empty())
         return gm20b::EventDependencyState::ready;
-    std::lock_guard<gm20b::Mutex> lock(cb->_lock);
+    std::lock_guard<gm20b::UnfairMutex> lock(cb->_lock);
     const gm20b::EventDependencyState state = gm20b::eventDependencies(cb->_gpuEventWaits, generation, true);
     if (state == gm20b::EventDependencyState::failed)
         cb->_segError = [NSError errorWithDomain:MTLCommandBufferErrorDomain
@@ -317,7 +317,7 @@ void releaseEventWaits(SwitchMetalCommandBuffer *cb)
     cb->_sharedEventWatch.reset();
     if (!cb->_nativeWaitEvent)
         return;
-    std::lock_guard<gm20b::Mutex> lock(gRM->eventValues);
+    std::lock_guard<gm20b::UnfairMutex> lock(gRM->eventValues);
     gRM->events.unobserve(reinterpret_cast<uintptr_t>(cb->_nativeWaitEvent),
                           reinterpret_cast<uintptr_t>((__bridge void *)cb->_queue));
     cb->_nativeWaitEvent = nullptr;

@@ -107,10 +107,7 @@ KALLOC_TYPE_DEFINE(KT_GATE, gate_t, KT_PRIV_ACCT);
 struct lck_spinlock_to_info PERCPU_DATA(lck_spinlock_to_info);
 volatile lck_spinlock_to_info_t lck_spinlock_timeout_in_progress;
 
-/* ios-on-switch-lmao: no spinlock-timeout panics (what -no_slto_panic gives a debugger-enabled device). A thread that
- * waits for an IPI acknowledgement (restartable ranges) then keeps waiting instead of panicking the whole machine; the
- * other cores keep running. */
-SECURITY_READ_ONLY_LATE(boolean_t) spinlock_timeout_panic = FALSE;
+SECURITY_READ_ONLY_LATE(boolean_t) spinlock_timeout_panic = TRUE;
 
 struct lck_tktlock_pv_info PERCPU_DATA(lck_tktlock_pv_info);
 

@@ -11,7 +11,9 @@ from tools.emu.monitor import Monitor
 
 RAMOOPS = (0xB0000000, 0x200000)
 FRAMEBUFFER = (0xF5A00000, 720 * 1280 * 4)
-LOG_LINE = re.compile(rb'\[ *(\d+)\.(\d{6})\]: ?([\x20-\x7e]*)')
+LOG_LINE = re.compile(rb'\[ *(\d+)\.(\d{6})\]: ?([^\n\0]*)')
+TEXT = re.compile(rb'[^\n\0]+')
+STAMPED = re.compile(r'^\[ *(\d+)\.(\d{6})\] ')
 # kextlog=<filter> colours every OSKext message (OSKext.cpp colorForFlags): the line starts with a VT100 escape.
 TERMINAL_COLOUR = re.compile(rb'\x1b\[[0-9;]*m')
 PANIC = re.compile(rb'panic\(cpu \d+ caller [^\n\0]*')
@@ -33,12 +35,37 @@ def capture(monitor: Monitor, run: Path, kernel: Path | None) -> None:
 
 
 def kernel_log(ramoops: bytes) -> list[str]:
-    """Return the log lines in the kernel's RAM log, oldest first (the ring may have wrapped)."""
+    """Return the log lines in the kernel's RAM log, oldest first (the ring may have wrapped).
+
+    XNU stamps a line only when the message before it ended in a newline. A message that starts with one (the socket
+    state dumps do) leaves the text after it unstamped, and every message up to the next stamp joins that text: it
+    takes the stamp before it. Text before the ring's first stamp is a wrapped partial line and is dropped. Lines with
+    one stamp keep the ring's order.
+    """
     lines = {}
-    for match in LOG_LINE.finditer(TERMINAL_COLOUR.sub(b'', ramoops)):
-        stamp = int(match.group(1)) * 1_000_000 + int(match.group(2))
-        lines.setdefault((stamp, match.group(3)), None)
-    return [f'[{s // 1_000_000:6d}.{s % 1_000_000:06d}] {text.decode()}' for s, text in sorted(lines)]
+    stamp = None
+    for run in TEXT.finditer(TERMINAL_COLOUR.sub(b'', ramoops)):
+        text = run.group(0)
+        match = LOG_LINE.search(text)
+        before = text[: match.start()] if match else text
+        if stamp is not None and before.strip():
+            lines.setdefault((stamp, before), None)
+        if match:
+            stamp = int(match.group(1)) * 1_000_000 + int(match.group(2))
+            lines.setdefault((stamp, match.group(3)), None)
+    ordered = sorted(lines, key=lambda line: line[0])
+    return [f'[{s // 1_000_000:6d}.{s % 1_000_000:06d}] {text.decode(errors="replace")}' for s, text in ordered]
+
+
+def merge(*logs: list[str]) -> list[str]:
+    """Return the lines of `logs` once each, by stamp, keeping first-seen order within a stamp."""
+    seen = dict.fromkeys(line for log in logs for line in log)
+
+    def stamp(line: str) -> int:
+        match = STAMPED.match(line)
+        return int(match.group(1)) * 1_000_000 + int(match.group(2)) if match else 0
+
+    return sorted(seen, key=stamp)
 
 
 def panic_text(ramoops: bytes) -> str | None:
@@ -83,7 +110,7 @@ def summarize(run: Path, polled: Sequence[str] = ()) -> str:
     """
     ramoops = (run / 'ramoops.raw').read_bytes()
     live = run / 'msgbuf.raw'
-    log = sorted(set(kernel_log(live.read_bytes() if live.exists() else ramoops)).union(polled))
+    log = merge(kernel_log(live.read_bytes() if live.exists() else ramoops), polled)
     (run / 'kernel.log').write_text('\n'.join(log) + '\n')
     panic = panic_text(ramoops)
     if panic:

@@ -63,6 +63,12 @@ class RopTest(unittest.TestCase):
         key = 'samples=1 topo=0 ds=0/0 c0=80:15:0:1 c1=115:0:0:1 c2=90:15:0:1  | v x  | f y'
         self.assertEqual(rop.widths(key, 0xF | 0x3 << 4 | 0x9 << 8), [8, 8, 8, 8, rop.HALF, rop.HALF, 10, rop.ALPHA2])
 
+    def test_a_channel_the_format_lacks_is_not_compared(self):
+        key = 'samples=1 topo=0 ds=0/0 c0=10:15:0:1 c1=105:15:0:1  | v x  | f y'
+        found = rop.widths(key, 0xF | 0x3 << 4)
+        self.assertEqual(found, [8, rop.UNSTORED, rop.UNSTORED, rop.UNSTORED, None, None])
+        self.assertEqual(rop.store_code(0x37A08000, rop.UNSTORED), rop.store_code(0, rop.UNSTORED))
+
 
 if __name__ == '__main__':
     unittest.main()

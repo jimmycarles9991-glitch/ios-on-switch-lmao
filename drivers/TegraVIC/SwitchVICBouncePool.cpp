@@ -45,7 +45,21 @@ bool initialize()
     return true;
 }
 
-int allocate(SwitchVICBounceBuffer &buffer, const TegraVICSurfaceDesc &desc)
+uint64_t targetCapacity(uint64_t length)
+{
+    if (!length)
+        return 0;
+    constexpr uint64_t kMinRounded = 64ull << 10;
+    constexpr uint64_t kMaxRounded = 8ull << 20;
+    if (length >= kMaxRounded)
+        return length;
+    uint64_t cap = kMinRounded;
+    while (cap < length)
+        cap <<= 1;
+    return cap;
+}
+
+int allocate(SwitchVICBounceBuffer &buffer, const TegraVICSurfaceDesc &desc, uint64_t capacity)
 {
     if (!desc.length)
         return 0;
@@ -57,7 +71,7 @@ int allocate(SwitchVICBounceBuffer &buffer, const TegraVICSurfaceDesc &desc)
     auto *owner = IONewZero(Storage, 1);
     if (!owner)
         return -12;
-    if (!switch_dma_pages_alloc(&owner->pages, static_cast<size_t>(desc.length))) {
+    if (!switch_dma_pages_alloc(&owner->pages, static_cast<size_t>(capacity))) {
         IODelete(owner, Storage, 1);
         return -12;
     }
@@ -89,6 +103,11 @@ int switch_vic_bounce_acquire(const TegraVICSurfaceDesc *source, const TegraVICS
         tegra_vic_bounce_desc(destination, tegra_vic_pitch_align(traits, false), &requested[1]);
     if (requested[0].length > kBudget || requested[1].length > kBudget - requested[0].length)
         return -12;
+    uint64_t planned[2] = {targetCapacity(requested[0].length), targetCapacity(requested[1].length)};
+    if (planned[0] > kBudget || planned[1] > kBudget - planned[0]) {
+        planned[0] = requested[0].length;
+        planned[1] = requested[1].length;
+    }
     if (!initialize())
         return -12;
     IOLockLock(gLock);
@@ -101,7 +120,7 @@ int switch_vic_bounce_acquire(const TegraVICSurfaceDesc *source, const TegraVICS
             uint64_t growth = 0;
             for (unsigned i = 0; i < 2; ++i)
                 if (requested[i].length > candidate.buffers[i].capacity)
-                    growth += requested[i].length - candidate.buffers[i].capacity;
+                    growth += planned[i] - candidate.buffers[i].capacity;
             if (growth < bestGrowth) {
                 slot = &candidate;
                 bestGrowth = growth;
@@ -109,7 +128,7 @@ int switch_vic_bounce_acquire(const TegraVICSurfaceDesc *source, const TegraVICS
         }
         if (slot) {
             for (unsigned i = 0; i < 2; ++i)
-                if (!requested[i].length)
+                if (!requested[i].length && gBytes + bestGrowth > kBudget)
                     discard(slot->buffers[i]);
             for (auto &candidate : gSlots) {
                 if (&candidate == slot || candidate.busy)
@@ -125,9 +144,9 @@ int switch_vic_bounce_acquire(const TegraVICSurfaceDesc *source, const TegraVICS
         IOLockSleep(gLock, gSlots, THREAD_UNINT);
     }
     slot->busy = true;
-    int error = allocate(slot->buffers[0], requested[0]);
+    int error = allocate(slot->buffers[0], requested[0], planned[0]);
     if (!error)
-        error = allocate(slot->buffers[1], requested[1]);
+        error = allocate(slot->buffers[1], requested[1], planned[1]);
     if (error) {
         slot->busy = false;
         IOLockWakeup(gLock, gSlots, false);

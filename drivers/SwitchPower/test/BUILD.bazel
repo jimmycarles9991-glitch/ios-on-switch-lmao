@@ -33,7 +33,8 @@
 #   switch_perf_governor_callouts_test SwitchPerfGovernor.cpp itself over stand-ins for XNU: the locks, read-modify-
 #                                    writes and fences of a context switch, a tick and a touch interrupt, none of which
 #                                    may lock; a touch and the thermal limits still reach the clock at once; every
-#                                    context on its own thread at once (also under TSAN: ..._callouts_tsan_test)
+#                                    context on its own thread at once (also under TSAN: ..._callouts_tsan_test); the
+#                                    boot window's fallback wakes the owner in a release build (..._release_test)
 # The headers are C: each is compiled as C11 with -Wconversion -Wsign-conversion in a harness (its static inline
 # functions as exported ones) and driven by a GoogleTest test.
 #
@@ -206,7 +207,10 @@ host_test(
         "//drivers/SwitchPower:SwitchEMCClock.h",
         "//drivers/SwitchPower:SwitchEMCFixed.h",
     ],
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_POWER=1",
+    ],
 )
 
 host_test(
@@ -237,6 +241,18 @@ host_test(
     data = [
         "//drivers/SwitchPower:SwitchThermal.cpp",
         "//drivers/SwitchPower:SwitchThermalDfllLanding.h",
+    ],
+)
+
+host_test(
+    name = "switch_thermal_fan_test",
+    srcs = [
+        "switch_thermal_fan_test.cpp",
+        "//drivers/SwitchPower:SwitchThermalCurve.h",
+    ],
+    data = [
+        "//drivers/SwitchPower:SwitchSensors.cpp",
+        "//drivers/SwitchPower:SwitchThermal.cpp",
     ],
 )
 
@@ -292,7 +308,10 @@ PERF_GOVERNOR_SRCS = [
 host_library(
     name = "perf_governor",
     srcs = PERF_GOVERNOR_SRCS,
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_POWER=1",
+    ],
     force_includes = ["switch_perf_governor_counting.h"],
     deps = [":perf_kernel"],
 )
@@ -310,11 +329,43 @@ host_test(
     ],
 )
 
+# As a release kernel compiles it: no periodic line wakes the owner.
+host_library(
+    name = "perf_governor_release",
+    srcs = PERF_GOVERNOR_SRCS,
+    copts = [
+        "-UDEVELOPMENT",
+        "-DDEVELOPMENT=0",
+        "-UDEBUG",
+        "-DDEBUG=0",
+        "-DSWITCH_STATS_POWER=0",
+    ],
+    force_includes = ["switch_perf_governor_counting.h"],
+    deps = [":perf_kernel"],
+)
+
+host_test(
+    name = "switch_perf_governor_release_test",
+    srcs = [
+        "switch_perf_governor_callouts_test.cpp",
+        "//drivers/SwitchPower:SwitchPerfGovernor.h",
+        "//drivers/SwitchPower:SwitchPower.h",
+    ],
+    args = ["--gtest_filter=SwitchPerfBootWindow.*"],
+    deps = [
+        ":perf_governor_release",
+        ":perf_kernel",
+    ],
+)
+
 host_library(
     name = "perf_governor_tsan",
     srcs = PERF_GOVERNOR_SRCS,
     copts = ["-fsanitize=thread"],
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_POWER=1",
+    ],
     force_includes = ["switch_perf_governor_counting.h"],
     sanitize = False,
     deps = [":perf_kernel"],

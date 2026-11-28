@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 // BoImport: a task's pages wired for the GPU.
+#include <kern/thread.h>
+#include <switch/stall.h>
 #include "TegraGM20BUserClientInternal.h"
 #include "SwitchGpuSmmu.h"
 #include "TegraGM20BComp.h"
@@ -172,6 +174,11 @@ IOReturn AGXDeviceUserClient::boImport(const TegraGM20BAbiBoImport *in,
 		// hands over image bytes it maps read-only); a read-only BO is mapped read-only in the GPU, so a GPU write to
 		// it is an MMU fault (a panic naming it), never a store into memory the task cannot write.
 		const IOOptionBits directions[2] = {kIODirectionInOut, kIODirectionOut};
+#if TGM_STATS
+		// a wire still blocked after 50 ms names the VM wait it is in (25 Nov: 658 ms at 0% CPU)
+		switch_stall_watch *watch = switch_stall_watch_begin(
+			current_thread(), 50000000ULL, "tegra-gm20b: BoImport's wire");
+#endif
 		for (int i = 0; i < 2 && !bo->wired; i++) {
 			bo->wired = IOMemoryDescriptor::withAddressRange(in->address, in->bytes,
 									 directions[i], task_);
@@ -180,6 +187,9 @@ IOReturn AGXDeviceUserClient::boImport(const TegraGM20BAbiBoImport *in,
 				OSSafeReleaseNULL(bo->wired);
 			bo->readOnly = i == 1;
 		}
+#if TGM_STATS
+		switch_stall_watch_end(watch);
+#endif
 		lap(0);
 		cost.wire_cpu_ns = tgm_stats_cpu_ns() - cpuBefore;
 		cost.zero_fills = tgm_stats_zero_fills() - zeroFillsBefore;
@@ -247,12 +257,17 @@ IOReturn AGXDeviceUserClient::boImport(const TegraGM20BAbiBoImport *in,
 		releaseBo(bo);
 		return ioreturn(refused);
 	}
-	const bool wantBackingMem = in->surface_id != 0 && (bo->npages % TGM_COMP_PAGES) == 0 &&
-				    switch_gpu_smmu_ready() && switch_gpu_compression_on();
+	const bool wantCompMem = in->surface_id != 0 && (bo->npages % TGM_COMP_PAGES) == 0 &&
+				 switch_gpu_smmu_ready() && switch_gpu_compression_on();
+	const bool wantBigMem = !wantCompMem && in->surface_id != 0 &&
+				bo->npages >= SWITCH_GPU_SMMU_GRANULE_PAGES &&
+				switch_gpu_smmu_ready();
 	tgm_mem *canonical = nullptr;
 	bool gotCanonical = false;
-	if (wantBackingMem && !bo->mem) {
-		gotCanonical = switch_gpu_backing_tgm_mem(bo->backing, bo->npages, &canonical) == 0;
+	if ((wantCompMem || wantBigMem) && !bo->mem) {
+		const auto acquire =
+			wantCompMem ? switch_gpu_backing_tgm_mem : switch_gpu_backing_tgm_mem_big;
+		gotCanonical = acquire(bo->backing, bo->npages, &canonical) == 0;
 		if (!gotCanonical)
 			gotCanonical = switch_gpu_backing_tgm_mem_existing_or_direct(
 					       bo->backing, bo->npages, &canonical) == 0;
@@ -315,9 +330,6 @@ IOReturn AGXDeviceUserClient::boImport(const TegraGM20BAbiBoImport *in,
 	if (!covered)
 		tgm_coherency_cleaned(bo->coh);
 	lap(3);
-#if TGM_STATS
-	tgm_stats_unlocked(TGM_UNLOCKED_IMPORT, mark - start);
-#endif
 	const int readOnly = static_cast<int>(bo->readOnly);
 	const uint64_t first = bo->pas[0];
 	bo->ownerKind = SWITCH_GPU_OWNER_IMPORTED;

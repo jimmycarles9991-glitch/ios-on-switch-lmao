@@ -177,7 +177,7 @@ bool SwitchRT5639::answering()
     return !gLost;
 }
 
-void SwitchRT5639::probe(bool ldoOn, bool capture)
+void SwitchRT5639::probe(bool ldoOn, bool capture, void (*waitMs)(void *, uint32_t), void *waitCtx)
 {
     if (gLost)
         return;
@@ -189,7 +189,10 @@ void SwitchRT5639::probe(bool ldoOn, bool capture)
     if (!powered) {
         if (tegra_gpio_output(kLdo1Enable, 1))
             panic("SwitchAudio: cannot drive PZ4 (RT5639 LDO1_EN)");
-        IOSleep(400);
+        if (waitMs)
+            waitMs(waitCtx, 400);
+        else
+            IOSleep(400);
     }
     const int error = tegra_i2c_read(kBus, kAddr, VENDOR_ID2, id, sizeof(id));
     if (error || id[0] != 0x62 || id[1] != 0x31) {
@@ -247,13 +250,16 @@ void SwitchRT5639::probe(bool ldoOn, bool capture)
     }
 }
 
-// VREF1/VREF2 charge in fast mode (FV clear), then run in normal mode.
-void SwitchRT5639::biasStandby()
+// VREF1/VREF2 charge in fast mode (FV clear), then run in normal mode after kCodecBiasStandbyMS.
+void SwitchRT5639::biasStandbyBegin()
 {
     if (biasOn)
         return;
     update(PWR_ANLG1, P_VREF1 | P_MB | P_BG | P_VREF2, P_VREF1 | P_MB | P_BG | P_VREF2);
-    IOSleep(25);
+}
+
+void SwitchRT5639::biasStandbyFinish()
+{
     update(PWR_ANLG1, P_FV1 | P_FV2, P_FV1 | P_FV2);
     update(GEN_CTRL1, 0x0301, 0x0201);
     biasOn = true;
@@ -267,12 +273,13 @@ void SwitchRT5639::biasOff()
         write(reg, 0);
     update(GEN_CTRL1, 1u, 1u);  // the I2S clock stays: jack detect with an external microphone needs it
     biasOn = false;
+    currentRoute = kRouteNone;
 }
 
 void SwitchRT5639::powerOff()
 {
-    routeDown();
-    biasOff();
+    if (biasOn || currentRoute != kRouteNone)
+        biasOff();
     write(RESET, 0);
     if (tegra_gpio_output(kLdo1Enable, 0))
         IOLog("SwitchAudio: cannot drive PZ4 (RT5639 LDO1_EN) low; the codec loses power with the PMIC\n");
@@ -318,74 +325,115 @@ void SwitchRT5639::depop(bool up)
     }
 }
 
-void SwitchRT5639::routeUp(Route to)
+void SwitchRT5639::speakerRouteUpBegin()
 {
-    if (to == kRouteSpeaker) {
-        outputMuted = true;
-        write(SPK_VOL, V_MUTE | kSpkVol);
-        update(SPO_L_MIXER, 1u << 12, 1u << 12);
-        update(SPO_R_MIXER, 1u << 12, 1u << 12);
-        // Bias speaker mixers and PGAs while disconnected, then bring Class-D up muted to avoid pop transients.
-        update(PWR_MIXER, P_SM_L | P_SM_R, P_SM_L | P_SM_R);
-        update(PWR_VOL, P_SV_L | P_SV_R, P_SV_L | P_SV_R);
-        write(DAC1_DIG_VOL, kDacSpeaker);
-        IOSleep(15);
-        update(PWR_DIG1, P_CLS_D, P_CLS_D);
-        IOSleep(15);
-        update(SPO_L_MIXER, 1u << 12, 0);
-        update(SPO_R_MIXER, 1u << 12, 0);
-    } else if (to == kRouteHeadphones) {
-        outputMuted = true;
-        write(SV_ZCD1, kSvZcd1Hp);
-        update(SV_ZCD2, ZCD_HP, ZCD_HP);
-        write(HP_VOL, hpVolWord(hpAnalogReg, true));
-        update(PWR_ANLG1, P_HP_L | P_HP_R, P_HP_L | P_HP_R);
-        // "Improve HP Amp Drv": hp_amp_power_on.
-        update(DEPOP_M2, D_DEPOP_MAN, D_DEPOP_MAN);
-        write(DEPOP_M1, D_HP_CP | D_HP_CB);
-        update(PWR_ANLG1, P_FV1 | P_FV2, 0);
-        update(PWR_ANLG1, P_HA, P_HA);
-        IOSleep(15);
-        update(PWR_ANLG1, P_FV1 | P_FV2, P_FV1 | P_FV2);
-        update(DEPOP_M1, D_HP_SG | D_HP_CO, D_HP_SG | D_HP_CO);
-        update(PWR_MIXER, P_OM_L | P_OM_R, P_OM_L | P_OM_R);
-        update(PWR_VOL, P_HV_L | P_HV_R, P_HV_L | P_HV_R);
-        depop(true);  // "HP Amp" POST_PMU
-        writeList(kMicEq);
-        write(DAC1_DIG_VOL, kDacHeadphone);
-        IOSleep(80);   // "HP Post"
-        IOSleep(100);  // bias ON with the HP amp up: then release its soft mute
-        update(DEPOP_M1, D_HP_SG | D_HP_R_SMT | D_HP_L_SMT, 0);
-    }
-    currentRoute = to;
+    outputMuted = true;
+    write(SPK_VOL, V_MUTE | kSpkVol);
+    update(SPO_L_MIXER, 1u << 12, 1u << 12);
+    update(SPO_R_MIXER, 1u << 12, 1u << 12);
+    // Bias speaker mixers and PGAs while disconnected, then bring Class-D up muted to avoid pop transients.
+    update(PWR_MIXER, P_SM_L | P_SM_R, P_SM_L | P_SM_R);
+    update(PWR_VOL, P_SV_L | P_SV_R, P_SV_L | P_SV_R);
+    write(DAC1_DIG_VOL, kDacSpeaker);
 }
 
-void SwitchRT5639::routeDown()
+void SwitchRT5639::speakerRouteUpClassD()
+{
+    update(PWR_DIG1, P_CLS_D, P_CLS_D);
+}
+
+void SwitchRT5639::speakerRouteUpFinish()
+{
+    update(SPO_L_MIXER, 1u << 12, 0);
+    update(SPO_R_MIXER, 1u << 12, 0);
+    currentRoute = kRouteSpeaker;
+}
+
+void SwitchRT5639::speakerRouteDownEarly()
+{
+    update(PWR_VOL, P_SV_L | P_SV_R, 0);
+    update(PWR_MIXER, P_SM_L | P_SM_R, 0);
+    currentRoute = kRouteNone;
+}
+
+void SwitchRT5639::speakerRouteDownBegin()
 {
     mute(true);
-    if (currentRoute == kRouteSpeaker) {
-        // Shut down Class-D while mixers, PGAs, and VREF remain biased so their rail collapse cannot click the speaker.
-        update(SPO_L_MIXER, 1u << 12, 1u << 12);
-        update(SPO_R_MIXER, 1u << 12, 1u << 12);
-        update(PWR_DIG1, P_CLS_D, 0);
-        IOSleep(15);
-        update(PWR_VOL, P_SV_L | P_SV_R, 0);
-        update(PWR_MIXER, P_SM_L | P_SM_R, 0);
-    } else if (currentRoute == kRouteHeadphones) {
-        depop(false);  // "HP Amp" PRE_PMD
-        IOSleep(30);
-        update(DEPOP_M1, D_SMT_TRIG | D_HP_R_SMT | D_HP_L_SMT, 0);
-        write(CHARGE_PUMP, CP_OSW_R | CP_OSW_L);
-        update(PWR_VOL, P_HV_L | P_HV_R, 0);
-        update(PWR_MIXER, P_OM_L | P_OM_R, 0);
-        update(PWR_ANLG1, P_HP_L | P_HP_R | P_HA, 0);
-        update(DEPOP_M1, D_HP_CP | D_HP_CB | D_HP_CO | D_HP_SG, 0);
-        write(DEPOP_M2, 0x1100);
-        writeList(kEqOff);
-        write(ADJ_HPF, 0x0000);
-        write(SV_ZCD1, kSvZcd1Default);
-        update(SV_ZCD2, ZCD_HP, 0);
-    }
+    // Shut down Class-D while mixers, PGAs, and VREF remain biased so their rail collapse cannot click the speaker.
+    update(SPO_L_MIXER, 1u << 12, 1u << 12);
+    update(SPO_R_MIXER, 1u << 12, 1u << 12);
+    update(PWR_DIG1, P_CLS_D, 0);
+}
+
+void SwitchRT5639::speakerRouteDownFinish()
+{
+    update(PWR_VOL, P_SV_L | P_SV_R, 0);
+    update(PWR_MIXER, P_SM_L | P_SM_R, 0);
+    currentRoute = kRouteNone;
+}
+
+void SwitchRT5639::headphoneRouteUpBegin()
+{
+    outputMuted = true;
+    write(SV_ZCD1, kSvZcd1Hp);
+    update(SV_ZCD2, ZCD_HP, ZCD_HP);
+    write(HP_VOL, hpVolWord(hpAnalogReg, true));
+    update(PWR_ANLG1, P_HP_L | P_HP_R, P_HP_L | P_HP_R);
+    // "Improve HP Amp Drv": hp_amp_power_on.
+    update(DEPOP_M2, D_DEPOP_MAN, D_DEPOP_MAN);
+    write(DEPOP_M1, D_HP_CP | D_HP_CB);
+    update(PWR_ANLG1, P_FV1 | P_FV2, 0);
+    update(PWR_ANLG1, P_HA, P_HA);
+}
+
+void SwitchRT5639::headphoneRouteUpDepop()
+{
+    update(PWR_ANLG1, P_FV1 | P_FV2, P_FV1 | P_FV2);
+    update(DEPOP_M1, D_HP_SG | D_HP_CO, D_HP_SG | D_HP_CO);
+    update(PWR_MIXER, P_OM_L | P_OM_R, P_OM_L | P_OM_R);
+    update(PWR_VOL, P_HV_L | P_HV_R, P_HV_L | P_HV_R);
+    depop(true);  // "HP Amp" POST_PMU
+    writeList(kMicEq);
+    write(DAC1_DIG_VOL, kDacHeadphone);
+}
+
+void SwitchRT5639::headphoneRouteUpFinish()
+{
+    update(DEPOP_M1, D_HP_SG | D_HP_R_SMT | D_HP_L_SMT, 0);
+    write(HP_VOL, hpVolWord(hpAnalogReg, true));
+    currentRoute = kRouteHeadphones;
+}
+
+void SwitchRT5639::headphoneRouteDownEarly()
+{
+    update(PWR_ANLG1, P_FV1 | P_FV2, P_FV1 | P_FV2);
+    update(PWR_ANLG1, P_HP_L | P_HP_R | P_HA, 0);
+    update(DEPOP_M1, D_HP_CP | D_HP_CB, 0);
+    write(DEPOP_M2, 0x1100);
+    write(SV_ZCD1, kSvZcd1Default);
+    update(SV_ZCD2, ZCD_HP, 0);
+    currentRoute = kRouteNone;
+}
+
+void SwitchRT5639::headphoneRouteDownBegin()
+{
+    mute(true);
+    depop(false);  // "HP Amp" PRE_PMD
+}
+
+void SwitchRT5639::headphoneRouteDownFinish()
+{
+    update(DEPOP_M1, D_SMT_TRIG | D_HP_R_SMT | D_HP_L_SMT, 0);
+    write(CHARGE_PUMP, CP_OSW_R | CP_OSW_L);
+    update(PWR_VOL, P_HV_L | P_HV_R, 0);
+    update(PWR_MIXER, P_OM_L | P_OM_R, 0);
+    update(PWR_ANLG1, P_HP_L | P_HP_R | P_HA, 0);
+    update(DEPOP_M1, D_HP_CP | D_HP_CB | D_HP_CO | D_HP_SG, 0);
+    write(DEPOP_M2, 0x1100);
+    writeList(kEqOff);
+    write(ADJ_HPF, 0x0000);
+    write(SV_ZCD1, kSvZcd1Default);
+    update(SV_ZCD2, ZCD_HP, 0);
     currentRoute = kRouteNone;
 }
 
@@ -424,15 +472,15 @@ void SwitchRT5639::micBias(bool on)
     update(PWR_ANLG2, P_MB1, on ? P_MB1 : 0);
 }
 
-bool SwitchRT5639::detectHeadset(bool jackIn)
+void SwitchRT5639::detectHeadsetBegin()
 {
-    bool headset = false;
-    if (jackIn) {
-        micBias(true);
-        update(IRQ_CTRL2, 1u << 3, 0);
-        IOSleep(100);
-        headset = ((read(IRQ_CTRL2) & (1u << 3)) == 0u);
-    }
+    micBias(true);
+    update(IRQ_CTRL2, 1u << 3, 0);
+}
+
+bool SwitchRT5639::detectHeadsetFinish()
+{
+    const bool headset = ((read(IRQ_CTRL2) & (1u << 3)) == 0u);
     if (!headset)
         micBias(false);
     return headset;

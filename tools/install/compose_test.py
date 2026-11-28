@@ -5,11 +5,15 @@ container disk attach names, which answers while diskutil's whole APFS listing s
 """
 
 import contextlib
+import os
+import struct
+import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
-from tools.install import compose
+from tools.install import apfs, compose, gpt
 
 APFS = '7C3457EF-0000-11AA-AA11-00306543ECAC'
 APFS_CONTENT = '41504653-0000-11AA-AA11-00306543ECAC'
@@ -126,6 +130,106 @@ class ContainerOfAnAttach(unittest.TestCase):
             compose._grow(Path('scratch.img'), 1 << 30, spec, mock.Mock())
         added = [call.args[3] for call in run.call_args_list if call.args[:3] == ('diskutil', 'apfs', 'addVolume')]
         self.assertEqual(added, ['disk41', 'disk41'])
+
+    def test_set_uuids_also_sets_volume_feature_flags(self) -> None:
+        bs = 4096
+        part_blocks = 64
+        part_bytes = part_blocks * bs
+        part_sectors = part_bytes // gpt.SECTOR
+        disk_sectors = compose.START_SECTOR + part_sectors + 2048
+        system, data, preboot = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        want_data = uuid.UUID('D1B1D053-D0A6-496C-8625-A947A3DA863E')
+        want_preboot = uuid.UUID('4AA4A761-5138-439D-9A30-D4138F6887FA')
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / 'scratch.img'
+            with open(image, 'wb') as f:
+                f.truncate(disk_sectors * gpt.SECTOR)
+            fd = os.open(image, os.O_RDWR)
+            try:
+                entry = (
+                    gpt.APFS,
+                    uuid.uuid4(),
+                    compose.START_SECTOR,
+                    compose.START_SECTOR + part_sectors - 1,
+                    'compose',
+                )
+                for lba, block in gpt.build(disk_sectors, [entry]):
+                    os.pwrite(fd, block, lba * gpt.SECTOR)
+                base = compose.START_SECTOR * gpt.SECTOR
+
+                def obj(oid: int, xid: int, kind: int, body: bytes) -> bytes:
+                    blk = bytearray(bs)
+                    struct.pack_into('<QQII', blk, 8, oid, xid, kind, 0)
+                    blk[32 : 32 + len(body)] = body
+                    return apfs.with_checksum(bytes(blk))
+
+                vols = [
+                    (system, 1, b'System'),
+                    (data, 0x40, b'SwitchDataTrial'),
+                    (preboot, 0x10, b'SwitchPrebootTrial'),
+                ]
+                fs_oids = [1026 + i for i in range(len(vols))]
+                leaf = bytearray(bs)
+                struct.pack_into('<QQII', leaf, 8, 11, 5, 0x40000003, 0xB)
+                struct.pack_into(
+                    '<HHI', leaf, 32, apfs.BTNODE_ROOT | apfs.BTNODE_LEAF | apfs.BTNODE_FIXED_KV_SIZE, 0, len(vols)
+                )
+                struct.pack_into('<HH', leaf, 40, 0, 4 * len(vols))
+                keys, value_end = 56 + 4 * len(vols), bs - 40
+                blocks = {}
+                for i, (vol_uuid, role, name) in enumerate(vols):
+                    struct.pack_into('<HH', leaf, 56 + 4 * i, 16 * i, 16 * (i + 1))
+                    struct.pack_into('<QQ', leaf, keys + 16 * i, fs_oids[i], 5)
+                    struct.pack_into('<IIQ', leaf, value_end - 16 * (i + 1), 0, bs, 20 + i)
+                    sb = bytearray(bs - 32)
+                    sb[0:4] = apfs.APFS_MAGIC
+                    sb[apfs.VOL_UUID_OFFSET - 32 : apfs.VOL_UUID_OFFSET - 16] = vol_uuid.bytes
+                    struct.pack_into('<H', sb, apfs.VOL_ROLE_OFFSET - 32, role)
+                    sb[apfs.VOL_NAME_OFFSET - 32 : apfs.VOL_NAME_OFFSET - 32 + len(name)] = name
+                    blocks[20 + i] = obj(fs_oids[i], 5, apfs.OBJECT_TYPE_FS, bytes(sb))
+                blocks[11] = apfs.with_checksum(bytes(leaf))
+                omap = bytearray(bs - 32)
+                struct.pack_into('<Q', omap, 48 - 32, 11)
+                blocks[10] = obj(10, 5, apfs.OBJECT_TYPE_OMAP, bytes(omap))
+                nx = bytearray(bs - 32)
+                nx[0:4] = apfs.NX_MAGIC
+                struct.pack_into('<IQ', nx, 4, bs, part_blocks)
+                struct.pack_into('<II', nx, 104 - 32, 4, 0)
+                struct.pack_into('<Q', nx, 112 - 32, 1)
+                struct.pack_into('<Q', nx, 160 - 32, 10)
+                struct.pack_into('<I', nx, 180 - 32, 4)
+                for i, oid in enumerate(fs_oids):
+                    struct.pack_into('<Q', nx, 184 - 32 + 8 * i, oid)
+                blocks[0] = blocks[1] = obj(1, 5, apfs.OBJECT_TYPE_NX_SUPERBLOCK, bytes(nx))
+                for paddr, data_blk in blocks.items():
+                    os.pwrite(fd, data_blk, base + paddr * bs)
+            finally:
+                os.close(fd)
+            spec = {
+                'volumes': {
+                    'system': {'uuid': str(system).upper(), 'role': 1},
+                    'data': {
+                        'uuid': str(want_data).upper(),
+                        'role': 0x40,
+                        'name': 'SwitchDataTrial',
+                        'rocompat_features': 0x0C,
+                        'incompat_features': 0x200,
+                    },
+                    'preboot': {'uuid': str(want_preboot).upper(), 'role': 0x10, 'name': 'SwitchPrebootTrial'},
+                }
+            }
+            offset = compose._set_uuids(image, part_bytes, spec, mock.Mock())
+            self.assertEqual(offset, compose.START_SECTOR * gpt.SECTOR)
+            fd = os.open(image, os.O_RDONLY)
+            try:
+                c = apfs.Container(fd, offset)
+                data_sb = c.read(21)
+                self.assertEqual(uuid.UUID(bytes=data_sb[apfs.VOL_UUID_OFFSET : apfs.VOL_UUID_OFFSET + 16]), want_data)
+                self.assertEqual(struct.unpack_from('<QQ', data_sb, apfs.VOL_ROCOMPAT_OFFSET), (0x0C, 0x200))
+                self.assertEqual(struct.unpack_from('<QQ', c.read(20), apfs.VOL_ROCOMPAT_OFFSET), (0, 0))
+                self.assertEqual(struct.unpack_from('<QQ', c.read(22), apfs.VOL_ROCOMPAT_OFFSET), (0, 0))
+            finally:
+                os.close(fd)
 
 
 if __name__ == '__main__':

@@ -43,7 +43,7 @@ enum SwitchMetalICBKinds : uint8_t {
     NSUInteger _count;
     uint32_t _slotWords;  // gm20b::icb::kPatchSlotWords where its descriptor has patch commands, else kSlotWords
     bool _patches;        // its descriptor's command types hold drawPatches: or drawIndexedPatches: (and the device's)
-    gm20b::Mutex _lock;   // commands are encoded from any thread
+    gm20b::UnfairMutex _lock;   // commands are encoded from any thread
     std::vector<SwitchMetalICBCommand> _commands;
     std::unordered_map<void *, uint32_t> _buffers;  // the buffers its commands read, and how many name each
     uint32_t _kinds[4];                             // its commands of each SwitchMetalICBKinds bit
@@ -72,6 +72,7 @@ enum SwitchMetalICBKinds : uint8_t {
 
 inline uint32_t *gm20bCommandSlot(SwitchMetalIndirectCommandBuffer *b, NSUInteger index)
 {
+    b->_raw.markCpuDirty();
     return reinterpret_cast<uint32_t *>(b->_raw.cpu) + index * b->_slotWords;
 }
 

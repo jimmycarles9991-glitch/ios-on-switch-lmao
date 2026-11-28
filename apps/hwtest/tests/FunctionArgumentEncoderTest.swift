@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A function's own argument encoder (newArgumentEncoderWithBufferIndex:) is the shader compiler's answer from the

@@ -3,7 +3,22 @@
 // of APFS clones. Host values come from host.libsonnet and the LaunchDaemon's environment (switch-worker).
 local host = import 'host.libsonnet';
 local dir = std.extVar('SWITCH_BB_WORKER_DIR');
+local gpu = std.extVar('SWITCH_WORKER_GPU');
 local storage = { grpc: { client: { address: host.storageAddress } } };
+// Bazel's exec platform //bazel/platforms:exec_darwin_arm64, property for property.
+local platform = [
+  { name: 'ISA', value: 'arm64' },
+  { name: 'OSFamily', value: 'darwin' },
+  { name: 'xcode', value: std.extVar('SWITCH_WORKER_XCODE_BUILD') },
+];
+local runner(concurrency, properties) = {
+  endpoint: { address: 'unix://' + dir + '/runner.sock' },
+  concurrency: concurrency,
+  platform: { properties: properties },
+  maximumFilePoolFileCount: 200000,
+  maximumFilePoolSizeBytes: 8 * 1024 * 1024 * 1024,
+  workerId: { host: host.name },
+};
 
 {
   blobstore: {
@@ -30,21 +45,11 @@ local storage = { grpc: { client: { address: host.storageAddress } } };
       maximumCacheSizeBytes: host.workerCacheGiB * 1024 * 1024 * 1024,
       cacheReplacementPolicy: 'LEAST_RECENTLY_USED',
     },
-    runners: [{
-      endpoint: { address: 'unix://' + dir + '/runner.sock' },
-      concurrency: host.concurrency,
-      platform: {
-        // Bazel's exec platform //bazel/platforms:exec_darwin_arm64, property for property.
-        properties: [
-          { name: 'ISA', value: 'arm64' },
-          { name: 'OSFamily', value: 'darwin' },
-          { name: 'xcode', value: std.extVar('SWITCH_WORKER_XCODE_BUILD') },
-        ],
-      },
-      maximumFilePoolFileCount: 200000,
-      maximumFilePoolSizeBytes: 8 * 1024 * 1024 * 1024,
-      workerId: { host: host.name },
-    }],
+    // The scheduler queues an action by its exact platform, so the actions that ask for a GPU (a `gpu` property:
+    // apps/hwtest's Core Animation goldens) run on a one-slot runner of their own, and every other action keeps all of
+    // the general runner's slots. Slots are numbered across a build directory's runners, so the two share none.
+    runners: [runner(host.concurrency, platform)] +
+             (if gpu == '' then [] else [runner(1, platform + [{ name: 'gpu', value: gpu }])]),
   }],
   filePool: { blockDevice: { file: { path: dir + '/filepool', sizeBytes: 8 * 1024 * 1024 * 1024 } } },
   inputDownloadConcurrency: 128,

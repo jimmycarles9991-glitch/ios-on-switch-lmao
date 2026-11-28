@@ -9,6 +9,7 @@
 #include <libkern/OSKextLib.h>
 #include <pexpert/pexpert.h>
 #include <libkern/c++/OSMetaClass.h>
+#include "../TegraGM20B/OriginalAcceleratorABI.h"
 
 extern "C" {
 OSReturn switch_kernel_classes(void (*initialize)());
@@ -32,7 +33,8 @@ void switch_accel_stub_publish(void)
     const OSSymbol *name = OSSymbol::withCString("IOAcceleratorES");
     const OSMetaClass *parent = name ? OSMetaClass::getMetaClassWithName(name) : nullptr;
     OSSafeReleaseNULL(name);
-    if (!parent || parent->getClassSize() != 136 || switch_accel_stub_instance_size() != 136) {
+    if (!parent || parent->getClassSize() != sizeof(IOAcceleratorES) ||
+        switch_accel_stub_instance_size() != sizeof(IOAcceleratorES)) {
         panic("SwitchAccelStub: IOAcceleratorES %p size %u, ours %u", parent, parent ? parent->getClassSize() : 0,
               switch_accel_stub_instance_size());
     }

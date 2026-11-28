@@ -920,7 +920,7 @@ mac_proc_check_launch_constraints(proc_t curp, struct image_params *imgp, os_rea
 
 	MAC_POLICY_ITERATE({
 		mpo_proc_check_launch_constraints_t *hook = mpc->mpc_ops->mpo_proc_check_launch_constraints;
-		if (hook == NULL || ((switch_app_code_image(vp) || switch_bootstrap_image(vp)) && switch_app_code_amfi(mpc->mpc_name))) {
+		if (hook == NULL || (switch_app_code_amfi(mpc->mpc_name) && (switch_app_code_image(vp) || switch_bootstrap_image(vp)))) {
 		        continue;
 		}
 

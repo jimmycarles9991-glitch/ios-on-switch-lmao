@@ -72,7 +72,8 @@ static uint32_t codedHeight(const Encoder *e)
     return e->codec == kCMVideoCodecType_HEVC ? hevcenc_coded_height(&e->hevc) : h264enc_height_mbs(&e->config) * 16;
 }
 
-static bool copyRegion(Encoder *e, CVPixelBufferRef image, const AVERegion *r, TegraNVENCSubmit *submit)
+static bool copyRegion(const Encoder *e, CVPixelBufferRef image, const AVERegion *r, uint8_t *inputVA,
+                       TegraNVENCSubmit *submit)
 {
     if (CVPixelBufferLockBaseAddress(image, kCVPixelBufferLock_ReadOnly))
         return false;
@@ -81,7 +82,7 @@ static bool copyRegion(Encoder *e, CVPixelBufferRef image, const AVERegion *r, T
     const uint8_t *luma = (const uint8_t *)CVPixelBufferGetBaseAddressOfPlane(image, 0) + r->y * lumaStride + r->x;
     const uint8_t *chroma =
         (const uint8_t *)CVPixelBufferGetBaseAddressOfPlane(image, 1) + r->y / 2 * chromaStride + r->x;
-    h264enc_put_region(e->config.input_layout, &e->layout.input, e->inputVA, luma, lumaStride, chroma, chromaStride,
+    h264enc_put_region(e->config.input_layout, &e->layout.input, inputVA, luma, lumaStride, chroma, chromaStride,
                        r->width, r->height, codedWidth(e), codedHeight(e));
     CVPixelBufferUnlockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
     submit->source = (TegraNVENCSource){0};
@@ -89,9 +90,9 @@ static bool copyRegion(Encoder *e, CVPixelBufferRef image, const AVERegion *r, T
 }
 
 // The fill functions' first clean range is the whole input buffer, for the copy; VIC's input is no CPU write.
-static void dropInputClean(const Encoder *e, TegraNVENCSubmit *submit)
+static void dropInputClean(uint32_t inputHandle, TegraNVENCSubmit *submit)
 {
-    if (submit->clean_count && submit->clean[0].handle == e->handles.input) {
+    if (submit->clean_count && submit->clean[0].handle == inputHandle) {
         submit->clean_count--;
         memmove(&submit->clean[0], &submit->clean[1], submit->clean_count * sizeof(submit->clean[0]));
     }
@@ -102,16 +103,20 @@ static uint32_t vicMatrix(uint8_t h273)
     return h273 == 9 ? 2 : h273 == 1 ? 1 : 0;
 }
 
-bool ave_input_put(Encoder *e, CVPixelBufferRef image, const AVERegion *r, TegraNVENCSubmit *submit)
+bool ave_input_put_buffer(const Encoder *e, CVPixelBufferRef image, const AVERegion *r, uint32_t inputHandle,
+                          uint8_t *inputVA, TegraNVENCSubmit *submit, bool *refused)
 {
+    if (refused)
+        *refused = false;
     if (!e->surfaceInput)
-        return copyRegion(e, image, r, submit);
+        return copyRegion(e, image, r, inputVA, submit);
     if (!CVPixelBufferGetIOSurface(image)) {
-        e->inputRefused++;
+        if (refused)
+            *refused = true;
         switch_refusal("AVE", "a picture without an IOSurface", "VIC cannot take it, its frame fails");
         return false;
     }
-    dropInputClean(e, submit);
+    dropInputClean(inputHandle, submit);
     submit->source = (TegraNVENCSource){
         .surface_id = IOSurfaceGetID(CVPixelBufferGetIOSurface(image)),
         .x = r->x,
@@ -125,21 +130,29 @@ bool ave_input_put(Encoder *e, CVPixelBufferRef image, const AVERegion *r, Tegra
     return true;
 }
 
-int ave_input_submit(Encoder *e, const TegraNVENCSubmit *submit, uint32_t *fence)
+int ave_input_submit_raw(NVENCClient *client, const TegraNVENCSubmit *submit, uint32_t *fence, uint32_t *route)
 {
     uint32_t input = TEGRA_NVENC_INPUT_CPU;
-    const int status = nvenc_submit(e->client, submit, fence, &input);
-    if (!status) {
-        e->inputCopies += input == TEGRA_NVENC_INPUT_CPU;
-        e->inputVIC += input == TEGRA_NVENC_INPUT_VIC || input == TEGRA_NVENC_INPUT_BOUNCED;
-        e->inputBounced += input == TEGRA_NVENC_INPUT_BOUNCED;
-        e->inputDirect += input == TEGRA_NVENC_INPUT_DIRECT;
-    } else if (submit->source.surface_id && (status == kIOReturnUnsupported || status == kIOReturnNotReady)) {
-        e->inputRefused++;
+    const int status = nvenc_submit(client, submit, fence, &input);
+    if (route)
+        *route = input;
+    if (status && submit->source.surface_id && (status == kIOReturnUnsupported || status == kIOReturnNotReady)) {
         if (status == kIOReturnUnsupported)
             switch_refusal("AVE", "a surface VIC cannot take", "TegraNVENC's line says why; its frame fails");
         else
             switch_refusal("AVE", "a surface VIC could not take then", "TegraNVENC's line says why; its frame fails");
     }
     return status;
+}
+
+void ave_input_record_route(Encoder *e, const TegraNVENCSubmit *submit, int status, uint32_t route)
+{
+    if (!status) {
+        e->inputCopies += route == TEGRA_NVENC_INPUT_CPU;
+        e->inputVIC += route == TEGRA_NVENC_INPUT_VIC || route == TEGRA_NVENC_INPUT_BOUNCED;
+        e->inputBounced += route == TEGRA_NVENC_INPUT_BOUNCED;
+        e->inputDirect += route == TEGRA_NVENC_INPUT_DIRECT;
+    } else if (submit->source.surface_id && (status == kIOReturnUnsupported || status == kIOReturnNotReady)) {
+        e->inputRefused++;
+    }
 }

@@ -160,8 +160,8 @@ static bool stub_site(enum a64x_class c, uint32_t w)
 {
     uint32_t one;
     return c == A64X_LSE_CAS || c == A64X_LSE_CASP || c == A64X_LSE_LDOP || c == A64X_LSE_SWP || c == A64X_JSCVT ||
-           c == A64X_FCMA || c == A64X_FP16 || c == A64X_RDM || c == A64X_SB ||
-           (c == A64X_PAC_LDRA && !a64x_rewrite1(w, &one));
+           c == A64X_FCMA || c == A64X_RDM || c == A64X_SB ||
+           ((c == A64X_PAC_LDRA || c == A64X_FP16) && !a64x_rewrite1(w, &one));
 }
 
 static int check_words(struct vctx *c, bool no_pac, struct a64x_pt_check *v, char *err, size_t errlen)

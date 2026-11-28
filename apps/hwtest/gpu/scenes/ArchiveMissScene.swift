@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// MTLPipelineOptionFailOnBinaryArchiveMiss as Metal answers it: a creation that lists binary archives none of which

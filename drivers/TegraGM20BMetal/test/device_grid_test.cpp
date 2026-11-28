@@ -50,10 +50,16 @@ struct Launch {
 
 class DeviceGrid : public harness::DeviceTest {
 protected:
-    // The launches one dispatch of `groups` threadgroups of one thread submits, in order; false where it was refused
-    bool dispatched(const uint32_t groups[3], std::vector<Launch> &out, const char **why)
+    bool dispatched(const uint32_t groups[3], std::vector<Launch> &out, const char **why, bool measured = true)
     {
         const gm20b::ComputeState *k = gm20b::placeCompute(dev, rootKernel());
+        if (k) {
+            auto &rate = const_cast<gm20b::BandRate &>(k->rate);
+            rate.psPerUnit.store(0, std::memory_order_relaxed);
+            rate.samples.store(0, std::memory_order_relaxed);
+            if (measured)
+                gm20b::learn(rate, 40'000, 1'000'000);
+        }
         gm20b::CommandBuffer *cb = dev.begin();
         if (!k || !cb)
             return false;
@@ -139,6 +145,43 @@ TEST_F(DeviceGrid, AGridWithinTheQmdIsOneLaunch)
     ASSERT_EQ(launches.size(), 1u);
     EXPECT_EQ(launches[0].height, 65535u);
     EXPECT_EQ(launches[0].depth, 2u);
+}
+
+TEST_F(DeviceGrid, SmallUnmeasuredGridStaysInQmdSlicesWhileHeavyUnmeasuredCapsAtProbeLimit)
+{
+    const uint32_t groups[3] = {3, 70000, 1};
+    std::vector<Launch> launches;
+    const char *why = nullptr;
+    ASSERT_TRUE(dispatched(groups, launches, &why, false)) << (why ? why : "");
+    EXPECT_EQ(launches.size(), 2u);
+
+    gm20b::ComputeRecord heavy = rootKernel();
+    heavy.code.assign(4096 * 8, 0);
+    const gm20b::ComputeState *hk = gm20b::placeCompute(dev, heavy);
+    ASSERT_NE(hk, nullptr);
+    gm20b::CommandBuffer *cb = dev.begin();
+    ASSERT_NE(cb, nullptr);
+    const size_t before = kernel_model::model.jobs.size();
+    {
+        gm20b::ComputeEncoder e(*cb, dev);
+        e.setState(hk);
+        const uint32_t bigGroups[3] = {16, 70000, 1};
+        const uint32_t threads[3] = {1, 1, 1};
+        ASSERT_TRUE(e.dispatch(bigGroups, threads, &why)) << (why ? why : "");
+        e.end();
+    }
+    uint32_t seqno = 0;
+    ASSERT_TRUE(cb->commit(seqno));
+    size_t heavyLaunches = 0;
+    for (size_t j = before; j < kernel_model::model.jobs.size(); j++) {
+        const std::vector<uint32_t> &w = kernel_model::model.jobs[j].words;
+        for (size_t i = 0; i + 1 < w.size(); i++) {
+            const uint32_t h = w[i], subc = h >> 13 & 7, m = (h & 0xfff) << 2;
+            if (subc == gm20b::SUBC_COMPUTE && m == NVB1C0_SEND_PCAS_A)
+                heavyLaunches++;
+        }
+    }
+    EXPECT_EQ(heavyLaunches, gm20b::kMaxUnmeasuredBands);
 }
 
 TEST_F(DeviceGrid, AnIndirectCommandsSliceIsItsOwnLaunch)

@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Patch commands of a state whose set 0 is past one 256-byte block: the post-tessellation vertex function reads 20

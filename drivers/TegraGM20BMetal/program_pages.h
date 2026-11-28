@@ -21,6 +21,17 @@ constexpr uint64_t kProgramSlotPage = 16384;
 // What one import takes of a file: a multiple of every page size the kernel and the GPU map by
 constexpr uint64_t kProgramGrain = 0x10000;
 
+// The grains of the file [offset, offset + bytes) lies in, [first, end): what an import of the range takes
+struct GrainSpan {
+    uint64_t first, end;
+};
+
+constexpr GrainSpan programGrains(uint64_t offset, uint64_t bytes)
+{
+    return {offset / kProgramGrain * kProgramGrain,
+            (offset + bytes + kProgramGrain - 1) / kProgramGrain * kProgramGrain};
+}
+
 constexpr uint64_t programSlotEntryBytes(uint64_t slot)
 {
     return (slot + kProgramPrefetchBytes + kProgramSlotPage - 1) / kProgramSlotPage * kProgramSlotPage;
@@ -71,8 +82,8 @@ public:
         grains.clear();
         if (!set_ || !bytes || offset < first_ || offset > end_ || bytes > end_ - offset)
             return false;
-        const uint64_t g0 = (offset - first_) / kProgramGrain, g1 = (offset + bytes - first_ - 1) / kProgramGrain;
-        for (uint64_t g = g0; g <= g1; g++)
+        const GrainSpan span = programGrains(offset, bytes);
+        for (uint64_t g = (span.first - first_) / kProgramGrain; g < (span.end - first_) / kProgramGrain; g++)
             if (!isBound(g)) {
                 const uint64_t at = first_ + g * kProgramGrain;
                 grains.push_back({at, std::min(kProgramGrain, end_ - at)});

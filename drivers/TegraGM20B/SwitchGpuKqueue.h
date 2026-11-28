@@ -67,15 +67,17 @@ struct SwitchGpuKqueue {
 	}
 
 	// The channel on an open space, made when there is none: 0, or the error making it.
+	// Pass `out` to publish `channel` later under the caller's own lock.
 	int openChannel(const SwitchGpuKqueueShape &shape, const void *owner,
-			void (*fenced)(void *))
+			void (*fenced)(void *), tgm_chan **out = nullptr)
 	{
-		if (channel)
+		tgm_chan **target = out ? out : &channel;
+		if (*target)
 			return 0;
 		const int result = tgm_chan_new_copy(vm, owner, fenceCpu, fenceGpu, shape.name,
-						     shape.high, &channel);
+						     shape.high, target);
 		if (!result && fenced)
-			tgm_chan_on_fence(channel, fenced, nullptr);
+			tgm_chan_on_fence(*target, fenced, nullptr);
 		return result;
 	}
 };

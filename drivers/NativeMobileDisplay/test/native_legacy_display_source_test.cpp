@@ -136,8 +136,10 @@ TEST(DirectScanoutSource, TiledSurfacesScanBlockLinear)
     EXPECT_TRUE(copy.has("copy.sourceBlockHeightLog2 = blockLog2 >= 0 ? static_cast<uint32_t>(blockLog2) : 0;"));
     const CodeText kick = method("void kickOnce()");
     EXPECT_TRUE(
-        kick.before("const int blockLog2 = surfaceBlockLog2(memory);",
+        kick.before("const addr64_t firstPa = directFirstPa(memory);",
                     "offerDirect(request, surface, memory, sourceStride, allocation, width, height, tiled, kickAt)"));
+    EXPECT_TRUE(kick.before("const int blockLog2 = surfaceBlockLog2Pa(firstPa);",
+                            "const bool compressed = tiled && surfaceCompressedPa(firstPa);"));
     // window A scans, and the CPU's fallback copies as it is, only a frame in window A's own blocks; a frame tiled in
     // other blocks takes the GPU copy (which reads its layout) or is not shown
     EXPECT_TRUE(kick.before("const bool asScanned = !tiled || blockLog2 == static_cast<int>(kScanBlockLog2);",
@@ -238,9 +240,11 @@ TEST(PanicRestoreSource, EveryKernelConfig)
 TEST(DisplayStatsSource, QuietDisplayWindowsAreLogged)
 {
     const CodeText stats = method("void noteStatsWindow()");
-    EXPECT_TRUE(stats.has("if (stVsyncs && !stSwaps && !stPresents)"));
-    EXPECT_TRUE(stats.before("SwitchDisplay: quiet display: ", "stSwaps = stVsyncs = "));
-    EXPECT_TRUE(stats.before("SwitchDisplay: quiet display: ", "if (logged) os_log("));
+    EXPECT_TRUE(stats.has("s.quietDisplay = stVsyncs && !stSwaps && !stPresents;"));
+    EXPECT_TRUE(stats.before("s.quietDisplay = stVsyncs && !stSwaps && !stPresents;", "stSwaps = stVsyncs = "));
+    const CodeText log = method("void logStatsWindow(const StatsSnapshot &s) const");
+    EXPECT_TRUE(log.has("if (s.quietDisplay)"));
+    EXPECT_TRUE(log.before("SwitchDisplay: quiet display: ", "if (s.logged) os_log("));
 }
 
 // An idle display wakes no core: FRAME_END reaches the CPU only while something waits for a frame end. Holders outside the
@@ -252,11 +256,12 @@ TEST(FrameEndSource, MaskedWhileNothingWaits)
     EXPECT_EQ(code().count("dc[kDcIntMask] ="), 3u);
     for (const char *helper :
          {"void writeIntMask(uint32_t clear, uint32_t set)", "void unmaskFrameEnd()", "void maskIdleFrameEnd()"})
-        EXPECT_TRUE(method(helper).has("IOSimpleLockLockDisableInterrupt(intMaskLock)")) << helper;
+        EXPECT_TRUE(method(helper).has("IOLockLock(intMaskLock)")) << helper;
     EXPECT_TRUE(method("void kickSwapQueue() override").startsWith("if (primary) kickUnmaskFrameEnd();"));
     EXPECT_TRUE(method("void vblankTick()")
                     .endsWith("if ((status & kFrameEndInt) && !frameEndNeeded() && tegra_panel_holds_frame_end()) { "
-                              "maskIdleFrameEnd(); idleFlipDeadline(); }"));
+                              "maskIdleFrameEnd(); idleFlipDeadline(); } if ((status & kFrameEndInt) && stats) "
+                              "noteFrameEndRouted();"));
     EXPECT_TRUE(method("void maskIdleFrameEnd()").has("if (!__atomic_load_n(&gFrameEndHolds"));
     // The kick's shadow: set with the lock held, cleared only by the gate.
     EXPECT_TRUE(method("void kickUnmaskFrameEnd()")
@@ -300,6 +305,23 @@ TEST(Sc7Source, StatusReadsNotFixedSleeps)
     EXPECT_EQ(CodeText(power).count("0x2A000001"), 0u);
     EXPECT_TRUE(up.before("write(gMipiCal, kMipiDsiCal);", "tegra_mipi_cal::calibrate(gMipiCal"));
     EXPECT_TRUE(up.before("tegra_mipi_cal::calibrate(gMipiCal", "write(gDc, kDcTimings);"));
+}
+
+// DC A's general syncpoint client, the display stream's, stalls a full condition FIFO's writer rather than drop the
+// increment; the window clients, only debug probes', drop rather than stall DC A's host interface. All reset together.
+TEST(DisplayPowerSource, TheGeneralClientStallsTheWindowClientsDropAndAllAreResetTogether)
+{
+    const CodeText power(SourceText("../TegraDisplayPower.cpp"));
+    EXPECT_FALSE(power.has("{DC_CMD_GENERAL_INCR_SYNCPT_CNTRL, 1u << 8}"));
+    EXPECT_TRUE(power.has("{DC_CMD_WIN_A_INCR_SYNCPT_CNTRL, kSyncptNoStall},"));
+    EXPECT_TRUE(power.has("{DC_CMD_WIN_B_INCR_SYNCPT_CNTRL, kSyncptNoStall},"));
+    EXPECT_TRUE(power.has("{DC_CMD_WIN_C_INCR_SYNCPT_CNTRL, kSyncptNoStall},"));
+    EXPECT_TRUE(power.before("{DC_CMD_WIN_C_INCR_SYNCPT_CNTRL, 1},", "{DC_CMD_GENERAL_INCR_SYNCPT_CNTRL, 0},"));
+    EXPECT_TRUE(power.before("{DC_CMD_GENERAL_INCR_SYNCPT_CNTRL, 1},", "{DC_CMD_WIN_A_INCR_SYNCPT_CNTRL, 1},"));
+    EXPECT_TRUE(
+        power.before("{DC_CMD_WIN_C_INCR_SYNCPT_CNTRL, kSyncptNoStall},", "{DC_CMD_GENERAL_INCR_SYNCPT_ERROR, ~0u},"));
+    EXPECT_TRUE(power.before("{DC_CMD_WIN_C_INCR_SYNCPT_ERROR, ~0u},", "{DC_CMD_CONT_SYNCPT_VSYNC, (1u << 8) | 9},"));
+    EXPECT_TRUE(method("void gpuDeadlineCheck()").has("dc[kDcSyncptErrors[3]]"));
 }
 
 TEST(BlankSource, ColourBlankEndsAtTheNextLatch)
@@ -419,7 +441,7 @@ TEST(FrameEndSource, ConsoleTapeRearmsBeforePublishingItsWaitCallback)
     const CodeText start = method("void startConsoleTape()");
     EXPECT_TRUE(start.has("tapeAttached = true; unmaskFrameEnd();"));
     EXPECT_TRUE(start.before("unmaskFrameEnd();", "vc_tape_attach("));
-    EXPECT_TRUE(method("bool frameEndNeeded()").has("tapeAttached"));
+    EXPECT_TRUE(method("switch_frame_end::Holder frameEndHolder()").has("tapeAttached"));
     EXPECT_TRUE(method("int waitTapeFrame()").has("panic(\"SwitchDisplay: the console waited"));
 }
 
@@ -436,7 +458,7 @@ TEST(FrameEndSource, OnePassAndOneDeadlineAPeriod)
     EXPECT_TRUE(method("void armDeadlineTimer()").startsWith("if (flipDeadlineArmed || !flipTimer) return;"));
     EXPECT_TRUE(method("void checkFlipDeadline()")
                     .has("if (frameEnds != flipDeadlineFrames || frameEndPending(kFrameEndInt))"));
-    EXPECT_TRUE(method("bool frameEndNeeded()").has("(offerAged && gpuScanout)"));
+    EXPECT_TRUE(method("switch_frame_end::Holder frameEndHolder()").has("(offerAged && gpuScanout)"));
     EXPECT_FALSE(code().has("__atomic_store_n(&gpuScanout"));
     EXPECT_FALSE(code().has("__atomic_exchange_n(&gpuDonePending"));
     EXPECT_FALSE(code().has("__atomic_exchange_n(&self->gpuDonePending"));
@@ -461,13 +483,14 @@ TEST(FrameEndSource, VerdictsReachTheTableThroughTheGate)
 // release kernel counts nothing (stats is SWITCH_FRAME_TIMELINE: DEVELOPMENT || DEBUG).
 TEST(DisplayStatsSource, LocksPerFrameEndLine)
 {
-    const CodeText window = method("void noteLocksWindow()");
-    EXPECT_TRUE(window.startsWith("if (!stats) return;"));
-    EXPECT_TRUE(window.has("os_log(OS_LOG_DEFAULT, \"SwitchDisplay locks: %s\", line);"));
+    const CodeText stats = method("void noteStatsWindow()");
     for (const char *count : {"color->lockTakes()", "intMaskTakes", "switch_vic_surface_cache_locks()", "flipClaims()"})
-        EXPECT_TRUE(window.has(count)) << count;
-    EXPECT_TRUE(method("void noteStatsWindow()").has("noteLocksWindow();"));
+        EXPECT_TRUE(stats.has(count)) << count;
+    const CodeText window = method("static void logLocksWindow(const StatsSnapshot &s)");
+    EXPECT_TRUE(window.has("os_log(OS_LOG_DEFAULT, \"SwitchDisplay locks: %s\", line);"));
+    EXPECT_TRUE(method("void logStatsWindow(const StatsSnapshot &s) const").has("logLocksWindow(s);"));
     EXPECT_TRUE(method("void notePass()").startsWith("if (stats) ++stPasses;"));
+    EXPECT_TRUE(window.has("routedLine(s.routed, line + used, sizeof(line) - used, s.us, s.swaps, s.irqs);"));
 }
 
 // validateSwap runs on the client's thread: it decides and observes, and everything the gate owns (the overlay's
@@ -501,4 +524,35 @@ TEST(FrameTimelineSource, TheFrameEndStandsInForAnUnarmedVsync)
     EXPECT_TRUE(note.has("if (!SWITCH_FRAME_TIMELINE) return;"));
     EXPECT_TRUE(note.has("switch_sched_render_vsync(stamp, interval);"));
     EXPECT_TRUE(method("FrameTimeline swapTimeline(uint64_t at)").has("tl.vsyncUs = timelineVsyncUs(at);"));
+}
+
+// tools/perf's pacing.FRAME_RENDER reads the render thread's window off every slow present's line: its SwitchFrameRender
+// line is capped at 30/s and written only for a swap half a period late, and the display's first submit is the
+// compositor's first since the previous swap, which can come long before this frame's vsync. The window is read before
+// switch_sched_render_swapped closes it.
+TEST(FrameTimelineSource, EverySlowPresentCarriesTheRenderThreadsWindow)
+{
+    const CodeText swap = method("FrameTimeline swapTimeline(uint64_t at)");
+    EXPECT_TRUE(swap.has("switch_sched_render_window(&renderVsync, &renderWoke, &renderFirst)"));
+    const std::string display = SourceText("../NativeLegacyDisplay.cpp");
+    EXPECT_LT(display.find("switch_sched_render_window(&renderVsync"), display.find("switch_sched_render_swapped();"));
+    EXPECT_TRUE(method("static void noteSlowFrame(").has(R"("; render vsync %llu woke %d first %d")"));
+}
+
+TEST(SwapZeroLayerSource, SwapSubmitFilterMatchesBothIpswTables)
+{
+    const std::string t24 = SourceText("../../../kits/SwitchABI/kinds/24B119/IOMobileFramebufferLegacy.json");
+    const std::string t21 = SourceText("../../../kits/SwitchABI/kinds/21H461/IOMobileFramebufferLegacy.json");
+    EXPECT_THAT(t24, HasSubstr("\"slots\": 379"));
+    EXPECT_THAT(t24, HasSubstr("\"opaque180\": \"0xfffffff009978668\""));
+    EXPECT_THAT(t21, HasSubstr("\"slots\": 358"));
+    EXPECT_THAT(t21, HasSubstr("\"opaque178\": \"0xfffffff00678f224\""));
+    EXPECT_TRUE(code().has("static constexpr unsigned kLegacyVtableSlots = 379, kSwapSubmitSlot = 180;"));
+    EXPECT_TRUE(code().has("static constexpr unsigned kLegacyVtableSlots = 358, kSwapSubmitSlot = 178;"));
+    EXPECT_TRUE(code().has("static inline switch_display::SwapZeroLayerState swapZeroLayer;"));
+    EXPECT_FALSE(code().has("swapZeroLock"));
+    EXPECT_TRUE(method("bool start(IOService *provider) override").has("installSwapSubmitFilter();"));
+    EXPECT_TRUE(method("void stop(IOService *provider) override").has("resetSwapZeroLayer();"));
+    EXPECT_TRUE(method("void free() override").has("removeSwapSubmitFilter();"));
+    EXPECT_TRUE(method("IOReturn newUserClient(").has("resetSwapZeroLayer();"));
 }

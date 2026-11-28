@@ -63,7 +63,6 @@ void switch_gm20b_fetch_after_idle(struct nv_push *p)
 
 void switch_gm20b_compute_idle_flushed(struct nv_push *p)
 {
-    P_IMMD(p, NVB1C0, WAIT_FOR_IDLE, 0);
     P_IMMD(p, NVB1C0, INVALIDATE_SHADER_CACHES,
            {
                .data = DATA_TRUE,

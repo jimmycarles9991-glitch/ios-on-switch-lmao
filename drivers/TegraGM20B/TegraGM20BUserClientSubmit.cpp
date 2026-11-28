@@ -95,8 +95,8 @@ IOReturn AGXDeviceUserClient::cpuAccess(const TegraGM20BAbiCpuAccess *in, bool r
 
 bool AGXDeviceUserClient::reserveJob(JobScratch &job, uint32_t uses)
 {
-	if (!job.bytes)
-		job.bytes = IONew(uint64_t, (kJobBytes + 7) / 8);
+	if (!job.record)
+		job.record = static_cast<SwitchGpuJobBuffer *>(IOMallocData(sizeof(*job.record)));
 	if (!job.dependencies)
 		job.dependencies = IONew(switch_gpu_backing_token, TegraGM20BMaxJobDependencies);
 	if (!job.events) {
@@ -104,7 +104,7 @@ bool AGXDeviceUserClient::reserveJob(JobScratch &job, uint32_t uses)
 		if (job.events)
 			*job.events = {};
 	}
-	if (!job.bytes || !job.dependencies || !job.events)
+	if (!job.record || !job.dependencies || !job.events)
 		return false;
 	if (uses > job.capacity) {
 		uint32_t capacity = job.capacity ? job.capacity : 64;
@@ -118,13 +118,16 @@ bool AGXDeviceUserClient::reserveJob(JobScratch &job, uint32_t uses)
 		auto *surfaces = IONew(SwitchGpuSurfaceRefresh, capacity);
 		auto **leases = IONew(switch_gpu_cpu_lease *, capacity);
 		auto **written = IONew(tgm_coh *, capacity);
-		if (!made || !writes || !guards || !surfaces || !leases || !written) {
+		auto **nativeWritten = IONew(void *, capacity);
+		if (!made || !writes || !guards || !surfaces || !leases || !written ||
+		    !nativeWritten) {
 			IODelete(made, switch_gpu_backing_use, capacity);
 			IODelete(writes, switch_gpu_backing_write_range, capacity);
 			IODelete(guards, switch_gpu_backing_guard, capacity);
 			IODelete(surfaces, SwitchGpuSurfaceRefresh, capacity);
 			IODelete(leases, switch_gpu_cpu_lease *, capacity);
 			IODelete(written, tgm_coh *, capacity);
+			IODelete(nativeWritten, void *, capacity);
 			return false;
 		}
 		IODelete(job.uses, switch_gpu_backing_use, job.capacity);
@@ -133,9 +136,11 @@ bool AGXDeviceUserClient::reserveJob(JobScratch &job, uint32_t uses)
 		IODelete(job.surfaces, SwitchGpuSurfaceRefresh, job.capacity);
 		IODelete(job.leases, switch_gpu_cpu_lease *, job.capacity);
 		IODelete(job.written, tgm_coh *, job.capacity);
+		IODelete(job.nativeWritten, void *, job.capacity);
 		job.surfaces = surfaces;
 		job.leases = leases;
 		job.written = written;
+		job.nativeWritten = nativeWritten;
 		job.uses = made;
 		job.writes = writes;
 		job.guards = guards;
@@ -146,7 +151,8 @@ bool AGXDeviceUserClient::reserveJob(JobScratch &job, uint32_t uses)
 
 void AGXDeviceUserClient::freeJob(JobScratch &job)
 {
-	IODelete(job.bytes, uint64_t, (kJobBytes + 7) / 8);
+	if (job.record)
+		IOFreeData(job.record, sizeof(*job.record));
 	IODelete(job.dependencies, switch_gpu_backing_token, TegraGM20BMaxJobDependencies);
 	if (job.events) {
 		job.events->clear();
@@ -158,5 +164,7 @@ void AGXDeviceUserClient::freeJob(JobScratch &job)
 	IODelete(job.surfaces, SwitchGpuSurfaceRefresh, job.capacity);
 	IODelete(job.leases, switch_gpu_cpu_lease *, job.capacity);
 	IODelete(job.written, tgm_coh *, job.capacity);
+	IODelete(job.nativeWritten, void *, job.capacity);
+	job.useCache.release();
 	job = {};
 }

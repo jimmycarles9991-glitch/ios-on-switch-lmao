@@ -29,7 +29,7 @@ std::string path(id<MTLCommandBuffer> cb)
 
 NSError *failure(id<MTLCommandBuffer> cb)
 {
-    std::lock_guard<gm20b::Mutex> l(((SwitchMetalCommandBuffer *)cb)->_lock);
+    std::lock_guard<gm20b::UnfairMutex> l(((SwitchMetalCommandBuffer *)cb)->_lock);
     return ((SwitchMetalCommandBuffer *)cb)->_segError;
 }
 

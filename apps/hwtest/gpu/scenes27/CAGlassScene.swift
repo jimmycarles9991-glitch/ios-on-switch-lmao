@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// QuartzCore 27's Liquid Glass background (glass_background_all over the variable blur's vertex function, into BGRA8

@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
+import HWTestKit
 import Metal
 
 /// Rule mip.twod (drivers/TegraGM20BMetal/fx/fx_mip_route.h): generateMipmaps on the 2D engine, step by step against

@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A command buffer held on its own app's shared event that nobody signals fails as Metal's GPU fails it

@@ -50,7 +50,7 @@ static bool heldInPlanes(SwitchMetalTexture *t)
 - (void)setComputePipelineState:(id<MTLComputePipelineState>)state
 {
     SwitchMetalComputeState *next =
-        [(id)state isKindOfClass:[SwitchMetalComputeState class]] ? (SwitchMetalComputeState *)state : nil;
+        state && object_getClass(state) == gSwitchMetalComputeStateClass ? (SwitchMetalComputeState *)state : nil;
     if (state && !next)
         return gm20bComputeFails(_cb, gm20b::ComputeFailure::Invalid, PredCompute, 0,
                                  "a compute pipeline state of another device");
@@ -69,7 +69,7 @@ static bool heldInPlanes(SwitchMetalTexture *t)
 
 - (void)setBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index
 {
-    if (buffer && ![(id)buffer isKindOfClass:[SwitchMetalBuffer class]])
+    if (buffer && !gm20bAsBuffer(buffer))
         return gm20bComputeFails(_cb, gm20b::ComputeFailure::Invalid, PredCompute, index,
                                  "a kernel's buffer of another device");
     setBinding(_cb, OpKernelBuffer, 3, index, buffer, offset);
@@ -165,8 +165,7 @@ static MTLTextureDescriptor *kernelDescriptor(SwitchMetalTexture *t, SwitchMetal
 
 - (void)setTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index
 {
-    SwitchMetalTexture *t =
-        [(id)texture isKindOfClass:[SwitchMetalTexture class]] ? (SwitchMetalTexture *)texture : nil;
+    SwitchMetalTexture *t = gm20bAsTexture(texture);
     if (texture && !t)
         return gm20bComputeFails(_cb, gm20b::ComputeFailure::Invalid, PredCompute, index,
                                  "a kernel's texture of another device");
@@ -188,8 +187,7 @@ static MTLTextureDescriptor *kernelDescriptor(SwitchMetalTexture *t, SwitchMetal
 
 - (void)setSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index
 {
-    SwitchMetalSampler *s =
-        [(id)sampler isKindOfClass:[SwitchMetalSampler class]] ? (SwitchMetalSampler *)sampler : nil;
+    SwitchMetalSampler *s = gm20bAsSampler(sampler);
     if (sampler && !s)
         return gm20bComputeFails(_cb, gm20b::ComputeFailure::Invalid, PredCompute, index,
                                  "a kernel's sampler of another device");
@@ -407,7 +405,7 @@ static MTLTextureDescriptor *kernelDescriptor(SwitchMetalTexture *t, SwitchMetal
         reference:(uint32_t)reference
 {
     _cb->_predicates.record(kind);
-    const bool gm20bBuffer = [(id)buffer isKindOfClass:[SwitchMetalBuffer class]];
+    const bool gm20bBuffer = gm20bAsBuffer(buffer) != nil;
     const bool readsWord = kind == gm20b::PredicateRecords::StartIf || kind == gm20b::PredicateRecords::StartWhile ||
                            kind == gm20b::PredicateRecords::EndDoWhile;
     // a Start or an EndDoWhile naming no buffer withholds its compute unit's dispatches at the encode
@@ -501,8 +499,7 @@ static MTLTextureDescriptor *kernelDescriptor(SwitchMetalTexture *t, SwitchMetal
                           indirectBufferOffset:(NSUInteger)offset
                          threadsPerThreadgroup:(MTLSize)threads
 {
-    SwitchMetalBuffer *arguments =
-        [(id)buffer isKindOfClass:[SwitchMetalBuffer class]] ? (SwitchMetalBuffer *)buffer : nil;
+    SwitchMetalBuffer *arguments = gm20bAsBuffer(buffer);
     if (!arguments)
         return gm20bComputeFails(_cb, gm20b::ComputeFailure::Invalid, PredCompute, offset,
                                  "indirect dispatch arguments of another device");

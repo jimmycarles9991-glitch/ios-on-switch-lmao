@@ -18,6 +18,7 @@ void (*releaseOwner)(void *);
 bool rejected, existing;
 unsigned retired;
 switch_gpu_cached_mapping *returned;
+switch_gpu_spare_kind returnedKind;
 
 class CachedPin : public testing::Test
 {
@@ -28,6 +29,7 @@ class CachedPin : public testing::Test
 		rejected = existing = false;
 		retired = 0;
 		returned = nullptr;
+		returnedKind = SWITCH_GPU_SPARE_KINDS;
 	}
 
 	void TearDown() override
@@ -54,12 +56,13 @@ extern "C" switch_gpu_backing *switch_gpu_backing_register(const uint64_t *, uin
 IOMemoryMap *returnedMap;
 
 void switch_gpu_cached_retire(SwitchGpuCachedBuffer buffer, uint64_t *pages, uint32_t count,
-			      switch_gpu_cached_mapping *mapping)
+			      switch_gpu_spare_kind kind, switch_gpu_cached_mapping *mapping)
 {
 	EXPECT_EQ(count, 4u);
 	EXPECT_EQ(pages[3], 0x4000u);
 	++retired;
 	returned = mapping;
+	returnedKind = kind;
 	returnedMap = buffer.map;
 	buffer.memory->complete();
 	buffer.memory->release();
@@ -78,7 +81,8 @@ TEST_F(CachedPin, PersistentMappingTravelsWithLastBackingOwner)
 {
 	IOMemoryDescriptor memory;
 	switch_gpu_cached_mapping mapping{9};
-	ASSERT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, {&memory, nullptr, nullptr}, &mapping),
+	ASSERT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, {&memory, nullptr, nullptr},
+					SWITCH_GPU_SPARE_CACHED, &mapping),
 		  &backing);
 	EXPECT_EQ(retired, 0u);
 	EXPECT_EQ(memory.refs, 2u);
@@ -86,9 +90,24 @@ TEST_F(CachedPin, PersistentMappingTravelsWithLastBackingOwner)
 	releaseOwner(owner);
 	owner = nullptr;
 	EXPECT_EQ(returned, &mapping);
+	EXPECT_EQ(returnedKind, SWITCH_GPU_SPARE_CACHED);
 	EXPECT_EQ(retired, 1u);
 	EXPECT_EQ(memory.refs, 1u);
 	EXPECT_EQ(memory.prepared, 0u);
+}
+
+// A system BO's write-combined buffer goes back to the write-combined spares, never the cacheable ones
+TEST_F(CachedPin, AWriteCombinedBufferRetiresToItsOwnKind)
+{
+	IOMemoryDescriptor memory;
+	switch_gpu_cached_mapping mapping{9};
+	ASSERT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, {&memory, nullptr, nullptr},
+					SWITCH_GPU_SPARE_WC, &mapping),
+		  &backing);
+	releaseOwner(owner);
+	owner = nullptr;
+	EXPECT_EQ(retired, 1u);
+	EXPECT_EQ(returnedKind, SWITCH_GPU_SPARE_WC);
 }
 
 // A spare made of 128 KiB units is mapped at one kernel address by its own IOMemoryMap: the backing's last owner hands
@@ -99,7 +118,8 @@ TEST_F(CachedPin, AUnitsBuffersKernelMapTravelsWithTheBuffer)
 	IOMemoryMap map{7};
 	switch_gpu_cached_mapping mapping{9};
 	returnedMap = nullptr;
-	ASSERT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, {&memory, &map, &map}, &mapping),
+	ASSERT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, {&memory, &map, &map},
+					SWITCH_GPU_SPARE_CACHED, &mapping),
 		  &backing);
 	releaseOwner(owner);
 	owner = nullptr;
@@ -112,7 +132,8 @@ TEST_F(CachedPin, RefusedRegistrationReturnsMappingOwnershipToCaller)
 	IOMemoryDescriptor memory;
 	switch_gpu_cached_mapping mapping{9};
 	rejected = true;
-	EXPECT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, {&memory, nullptr, nullptr}, &mapping),
+	EXPECT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, {&memory, nullptr, nullptr},
+					SWITCH_GPU_SPARE_CACHED, &mapping),
 		  nullptr);
 	EXPECT_EQ(retired, 0u);
 	EXPECT_EQ(memory.refs, 1u);
@@ -124,7 +145,8 @@ TEST_F(CachedPin, ExistingAuthorityDisposesOnlyTheExtraMappingOwner)
 	IOMemoryDescriptor memory;
 	switch_gpu_cached_mapping mapping{9};
 	existing = true;
-	EXPECT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, {&memory, nullptr, nullptr}, &mapping),
+	EXPECT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, {&memory, nullptr, nullptr},
+					SWITCH_GPU_SPARE_CACHED, &mapping),
 		  &backing);
 	EXPECT_EQ(retired, 1u);
 	EXPECT_EQ(returned, &mapping);
@@ -137,7 +159,8 @@ TEST_F(CachedPin, FailedPrepareDoesNotConsumeMapping)
 	IOMemoryDescriptor memory;
 	switch_gpu_cached_mapping mapping{9};
 	memory.refuse = true;
-	EXPECT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, {&memory, nullptr, nullptr}, &mapping),
+	EXPECT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, {&memory, nullptr, nullptr},
+					SWITCH_GPU_SPARE_CACHED, &mapping),
 		  nullptr);
 	EXPECT_EQ(retired, 0u);
 	EXPECT_EQ(memory.refs, 1u);

@@ -1,13 +1,14 @@
-"""QuartzCore 27's Pipeline::Spec::name: a spec (caspec27.Spec) back into its name, as decode_name reads it.
+"""QuartzCore's Pipeline::Spec::name: a spec (caspec.Spec or caspec27.Spec) back into its name, as decode_name reads it.
 
-Each segment writes its table's fields in order (pipeline encode_segment 24B119 0x18441175c, the fragment's and an
-image's alike): the pipeline's format and an image's function always, any other field whose value is not the table's
-default, each as its letter and its code (the decoder's, else the number at the field's width), a multi-value field
-when any value differs, every value; then X and the set flags in the table's order. Names carry every image segment
-the texture function samples.
+Each segment writes its table's fields in order (pipeline encode_segment 24B119 0x18441175c, 21H461 alike, the
+fragment's and an image's too): the pipeline's format and an image's function always, any other field whose value is not
+the table's default, each as its letter and its code (the decoder's, else the number at the field's width), a
+multi-value field when any value differs, every value; then X and the set flags in the table's order. Names carry every
+image segment the texture function samples.
 """
 
-from caspec27 import Image, Spec, Tables27
+import caspec
+import caspec27
 
 PIPELINE_FLAGS = ('b', 'm', 'w')
 
@@ -40,8 +41,15 @@ def _segment(
     return out
 
 
-def encode(tables: Tables27, s: Spec) -> str:
+def _flag_set(flags: set[str] | int) -> set[str]:
+    if isinstance(flags, int):
+        return {letter for letter, bit in caspec.FLAG_BITS.items() if flags >> bit & 1}
+    return set(flags)
+
+
+def encode(tables: caspec.Tables | caspec27.Tables27, s: caspec.Spec | caspec27.Spec) -> str:
     """Give the name of spec `s`."""
+    tables = getattr(tables, 'v27', None) or tables
     dec, nt = tables.dec, tables.t['name_tables']
     pipeline = _segment(
         nt['pipeline'],
@@ -59,12 +67,13 @@ def encode(tables: Tables27, s: Spec) -> str:
             'L': dec['VertexLayout'],
         },
         {'T': [s.T], 'B': [s.fragB], 'D': [s.D], 'A': [s.A], 'S': [s.S], 'L': [s.L]},
-        set(s.flags),
+        _flag_set(s.flags),
         '',
     )
+    empty_image = caspec27.Image if isinstance(tables, caspec27.Tables27) else caspec.Image
     images = []
     for k in range(tables.images(s.T)):
-        img = s.images[k] if k < len(s.images) else Image()
+        img = s.images[k] if k < len(s.images) else empty_image()
         images.append(
             _segment(
                 nt['image'],

@@ -17,4 +17,5 @@ struct hrtimer {
 void hrtimer_init(struct hrtimer *timer, int which_clock, enum hrtimer_mode mode);
 void hrtimer_start(struct hrtimer *timer, ktime_t tim, const enum hrtimer_mode mode);
 int hrtimer_cancel(struct hrtimer *timer);
+int hrtimer_try_to_cancel(struct hrtimer *timer);
 #endif

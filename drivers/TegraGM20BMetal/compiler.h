@@ -25,7 +25,7 @@ public:
 
     using Make = std::function<Outcome(const CacheKey &k, RuntimeRecord &record, std::string &why)>;
     // Called on the queue once the state is made (`record` null: refused, `why`)
-    using Done = std::function<void(const RuntimeRecord *record, const std::string &why)>;
+    using Done = std::function<void(std::shared_ptr<const RuntimeRecord> record, const std::string &why)>;
 
     Compiler(RecordCache *cache, Make make);
     ~Compiler();
@@ -39,7 +39,7 @@ public:
 
     // The state's result so far; the first ask of it queues its making. Every ask made while it is being made has its `done`
     // called once it is
-    State ask(const CacheKey &k, Done done, const RuntimeRecord **record = nullptr);
+    State ask(const CacheKey &k, Done done, std::shared_ptr<const RuntimeRecord> *record = nullptr);
     // The state's record or refusal if it is made or on disk, on the caller's thread: what a state's creation takes at once (the
     // disk's entry is kept as the state's result). None: not made yet (being made, or never asked)
     RecordCache::Found lookup(const CacheKey &k, RuntimeRecord &record, std::string &why);
@@ -50,6 +50,8 @@ public:
     // A state's record or refusal found outside this table (the shader compiler's store), kept as its result unless an ask
     // came first
     void keep(const CacheKey &k, RecordCache::Found found, const RuntimeRecord &record, const std::string &why);
+    // Drop settled in-memory entries with no active maker or waiters; returns how many entries were freed.
+    size_t trim();
     void drain();  // host tests: waits for everything asked so far
     void enqueue(std::function<void()> work);
 
@@ -71,10 +73,11 @@ public:
 private:
     struct Entry {
         State state = State::Pending;
-        std::unique_ptr<RuntimeRecord> record;
+        std::shared_ptr<const RuntimeRecord> record;
         std::string why;
         std::vector<Done> waiters;  // the asks made while it was being made
         pthread_t maker = nullptr;  // the thread making it; none while it waits in the queue
+        uint32_t waiting = 0;       // threads blocked in waitForMaker on this entry
     };
 
     struct Job;
@@ -98,8 +101,8 @@ private:
     static void runTask(void *task);
     Outcome produce(const CacheKey &k, RuntimeRecord &record, std::string &why, RecordCache::Found &found);
     std::vector<Done> settle(const CacheKey &k, Outcome outcome, RecordCache::Found found,
-                             std::unique_ptr<RuntimeRecord> record, const std::string &why, uint64_t began,
-                             const RuntimeRecord **made);
+                             std::shared_ptr<const RuntimeRecord> record, const std::string &why, uint64_t began,
+                             std::shared_ptr<const RuntimeRecord> &made);
     void queue(const CacheKey &k);
     void waitForMaker(std::unique_lock<gm20b::Mutex> &l, Entry &e);
 };

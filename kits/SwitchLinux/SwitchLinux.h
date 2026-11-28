@@ -28,6 +28,7 @@ uint64_t switch_linux_malloc_size(const void *block);
 unsigned long switch_linux_irq_save(void);
 void switch_linux_irq_restore(unsigned long flags);
 bool switch_linux_irqs_disabled(void);
+bool switch_linux_can_sleep(void);
 int switch_linux_cpu(void);
 
 uint64_t switch_linux_nanotime(void);
@@ -53,6 +54,11 @@ void switch_linux_wakeup_one(const void *event);
 void *switch_linux_mutex_alloc(void);
 void switch_linux_mutex_free(void *mutex);
 void *switch_linux_mutex_of(void **slot);
+static inline void *switch_linux_mutex_fast(void **slot)
+{
+    void *mutex = __atomic_load_n(slot, __ATOMIC_RELAXED);
+    return __builtin_expect(mutex != (void *)0, 1) ? mutex : (switch_linux_mutex_of)(slot);
+}
 void switch_linux_mutex_lock(void *mutex);
 void switch_linux_mutex_unlock(void *mutex);
 bool switch_linux_mutex_trylock(void *mutex);
@@ -62,6 +68,15 @@ bool switch_linux_mutex_sleep(void *mutex, const void *event, uint64_t deadline_
 void *switch_linux_rwsem_alloc(void);
 void switch_linux_rwsem_free(void *rwsem);
 void *switch_linux_rwsem_of(void **slot);
+static inline void *switch_linux_rwsem_fast(void **slot)
+{
+    void *rwsem = __atomic_load_n(slot, __ATOMIC_RELAXED);
+    return __builtin_expect(rwsem != (void *)0, 1) ? rwsem : (switch_linux_rwsem_of)(slot);
+}
+#if defined(KERNEL) && !defined(SWITCH_LINUX_IMPL)
+#define switch_linux_mutex_of(slot) switch_linux_mutex_fast(slot)
+#define switch_linux_rwsem_of(slot) switch_linux_rwsem_fast(slot)
+#endif
 void switch_linux_down_read(void *rwsem);
 void switch_linux_up_read(void *rwsem);
 void switch_linux_down_write(void *rwsem);
@@ -75,9 +90,12 @@ void switch_linux_up_write(void *rwsem);
 // fn(arg) on the caller's thread (flush_work). Both are thread context, never from the call; both return true if a run
 // was pending. alloc is thread context; free takes a call that is neither pending nor running.
 void *switch_linux_call_alloc(void (*fn)(void *arg), void *arg);
+void *switch_linux_call_alloc_deferrable(void (*fn)(void *arg), void *arg);
+void *switch_linux_call_alloc_low(void (*fn)(void *arg), void *arg);
 void switch_linux_call_free(void *call);
 bool switch_linux_call_enter(void *call);
 bool switch_linux_call_enter_after(void *call, uint64_t delay_ns);
+bool switch_linux_call_enter_after_leeway(void *call, uint64_t delay_ns, uint64_t leeway_ns);
 bool switch_linux_call_cancel(void *call);
 bool switch_linux_call_cancel_wait(void *call);
 bool switch_linux_call_flush(void *call, void (*fn)(void *arg), void *arg);

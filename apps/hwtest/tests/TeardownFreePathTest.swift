@@ -1,7 +1,9 @@
 import Darwin
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Resource teardown detaches what it lets go of under Device::lock_ and runs BoFree, VA release, vm_deallocate and

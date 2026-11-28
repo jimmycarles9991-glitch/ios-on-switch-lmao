@@ -81,4 +81,27 @@ TEST(KernelShapes, AStageInSegmentItCannotReadOrOfAFunctionsStateIsRefused)
     EXPECT_FALSE(probe::parse(ofFunction + stageInText(stageInput()) + " | ", s, why));
 }
 
+TEST(KernelShapes, AFactsOnlyLineParsesWithZeroThreadsAndRefusesDispatchResources)
+{
+    const std::string line =
+        "D ok=1 tg=0,0,0 edge=0,0,0 threads=0 | form=d opt=0 max=256 tgm=1 label=- | k cam_isp lib=/a.metallib | ";
+    probe::Shape s;
+    std::string why;
+    ASSERT_TRUE(probe::parse(line, s, why)) << why;
+    EXPECT_TRUE(s.factsOnly);
+    EXPECT_EQ(s.maxThreads, 256u);
+    EXPECT_TRUE(s.multipleOfWidth);
+    EXPECT_NE(probe::key(s, {}).find(" | max=256 tgm=1 | tg=0,0,0 | "), std::string::npos);
+
+    probe::Shape bad;
+    EXPECT_FALSE(probe::parse(
+        "D ok=1 tg=0,0,0 edge=0,0,0 threads=0 tex=0:80:2:1:1:02030405 | form=d opt=0 max=0 tgm=0 | k cam_isp "
+        "lib=/a.metallib | ",
+        bad, why));
+    EXPECT_FALSE(probe::parse(
+        "D ok=1 tg=0,1,1 edge=0,0,0 threads=0 | form=d opt=0 max=0 tgm=0 | k cam_isp lib=/a.metallib | ", bad, why));
+    EXPECT_FALSE(probe::parse(
+        "D ok=1 tg=0,0,0 edge=0,0,0 threads=1 | form=d opt=0 max=0 tgm=0 | k cam_isp lib=/a.metallib | ", bad, why));
+}
+
 }  // namespace

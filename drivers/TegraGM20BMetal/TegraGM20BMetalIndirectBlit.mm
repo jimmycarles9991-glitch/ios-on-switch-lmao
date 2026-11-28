@@ -122,7 +122,7 @@ void encodeCommandsBlit(gm20b::CommandBuffer *rc, gm20b::BlitEncoder *be, const 
     be->access(c.op == OpCopyCommands ? (__bridge void *)from : nullptr, (__bridge void *)to);
     std::vector<SwitchMetalICBCommand> commands(count);
     if (c.op == OpCopyCommands) {
-        std::lock_guard<gm20b::Mutex> hold(from->_lock);
+        std::lock_guard<gm20b::UnfairMutex> hold(from->_lock);
         std::copy_n(from->_commands.begin() + ptrdiff_t(first), count, commands.begin());
     }
     if (c.op == OpResetCommands)

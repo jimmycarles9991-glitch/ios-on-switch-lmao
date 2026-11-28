@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// An indexed indirect draw whose index buffer offset is at or past the buffer's end, which Metal's validation takes:

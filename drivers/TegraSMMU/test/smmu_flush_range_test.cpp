@@ -97,19 +97,20 @@ protected:
     }
 };
 
-// 768 entries 2 MiB into the window: entries 512..1023 of table 1 and 0..255 of table 2, one run of 3072 bytes.
-TEST_F(SmmuFlushRange, AThreeMiBMapFlushesItsPteGroupsAndTwoSectionsOnly)
+// 64 entries (256 KiB = 4 granules = 8 32-byte PTC lines) across a 4 MiB section boundary: stays below the collapse
+// threshold and flushes only its 8 PTC lines and 2 TLB sections.
+TEST_F(SmmuFlushRange, ASmallMapAcrossSectionsFlushesOnlyItsPteGroupsAndSections)
 {
-    std::vector<uint64_t> pages(768);
+    std::vector<uint64_t> pages(64);
     for (uint32_t i = 0; i < pages.size(); ++i)
         pages[i] = 0x90000000ULL + i * 4096ULL;
-    const uint64_t iova = kWindow + (2ULL << 20);
-    ASSERT_TRUE(domain.map(iova, pages.data(), 768, true));
-    const uintptr_t low = entryVa(iova), high = entryVa(iova + 767 * 4096ULL) + 4;
+    const uint64_t iova = kWindow + kSection - 32 * 4096ULL;
+    ASSERT_TRUE(domain.map(iova, pages.data(), 64, true));
+    const uintptr_t low = entryVa(iova), high = entryVa(iova + 63 * 4096ULL) + 4;
     switch_smmu_publish(domain, kAsid, SWITCH_DCACHE_CLEAN);
 
-    const uint64_t first = kTablesPa + 4096 + 512 * 4, end = kTablesPa + 2 * 4096 + 256 * 4;
-    ASSERT_EQ(end - first, 768u * 4);
+    const uint64_t first = kTablesPa + 4096 + (1024 - 32) * 4, end = kTablesPa + 2 * 4096 + 32 * 4;
+    ASSERT_EQ(end - first, 64u * 4);
     std::vector<Event> expected = {mcWrite(kPtcFlushHi, 0)};
     for (uint64_t at = first; at < end; at += 32)
         expected.push_back(mcWrite(kPtcFlush, static_cast<uint32_t>(at) | kPtcAddress));
@@ -117,7 +118,7 @@ TEST_F(SmmuFlushRange, AThreeMiBMapFlushesItsPteGroupsAndTwoSectionsOnly)
     expected.push_back(mcWrite(kTlbFlush, section(kWindow + kSection)));
     expected.push_back(mcRead(kPtbAsid));
     EXPECT_EQ(mcAccesses(), expected);
-    EXPECT_EQ(expected.size(), 1u + 96u + 2u + 1u);
+    EXPECT_EQ(expected.size(), 1u + 8u + 2u + 1u);
     for (const Event &e : gEvents)
         EXPECT_FALSE(e.kind == "write" && e.at == kPtcFlush && !(e.value & 1)) << "a PTC flush of TYPE ALL";
 
@@ -128,6 +129,82 @@ TEST_F(SmmuFlushRange, AThreeMiBMapFlushesItsPteGroupsAndTwoSectionsOnly)
     ASSERT_GE(gEvents.size(), cleaned.size());
     EXPECT_EQ(std::vector<Event>(gEvents.begin(), gEvents.begin() + static_cast<long>(cleaned.size())), cleaned)
         << "the table bytes reach memory before the first flush";
+}
+
+// 768 entries (3 MiB = 96 PTC lines > 8): collapses to whole-PTC + whole-ASID TLB flush (2 MMIO writes).
+TEST_F(SmmuFlushRange, AThreeMiBMapCollapsesToWholeAsidFlush)
+{
+    std::vector<uint64_t> pages(768);
+    for (uint32_t i = 0; i < pages.size(); ++i)
+        pages[i] = 0x90000000ULL + i * 4096ULL;
+    const uint64_t iova = kWindow + (2ULL << 20);
+    ASSERT_TRUE(domain.map(iova, pages.data(), 768, true));
+    const uintptr_t low = entryVa(iova), high = entryVa(iova + 767 * 4096ULL) + 4;
+    switch_smmu_publish(domain, kAsid, SWITCH_DCACHE_CLEAN);
+
+    const std::vector<Event> expected = {mcWrite(kPtcFlush, kPtcNoWaitIdle), mcRead(kPtbAsid),
+                                         mcWrite(kTlbFlush, kAsidMatch), mcRead(kPtbAsid)};
+    EXPECT_EQ(mcAccesses(), expected);
+
+    std::vector<Event> cleaned;
+    for (uintptr_t line = low & ~uintptr_t{63}; line < high; line += 64)
+        cleaned.push_back({"cvac", line, 0});
+    cleaned.push_back({"dsb", 0, 0});
+    ASSERT_GE(gEvents.size(), cleaned.size());
+    EXPECT_EQ(std::vector<Event>(gEvents.begin(), gEvents.begin() + static_cast<long>(cleaned.size())), cleaned)
+        << "the table bytes reach memory before the first flush";
+}
+
+// Two distant 64 KiB mappings before one publish clean and flush only their own PTE groups and sections, never the gap.
+TEST_F(SmmuFlushRange, TwoDistantMappingsFlushOnlyTheirOwnRanges)
+{
+    const uint64_t page = 0x90000000;
+    const uint64_t a = kWindow, b = kWindow + (64ULL << 20);
+    ASSERT_TRUE(domain.map(a, &page, 1, true));
+    ASSERT_TRUE(domain.map(b, &page, 1, true));
+    switch_smmu_publish(domain, kAsid, SWITCH_DCACHE_CLEAN);
+    const std::vector<Event> expected = {
+        {"cvac", entryVa(a) & ~uintptr_t{63}, 0},
+        {"cvac", entryVa(b) & ~uintptr_t{63}, 0},
+        {"dsb", 0, 0},
+        mcWrite(kPtcFlushHi, 0),
+        mcWrite(kPtcFlush, static_cast<uint32_t>(kTablesPa + 4096) | kPtcAddress),
+        mcWrite(kTlbFlush, section(a)),
+        mcRead(kPtbAsid),
+        mcWrite(kPtcFlushHi, 0),
+        mcWrite(kPtcFlush, static_cast<uint32_t>(kTablesPa + 17 * 4096) | kPtcAddress),
+        mcWrite(kTlbFlush, section(b)),
+        mcRead(kPtbAsid),
+    };
+    EXPECT_EQ(gEvents, expected);
+}
+
+// Fresh 64 KiB-granule publish cleans cache lines without touching MC; granule unmap flushes both 32-byte PTC atoms.
+TEST_F(SmmuFlushRange, FreshPublishSkipsMcAndGranuleUnmapFlushesBothAtoms)
+{
+    const uint64_t page = 0x90000000, iova = kWindow + (5ULL << 20);
+    ASSERT_TRUE(domain.map(iova, &page, 1, true));
+    switch_smmu_publish_fresh(domain, kAsid, SWITCH_DCACHE_CLEAN);
+    const std::vector<Event> mapExpected = {
+        {"cvac", entryVa(iova) & ~uintptr_t{63}, 0},
+        {"dsb", 0, 0},
+    };
+    EXPECT_EQ(gEvents, mapExpected);
+
+    gEvents.clear();
+    domain.unmap(iova, 1);
+    switch_smmu_publish_granules(domain, kAsid, SWITCH_DCACHE_CLEAN);
+    const uint32_t ptePa = static_cast<uint32_t>(kTablesPa + 2 * 4096 + 256 * 4);
+    const std::vector<Event> unmapExpected = {
+        {"cvac", entryVa(iova) & ~uintptr_t{63}, 0},
+        {"dsb", 0, 0},
+        mcWrite(kPtcFlushHi, 0),
+        mcWrite(kPtcFlush, ptePa | kPtcAddress),
+        mcWrite(kPtcFlush, (ptePa + 32) | kPtcAddress),
+        mcWrite(kTlbFlush, section(kWindow + kSection)),
+        mcRead(kPtbAsid),
+    };
+    EXPECT_EQ(gEvents, unmapExpected);
 }
 
 // The USB host's and the display's choice: clean and invalidate; one entry is one PTE group and one section.
@@ -194,7 +271,7 @@ TEST_F(SmmuFlushRange, UnderTheMcLockNothingLocksSleepsWaitsOrAllocates)
     EXPECT_TRUE(switch_test_under_spinlock.empty()) << "under the MC lock: " << calls;
     EXPECT_EQ(gUnlocked, 0u) << "MC accesses without the MC lock";
     EXPECT_EQ(switch_test_spinlocks_held, 0u);
-    EXPECT_GT(mcAccesses().size(), 128u + 2u);
+    EXPECT_EQ(mcAccesses().size(), 12u) << "three collapsed whole-ASID flushes (4 MC ops each)";
 }
 
 // The stand-ins catch what they are for: each call that can block, made under a simple lock, is named.
@@ -277,6 +354,35 @@ TEST(SmmuFlushRangeFields, AnEntryInAGroupsUpperHalfFlushesTheGroupsBase)
         mcRead(kPtbAsid),
     };
     EXPECT_EQ(io.events, expected);
+}
+
+TEST(SmmuFlushRangeFields, FlushTablesCollapsesAboveEightLines)
+{
+    struct Recorder {
+        std::vector<Event> events;
+
+        uint32_t read(uint32_t offset)
+        {
+            events.push_back({"read", offset, 0});
+            return 0;
+        }
+
+        void write(uint32_t offset, uint32_t value)
+        {
+            events.push_back({"write", offset, value});
+        }
+    } io;
+
+    const switch_smmu_table_flush small = {0x90001000ULL, 0xfULL, 0x10000000u};
+    switch_smmu::flushTables(io, 120, &small, 1);
+    EXPECT_EQ(io.events.size(), 1u + 8u + 1u + 1u);
+
+    io.events.clear();
+    const switch_smmu_table_flush large = {0x90001000ULL, 0x1fULL, 0x10000000u};
+    switch_smmu::flushTables(io, 120, &large, 1);
+    const std::vector<Event> collapsed = {mcWrite(kPtcFlush, kPtcNoWaitIdle), mcRead(kPtbAsid),
+                                          mcWrite(kTlbFlush, (1u << 31) | (120u << 24)), mcRead(kPtbAsid)};
+    EXPECT_EQ(io.events, collapsed);
 }
 }  // namespace
 

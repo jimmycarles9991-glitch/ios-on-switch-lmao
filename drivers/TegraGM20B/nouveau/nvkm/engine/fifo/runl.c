@@ -155,7 +155,6 @@ nvkm_runl_preempt_wait(struct nvkm_runl *runl)
 			break;
 
 		nvkm_runl_rc(runl);
-		usleep_range(1, 2);
 	) < 0 ? -ETIMEDOUT : 0;
 }
 

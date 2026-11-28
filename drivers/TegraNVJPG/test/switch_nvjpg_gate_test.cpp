@@ -19,7 +19,7 @@ TEST_F(NVJPGGate, AJobAfterTheIdlePowerOffPowersThePartitionOnBootsTheFalconAndR
     const size_t streams = gEngine.streams.size();
     TegraNVJPGJob job = decodeJob();
     nvjpg_dec_status status = {};
-    ASSERT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
+    ASSERT_EQ(runDecode(&job, &status), 0);
     // powergate-t21x.c's order, then nvhost's module reset; no MBIST pulse on T210B01.
     EXPECT_EQ(gEngine.steps(from, {"partition on", "clock on", "reset", "unclamp", "unreset", "release", "lvl2"}),
               (Steps{"partition on", "clock on", "reset", "unclamp", "unreset", "release", "reset", "unreset"}));
@@ -43,7 +43,7 @@ TEST_F(NVJPGGate, AJobPastItsBoundIsCancelledAndTheNextJobRuns)
     const int boots = gEngine.boots, teardowns = gEngine.teardowns, restarts = gEngine.restarts;
     TegraNVJPGJob job = decodeJob();
     nvjpg_dec_status status = {};
-    EXPECT_EQ(tegra_nvjpg_run(&job, &status, nullptr), -5);
+    EXPECT_EQ(runDecode(&job, &status), -5);
     EXPECT_TRUE(logged("not reached"));
     EXPECT_TRUE(logged("job selector 7, 64x64"));
     EXPECT_TRUE(logged("engine reset: running again"));
@@ -57,7 +57,7 @@ TEST_F(NVJPGGate, AJobPastItsBoundIsCancelledAndTheNextJobRuns)
 
     gEngine.stallDecodes = false;
     const uint32_t before = gEngine.syncpt;
-    EXPECT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
+    EXPECT_EQ(runDecode(&job, &status), 0);
     EXPECT_EQ(gEngine.syncpt, before + 1);
 }
 
@@ -68,26 +68,79 @@ TEST_F(NVJPGGate, AFalconErrorFailsTheDecodeAtOnceWithTheFirmwaresReason)
 {
     TegraNVJPGJob job = decodeJob();
     nvjpg_dec_status status = {};
-    ASSERT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
+    ASSERT_EQ(runDecode(&job, &status), 0);
     gEngine.falconErrorInDecode = true;
     gEngine.stallDecodes = true;
-    gEngine.decodeWaitEnded.clear();
+    gEngine.decodeEndedBy.clear();
     const size_t from = gEngine.events.size();
-    EXPECT_EQ(tegra_nvjpg_run(&job, &status, nullptr), -5);
-    EXPECT_EQ(gEngine.decodeWaitEnded, "falcon") << "the decode ends on the error, not at its bound";
+    EXPECT_EQ(runDecode(&job, &status), -5);
+    EXPECT_EQ(gEngine.decodeEndedBy, "falcon") << "the decode ends on the error, not at its bound";
     gEngine.falconErrorInDecode = false;
     gEngine.stallDecodes = false;
     EXPECT_TRUE(logged("falcon error interrupt: MAILBOX0 0x8 (MSDECOS_ERROR_APPLICATION) MAILBOX1 0x77"));
     EXPECT_FALSE(logged("not reached in"));
     EXPECT_TRUE(logged("engine reset: running again"));
     using Steps = std::vector<std::string>;
-    EXPECT_EQ(gEngine.steps(from, {"falcon error", "kick", "flush", "reset", "falcon start"}),
-              (Steps{"falcon error", "kick", "flush", "reset", "reset", "reset", "falcon start"}));
+    EXPECT_EQ(gEngine.steps(from, {"falcon error", "flush", "reset", "fence released", "falcon start"}),
+              (Steps{"falcon error", "flush", "reset", "reset", "reset", "fence released", "falcon start"}));
     EXPECT_EQ(switch_mmio_read32(gNvjpgRegisters.data(), SWITCH_FALCON_THI_INT_STATUS), 0u);
-    EXPECT_TRUE(IOWorkLoop::last()->enabled) << "the line is on again once the falcon is proven";
+    EXPECT_TRUE(switch_interrupt_nub(kErrorIntid, false)->enabled) << "the line is on again once the falcon is proven";
     const uint32_t before = gEngine.syncpt;
-    EXPECT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
+    EXPECT_EQ(runDecode(&job, &status), 0);
     EXPECT_EQ(gEngine.syncpt, before + 1);
+}
+
+// A cancelled job's fence is released by the CPU once channel 3 is torn down and its falcon stopped (the model checks
+// both), as NVDEC's and VIC's cancellations release theirs, so a re-pack queued behind it runs and ends. The reboot's
+// proof and the next job count on from the released fence.
+TEST_F(NVJPGGate, ACancelledJobsFenceIsReleasedOnceTheEngineIsStopped)
+{
+    TegraNVJPGJob job = decodeJob();
+    nvjpg_dec_status status = {};
+    ASSERT_EQ(runDecode(&job, &status), 0);
+    const uint32_t before = gEngine.syncpt;
+    gEngine.stallDecodes = true;
+    EXPECT_EQ(runDecode(&job, &status), -5);
+    gEngine.stallDecodes = false;
+    EXPECT_EQ(gEngine.released, std::vector<uint32_t>{before + 1});
+    EXPECT_EQ(gEngine.syncpt, before + 3) << "the released fence, then the reboot's proof";
+    EXPECT_EQ(runDecode(&job, &status), 0);
+    EXPECT_EQ(gEngine.syncpt, before + 4);
+}
+
+// A job whose fence cannot be armed would have nothing to end it: it is cancelled at once, its fence released, and no
+// end is signalled.
+TEST_F(NVJPGGate, AJobWhoseFenceCannotBeArmedIsCancelledAndItsFenceReleased)
+{
+    TegraNVJPGJob job = decodeJob();
+    nvjpg_dec_status status = {};
+    ASSERT_EQ(runDecode(&job, &status), 0);
+    const uint32_t before = gEngine.syncpt;
+    gEngine.stallDecodes = true;
+    gEngine.armError = TEGRA_HOST1X_ENODEV;
+    EXPECT_EQ(runDecode(&job, &status), -5);
+    gEngine.stallDecodes = false;
+    EXPECT_EQ(gEngine.released, std::vector<uint32_t>{before + 1});
+    EXPECT_TRUE(logged("engine reset: running again"));
+    EXPECT_EQ(runDecode(&job, &status), 0);
+}
+
+// A fence host1x does not release leaves the engine off to the idle gate, with the reason in the line: the next decode
+// powers it on and runs.
+TEST_F(NVJPGGate, AFenceHost1xDoesNotReleaseLeavesTheEngineToTheNextPowerOn)
+{
+    gEngine.stallDecodes = true;
+    gEngine.releaseError = TEGRA_HOST1X_ENODEV;
+    TegraNVJPGJob job = decodeJob();
+    nvjpg_dec_status status = {};
+    EXPECT_EQ(runDecode(&job, &status), -5);
+    gEngine.stallDecodes = false;
+    gEngine.releaseError = 0;
+    EXPECT_TRUE(logged("it did not come back, the next decode powers it on again: its fence was not released"));
+    EXPECT_FALSE(gEngine.clockOn);
+    const int boots = gEngine.boots;
+    EXPECT_EQ(runDecode(&job, &status), 0);
+    EXPECT_EQ(gEngine.boots, boots + 1);
 }
 
 // "Whenever a module is reset, the corresponding teardown bit in [HOST1X_SYNC_MOD_TEARDOWN] should be written" (TRM
@@ -99,14 +152,14 @@ TEST_F(NVJPGGate, EveryResetIsFollowedByHost1xsModuleTeardownBeforeTheFalconStar
     size_t from = gEngine.events.size();
     TegraNVJPGJob job = decodeJob();
     nvjpg_dec_status status = {};
-    ASSERT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
+    ASSERT_EQ(runDecode(&job, &status), 0);
     using Steps = std::vector<std::string>;
     EXPECT_EQ(gEngine.steps(from, {"reset", "unreset", "module teardown 14", "falcon start"}),
               (Steps{"reset", "unreset", "reset", "unreset", "module teardown 14", "falcon start"}));
 
     gEngine.stallDecodes = true;
     from = gEngine.events.size();
-    EXPECT_EQ(tegra_nvjpg_run(&job, &status, nullptr), -5);
+    EXPECT_EQ(runDecode(&job, &status), -5);
     EXPECT_EQ(gEngine.steps(from, {"reset", "unreset", "module teardown 14", "falcon start"}),
               (Steps{"reset", "reset", "unreset", "reset", "unreset", "module teardown 14", "falcon start"}));
     gEngine.stallDecodes = false;
@@ -121,7 +174,7 @@ TEST_F(NVJPGGate, UngatingThePartitionPulsesNVDECsClockBeforeTheClampsGo)
     size_t from = gEngine.events.size();
     TegraNVJPGJob job = decodeJob();
     nvjpg_dec_status status = {};
-    ASSERT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
+    ASSERT_EQ(runDecode(&job, &status), 0);
     using Steps = std::vector<std::string>;
     EXPECT_EQ(gEngine.steps(from, {"partition on", "clock on", "nvdec clock on", "nvdec clock off", "unclamp", "lvl2"}),
               (Steps{"partition on", "clock on", "nvdec clock on", "nvdec clock off", "unclamp"}));
@@ -131,7 +184,7 @@ TEST_F(NVJPGGate, UngatingThePartitionPulsesNVDECsClockBeforeTheClampsGo)
     gEngine.clocks[kNvdecClock] = true;
     idle();
     from = gEngine.events.size();
-    ASSERT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
+    ASSERT_EQ(runDecode(&job, &status), 0);
     EXPECT_TRUE(gEngine.steps(from, {"nvdec clock on", "nvdec clock off"}).empty());
     EXPECT_TRUE(gEngine.clocks[kNvdecClock]) << "NVDEC's running clock is not touched";
     gEngine.nvdecPartitionOn = false;
@@ -147,19 +200,19 @@ TEST_F(NVJPGGate, APowerOnWaitsForTheRemoveClampingCommandNotTheLegacyClampStatu
     gEngine.clampStatusStale = true;
     TegraNVJPGJob job = decodeJob();
     nvjpg_dec_status status = {};
-    EXPECT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
+    EXPECT_EQ(runDecode(&job, &status), 0);
     EXPECT_FALSE(logged("power-on FAIL"));
     gEngine.clampStatusStale = false;
 
     idle();
     gEngine.clampStuck = true;
-    EXPECT_EQ(tegra_nvjpg_run(&job, &status, nullptr), -19);
+    EXPECT_EQ(runDecode(&job, &status), -19);
     EXPECT_TRUE(logged("did not come up (PWRGATE_STATUS 0 REMOVE_CLAMPING_CMD 0x4000000 CLAMP_STATUS 0x4000000"));
     EXPECT_TRUE(
         logged("TegraNVJPG: partition 26 kept its clamps: REMOVE_CLAMPING_CMD 0x4000000 CLAMP_STATUS 0x4000000"));
     EXPECT_FALSE(gEngine.partitionOn) << "powered back off, so the next power-up ungates it again";
     gEngine.clampStuck = false;
-    EXPECT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0) << "the next decode powers it on again";
+    EXPECT_EQ(runDecode(&job, &status), 0) << "the next decode powers it on again";
 }
 
 // A partition already on (NVDEC's keeps NVJPG's on, or the boot chain left it on) has no clamp to remove: no command is
@@ -172,7 +225,7 @@ TEST_F(NVJPGGate, APartitionAlreadyOnIsNotSentTheRemoveClampingCommand)
     const size_t from = gEngine.events.size();
     TegraNVJPGJob job = decodeJob();
     nvjpg_dec_status status = {};
-    EXPECT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
+    EXPECT_EQ(runDecode(&job, &status), 0);
     EXPECT_TRUE(gEngine.steps(from, {"unclamp"}).empty());
     EXPECT_FALSE(logged("power-on FAIL"));
     gEngine.nvdecPartitionOn = false;
@@ -188,7 +241,7 @@ TEST_F(NVJPGGate, ACancellationWhoseFlushRequestWasDroppedSaysTheClientWasNotFlu
     gEngine.requestDropped = true;
     TegraNVJPGJob job = decodeJob();
     nvjpg_dec_status status = {};
-    EXPECT_EQ(tegra_nvjpg_run(&job, &status, nullptr), -5);
+    EXPECT_EQ(runDecode(&job, &status), -5);
     EXPECT_TRUE(
         logged("TegraNVJPG: MC hot reset request bit 0x100 of MC 0x970 reads clear while its flush was awaited"));
     EXPECT_TRUE(logged("memory client did not drain")) << "the line must not say drained";
@@ -206,13 +259,13 @@ TEST_F(NVJPGGate, AJobIsBoundedByItsOwnPixelsAndASmallMargin)
     job.setup.frame_height = 83;
     job.pixels = 208 * 88;
     nvjpg_dec_status status = {};
-    ASSERT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
+    ASSERT_EQ(runDecode(&job, &status), 0);
     EXPECT_EQ(gEngine.lastBoundUs, 50000u + 208 * 88 / 16);
     job.pixels = 4032ull * 3024;
-    ASSERT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
+    ASSERT_EQ(runDecode(&job, &status), 0);
     EXPECT_EQ(gEngine.lastBoundUs, 50000u + 4032 * 3024 / 16);
     job.pixels = 16384ull * 16384 * 2;
-    ASSERT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
+    ASSERT_EQ(runDecode(&job, &status), 0);
     EXPECT_EQ(gEngine.lastBoundUs, 30000000u) << "at most 30 s";
 }
 
@@ -222,14 +275,14 @@ TEST_F(NVJPGGate, AnIdlePowerOffKeepsThePartitionOnWhileNVDECsIsOn)
 {
     TegraNVJPGJob job = decodeJob();
     nvjpg_dec_status status = {};
-    ASSERT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
+    ASSERT_EQ(runDecode(&job, &status), 0);
     gEngine.nvdecPartitionOn = true;
     idle();
     EXPECT_TRUE(gEngine.partitionOn);
     EXPECT_TRUE(gEngine.inReset);
     EXPECT_FALSE(gEngine.clockOn);
     EXPECT_TRUE(gEngine.flushed);
-    ASSERT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
+    ASSERT_EQ(runDecode(&job, &status), 0);
     gEngine.nvdecPartitionOn = false;
 }
 
@@ -240,9 +293,9 @@ TEST_F(NVJPGGate, TheStreamIsTheSameWhicheverSelectorTheJobCameThrough)
     TegraNVJPGJob first = decodeJob(), seventh = decodeJob();
     first.selector = 1;
     nvjpg_dec_status status = {};
-    ASSERT_EQ(tegra_nvjpg_run(&first, &status, nullptr), 0);
+    ASSERT_EQ(runDecode(&first, &status), 0);
     const std::vector<uint32_t> one = gEngine.streams.back();
-    ASSERT_EQ(tegra_nvjpg_run(&seventh, &status, nullptr), 0);
+    ASSERT_EQ(runDecode(&seventh, &status), 0);
     const std::vector<uint32_t> seven = gEngine.streams.back();
     ASSERT_EQ(one.size(), seven.size());
     ASSERT_EQ(one.size(), 29u);  // SETCLASS, 9 methods of 3 words for two planes, OP_DONE: T-v3a's 0x74 bytes
@@ -263,20 +316,20 @@ TEST_F(NVJPGGate, AnEngineTheResetDoesNotBringBackIsPoweredOnByALaterDecode)
     gEngine.deadAfterReset = true;
     TegraNVJPGJob job = decodeJob();
     nvjpg_dec_status status = {};
-    EXPECT_EQ(tegra_nvjpg_run(&job, &status, nullptr), -5);
+    EXPECT_EQ(runDecode(&job, &status), -5);
     EXPECT_TRUE(logged("it did not come back, the next decode powers it on again"));
     EXPECT_TRUE(tegra_nvjpg_ready()) << "the service keeps taking decodes";
     EXPECT_FALSE(gEngine.clockOn);
     const int boots = gEngine.boots;
-    EXPECT_EQ(tegra_nvjpg_run(&job, &status, nullptr), -19);
+    EXPECT_EQ(runDecode(&job, &status), -19);
     EXPECT_EQ(gEngine.boots, boots + 1) << "the next decode tried a power-on";
     EXPECT_TRUE(logged("power-on FAIL"));
-    EXPECT_EQ(tegra_nvjpg_run(&job, &status, nullptr), -19);
+    EXPECT_EQ(runDecode(&job, &status), -19);
     EXPECT_EQ(gEngine.boots, boots + 2) << "the decode after it runs the power-on again, with no wait";
     gEngine.stallDecodes = false;
     gEngine.deadAfterReset = false;
     const uint32_t before = gEngine.syncpt;
-    EXPECT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
+    EXPECT_EQ(runDecode(&job, &status), 0);
     EXPECT_EQ(gEngine.boots, boots + 3);
     EXPECT_EQ(gEngine.syncpt, before + 3) << "the power-on's proof, then the decode";
 }
@@ -304,38 +357,6 @@ TEST_F(NVJPGGate, ThePublishedTraitsTakeEveryDCTScale)
         EXPECT_EQ(tegra_nvjpg_plan(&r, &photo, &d, &shipped, 1u << 20, &plan, &kind), nullptr) << "1/" << (1u << scale);
         EXPECT_EQ(plan.target.scale, scale);
     }
-}
-
-// A decode's host1x submit and syncpoint wait take no lock: the job's use of the gate keeps the engine on.
-TEST_F(NVJPGGate, AJobWaitsForTheEngineWithNoStateLockHeld)
-{
-    TegraNVJPGJob job = decodeJob();
-    nvjpg_dec_status status = {};
-    ASSERT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
-    gEngine.waitsUnderStateLock = 0;
-    ASSERT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
-    // base 2: the submit's wait for room and the job's syncpoint wait, both under gStateLock
-    EXPECT_EQ(gEngine.waitsUnderStateLock, 0);
-}
-
-// The cancellation takes the power lock with gStateLock not held, so the only order between the two is the gate's
-// (power lock, then gateOn/gateOff's gStateLock).
-TEST_F(NVJPGGate, ACancellationTakesThePowerLockOutsideTheStateLock)
-{
-    TegraNVJPGJob job = decodeJob();
-    nvjpg_dec_status status = {};
-    ASSERT_EQ(tegra_nvjpg_run(&job, &status, nullptr), 0);
-    gEngine.waitsUnderStateLock = gEngine.powerUnderStateLock = 0;
-    switch_test_lock_taken = [](IOLock *lock) {
-        gEngine.powerUnderStateLock += lock == &gNvdecPower && gStateLock->locked;
-    };
-    gEngine.stallDecodes = true;
-    EXPECT_EQ(tegra_nvjpg_run(&job, &status, nullptr), -5);
-    switch_test_lock_taken = nullptr;
-    EXPECT_TRUE(logged("engine reset: running again"));
-    // base 1: the power lock inside gStateLock; base 4: the job's submit and wait and the reboot's proof under gStateLock
-    EXPECT_EQ(gEngine.powerUnderStateLock, 0);
-    EXPECT_EQ(gEngine.waitsUnderStateLock, 0);
 }
 
 TEST_F(NVJPGGate, AllocationsKeepDisjointMappingsUntilTheirOwnRelease)

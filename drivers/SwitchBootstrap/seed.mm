@@ -11,6 +11,18 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+static NSArray<NSString *> *switch_seed_held_names(void)
+{
+    NSArray<NSString *> *every = @[ @"org.coolstar.sileo", @"ellekit", @"uikittools", @"launchctl" ];
+    NSDictionary *targets = SWITCH_BOOTSTRAP_MANAGED_PACKAGES;
+    NSMutableArray<NSString *> *added = [NSMutableArray new];
+    for (NSString *name in targets)
+        if (![every containsObject:name])
+            [added addObject:name];
+    [added sortUsingSelector:@selector(compare:)];
+    return [every arrayByAddingObjectsFromArray:added];
+}
+
 static int switch_bootstrap_write_firmware(NSString *root)
 {
     NSString *path = [root stringByAppendingPathComponent:@"Library/dpkg/status"];
@@ -19,7 +31,7 @@ static int switch_bootstrap_write_firmware(NSString *root)
     NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
     if (!text)
         return EIO;
-    NSSet *held = [NSSet setWithArray:@[ @"org.coolstar.sileo", @"ellekit", @"uikittools", @"launchctl" ]];
+    NSSet *held = [NSSet setWithArray:switch_seed_held_names()];
     NSMutableSet *found = [NSMutableSet new];
     NSMutableArray *records = [NSMutableArray new];
     for (NSString *block in [text componentsSeparatedByString:@"\n\n"]) {
@@ -276,7 +288,7 @@ int switch_bootstrap_prepare(NSString *root, NSString *base, NSString *archive, 
             @"firmware" : @SWITCH_BOOTSTRAP_FIRMWARE,
             @"archive_sha256" : expectedHash,
             @"helper_sha256" : switch_bootstrap_digest(@SWITCH_BOOTSTRAP_HELPER) ?: @"",
-            @"holds" : @[ @"org.coolstar.sileo", @"ellekit", @"uikittools", @"launchctl" ]
+            @"holds" : switch_seed_held_names()
         };
         if (!error)
             error = switch_seed_write([temporary stringByAppendingPathComponent:switch_seed_receipt], saved);

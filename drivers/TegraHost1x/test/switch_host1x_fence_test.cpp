@@ -11,6 +11,7 @@
 #include "../TegraHost1x.cpp"
 #include "../SwitchHost1xChannels.cpp"
 #include "../SwitchHost1xFence.cpp"
+#include "../SwitchHost1xErrors.cpp"
 
 extern "C" bool switch_nvdec_host1x_cancelled(uint32_t, uint32_t)
 {
@@ -20,6 +21,40 @@ extern "C" bool switch_nvdec_host1x_cancelled(uint32_t, uint32_t)
 extern "C" bool switch_vic_host1x_cancelled(uint32_t, uint32_t)
 {
     return false;
+}
+
+extern "C" void switch_gpu_bridge_gate_close(void)
+{}
+
+// No stream here waits on a GPU bridge.
+extern "C" void switch_gpu_bridge_syncpoint(const switch_gpu_bridge *, uint32_t *syncpoint, uint32_t *threshold)
+{
+    *syncpoint = *threshold = 0;
+}
+
+extern "C" int switch_gpu_bridge_status(const switch_gpu_bridge *)
+{
+    return 1;
+}
+
+extern "C" void switch_gpu_bridge_release(switch_gpu_bridge **bridge)
+{
+    *bridge = nullptr;
+}
+
+extern "C" int switch_gpu_bridge_failed(const switch_gpu_bridge *)
+{
+    return 0;
+}
+
+extern "C" int switch_gpu_bridge_why(const switch_gpu_bridge *)
+{
+    return 0;
+}
+
+extern "C" int switch_gpu_bridge_source_failure(const switch_gpu_bridge *)
+{
+    return 0;
 }
 
 extern "C" int switch_gpu_backing_token_status(const switch_gpu_backing_token *)
@@ -78,11 +113,11 @@ void signaled(switch_host1x_fence *fence, int status)
     gOrder.push_back("callback " + std::to_string(fence->threshold));
 }
 
-// A filter waiter's fn: in the filter, under its simple lock, never under the list's IOLock, with preemption off.
+// A filter waiter's fn: in the filter, under its simple lock, never with interrupts re-enabled, with preemption off.
 void filtered(void *ctx)
 {
     gOrder.push_back("filter " + std::to_string(reinterpret_cast<uintptr_t>(ctx)));
-    if (!gFilterLock->held || gFilterLock->disabled || gLock->held || !switch_test_preemption_off)
+    if (!gLock->held || gLock->disabled || !switch_test_preemption_off)
         gOrder.push_back("wrong context");
 }
 
@@ -131,6 +166,18 @@ extern "C" void switch_car_clock_enable(unsigned)
 extern "C" void switch_car_reset_deassert(unsigned)
 {}
 
+// SwitchHost1xSmmu.cpp's: the register file has no SMMU behind it.
+bool switch_host1x_channels_confine(char *line, size_t size)
+{
+    snprintf(line, size, "no SMMU in the host test");
+    return false;
+}
+
+bool switch_host1x_channels_confine_channel(const switch_dma_buffer *, const switch_dma_buffer *)
+{
+    return true;
+}
+
 extern "C" void tegra_mc_hot_reset(uint32_t, uint32_t, bool)
 {}
 
@@ -162,9 +209,21 @@ namespace {
 struct Host1xFence : testing::Test {
     void SetUp() override
     {
+        static bool seeded = false;
+        const bool first = !seeded;
+        if (first) {
+            seeded = true;
+            for (uint32_t id = 0; id < kSyncpts; ++id)
+                value(id) = 0x80088080u ^ (id + 1u);
+        }
         ASSERT_EQ(tegra_host1x_start(), TEGRA_HOST1X_OK);
+        if (first) {
+            EXPECT_EQ(gPool.capacity(), 190u) << "non-zero power-on syncpoint SRAM stays in the pool";
+            for (uint32_t id = 0; id < kSyncpts; ++id)
+                value(id) = 0;
+        }
         switch_test_sleep = nullptr;
-        switch_test_kicks = switch_test_wakeups = 0;
+        switch_test_kicks = switch_test_wakeups = switch_test_bounds_cancels = 0;
         switch_test_now = 1000;
         switch_test_bounds_at = 0;
         gBoundsAt = 0;
@@ -501,9 +560,276 @@ TEST_F(Host1xFence, TheFilterRunsWithPreemptionOffAndNothingThatBlocks)
     EXPECT_EQ(gOrder, std::vector<std::string>{"filter 30"});
     EXPECT_EQ(switch_test_preemption_off, 0);
     IOSimpleLock held{};
+    IOLock blocking{};
     IOSimpleLockLock(&held);
-    EXPECT_THROW(IOLockLock(gLock), std::runtime_error);
+    EXPECT_THROW(IOLockLock(&blocking), std::runtime_error);
     IOSimpleLockUnlock(&held);
     interrupt(184);
 }
+
+TEST_F(Host1xFence, FilterHandlesPureWaitersWithoutWakingWorkLoopAndCancelsBoundsTimer)
+{
+    value(185) = 0;
+    switch_host1x_filter_handle handle = 0;
+    ASSERT_EQ(switch_host1x_filter_wait(185, 2, filtered, tag(40), &handle), TEGRA_HOST1X_OK);
+    value(185) = 2;
+    reg(0xe80 + 4 * (185 / 32)) = 1u << (185 % 32);
+    EXPECT_FALSE(switch_host1x_intr_filter()) << "filter waiter retires directly in filter without work-loop bounce";
+    reg(0xe80 + 4 * (185 / 32)) = 0;
+    EXPECT_EQ(gOrder, std::vector<std::string>{"filter 40"});
+    EXPECT_FALSE(switch_host1x_fence_names(185));
+
+    value(186) = 0;
+    switch_host1x_fence cb;
+    switch_host1x_fence_init(&cb, 186, 3, signaled);
+    ASSERT_EQ(switch_host1x_fence_add(&cb, 5000), TEGRA_HOST1X_OK);
+    EXPECT_NE(switch_test_bounds_at, 0u);
+    const uint32_t cancelsBefore = switch_test_bounds_cancels;
+    value(186) = 3;
+    reg(0xe80 + 4 * (186 / 32)) = 1u << (186 % 32);
+    EXPECT_TRUE(switch_host1x_intr_filter()) << "callback fence queues hand-off and wakes work loop";
+    reg(0xe80 + 4 * (186 / 32)) = 0;
+    EXPECT_EQ(switch_test_bounds_cancels, cancelsBefore + 1u)
+        << "idle bounds timer cancelled when last bounded fence retires";
+    EXPECT_EQ(switch_test_bounds_at, 0u);
+    switch_host1x_intr_handle();
+    EXPECT_EQ(gSignals[3].calls, 1);
+}
 }  // namespace
+
+// tegra_host1x_syncpt_free: an id goes back only when no fence names it and it was handed out; either mistake panics.
+TEST_F(Host1xFence, AFreedSyncpointNamedByAFenceOrNotHandedOutPanics)
+{
+    uint32_t id = 0;
+    ASSERT_EQ(tegra_host1x_syncpt_alloc(&id), TEGRA_HOST1X_OK);
+    value(id) = 0;
+    switch_host1x_fence fence;
+    switch_host1x_fence_init(&fence, id, 5, signaled);
+    ASSERT_EQ(switch_host1x_fence_add(&fence, 0), TEGRA_HOST1X_OK);
+    try {
+        tegra_host1x_syncpt_free(id);
+        ADD_FAILURE() << "no panic";
+    } catch (const std::runtime_error &e) {
+        EXPECT_EQ(std::string(e.what()),
+                  "TegraHost1x: syncpoint " + std::to_string(id) + " freed while a fence or waiter still waits on it");
+    }
+    EXPECT_TRUE(switch_host1x_fence_remove(&fence));
+    tegra_host1x_syncpt_free(id);
+    try {
+        tegra_host1x_syncpt_free(id);
+        ADD_FAILURE() << "no panic";
+    } catch (const std::runtime_error &e) {
+        EXPECT_NE(std::string(e.what()).find("not handed out"), std::string::npos) << e.what();
+    }
+}
+
+// Once the 32 ids every boot used before (160-191) are out, the pool hands out low ones. They wait, survive SC7 and
+// release after a failure as those did.
+TEST_F(Host1xFence, ALowSyncpointPastTheOldRangeWaitsSleepsAndReleasesAsAnyOther)
+{
+    std::vector<uint32_t> held;
+    uint32_t low = 0;
+    do {
+        ASSERT_EQ(tegra_host1x_syncpt_alloc(&low), TEGRA_HOST1X_OK);
+        held.push_back(low);
+    } while (low >= 160);
+    EXPECT_NE(low, 0u);
+    EXPECT_NE(low, 9u);
+    value(low) = 0;
+    switch_host1x_fence fence;
+    switch_host1x_fence_init(&fence, low, 1, signaled);
+    ASSERT_EQ(switch_host1x_fence_add(&fence, 0), TEGRA_HOST1X_OK);
+    EXPECT_EQ(threshold(low), 1u);
+    value(low) = 5;
+    tegra_host1x_suspend();
+    value(low) = 0;
+    threshold(low) = 0;
+    tegra_host1x_resume();
+    EXPECT_EQ(value(low), 5u) << "SC7 restores its value";
+    interrupt(low);
+    EXPECT_EQ(gSignals[1].calls, 1);
+    EXPECT_EQ(tegra_host1x_syncpt_release_failed(low, 9, 2), TEGRA_HOST1X_EINVAL) << "farther than the jobs allowed";
+    for (const uint32_t id : held)
+        tegra_host1x_syncpt_free(id);
+    EXPECT_EQ(tegra_host1x_syncpt_release_failed(low, 6, 1), TEGRA_HOST1X_EINVAL) << "freed: not ours any more";
+}
+
+// Review-dma2 D7, debug kernels: a free before the syncpoint reached a threshold a channel's fenced job was given would
+// let the job's late increment reach the next owner.
+TEST_F(Host1xFence, AFreeWhileAChannelsJobStillOwesAnIncrementPanics)
+{
+    uint32_t id = 0;
+    ASSERT_EQ(tegra_host1x_syncpt_alloc(&id), TEGRA_HOST1X_OK);
+    value(id) = 4;
+    const uint32_t job[2] = {tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_HOST1X, 0, 0),
+                             tegra_host1x_op_incr_syncpt(TEGRA_HOST1X_COND_IMMEDIATE, id)};
+    ASSERT_EQ(switch_host1x_job_copy(TEGRA_HOST1X_CHANNEL_NVJPG, job, 2, id, 6), TEGRA_HOST1X_OK);
+    try {
+        tegra_host1x_syncpt_free(id);
+        ADD_FAILURE() << "no panic";
+    } catch (const std::runtime_error &e) {
+        EXPECT_EQ(std::string(e.what()), "TegraHost1x: syncpoint " + std::to_string(id) +
+                                             " freed at 4 while a job a channel ran still takes it to 6");
+    }
+    value(id) = 6;
+    tegra_host1x_syncpt_free(id);
+}
+
+TEST_F(Host1xFence, AFreeAfterARestartDroppedTheOwingJobIsNoPanic)
+{
+    uint32_t id = 0;
+    ASSERT_EQ(tegra_host1x_syncpt_alloc(&id), TEGRA_HOST1X_OK);
+    value(id) = 4;
+    const uint32_t job[2] = {tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_HOST1X, 0, 0),
+                             tegra_host1x_op_incr_syncpt(TEGRA_HOST1X_COND_IMMEDIATE, id)};
+    ASSERT_EQ(switch_host1x_job_copy(TEGRA_HOST1X_CHANNEL_NVJPG, job, 2, id, 6), TEGRA_HOST1X_OK);
+    tegra_host1x_channel_teardown(TEGRA_HOST1X_CHANNEL_NVJPG);
+    tegra_host1x_channel_restart(TEGRA_HOST1X_CHANNEL_NVJPG);
+    tegra_host1x_syncpt_free(id);
+}
+
+TEST_F(Host1xFence, AHighBitSyncpointFreesCleanlyAndStillChecksOwedThresholds)
+{
+    uint32_t id = 0;
+    ASSERT_EQ(tegra_host1x_syncpt_alloc(&id), TEGRA_HOST1X_OK);
+    value(id) = 0x84000120u;
+    tegra_host1x_syncpt_free(id);
+
+    ASSERT_EQ(tegra_host1x_syncpt_alloc(&id), TEGRA_HOST1X_OK);
+    value(id) = 0x84000120u;
+    const uint32_t job[2] = {tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_HOST1X, 0, 0),
+                             tegra_host1x_op_incr_syncpt(TEGRA_HOST1X_COND_IMMEDIATE, id)};
+    ASSERT_EQ(switch_host1x_job_copy(TEGRA_HOST1X_CHANNEL_NVJPG, job, 2, id, 0x84000122u), TEGRA_HOST1X_OK);
+    try {
+        tegra_host1x_syncpt_free(id);
+        ADD_FAILURE() << "no panic";
+    } catch (const std::runtime_error &e) {
+        EXPECT_EQ(std::string(e.what()), "TegraHost1x: syncpoint " + std::to_string(id) +
+                                             " freed at 2214592800 while a job a channel ran still takes it to "
+                                             "2214592802");
+    }
+    value(id) = 0x84000122u;
+    tegra_host1x_syncpt_free(id);
+}
+
+// host1x's general interrupt failing a stopped channel's jobs (SwitchHost1xErrors.cpp, switch_host1x_channels_failed):
+// what its bound would have failed, at once, with the bound's status.
+namespace {
+uint32_t &syncReg(uint32_t offset)
+{
+    return reg(offset);
+}
+
+IOFilterInterruptEventSource *general()
+{
+    const auto &made = IOFilterInterruptEventSource::made();
+    return made.size() >= 2 ? made[1] : nullptr;
+}
+
+// The interrupt as it arrives, only when CPU0's line carries it (TRM 14.9.2-14.9.8: the channel's HINTMASK_EXT bit,
+// HINTMASK's EXT enable, INTC0MASK's HOST_INT, INTMASK's master): its filter, then (taken) its action on the work loop.
+bool illegalOpcode(uint32_t channel)
+{
+    syncReg(0x028) |= 1u << channel;
+    const bool line = (syncReg(0x028) & syncReg(0x02c)) && (syncReg(0x024) & (1u << 31)) && (syncReg(0x008) & 1u) &&
+                      (syncReg(0x004) & 1u);
+    IOFilterInterruptEventSource *source = general();
+    if (!line || !source || !source->filter(nullptr, source))
+        return false;
+    source->action(nullptr, source, 1);
+    return true;
+}
+}  // namespace
+
+TEST_F(Host1xFence, TheGeneralInterruptIsOnWithEveryChannelsIllegalOpcodeUnmasked)
+{
+    ASSERT_NE(general(), nullptr);
+    EXPECT_TRUE(general()->enabled);
+    EXPECT_EQ(syncReg(0x02c), 0x3fffu);
+    EXPECT_EQ(syncReg(0x024) & (1u << 31), 1u << 31);
+    EXPECT_EQ(syncReg(0x008), 1u) << "INTC0MASK: host1x's own HOST_INT reaches CPU0";
+    EXPECT_EQ(syncReg(0x004) & 1u, 1u);
+}
+
+// A CPU wait whose fence a stopped channel fails returns the failure: before, it read as reached.
+TEST_F(Host1xFence, AWaitWhoseFenceIsFailedReturnsTheFailure)
+{
+    value(175) = 0;
+    switch_test_sleep = [&](uint64_t) {
+        switch_host1x_fences_fail(175, TEGRA_HOST1X_ETIMEDOUT);
+        return THREAD_AWAKENED;
+    };
+    EXPECT_EQ(tegra_host1x_syncpt_wait(175, 3, 1000000), TEGRA_HOST1X_ETIMEDOUT);
+    EXPECT_FALSE(switch_host1x_fence_names(175));
+}
+
+// The stopped channel's bounded fences fail at once (a queue's job fence: VIC's and NVDEC's cancel on it); an unbounded
+// consumer's fence on the same syncpoint, a fence already reached and another syncpoint's are left as they were.
+TEST_F(Host1xFence, AnIllegalOpcodeFailsTheChannelsBoundedFencesAndLeavesTheRest)
+{
+    constexpr uint32_t channel = TEGRA_HOST1X_CHANNEL_VIC;
+    value(176) = 1;
+    value(177) = 0;
+    const uint32_t job[2] = {tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_HOST1X, 0, 0),
+                             tegra_host1x_op_incr_syncpt(TEGRA_HOST1X_COND_IMMEDIATE, 176)};
+    ASSERT_EQ(switch_host1x_job_copy(channel, job, 2, 176, 2), TEGRA_HOST1X_OK);
+    switch_host1x_fence bounded, consumer, other;
+    switch_host1x_fence_init(&bounded, 176, 2, signaled);
+    switch_host1x_fence_init(&consumer, 176, 3, signaled);
+    switch_host1x_fence_init(&other, 177, 4, signaled);
+    ASSERT_EQ(switch_host1x_fence_add(&bounded, 2000000), TEGRA_HOST1X_OK);
+    ASSERT_EQ(switch_host1x_fence_add(&consumer, 0), TEGRA_HOST1X_OK);
+    ASSERT_EQ(switch_host1x_fence_add(&other, 2000000), TEGRA_HOST1X_OK);
+    ASSERT_TRUE(illegalOpcode(channel));
+    switch_host1x_intr_handle();
+    EXPECT_EQ(gSignals[2].calls, 1) << "failed at once, not at its bound";
+    EXPECT_EQ(gSignals[2].status, TEGRA_HOST1X_ETIMEDOUT);
+    EXPECT_EQ(consumer.state, SWITCH_HOST1X_FENCE_QUEUED) << "a consumer ends by the cancellation's release";
+    EXPECT_EQ(other.state, SWITCH_HOST1X_FENCE_QUEUED);
+    EXPECT_EQ(syncReg(0x02c) & (1u << channel), 0u) << "masked until the channel restarts";
+    tegra_host1x_channel_teardown(channel);
+    tegra_host1x_channel_restart(channel);
+    EXPECT_EQ(syncReg(0x02c) & (1u << channel), 1u << channel) << "the restart unmasks it";
+    EXPECT_TRUE(switch_host1x_fence_remove(&consumer));
+    EXPECT_TRUE(switch_host1x_fence_remove(&other));
+}
+
+// A stopped channel's syncpoints stay stopped until it restarts: a job's bound that starts later (its inputs came in),
+// a new bounded fence and a CPU wait that comes after the interrupt fail at once too, not after their bound.
+TEST_F(Host1xFence, AWaitOrBoundThatStartsAfterTheStopFailsAtOnceUntilTheRestart)
+{
+    constexpr uint32_t channel = TEGRA_HOST1X_CHANNEL_NVENC;
+    value(178) = 0;
+    const uint32_t job[2] = {tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_HOST1X, 0, 0),
+                             tegra_host1x_op_incr_syncpt(TEGRA_HOST1X_COND_IMMEDIATE, 178)};
+    ASSERT_EQ(switch_host1x_job_copy(channel, job, 2, 178, 3), TEGRA_HOST1X_OK);
+    switch_host1x_fence later;
+    switch_host1x_fence_init(&later, 178, 2, signaled);
+    ASSERT_EQ(switch_host1x_fence_add(&later, 0), TEGRA_HOST1X_OK) << "inputs not in yet: unbounded";
+    ASSERT_TRUE(illegalOpcode(channel));
+    switch_host1x_intr_handle();
+    EXPECT_EQ(later.state, SWITCH_HOST1X_FENCE_QUEUED) << "unbounded: nothing a bound would have failed yet";
+    switch_host1x_fence_watch(&later, 2000000);
+    switch_host1x_intr_handle();
+    EXPECT_EQ(gSignals[2].calls, 1) << "its bound starts on a stopped syncpoint: failed at once";
+    EXPECT_EQ(gSignals[2].status, TEGRA_HOST1X_ETIMEDOUT);
+    switch_test_sleep = [](uint64_t) -> int {
+        ADD_FAILURE() << "a wait on a stopped syncpoint slept";
+        return THREAD_TIMED_OUT;
+    };
+    EXPECT_EQ(tegra_host1x_syncpt_wait(178, 3, 2000000), TEGRA_HOST1X_ETIMEDOUT);
+    switch_host1x_fence bounded;
+    switch_host1x_fence_init(&bounded, 178, 3, signaled);
+    ASSERT_EQ(switch_host1x_fence_add(&bounded, 2000000), TEGRA_HOST1X_OK);
+    switch_host1x_intr_handle();
+    EXPECT_EQ(gSignals[3].calls, 1);
+    EXPECT_EQ(gSignals[3].status, TEGRA_HOST1X_ETIMEDOUT);
+    switch_test_sleep = nullptr;
+    tegra_host1x_channel_teardown(channel);
+    tegra_host1x_channel_restart(channel);
+    switch_host1x_fence again;
+    switch_host1x_fence_init(&again, 178, 4, signaled);
+    ASSERT_EQ(switch_host1x_fence_add(&again, 2000000), TEGRA_HOST1X_OK);
+    EXPECT_EQ(again.state, SWITCH_HOST1X_FENCE_QUEUED) << "restarted: bounds run their course again";
+    EXPECT_TRUE(switch_host1x_fence_remove(&again));
+}

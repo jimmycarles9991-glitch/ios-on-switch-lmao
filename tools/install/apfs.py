@@ -23,9 +23,14 @@ OBJECT_TYPE_OMAP = 0xB
 OBJECT_TYPE_FS = 0xD
 BTNODE_ROOT, BTNODE_LEAF, BTNODE_FIXED_KV_SIZE = 0x1, 0x2, 0x4
 OMAP_VAL_DELETED = 0x1
+VOL_ROCOMPAT_OFFSET = 48  # apfs_superblock_t.apfs_readonly_compatible_features (u64)
+VOL_INCOMPAT_OFFSET = 56  # apfs_superblock_t.apfs_incompatible_features (u64)
 VOL_UUID_OFFSET = 240  # apfs_superblock_t.apfs_vol_uuid
 VOL_ROLE_OFFSET = 964  # apfs_superblock_t.apfs_role (u16)
 VOL_NAME_OFFSET = 704  # apfs_superblock_t.apfs_volname[256]
+APFS_ROCOMPAT_CLONE_MAPPING = 0x4
+APFS_ROCOMPAT_ATTRIBUTION_TAGS = 0x8
+APFS_INCOMPAT_EXPANDED_RECORDS = 0x200
 
 
 class ApfsError(Exception):
@@ -211,5 +216,34 @@ class Container:
                 self.write(paddr, out)
             patched.append((paddr, current, mapping[current]))
         if not dry_run:
+            os.fsync(self.fd)
+        return patched
+
+    def set_volume_features(
+        self,
+        features: dict[uuid.UUID, tuple[int, int]],
+        dry_run: bool = False,
+    ) -> list[tuple[int, uuid.UUID, int, int]]:
+        """OR `(rocompat, incompat)` feature bits into every superblock copy of matching volumes."""
+        patched = []
+        for paddr, block in sorted(self.volume_blocks().items()):
+            current = uuid.UUID(bytes=block[VOL_UUID_OFFSET : VOL_UUID_OFFSET + 16])
+            if current not in features:
+                continue
+            if not checksum_ok(block):
+                raise ApfsError(f'volume superblock at block {paddr} has a bad checksum')
+            rocompat, incompat = struct.unpack_from('<QQ', block, VOL_ROCOMPAT_OFFSET)
+            add_rocompat, add_incompat = features[current]
+            new_rocompat = rocompat | add_rocompat
+            new_incompat = incompat | add_incompat
+            if (new_rocompat, new_incompat) == (rocompat, incompat):
+                continue
+            out = bytearray(block)
+            struct.pack_into('<QQ', out, VOL_ROCOMPAT_OFFSET, new_rocompat, new_incompat)
+            out = with_checksum(bytes(out))
+            if not dry_run:
+                self.write(paddr, out)
+            patched.append((paddr, current, new_rocompat, new_incompat))
+        if patched and not dry_run:
             os.fsync(self.fd)
         return patched

@@ -618,8 +618,8 @@ typedef struct {
 #define ATOMIC_INIT(i) {(i)}
 #define atomic_read(v) __atomic_load_n(&(v)->counter, __ATOMIC_RELAXED)
 #define atomic_set(v, i) __atomic_store_n(&(v)->counter, (i), __ATOMIC_RELAXED)
-#define atomic_add(i, v) ((void)__atomic_add_fetch(&(v)->counter, (i), __ATOMIC_SEQ_CST))
-#define atomic_sub(i, v) ((void)__atomic_sub_fetch(&(v)->counter, (i), __ATOMIC_SEQ_CST))
+#define atomic_add(i, v) ((void)__atomic_add_fetch(&(v)->counter, (i), __ATOMIC_RELAXED))
+#define atomic_sub(i, v) ((void)__atomic_sub_fetch(&(v)->counter, (i), __ATOMIC_RELAXED))
 #define atomic_inc(v) atomic_add(1, v)
 #define atomic_dec(v) atomic_sub(1, v)
 #define atomic_add_return(i, v) __atomic_add_fetch(&(v)->counter, (i), __ATOMIC_SEQ_CST)
@@ -629,8 +629,8 @@ typedef struct {
 #define atomic_dec_and_test(v) (atomic_sub_return(1, v) == 0)
 #define atomic_inc_and_test(v) (atomic_add_return(1, v) == 0)
 #define atomic_xchg(v, n) __atomic_exchange_n(&(v)->counter, (n), __ATOMIC_SEQ_CST)
-#define atomic_or(i, v) ((void)__atomic_or_fetch(&(v)->counter, (i), __ATOMIC_SEQ_CST))
-#define atomic_andnot(i, v) ((void)__atomic_and_fetch(&(v)->counter, ~(i), __ATOMIC_SEQ_CST))
+#define atomic_or(i, v) ((void)__atomic_or_fetch(&(v)->counter, (i), __ATOMIC_RELAXED))
+#define atomic_andnot(i, v) ((void)__atomic_and_fetch(&(v)->counter, ~(i), __ATOMIC_RELAXED))
 
 static inline int atomic_cmpxchg(atomic_t *v, int o, int n)
 {
@@ -671,7 +671,15 @@ typedef struct {
 #define refcount_inc(r) atomic_inc(&(r)->refs)
 #define refcount_inc_not_zero(r) atomic_inc_not_zero(&(r)->refs)
 #define refcount_dec(r) atomic_dec(&(r)->refs)
-#define refcount_dec_and_test(r) atomic_dec_and_test(&(r)->refs)
+
+static inline bool refcount_dec_and_test(refcount_t *r)
+{
+	if (__atomic_sub_fetch(&r->refs.counter, 1, __ATOMIC_RELEASE) == 0) {
+		__atomic_thread_fence(__ATOMIC_ACQUIRE);
+		return true;
+	}
+	return false;
+}
 struct mutex;
 struct spinlock;
 bool refcount_dec_and_mutex_lock(refcount_t *r, struct mutex *lock);
@@ -728,9 +736,15 @@ static inline void mutex_destroy(struct mutex *m)
 	m->lck = NULL;
 }
 
+static inline void *tgm_mutex_lck(struct mutex *m)
+{
+	void *l = __atomic_load_n(&m->lck, __ATOMIC_RELAXED);
+	return likely(l != NULL) ? l : switch_linux_mutex_of(&m->lck);
+}
+
 static inline void mutex_lock(struct mutex *m)
 {
-	switch_linux_mutex_lock(switch_linux_mutex_of(&m->lck));
+	switch_linux_mutex_lock(tgm_mutex_lck(m));
 }
 
 static inline void mutex_unlock(struct mutex *m)
@@ -740,7 +754,7 @@ static inline void mutex_unlock(struct mutex *m)
 
 static inline int mutex_trylock(struct mutex *m)
 {
-	return switch_linux_mutex_trylock(switch_linux_mutex_of(&m->lck)) ? 1 : 0;
+	return switch_linux_mutex_trylock(tgm_mutex_lck(m)) ? 1 : 0;
 }
 
 #define mutex_lock_nested(m, s) mutex_lock(m)
@@ -793,14 +807,26 @@ struct rw_semaphore {
 	void *lck;
 };
 
+static inline void *tgm_rwsem_lck(struct rw_semaphore *s)
+{
+	void *l = __atomic_load_n(&s->lck, __ATOMIC_RELAXED);
+	return likely(l != NULL) ? l : switch_linux_rwsem_of(&s->lck);
+}
+
 static inline void init_rwsem(struct rw_semaphore *s)
 {
 	s->lck = switch_linux_rwsem_alloc();
 }
 
+static inline void destroy_rwsem(struct rw_semaphore *s)
+{
+	switch_linux_rwsem_free(s->lck);
+	s->lck = NULL;
+}
+
 static inline void down_read(struct rw_semaphore *s)
 {
-	switch_linux_down_read(switch_linux_rwsem_of(&s->lck));
+	switch_linux_down_read(tgm_rwsem_lck(s));
 }
 
 static inline void up_read(struct rw_semaphore *s)
@@ -810,7 +836,7 @@ static inline void up_read(struct rw_semaphore *s)
 
 static inline void down_write(struct rw_semaphore *s)
 {
-	switch_linux_down_write(switch_linux_rwsem_of(&s->lck));
+	switch_linux_down_write(tgm_rwsem_lck(s));
 }
 
 static inline void up_write(struct rw_semaphore *s)
@@ -1596,19 +1622,19 @@ long schedule_timeout(long timeout);
 /* Every wait sleeps in nvxnu_idle() until the GPU interrupt work loop (or wake_up()/complete() from a work item)
  * wakes it or its timeout passes; Linux semantics otherwise (the condition is tested once more at the end). */
 typedef struct wait_queue_head {
-	atomic_t seq;
+	int unused;
 } wait_queue_head_t;
 
 static inline void init_waitqueue_head(wait_queue_head_t *w)
 {
-	atomic_set(&w->seq, 0);
+	w->unused = 0;
 }
 
-#define DECLARE_WAIT_QUEUE_HEAD(n) wait_queue_head_t n = {ATOMIC_INIT(0)}
+#define DECLARE_WAIT_QUEUE_HEAD(n) wait_queue_head_t n = {0}
 
 static inline void wake_up(wait_queue_head_t *w)
 {
-	atomic_inc(&w->seq);
+	(void)w;
 	nvxnu_wake();
 }
 

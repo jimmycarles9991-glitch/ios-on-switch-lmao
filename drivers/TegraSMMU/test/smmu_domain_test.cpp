@@ -305,3 +305,30 @@ TEST(TegraSMMUDomain, SectionsMapFourMiB)
     ASSERT_TRUE(d.reserve(0x0080'0000, 4096));
     EXPECT_FALSE(d.section(0x0080'0000, 0x8000'0000, true)) << "over a table";
 }
+
+TEST(TegraSMMUDomain, TracksDisjointDirtyRangesAndOverflowsCleanly)
+{
+    Buffer b(1 + 32, 0xe7000000);
+    TegraSMMUDomain d;
+    ASSERT_TRUE(d.init(b.va(), b.pa, 1 + 32));
+    ASSERT_TRUE(d.reserve(0x10000000, 128ULL << 20));
+    TegraSMMUDomain::Changes c{};
+    ASSERT_TRUE(d.takeChanges(&c));
+    EXPECT_TRUE(c.directory);
+
+    const uint64_t page = 0x81000000;
+    ASSERT_TRUE(d.map(0x10000000, &page, 1, true));
+    ASSERT_TRUE(d.map(0x14000000, &page, 1, true));
+    ASSERT_TRUE(d.takeChanges(&c));
+    EXPECT_FALSE(c.directory);
+    EXPECT_FALSE(c.overflow);
+    ASSERT_EQ(c.count, 2u);
+    EXPECT_EQ(c.ranges[0].iovaLow, 0x10000000ULL);
+    EXPECT_EQ(c.ranges[1].iovaLow, 0x14000000ULL);
+
+    for (uint32_t i = 0; i <= TegraSMMUDomain::kMaxDirtyRanges; ++i)
+        ASSERT_TRUE(d.map(0x10000000 + static_cast<uint64_t>(i) * (4ULL << 20), &page, 1, true));
+    ASSERT_TRUE(d.takeChanges(&c));
+    EXPECT_TRUE(c.overflow);
+    EXPECT_LT(c.dirtyLow, c.dirtyHigh);
+}

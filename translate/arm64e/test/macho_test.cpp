@@ -2,6 +2,8 @@
 // output and nothing of Apple's.
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <initializer_list>
@@ -30,11 +32,20 @@ constexpr uint32_t kFunctionStarts = kLinkedit;
 constexpr uint32_t kDataInCode = kLinkedit + 0x100;
 constexpr uint32_t kFixups = kLinkedit + 0x200;
 
+struct ExtraSection {
+    const char *name;
+    uint32_t offset;
+    uint32_t flags;
+    std::vector<uint32_t> words;
+    std::vector<uint32_t> function_starts;
+};
+
 struct Spec {
     uint32_t cpusubtype = A64X_CPU_SUBTYPE_ARM64E;
     std::vector<uint32_t> code;
     std::vector<uint32_t> function_starts;                    // word indices into code
     std::vector<std::pair<uint32_t, uint16_t>> data_in_code;  // word index, length in bytes
+    std::vector<ExtraSection> extra_sections;
     bool marked = false;
     bool data_executable = false;                         // a second executable segment
     uint16_t fixup_format = 0;                            // 0: no LC_DYLD_CHAINED_FIXUPS
@@ -68,9 +79,10 @@ std::vector<uint8_t> build(const Spec &s)
     std::vector<uint8_t> b(3 * kSeg, 0);
     size_t lc = 32;
     uint32_t ncmds = 0;
-    auto segment = [&](const char *name, uint32_t index, uint32_t prot, std::initializer_list<int> sections) {
+    auto segment = [&](const char *name, uint32_t index, uint32_t prot, bool with_text_sections) {
         size_t at = lc;
-        uint32_t nsects = static_cast<uint32_t>(sections.size());
+        uint32_t nsects =
+            with_text_sections ? static_cast<uint32_t>(1 + (s.marked ? 1 : 0) + s.extra_sections.size()) : 0;
         put32(b, at, A64X_LC_SEGMENT_64);
         put32(b, at + 4, 72 + 80 * nsects);
         putName(b, at + 8, name);
@@ -82,32 +94,38 @@ std::vector<uint8_t> build(const Spec &s)
         put32(b, at + 60, prot);
         put32(b, at + 64, nsects);
         size_t sc = at + 72;
-        for (int kind : sections) {
-            if (kind == 0) {
-                putName(b, sc, "__text");
-                putName(b, sc + 16, "__TEXT");
-                put64(b, sc + 32, kBase + kTextOff);
-                put64(b, sc + 40, 4 * s.code.size());
-                put32(b, sc + 48, kTextOff);
-                put32(b, sc + 64, A64X_S_ATTR_PURE_INSTRUCTIONS | A64X_S_ATTR_SOME_INSTRUCTIONS);
-            } else {
+        if (with_text_sections) {
+            putName(b, sc, "__text");
+            putName(b, sc + 16, "__TEXT");
+            put64(b, sc + 32, kBase + kTextOff);
+            put64(b, sc + 40, 4 * s.code.size());
+            put32(b, sc + 48, kTextOff);
+            put32(b, sc + 64, A64X_S_ATTR_PURE_INSTRUCTIONS | A64X_S_ATTR_SOME_INSTRUCTIONS);
+            sc += 80;
+            if (s.marked) {
                 putName(b, sc, A64X_TARGET_SECTNAME);
                 putName(b, sc + 16, A64X_TARGET_SEGNAME);
                 put64(b, sc + 32, kBase + 0x3000);
                 put64(b, sc + 40, 16);
                 put32(b, sc + 48, 0x3000);
+                sc += 80;
             }
-            sc += 80;
+            for (const ExtraSection &es : s.extra_sections) {
+                putName(b, sc, es.name);
+                putName(b, sc + 16, "__TEXT");
+                put64(b, sc + 32, kBase + es.offset);
+                put64(b, sc + 40, 4 * es.words.size());
+                put32(b, sc + 48, es.offset);
+                put32(b, sc + 64, es.flags);
+                sc += 80;
+            }
         }
         lc = sc;
         ncmds++;
     };
-    if (s.marked)
-        segment("__TEXT", 0, 5, {0, 1});
-    else
-        segment("__TEXT", 0, 5, {0});
-    segment("__DATA", 1, s.data_executable ? 5 : 3, {});
-    segment("__LINKEDIT", 2, 1, {});
+    segment("__TEXT", 0, 5, true);
+    segment("__DATA", 1, s.data_executable ? 5 : 3, false);
+    segment("__LINKEDIT", 2, 1, false);
     auto linkedit = [&](uint32_t cmd, uint32_t off, uint32_t size) {
         put32(b, lc, cmd);
         put32(b, lc + 4, 16);
@@ -116,11 +134,20 @@ std::vector<uint8_t> build(const Spec &s)
         lc += 16;
         ncmds++;
     };
-    if (!s.function_starts.empty()) {
+    std::vector<uint64_t> starts;
+    for (uint32_t w : s.function_starts)
+        starts.push_back(kBase + kTextOff + 4ull * w);
+    for (const ExtraSection &es : s.extra_sections)
+        for (uint32_t w : es.function_starts)
+            starts.push_back(kBase + es.offset + 4ull * w);
+    if (!starts.empty()) {
+        std::sort(starts.begin(), starts.end());
         size_t q = kFunctionStarts;
         uint64_t last = kBase;
-        for (uint32_t w : s.function_starts) {
-            uint64_t addr = kBase + kTextOff + 4ull * w, delta = addr - last;
+        for (uint64_t addr : starts) {
+            uint64_t delta = addr - last;
+            if (!delta)
+                continue;
             last = addr;
             do {
                 uint8_t byte = delta & 0x7F;
@@ -165,6 +192,9 @@ std::vector<uint8_t> build(const Spec &s)
     put32(b, 20, static_cast<uint32_t>(lc - 32));
     for (size_t i = 0; i < s.code.size(); i++)
         put32(b, kTextOff + 4 * i, s.code[i]);
+    for (const ExtraSection &es : s.extra_sections)
+        for (size_t i = 0; i < es.words.size(); i++)
+            put32(b, es.offset + 4 * i, es.words[i]);
     return b;
 }
 
@@ -184,6 +214,11 @@ struct Translated {
     uint32_t word(size_t i) const
     {
         return get32(&out[kTextOff + 4 * i]);
+    }
+
+    uint32_t wordAt(uint32_t off, size_t i) const
+    {
+        return get32(&out[off + 4 * i]);
     }
 };
 
@@ -556,6 +591,153 @@ TEST(Parse, TruncatedLoadCommandsAreRefused)
     put32(in, 32 + 4, 0x10000);
     EXPECT_EQ(-1, a64x_macho_parse(in.data(), in.size(), m.get(), err, sizeof(err)));
     EXPECT_EQ(-1, a64x_macho_parse(in.data(), 16, m.get(), err, sizeof(err)));
+}
+
+TEST(Parse, ClassifyExecSection)
+{
+    auto sect = [](const char *name) {
+        std::array<char, 16> s{};
+        strncpy(s.data(), name, s.size());
+        return s;
+    };
+    const auto text = sect("__text");
+    const auto text_env = sect("text_env");
+    const auto cold = sect("__cold_code");
+    const auto cstr = sect("__cstring");
+    const auto cnst = sect("__const");
+    const auto unwind = sect("__unwind_info");
+    const auto eh = sect("__eh_frame");
+    const auto except_tab = sect("__gcc_except_tab");
+    const auto objc_ml = sect("__objc_methlist");
+    const auto objc_stubs = sect("__objc_stubs");
+    const auto swift5 = sect("__swift5_types");
+    const auto stubs = sect("__stubs");
+
+    EXPECT_EQ(A64X_SECT_CODE,
+              a64x_classify_exec_section(text.data(), kBase + 0x1000, 16, A64X_S_ATTR_PURE_INSTRUCTIONS));
+    EXPECT_EQ(A64X_SECT_CODE,
+              a64x_classify_exec_section(objc_stubs.data(), kBase + 0x1000, 16, A64X_S_ATTR_SOME_INSTRUCTIONS));
+    EXPECT_EQ(A64X_SECT_CODE,
+              a64x_classify_exec_section(stubs.data(), kBase + 0x1000, 16, 0x8u | A64X_S_ATTR_PURE_INSTRUCTIONS));
+    EXPECT_EQ(A64X_SECT_CODE, a64x_classify_exec_section(text_env.data(), kBase + 0x2000, 16, A64X_S_REGULAR));
+    EXPECT_EQ(A64X_SECT_CODE, a64x_classify_exec_section(text.data(), kBase + 0x2000, 16, A64X_S_REGULAR));
+    EXPECT_EQ(A64X_SECT_CANDIDATE, a64x_classify_exec_section(cold.data(), kBase + 0x2000, 16, A64X_S_REGULAR));
+    EXPECT_EQ(A64X_SECT_DATA, a64x_classify_exec_section(text_env.data(), kBase + 0x2000, 16, A64X_S_ATTR_DEBUG));
+    EXPECT_EQ(A64X_SECT_DATA, a64x_classify_exec_section(text_env.data(), kBase + 0x2001, 16, A64X_S_REGULAR));
+    EXPECT_EQ(A64X_SECT_DATA, a64x_classify_exec_section(text_env.data(), kBase + 0x2000, 2, A64X_S_REGULAR));
+    EXPECT_EQ(A64X_SECT_DATA, a64x_classify_exec_section(text_env.data(), kBase + 0x2000, 0, A64X_S_REGULAR));
+    EXPECT_EQ(A64X_SECT_DATA, a64x_classify_exec_section(cstr.data(), kBase + 0x2000, 16, A64X_S_CSTRING_LITERALS));
+    EXPECT_EQ(A64X_SECT_DATA, a64x_classify_exec_section(cstr.data(), kBase + 0x2000, 16, A64X_S_REGULAR));
+    EXPECT_EQ(A64X_SECT_DATA, a64x_classify_exec_section(cnst.data(), kBase + 0x2000, 16, A64X_S_REGULAR));
+    EXPECT_EQ(A64X_SECT_DATA, a64x_classify_exec_section(unwind.data(), kBase + 0x2000, 16, A64X_S_REGULAR));
+    EXPECT_EQ(A64X_SECT_DATA, a64x_classify_exec_section(eh.data(), kBase + 0x2000, 16, 0x6800000Bu));
+    EXPECT_EQ(A64X_SECT_DATA, a64x_classify_exec_section(except_tab.data(), kBase + 0x2000, 16, A64X_S_REGULAR));
+    EXPECT_EQ(A64X_SECT_DATA, a64x_classify_exec_section(objc_ml.data(), kBase + 0x2000, 16, A64X_S_REGULAR));
+    EXPECT_EQ(A64X_SECT_DATA, a64x_classify_exec_section(swift5.data(), kBase + 0x2000, 16, A64X_S_REGULAR));
+    EXPECT_EQ(A64X_SECT_DATA, a64x_classify_exec_section(stubs.data(), kBase + 0x2000, 16, 0x8u));
+}
+
+TEST(Image, FlaglessTextEnvIsTranslated)
+{
+    constexpr uint32_t kEnvOff = 0x2000;
+    for (bool with_fs : {false, true}) {
+        Spec s;
+        s.code = {kAdd, kRet};
+        s.function_starts = {0};
+        s.extra_sections.push_back({"text_env",
+                                    kEnvOff,
+                                    A64X_S_REGULAR,
+                                    {kPacibsp, kLdaddal, kBraa, kAdd, kRetab},
+                                    with_fs ? std::vector<uint32_t>{0} : std::vector<uint32_t>{}});
+        Translated t;
+        translate(s, t);
+        ASSERT_EQ(0, t.rc) << t.err;
+        EXPECT_EQ(2u, t.m->nranges);
+        EXPECT_EQ(1, t.sites) << t.err;
+        EXPECT_EQ(kPacibsp, t.wordAt(kEnvOff, 0));
+        EXPECT_EQ(0x14000000u, t.wordAt(kEnvOff, 1) & 0xFC000000u);
+        EXPECT_EQ(0xD61F0200u, t.wordAt(kEnvOff, 2));
+        EXPECT_EQ(kAdd, t.wordAt(kEnvOff, 3));
+        EXPECT_EQ(kRet, t.wordAt(kEnvOff, 4));
+    }
+}
+
+TEST(Image, FlaglessRegularSectionRequiresFunctionStarts)
+{
+    constexpr uint32_t kColdOff = 0x2000;
+    const std::vector<uint32_t> body = {kPacibsp, kLdaddal, kBraa, kRetab};
+
+    Spec without_fs;
+    without_fs.code = {kAdd, kRet};
+    without_fs.function_starts = {0};
+    without_fs.extra_sections.push_back({"__cold_code", kColdOff, A64X_S_REGULAR, body, {}});
+    Translated t0;
+    translate(without_fs, t0);
+    ASSERT_EQ(0, t0.rc) << t0.err;
+    EXPECT_EQ(1u, t0.m->nranges);
+    EXPECT_EQ(0, t0.sites) << t0.err;
+    EXPECT_EQ(kLdaddal, t0.wordAt(kColdOff, 1));
+    EXPECT_EQ(kBraa, t0.wordAt(kColdOff, 2));
+    EXPECT_EQ(kRetab, t0.wordAt(kColdOff, 3));
+
+    Spec with_fs = without_fs;
+    with_fs.extra_sections[0].function_starts = {0};
+    Translated t1;
+    translate(with_fs, t1);
+    ASSERT_EQ(0, t1.rc) << t1.err;
+    EXPECT_EQ(2u, t1.m->nranges);
+    EXPECT_EQ(1, t1.sites) << t1.err;
+    EXPECT_EQ(0x14000000u, t1.wordAt(kColdOff, 1) & 0xFC000000u);
+    EXPECT_EQ(0xD61F0200u, t1.wordAt(kColdOff, 2));
+    EXPECT_EQ(kRet, t1.wordAt(kColdOff, 3));
+}
+
+TEST(Image, FlaglessDataSectionsAreExcluded)
+{
+    const std::vector<uint32_t> fake_code = {kPacibsp, kLdaddal, kBraa, kRetab};
+    Spec s;
+    s.code = {kAdd, kRet};
+    s.function_starts = {0};
+    s.extra_sections = {
+        {"__const", 0x2000, A64X_S_REGULAR, fake_code, {0}},
+        {"__cstring", 0x2040, A64X_S_CSTRING_LITERALS, fake_code, {}},
+        {"__cstring", 0x2080, A64X_S_REGULAR, fake_code, {0}},
+        {"__unwind_info", 0x20C0, A64X_S_REGULAR, fake_code, {}},
+        {"__eh_frame", 0x2100, 0x6800000Bu, fake_code, {}},
+        {"__gcc_except_tab", 0x2140, A64X_S_REGULAR, fake_code, {}},
+        {"__objc_methlist", 0x2180, A64X_S_REGULAR, fake_code, {}},
+        {"evaluator_cfg", 0x21C0, A64X_S_REGULAR, fake_code, {}},
+    };
+    Translated t;
+    translate(s, t);
+    ASSERT_EQ(0, t.rc) << t.err;
+    EXPECT_EQ(1u, t.m->nranges);
+    EXPECT_EQ(0, t.sites) << t.err;
+    EXPECT_EQ(0u, t.x.changed);
+    for (const ExtraSection &es : s.extra_sections) {
+        for (size_t i = 0; i < es.words.size(); i++)
+            EXPECT_EQ(es.words[i], t.wordAt(es.offset, i)) << es.name << "[" << i << "]";
+    }
+}
+
+TEST(Parse, OverlappingCodeRangesAreMergedForBinarySearch)
+{
+    Spec s;
+    s.code = {kPacibsp, kLdaddal, kAdd, kRetab, kNop, kNop, kNop, kNop};
+    s.function_starts = {0};
+    // Add a contained code section [0x1004, 0x100C) inside __text [0x1000, 0x1020) so sorting by .lo alone would break
+    // img_is_code's binary search on words past 0x100C if overlapping ranges were not merged.
+    s.extra_sections.push_back({"__stubs", 0x1004, A64X_S_ATTR_PURE_INSTRUCTIONS, {kAdd, kRet}, {}});
+    std::vector<uint8_t> in = build(s);
+    // Restore original __text words overwritten by build() for the overlapping section.
+    for (size_t i = 0; i < s.code.size(); i++)
+        put32(in, 0x1000 + i * 4, s.code[i]);
+    auto m = std::make_unique<a64x_macho>();
+    char err[256];
+    ASSERT_EQ(0, a64x_macho_parse(in.data(), in.size(), m.get(), err, sizeof(err))) << err;
+    ASSERT_EQ(1u, m->nranges);
+    EXPECT_EQ(0x1000u, m->ranges[0].lo);
+    EXPECT_EQ(0x1000u + s.code.size() * 4, m->ranges[0].hi);
 }
 
 }  // namespace

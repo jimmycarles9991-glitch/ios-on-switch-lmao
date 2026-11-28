@@ -270,7 +270,7 @@ public:
     {
         std::shared_ptr<Job> job;
         {
-            std::lock_guard<gm20b::Mutex> hold(lock_);
+            std::lock_guard<gm20b::UnfairMutex> hold(lock_);
             const auto at = entries_.find(key);
             if (at != entries_.end() && !at->second->retryable())
                 return at->second;
@@ -295,7 +295,7 @@ public:
     }
 
 private:
-    gm20b::Mutex lock_;
+    gm20b::UnfairMutex lock_;
     std::map<ComputeSpecialization, std::shared_ptr<Job>> entries_;
 };
 

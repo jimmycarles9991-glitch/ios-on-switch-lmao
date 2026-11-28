@@ -1,5 +1,7 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
+import HWTestGPUModels
 import Metal
 
 /// METALMAP d7 and LIMITS G13: the texture unit's 32-bit float filtering, and the 2D engine's mip downsample (the raw

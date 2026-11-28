@@ -396,3 +396,23 @@ TEST_F(NativeScanoutMapping, PlaneNativeSlotForHoldsScanoutBeforeCompressionChec
     EXPECT_EQ(backingScanoutHolds[backing], 0);
     EXPECT_EQ(backingRefs[backing], 0);
 }
+
+TEST_F(NativeScanoutMapping, PlaneSlotForCleanUsesPhysicalPagesAndContiguousSegmentsWithoutVaMap)
+{
+    IOMemoryDescriptor memory;
+    memory.length = 16 * 4096;
+    memory.segmentStep = 16 * 4096;
+
+    const int slot = display->planeSlotFor(&memory, 0, memory.length, true);
+    ASSERT_GE(slot, 0);
+    EXPECT_EQ(mapCalls, 0u);
+    EXPECT_EQ(memory.segmentCalls, 1u);
+    EXPECT_EQ(hwPageCleanCalls, 1u);
+    EXPECT_EQ(hwPageCleanPages, 16u);
+    EXPECT_EQ(dcacheSyncCalls, 1u);
+
+    EXPECT_EQ(display->planeSlotFor(&memory, 0, memory.length, true), slot);
+    EXPECT_EQ(memory.segmentCalls, 1u);
+    EXPECT_EQ(mapCalls, 0u);
+    display->planeDropSlot(unsigned(slot));
+}

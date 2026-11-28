@@ -46,6 +46,8 @@ void SwitchXUDC::serviceEvents()
     bool emptied = false;
     draining = true;
     for (uint32_t handled = 0; handled < 2 * kEventSegmentTrbs; ++handled) {
+        if (settlingDcis && !hw.nextTransferEventReady(settlingDcis))
+            break;
         if (!hw.nextEvent(e)) {
             emptied = true;
             break;
@@ -80,6 +82,8 @@ void SwitchXUDC::serviceEvents()
     if (emptied) {
         uint32_t lifted = 0;
         for (uint32_t dci = 2; dci < kMaxDci; ++dci) {
+            if (settlingDcis & (1u << dci))
+                continue;
             const Endpoint &ep = endpoints[dci];
             if (ep.tds && ep.tds->fenced()) {
                 ep.tds->liftFence();
@@ -104,7 +108,11 @@ void SwitchXUDC::serviceEvents()
 // suspend; its next reset starts over.
 void SwitchXUDC::portEvent()
 {
-    const PortChange change = hw.portChange();
+    PortChange change;
+    {
+        const DciOp op(this, UINT32_MAX);
+        change = hw.portChange();
+    }
     if (change.disconnected && speed != kSpeedNone) {
         ep0Cancel(kIOReturnAborted);
         speed = kSpeedNone;
@@ -147,17 +155,20 @@ void SwitchXUDC::setupEvent(const Event &e)
 {
     memcpy(setup, e.d, sizeof(setup));
     sequence = e.setupSequence();
-    hw.setHalt(0, false);
     IOUSBDeviceControlRequest *request = controlRequest();
-    if (sequence == 0xfffe || sequence == 0xffff || !request) {  // Tegra210 invalid sequence (tegra_xudc.c)
-        hw.setHalt(0, true);
-        return;
+    {
+        const DciOp op(this, 1u);
+        hw.setHalt(0, false);
+        if (sequence == 0xfffe || sequence == 0xffff || !request) {  // Tegra210 invalid sequence (tegra_xudc.c)
+            hw.setHalt(0, true);
+            return;
+        }
+        // A new setup packet ends the previous control transfer: what it left on the ring is dropped. Our own OUT
+        // stages end here; a family request still pending is aborted by the family itself (premature setup ->
+        // abortEndpoint -> handleAbortEndpoint -> ep0Cancel).
+        if (stage != Stage::Idle)
+            hw.dropQueued(0);
     }
-    // A new setup packet ends the previous control transfer: what it left on the ring is dropped. Our own OUT stages
-    // end here; a family request still pending is aborted by the family itself (premature setup -> abortEndpoint ->
-    // handleAbortEndpoint -> ep0Cancel).
-    if (stage != Stage::Idle)
-        hw.dropQueued(0);
     if (stage == Stage::DataOut || stage == Stage::StatusOut)
         stage = Stage::Idle;
     request->inputSetupPacket(setup);
@@ -261,9 +272,12 @@ void SwitchXUDC::ep0Complete(const Event &e)
 
 void SwitchXUDC::ep0Cancel(IOReturn status)
 {
-    if (stage != Stage::Idle)
-        hw.dropQueued(0);
-    stage = Stage::Idle;
+    {
+        const DciOp op(this, 1u);
+        if (stage != Stage::Idle)
+            hw.dropQueued(0);
+        stage = Stage::Idle;
+    }
     _IOUSBDeviceIORequestTag *pending[kEp0Depth + 1];
     uint32_t count = 0;
     if (ep0Request)

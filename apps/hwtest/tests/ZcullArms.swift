@@ -7,11 +7,13 @@ import Metal
 /// the far quads over everything again, on a 4x multisampled depth resolved into the target (`msaa4x`), on a two-layer
 /// array whose layers each take the quads (`layered`), and on a depth one pass clears and stores and a later pass of
 /// the same command buffer loads, the second pass drawing only the far quads: right after it, where the facade fuses the
-/// two into one pass that keeps its region, or stores and loads it (`fused`), and past a blit between them, where the
-/// first stores its region and the second loads it (`loaded`). `<arm>_wrong`: channels off the expected colours;
-/// `<arm>_passes`: regions the facade programmed for the arm (at least one, two for `loaded` and an unfused `fused`);
-/// `<arm>_fused`: passes it fused; `<arm>_loads`: regions loaded (at least one for `loaded`); `<arm>_error`: the arm could
-/// not run.
+/// two into one pass that keeps its region, or stores and loads it (`fused`), past a blit between them, where the
+/// first stores its region and the second loads it (`loaded`), and past a compute encoder and ten clears, where the
+/// commit cuts the range between them and the second pass's job loads the region the first's kept for it (`carried`).
+/// `<arm>_wrong`: channels off the expected colours; `<arm>_passes`: regions the facade programmed for the arm (at least
+/// one, two for `loaded`, `carried` and an unfused `fused`); `<arm>_fused`: passes it fused; `<arm>_loads`: regions
+/// loaded (at least one for `loaded` and `carried`); `<arm>_carried`: of those, regions an earlier job stored (at least
+/// one for `carried`); `<arm>_error`: the arm could not run.
 extension ZcullTest {
     struct ArmContext {
         let gpu: GPU
@@ -21,11 +23,12 @@ extension ZcullTest {
     }
 
     func arms(_ c: ArmContext, _ metrics: inout Metrics, _ wrong: inout [String], _ paths: inout Set<String>) async {
-        for (name, regions, fusions, loads, run) in [
-            ("msaa4x", 1, 0, 0, msaa4x), ("layered", 1, 0, 0, layered),
-            ("fused", 2, 1, 0, { try await self.loaded($0, apart: false) }),
-            ("loaded", 2, 0, 1, { try await self.loaded($0, apart: true) }),
-        ] as [(String, Int, Int, Int, (ArmContext) async throws -> (Int, String))] {
+        for (name, regions, fusions, loads, carries, run) in [
+            ("msaa4x", 1, 0, 0, 0, msaa4x), ("layered", 1, 0, 0, 0, layered),
+            ("fused", 2, 1, 0, 0, { try await self.loaded($0, apart: false) }),
+            ("loaded", 2, 0, 1, 0, { try await self.loaded($0, apart: true) }),
+            ("carried", 2, 0, 1, 1, carried),
+        ] as [(String, Int, Int, Int, Int, (ArmContext) async throws -> (Int, String))] {
             let before = GM20BFacade.counters(of: c.gpu.device)
             let ran: (Int, String)
             do {
@@ -39,6 +42,7 @@ extension ZcullTest {
             let after = GM20BFacade.counters(of: c.gpu.device)
             let delta = { (key: String) in (after[key] ?? 0) - (before[key] ?? 0) }
             let passes = delta("zcull_passes"), fused = delta("fused_passes"), loaded = delta("zcull_loads")
+            let carried = delta("zcull_carried")
             metrics.set("\(name)_wrong", bad)
             metrics.set("\(name)_passes", passes)
             if fusions > 0 || loads > 0 {
@@ -51,6 +55,10 @@ extension ZcullTest {
             let keptInOne = fusions > 0 && fused >= fusions && passes >= 1
             if passes < regions && !keptInOne { wrong.append("\(name)_passes") }
             if loaded < loads { wrong.append("\(name)_loads") }
+            if carries > 0 {
+                metrics.set("\(name)_carried", carried)
+                if carried < carries { wrong.append("\(name)_carried") }
+            }
         }
     }
 
@@ -168,26 +176,56 @@ extension ZcullTest {
                     blit.fill(buffer: between, range: 0 ..< 256, value: 0)
                     blit.endEncoding()
                 }
-                let pass = MTLRenderPassDescriptor()
-                pass.colorAttachments[0].texture = c.target
-                pass.colorAttachments[0].loadAction = first ? .clear : .load
-                pass.colorAttachments[0].storeAction = .store
-                pass.depthAttachment.texture = depth
-                pass.depthAttachment.loadAction = first ? .clear : .load
-                pass.depthAttachment.clearDepth = 1
-                pass.depthAttachment.storeAction = .store
-                let e = commands.makeRenderCommandEncoder(descriptor: pass)!
-                e.setRenderPipelineState(pipeline)
-                if first {
-                    let (w, h) = (c.width, c.height)
-                    e.setDepthStencilState(c.state(.less))
-                    GPU.draw(e, corners: GPU.pixelQuad(0, 0, w / 2, h, width: w, height: h, z: 0.25), color: Self.red)
-                } else {
-                    Self.quads(e, c, near: false)
-                }
-                e.endEncoding()
+                Self.depthPass(commands, c, depth, pipeline, first: first)
             }
         }
         return (Self.misses(try await gpu.raster(c.target, .bgra8Unorm), c.width, c.height), ran.path)
+    }
+
+    func carried(_ c: ArmContext) async throws -> (Int, String) {
+        let gpu = c.gpu
+        let depth = try gpu.texture(.depth32Float, c.width, c.height, usage: [.renderTarget])
+        let filler = try gpu.texture(.bgra8Unorm, 8, 8, usage: [.renderTarget])
+        let pipeline = try gpu.render(fragment: "exact_fragment", format: .bgra8Unorm, depth: .depth32Float)
+        let ran = try await gpu.run { commands in
+            // first, so the command buffer is encoded at its commit, where its range is cut into chunks
+            commands.makeComputeCommandEncoder()!.endEncoding()
+            Self.depthPass(commands, c, depth, pipeline, first: true)
+            for _ in 0 ..< 10 {
+                let clear = MTLRenderPassDescriptor()
+                clear.colorAttachments[0].texture = filler
+                clear.colorAttachments[0].loadAction = .clear
+                clear.colorAttachments[0].storeAction = .store
+                commands.makeRenderCommandEncoder(descriptor: clear)!.endEncoding()
+            }
+            Self.depthPass(commands, c, depth, pipeline, first: false)
+        }
+        return (Self.misses(try await gpu.raster(c.target, .bgra8Unorm), c.width, c.height), ran.path)
+    }
+
+    /// The first pass clears the target and the depth and draws the near quad over the left half; the second loads both
+    /// and draws the far quads over everything
+    static func depthPass(
+        _ commands: MTLCommandBuffer, _ c: ArmContext, _ depth: MTLTexture, _ pipeline: MTLRenderPipelineState,
+        first: Bool
+    ) {
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = c.target
+        pass.colorAttachments[0].loadAction = first ? .clear : .load
+        pass.colorAttachments[0].storeAction = .store
+        pass.depthAttachment.texture = depth
+        pass.depthAttachment.loadAction = first ? .clear : .load
+        pass.depthAttachment.clearDepth = 1
+        pass.depthAttachment.storeAction = .store
+        let e = commands.makeRenderCommandEncoder(descriptor: pass)!
+        e.setRenderPipelineState(pipeline)
+        if first {
+            let (w, h) = (c.width, c.height)
+            e.setDepthStencilState(c.state(.less))
+            GPU.draw(e, corners: GPU.pixelQuad(0, 0, w / 2, h, width: w, height: h, z: 0.25), color: red)
+        } else {
+            quads(e, c, near: false)
+        }
+        e.endEncoding()
     }
 }

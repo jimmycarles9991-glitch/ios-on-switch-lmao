@@ -493,40 +493,39 @@ static int decodeFrame(VP9Decoder *d, const uint8_t *data, size_t size, void *to
     fillProbs((nvdec_vp9EntropyProbs_t *)(input->va + kProbOff), &fc, st);
     tileSizes((uint16_t *)(input->va + kTilesOff), &h);
 
-    TegraNVDECSubmit submit;
-    memset(&submit, 0, sizeof(submit));
-    submit.codec = TEGRA_NVDEC_CODEC_VP9;
-    submit.setup_bytes = sizeof(nvdec_vp9_pic_s);
-    fillSetup(d, (nvdec_vp9_pic_s *)submit.setup, &h, cur, refs, (uint32_t)tileBytes);
+    TegraNVDECSubmit stackSubmit;
+    TegraNVDECSubmit *submit = d->b.submit_buffer ? d->b.submit_buffer : &stackSubmit;
+    memset(submit, 0, sizeof(*submit));
+    submit->codec = TEGRA_NVDEC_CODEC_VP9;
+    submit->setup_bytes = sizeof(nvdec_vp9_pic_s);
+    fillSetup(d, (nvdec_vp9_pic_s *)submit->setup, &h, cur, refs, (uint32_t)tileBytes);
     const uint8_t segWrite = d->seg_read == 0 ? 1 : 0, colmvRead = d->colmv_write ^ 1;
-    entry(&submit, NVC5B0_SET_APPLICATION_ID, TEGRA_NVDEC_ENTRY_VALUE, NVC5B0_SET_APPLICATION_ID_ID_VP9, 0);
-    entry(&submit, NVC5B0_SET_CONTROL_PARAMS, TEGRA_NVDEC_ENTRY_VALUE,
+    entry(submit, NVC5B0_SET_APPLICATION_ID, TEGRA_NVDEC_ENTRY_VALUE, NVC5B0_SET_APPLICATION_ID_ID_VP9, 0);
+    entry(submit, NVC5B0_SET_CONTROL_PARAMS, TEGRA_NVDEC_ENTRY_VALUE,
           NVC5B0_SET_CONTROL_PARAMS_CODEC_TYPE_VP9 | (1u << 4) /* GPTIMER_ON */ | (1u << 6) /* ERR_CONCEAL_ON */, 0);
-    entry(&submit, NVC5B0_SET_PICTURE_INDEX, TEGRA_NVDEC_ENTRY_VALUE, d->picture_index++, 0);
-    entry(&submit, NVC5B0_SET_IN_BUF_BASE_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input->handle, kBitsOff);
-    entry(&submit, NVC5B0_SET_NVDEC_STATUS_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input->handle, kStatusOff);
-    entry(&submit, NVC5B0_VP9_SET_PROB_TAB_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input->handle, kProbOff);
-    entry(&submit, NVC5B0_VP9_SET_CTX_COUNTER_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->counters_off);
-    entry(&submit, NVC5B0_VP9_SET_TILE_SIZE_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input->handle, kTilesOff);
-    entry(&submit, NVC5B0_VP9_SET_COL_MVWRITE_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux,
-          d->colmv_off[d->colmv_write]);
-    entry(&submit, NVC5B0_VP9_SET_COL_MVREAD_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->colmv_off[colmvRead]);
-    entry(&submit, NVC5B0_VP9_SET_SEGMENT_READ_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->seg_off[d->seg_read]);
-    entry(&submit, NVC5B0_VP9_SET_SEGMENT_WRITE_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->seg_off[segWrite]);
-    entry(&submit, NVC5B0_VP9_SET_FILTER_BUFFER_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->filter_off);
+    entry(submit, NVC5B0_SET_PICTURE_INDEX, TEGRA_NVDEC_ENTRY_VALUE, d->picture_index++, 0);
+    entry(submit, NVC5B0_SET_IN_BUF_BASE_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input->handle, kBitsOff);
+    entry(submit, NVC5B0_SET_NVDEC_STATUS_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input->handle, kStatusOff);
+    entry(submit, NVC5B0_VP9_SET_PROB_TAB_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input->handle, kProbOff);
+    entry(submit, NVC5B0_VP9_SET_CTX_COUNTER_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->counters_off);
+    entry(submit, NVC5B0_VP9_SET_TILE_SIZE_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input->handle, kTilesOff);
+    entry(submit, NVC5B0_VP9_SET_COL_MVWRITE_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->colmv_off[d->colmv_write]);
+    entry(submit, NVC5B0_VP9_SET_COL_MVREAD_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->colmv_off[colmvRead]);
+    entry(submit, NVC5B0_VP9_SET_SEGMENT_READ_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->seg_off[d->seg_read]);
+    entry(submit, NVC5B0_VP9_SET_SEGMENT_WRITE_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->seg_off[segWrite]);
+    entry(submit, NVC5B0_VP9_SET_FILTER_BUFFER_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->filter_off);
     const Surface *pics[4] = {refs[0], refs[1], refs[2], cur};  // LAST, GOLDEN, ALTREF, current (VP9_FRAME_SFC_ID)
     for (uint16_t i = 0; i < 4; i++) {
-        entry(&submit, (uint16_t)(NVC5B0_SET_PICTURE_LUMA_OFFSET0 + 4 * i), TEGRA_NVDEC_ENTRY_RELOC, pics[i]->handle,
-              0);
-        entry(&submit, (uint16_t)(NVC5B0_SET_PICTURE_CHROMA_OFFSET0 + 4 * i), TEGRA_NVDEC_ENTRY_RELOC, pics[i]->handle,
+        entry(submit, (uint16_t)(NVC5B0_SET_PICTURE_LUMA_OFFSET0 + 4 * i), TEGRA_NVDEC_ENTRY_RELOC, pics[i]->handle, 0);
+        entry(submit, (uint16_t)(NVC5B0_SET_PICTURE_CHROMA_OFFSET0 + 4 * i), TEGRA_NVDEC_ENTRY_RELOC, pics[i]->handle,
               pics[i]->luma_bytes);
     }
-    entry(&submit, NVC5B0_EXECUTE, TEGRA_NVDEC_ENTRY_VALUE, 1u << 8 /* AWAKEN */, 0);
+    entry(submit, NVC5B0_EXECUTE, TEGRA_NVDEC_ENTRY_VALUE, 1u << 8 /* AWAKEN */, 0);
     // The CPU wrote the probability table, the tile sizes and the tile data: one range of the input buffer.
-    submit.clean[0] = (TegraNVDECRange){input->handle, kProbOff, (uint32_t)(kBitsOff - kProbOff + tileBytes + 64), 0};
-    submit.clean_count = 1;
+    submit->clean[0] = (TegraNVDECRange){input->handle, kProbOff, (uint32_t)(kBitsOff - kProbOff + tileBytes + 64), 0};
+    submit->clean_count = 1;
     uint32_t fence = 0;
-    if (d->b.submit(d->b.ctx, &submit, &fence))
+    if (d->b.submit(d->b.ctx, submit, &fence))
         return -2;
     nvdec_ring_advance(&d->ring);
 

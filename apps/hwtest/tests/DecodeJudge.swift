@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUDecode
 import Metal
 
 /// The decode tests' comparisons of read() floats with DecodeVectors' wants: each texel whose codes differ counted

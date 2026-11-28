@@ -34,18 +34,64 @@ def judged(records: list[dict], *check_list: Check) -> dict[str, rules.Result]:
     return {r.check.name: r for r in results}
 
 
+class ScreenClass(unittest.TestCase):
+    """mg.screen-class wants the pinned identity's class: J181's 21 on 27, J120's 11 on 17."""
+
+    @staticmethod
+    def verdicts(darwin: int, screen_class: int) -> dict[str, str]:
+        group = {c.name: c for c in checks.GROUPS['mobilegestalt']}
+        logo = record(2, f'PUIProgressWindow got screen class {screen_class}')
+        logo['processImagePath'] = '/usr/libexec/backboardd'
+        log = [record(1, f'Darwin Kernel Version {darwin}.0.0: debug'), logo]
+        found = judged(log, group['mg.kernel'], group['mg.screen-class'], group['mg.screen-class-17'])
+        return {name: found[name].verdict for name in ('mg.screen-class', 'mg.screen-class-17')}
+
+    def test_each_version_wants_its_identitys_class(self):
+        self.assertEqual(self.verdicts(25, 21), {'mg.screen-class': PASS, 'mg.screen-class-17': rules.NA})
+        self.assertEqual(self.verdicts(23, 11), {'mg.screen-class': rules.NA, 'mg.screen-class-17': PASS})
+
+    def test_the_other_identitys_class_or_none_fails(self):
+        self.assertEqual(self.verdicts(25, 11)['mg.screen-class'], FAIL)
+        self.assertEqual(self.verdicts(25, -1)['mg.screen-class'], FAIL)
+        self.assertEqual(self.verdicts(23, 21)['mg.screen-class-17'], FAIL)
+
+
 class Checks(unittest.TestCase):
+    def test_a_sparse_window_with_a_long_wait_fails_the_longest_wait_check(self):
+        """Boot 2693043C (25 Nov): two runs in 10 s, one of them after 9.2 s on a run queue."""
+        sched = {c.name: c for c in checks.GROUPS['sched']}
+        sparse = 'backboardd.main[69] 31/31 TS DF DF: 2 runs 131072/9169075/9169075 us; render-server[69] 55/55 FX'
+        busy = 'backboardd.main[69] 31/31 TS DF DF: 400 runs 64/900/4000 us; render-server[69] 55/55 FX'
+        log = [record(t, f'SwitchSched 1/2 (10000 ms): {line}') for t, line in ((1.0, busy), (11.0, sparse))]
+        got = judged(log, sched['sched.backboardd-main'], sched['sched.backboardd-main-longest'])
+        self.assertEqual(got['sched.backboardd-main'].verdict, PASS)
+        self.assertEqual(got['sched.backboardd-main-longest'].verdict, FAIL)
+
+    def test_host1x_channel_counters_that_never_started_fail(self):
+        media = {c.name: c for c in checks.GROUPS['media']}
+        head = 'TegraHost1x: 5s NVDEC/VIC/NVENC/NVJPG/DC gathered=0/40/0/0/60 copied=0/0/0/0/0 arena_high=0/3/0/0/1KB '
+        running = head + 'room_waits=0/0/0/0/0 clocked=0/5000000/0/0/5000000us stalled=0/1000000/0/0/4500000us'
+        stopped = head + 'room_waits=0/0/0/0/0 clocked=0/0/0/0/0us stalled=0/0/0/0/0us'
+        check = media['media.host1x-channel-counters']
+        self.assertEqual(judged([record(1.0, running)], check)[check.name].verdict, PASS)
+        self.assertEqual(judged([record(1.0, running), record(6.0, stopped)], check)[check.name].verdict, FAIL)
+        self.assertEqual(
+            judged([record(1.0, head + 'room_waits=0/0/0/0/0 counters=off')], check)[check.name].verdict, NO_DATA
+        )
+
     def test_every_check_is_well_formed(self):
         names = [c.name for group in checks.GROUPS.values() for c in group]
         self.assertEqual(len(names), len(set(names)))
         for group in checks.GROUPS.values():
             for c in group:
-                self.assertTrue(c.rule in {rules.REPORT, rules.TIMELINE} or rules.RULE.match(c.rule), c.name)
+                self.assertTrue(
+                    c.rule in {rules.REPORT, rules.TIMELINE, rules.SUMS} or rules.RULE.match(c.rule), c.name
+                )
                 self.assertTrue(all(c.literals()), c.name)
                 if c.regex:
                     re.compile(c.regex)
                 self.assertTrue(all(n in names for n in c.needed()), c.name)
-                for other in (c.against, c.after, c.unless, c.followed, c.during, c.per, c.preceded):
+                for other in (c.against, c.after, c.unless, c.followed, c.during, c.per, c.preceded, c.boots):
                     self.assertTrue(not other or other in names, c.name)
                 self.assertTrue(all(n in names for n in c.outside), c.name)
 
@@ -148,6 +194,27 @@ class Rules(unittest.TestCase):
         self.assertEqual(got['idle'].verdict, PASS)
         self.assertIn('0.30', got['idle'].observed)
         self.assertEqual(got['none'].verdict, NO_DATA)
+
+    def test_frame_end_idle_leaves_out_debug_only_holders(self):
+        check = next(c for c in checks.GROUPS['display'] if c.name == 'display.frame-end-idle')
+        locks = 'SwitchDisplay locks: 300 frame ends; per 100: colour 0, INT_MASK 0; work-loop passes 100; '
+        debug = locks + '5011 ms, 0 swaps, 302 DC A interrupts, 2 not explained by debug holders, routed for release'
+        busy = locks + '5000 ms, 300 swaps, 300 DC A interrupts, 300 not explained by debug holders, routed for release'
+        leak = locks + '5000 ms, 0 swaps, 295 DC A interrupts, 295 not explained by debug holders, routed for release'
+
+        def verdict(*messages: str) -> str:
+            records = [record(i, m) for i, m in enumerate(messages)]
+            return devicerun.run_checks(records, [check])[0][0].verdict
+
+        self.assertEqual(verdict(debug, busy), PASS)
+        self.assertEqual(verdict(debug, leak), FAIL)
+
+    def test_transform_refused_names_the_word(self):
+        check = next(c for c in checks.GROUPS['display'] if c.name == 'display.transform-refused')
+        line = 'SwitchDisplay: swap refused: layer 2 has transform 1 (format 0x42475241, 1280x720)'
+        result = devicerun.run_checks([record(0, line)], [check])[0][0]
+        self.assertEqual(result.verdict, INFO)
+        self.assertIn('1/0x42475241/1280x720', result.observed)
 
     def test_against_and_grouping(self):
         by_name = {c.name: c for c in checks.GROUPS['gpu'] + checks.GROUPS['refusals']}
@@ -645,7 +712,7 @@ class Rules(unittest.TestCase):
         self.assertEqual(results[0].verdict, FAIL)
         self.assertIn('backboardd/PBGRABsovXmw_TlrpA3Xhfs_Iclr_Iclr', results[0].observed)
 
-    def test_backboardd_must_draw_no_catch_all_across_the_boot(self):
+    def test_no_process_draws_the_catch_all_across_the_boot(self):
         rule = [c for c in checks.GROUPS['boot'] if c.name == 'boot.ca-no-catch-all']
         self.assertEqual(len(rule), 1)
 
@@ -657,18 +724,82 @@ class Rules(unittest.TestCase):
                 'subsystem': checks.GPU_METAL_SUBSYSTEM,
                 'category': 'plugin',
                 'messageType': 'Default',
-                'eventMessage': f'TegraGM20BMetal: {process} gm20b 5s c=120(24.0/s) pack=45/0 cag={cag} rtsync=12/345us',
+                'eventMessage': f'TegraGM20BMetal: {process} gm20b 5s c=120(24.0/s) pack=45/0/1/0 cag={cag} rtsync=12/345us',
             }
 
-        hwtest = rates('SwitchHWTest', 7, 1)
-        results, _ = devicerun.run_checks([hwtest], rule)
+        results, _ = devicerun.run_checks([], rule)
         self.assertEqual(results[0].verdict, NO_DATA)
-        clean = [rates('backboardd', 0, 5), rates('backboardd', 0, 10), hwtest]
+        clean = [rates('backboardd', 0, 5), rates('backboardd', 0, 10), rates('SwitchHWTest', 0, 11)]
         results, _ = devicerun.run_checks(clean, rule)
         self.assertEqual(results[0].verdict, PASS)
         results, _ = devicerun.run_checks([*clean, rates('backboardd', 3, 15)], rule)
         self.assertEqual(results[0].verdict, FAIL)
         self.assertIn('max(cag) 3', results[0].observed)
+        results, _ = devicerun.run_checks([*clean, rates('SpringBoard', 7, 16)], rule)
+        self.assertEqual(results[0].verdict, FAIL)
+        self.assertIn('max(cag) 7', results[0].observed)
+        results, _ = devicerun.run_checks([*clean, rates('SwitchHWTest', 7, 17)], rule)
+        self.assertEqual(results[0].verdict, PASS)
+
+    def test_a_core_animation_state_any_process_lacks_fails_the_boot(self):
+        rule = [c for c in checks.GROUPS['boot'] if c.name == 'boot.ca-pack-covers-all']
+        self.assertEqual(len(rule), 1)
+
+        def record(process: str, message: str) -> dict:
+            return {
+                'timestamp': '2026-11-25 19:18:55.559000+0000',
+                'bootUUID': 'B00T',
+                'processImagePath': '/Applications/' + process,
+                'subsystem': checks.GPU_METAL_SUBSYSTEM,
+                'category': 'gm20b',
+                'messageType': 'Error',
+                'eventMessage': message,
+            }
+
+        own = record(
+            'SwitchHWTest',
+            'SwitchMetal: SwitchHWTest: a render state the pack lacks f98fae52bc0cfe8f '
+            '(com.apple.coreanimation.Pb3a8Xm_Tds4A2Xhf_Isrc): samples=1 c0=94',
+        )
+        results, _ = devicerun.run_checks([own], rule)
+        self.assertEqual(results[0].verdict, PASS)
+        for message in (
+            'SwitchMetal: Maps: a render state the pack lacks f98fae52bc0cfe8f '
+            '(com.apple.coreanimation.PBGRAXm_TdfgA2Xhf_Iscd): samples=1 c0=80',
+            'SwitchMetal: in-process state the pack lacks f98fae52bc0cfe8f (record): '
+            'label=com.apple.coreanimation.PBGRAXm_TdfgA2Xhf_Iscd',
+        ):
+            results, _ = devicerun.run_checks([own, record('Maps', message)], rule)
+            self.assertEqual(results[0].verdict, FAIL)
+            self.assertIn('PBGRAXm_TdfgA2Xhf_Iscd', results[0].observed)
+
+    def test_pack_tier1_uses_reports_os_states_and_ignores_hwtest(self):
+        rule = [c for c in checks.GROUPS['boot'] if c.name == 'pack.tier1-uses']
+        self.assertEqual(len(rule), 1)
+        self.assertIn('logharvest', rule[0].note)
+
+        def line(process: str, name: str, pieces: int, card: int) -> dict:
+            return {
+                'timestamp': '2026-11-23 10:00:05.000000+0000',
+                'bootUUID': 'B00T',
+                'processImagePath': '/usr/libexec/' + process,
+                'subsystem': checks.GPU_METAL_SUBSYSTEM,
+                'category': '',
+                'messageType': 'Default',
+                'eventMessage': (
+                    f'SwitchMetal: tier-1 pack state 0123456789abcdef {name} in {process}: {pieces} pieces, card={card}'
+                ),
+            }
+
+        hwtest = line('SwitchHWTest', 'aaaa1111bbbb2222', 2, 1)
+        results, _ = devicerun.run_checks([hwtest], rule)
+        self.assertEqual(results[0].verdict, NO_DATA)
+        os_use = [line('backboardd', 'deadbeef00000001', 2, 3), line('SpringBoard', 'deadbeef00000002', 1, 0), hwtest]
+        results, _ = devicerun.run_checks(os_use, rule)
+        self.assertEqual(results[0].verdict, INFO)
+        self.assertEqual(len(results[0].matches), 2)
+        self.assertIn('backboardd/deadbeef00000001/2/3', results[0].observed)
+        self.assertIn('SpringBoard/deadbeef00000002/1/0', results[0].observed)
 
     def test_boot_pack_pieces_fails_on_refusal_slow_import_or_piece_import(self):
         rule = [c for c in checks.GROUPS['boot'] if c.name == 'boot.pack-pieces']
@@ -689,8 +820,9 @@ class Rules(unittest.TestCase):
             rec(
                 '/kernel.development',
                 '',
-                'tegra-gm20b: pack image: tier 0 124 MiB built in 900 ms for cameracaptured '
-                '(pagein requests 125, copy 14 ms, big-page bytes 130023424)',
+                'tegra-gm20b: pack image: tier 0 124 MiB for cameracaptured, open 600 ms after the build began '
+                '(tables read), streamed 300 ms after that (pagein requests 125, copy 14 ms, big-page bytes '
+                '130023424); 0 jobs waited on it on the GPU, the first submitted 0 ms before its end',
                 1,
             ),
             rec(

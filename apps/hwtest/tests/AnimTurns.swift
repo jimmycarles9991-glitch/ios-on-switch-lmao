@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestKit
 import QuartzCore
 import UIKit
 
@@ -82,18 +83,22 @@ enum AnimTurns {
         }
     }
 
-    /// `turn` from where the scene is, and back; the run, and whether the scene was back where it began afterwards.
+    /// `turn` from where the scene is, and back; the run, whether the scene was back where it began afterwards, and
+    /// what the outward turn cost this app (TurnCost).
     static func run(
         _ turn: AnimTurn, watcher: TurnWatcher, stage: AnimStage, scene sceneName: String, block: Bool
-    ) async -> (AnimRun, Bool) {
+    ) async -> (AnimRun, Bool, TurnCost?) {
         let name = turn.rawValue
         guard let scene = Self.scene else {
-            return (refused(name, sceneName, CACurrentMediaTime(), "no_window_scene"), false)
+            return (refused(name, sceneName, CACurrentMediaTime(), "no_window_scene"), false, nil)
         }
         let from = mask(scene.interfaceOrientation)
         await AnimRun.frames(2)
         let t0 = CACurrentMediaTime()
-        let (start, end) = await self.turn(to: turn.target(from), watcher: watcher, block: block)
+        let main = await MainActor.run { pthread_mach_thread_np(pthread_self()) }
+        let ((start, end), cost) = await TurnCost.around(main: main) {
+            await self.turn(to: turn.target(from), watcher: watcher, block: block)
+        }
         await AnimRun.frames(8)
         if mask(scene.interfaceOrientation) != from {
             _ = await self.turn(to: from, watcher: watcher, block: false)
@@ -103,14 +108,14 @@ enum AnimTurns {
         guard case .began(let at, let nominal)? = start else {
             let note: String
             if case .refused(let why)? = start { note = "refused_" + why } else { note = "no_transition" }
-            return (refused(name, sceneName, t0, note), restored)
+            return (refused(name, sceneName, t0, note), restored, cost)
         }
         let run = AnimRun(
             name, sceneName, t0: t0, begin: at, end: end, nominal: nominal, error: -1, values: 0,
             shown: stage.probe.presented(from: t0, to: max(end, t0)),
             note: end > 0 ? "" : "no_completion"
         )
-        return (run, restored)
+        return (run, restored, cost)
     }
 
     private static func turn(

@@ -53,6 +53,7 @@ enum : IOOptionBits {
 	kIODirectionInOut = 3,
 	kIOMemoryPageable = 1u << 10,
 	kIOMemoryPersistent = 1u << 11,
+	kIOMemoryMapCopyOnWrite = 0x00020000,
 	kIOMapAnywhere = 1,
 	kIOMapReadOnly = 1u << 12,
 };
@@ -139,16 +140,88 @@ struct host_task {
 inline host_task gKernelTask = {false};
 inline task_t kernel_task = &gKernelTask;
 
+struct HostMemoryStats {
+	int liveDescriptors = 0;
+	int liveMaps = 0;
+	int mappingsCreated = 0;
+	IOOptionBits lastMapOptions = 0;
+	task_t lastMapTask = nullptr;
+
+	void reset()
+	{
+		*this = {};
+	}
+};
+
+inline HostMemoryStats gMemoryStats;
+
+class IOMemoryDescriptor;
+
+class IOMemoryMap : public OSObject
+{
+public:
+	IOMemoryMap(IOMemoryDescriptor *memory, mach_vm_address_t address, uint64_t bytes)
+	    : memory_(memory), address_(address), bytes_(bytes)
+	{
+		gMemoryStats.liveMaps++;
+	}
+
+	~IOMemoryMap() override;
+
+	mach_vm_address_t getAddress() const
+	{
+		return address_;
+	}
+
+	IOByteCount getLength() const
+	{
+		return bytes_;
+	}
+
+private:
+	IOMemoryDescriptor *memory_;
+	mach_vm_address_t address_;
+	uint64_t bytes_;
+};
+
 class IOMemoryDescriptor : public OSObject
 {
 public:
+	IOMemoryDescriptor()
+	{
+		gMemoryStats.liveDescriptors++;
+	}
+
+	~IOMemoryDescriptor() override
+	{
+		gMemoryStats.liveDescriptors--;
+	}
+
 	static IOMemoryDescriptor *withAddressRange(mach_vm_address_t address, uint64_t bytes,
-						    IOOptionBits, task_t)
+						    IOOptionBits options, task_t)
 	{
 		auto *made = new IOMemoryDescriptor;
 		made->address_ = address;
 		made->bytes_ = bytes;
+		made->options_ = options;
+		if (options & kIOMemoryMapCopyOnWrite) {
+			const auto *src = reinterpret_cast<const uint8_t *>(address);
+			made->cow_.assign(src, src + bytes);
+		}
 		return made;
+	}
+
+	IOMemoryMap *createMappingInTask(task_t task, mach_vm_address_t, IOOptionBits options)
+	{
+		gMemoryStats.mappingsCreated++;
+		gMemoryStats.lastMapOptions = options;
+		gMemoryStats.lastMapTask = task;
+		retain();
+		const mach_vm_address_t base =
+			(options_ & kIOMemoryMapCopyOnWrite)
+				? mach_vm_address_t(reinterpret_cast<uintptr_t>(cow_.data()))
+				: address_;
+		return new IOMemoryMap(this, base, bytes_);
 	}
 
 	IOReturn prepare()
@@ -175,7 +248,16 @@ public:
 private:
 	mach_vm_address_t address_ = 0;
 	uint64_t bytes_ = 0;
+	IOOptionBits options_ = 0;
+	std::vector<uint8_t> cow_;
 };
+
+inline IOMemoryMap::~IOMemoryMap()
+{
+	gMemoryStats.liveMaps--;
+	if (memory_)
+		memory_->release();
+}
 
 class IOBufferMemoryDescriptor : public IOMemoryDescriptor
 {

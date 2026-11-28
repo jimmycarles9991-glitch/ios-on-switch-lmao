@@ -1,20 +1,20 @@
 # NAK question batches
 
-These batches put eight questions NAK's SM50 backend has about GM20B to the Switch. The generators live in
+These batches put the questions NAK's SM50 backend has about GM20B to the Switch. The generators live in
 `tools/benchloop` (`sm53/affinity.py`, `sm53/int3.py`, `sm53/overlap.py`, `sm53/icache.py`, `store2fma.py`,
-`sm53/hsetp2.py`, `sm53/interlock_spin.py`, `sm53/powr_native.py`). After changing one, rewrite the files with
-`python3 -m tools.benchloop.nakbatches` from the repo root. `families_test` fails while a file and its generator
-disagree.
+`sm53/hsetp2.py`, `sm53/interlock_spin.py`, `sm53/powr_native.py`, `sm53/readers.py`, `sm53/dualclock.py`). After
+changing one, rewrite the files with `python3 -m tools.benchloop.nakbatches` from the repo root. `families_test` fails
+while a file and its generator disagree.
 
 ## Running them
 
 Install a HW Test at benchloop/6, open its Bench screen, then from the repo root run all of them in order:
 
 ```sh
-bazel run //tools/benchloop -- run "$PWD"/tools/benchloop/batches/{sr_affinity,int3_xmad,overlap,icache,store2fma,hsetp2,interlock_spin,icache_128k,powr_native}.json
+bazel run //tools/benchloop -- run "$PWD"/tools/benchloop/batches/{sr_affinity,int3_xmad,overlap,icache,store2fma,hsetp2,interlock_spin,icache_128k,powr_native,nak_latency,nak_writers,nak_yield,nak_dual}.json
 ```
 
-That is 464 experiments, sent as two batches. One batch alone is
+That is 1,116 experiments, sent as 5 batches. One batch alone is
 `bazel run //tools/benchloop -- run "$PWD"/tools/benchloop/batches/<name>.json`. Each file opens with a warm-up draw
 that lifts the GPU off its 76.8 MHz idle clock. After the usual status line the run prints one line per answer, and
 `report.json` in the result folder keeps the detail under each family's key.
@@ -214,6 +214,50 @@ own NaN, 0x7fc00000, goes through the same F2F. The chain lines come out that wa
 When a chain line is off, the check marked OFF names the instruction. No chain runs the float form, so its verdict also
 needs the `[float]` checks: LG2 of an f32 denormal is -inf, FMUL.FTZ(±inf, f32 denormal) is a NaN, and LG2 stays
 nonzero within 64 ulps of 1. `FMUL.FTZ(±0, y) = ±0` is only recorded.
+
+### nak_latency
+
+194 experiments, 336 KB. NVIDIA's own GM20B code waits less than NAK's tables in a few places. NAK takes none of
+those waits until these lines say so on the device.
+
+- Reads of a fixed-latency result by an instruction that sets a barrier. Six independent writes are each read `delay`
+  cycles later, 1 to 15 in one warp, and the reads are summed, so one stale read changes the texel. NAK makes every
+  reader wait the writer's 6 cycles (`sm50.rs` `raw_latency`). NVIDIA issues F2F, MUFU, F2I, I2F and FLO 2 cycles
+  after the write and LDC 4, which would read `reader FFMA>F2F -++++++++++++++ right from 2`. `reader FFMA>FFMA` is
+  the control: `-----++++++++++ right from 6`.
+- `reader RRO>MUFU.EX2` puts no barrier on RRO. Right from 2 means RRO is fixed-latency and NAK can drop its
+  scoreboard. The 11 Nov chain timed it at about 1.85 cycles.
+- `reader-wide` repeats them at delays 1, 2, 3, 4, 6 and 15 over the whole target. A delay counts only when every warp
+  gets it right under contention.
+- `stall HSETP2` is the FSETP predicate chain with HSETP2. NAK gives HSETP2's predicate 14 cycles and every other
+  compare 13. Expected: `latency 13`.
+
+### nak_writers
+
+158 experiments, 284 KB. The same reader rows with the writers `nak_latency` leaves out. XMAD read by LDC, I2F, FLO,
+F2F and MUFU.RCP: NAK keeps an XMAD's readers at 6 cycles until these come back right from 2 (LDC from 4). HFMA2 and
+HADD2 read by F2F's widening to f32: the half ALU feeds F2F on every frame of the compositor and the blurs, and NAK
+already lets that F2F issue 2 cycles after the write, so `reader HFMA2>F2F` and `reader HADD2>F2F` must read right
+from 2.
+
+### nak_yield
+
+47 experiments, 471 KB. NVIDIA sets control bit 4 on nearly every instruction, and always on one with a
+reuse flag. Every bench program before this one left it clear. `reuse` runs all nine reuse-flag variants with bit 4
+clear (11 Nov ran three) and set. If `reuse/y` comes in under `conflict/y`, the flags save the bank conflict and NAK
+should set them.
+
+### nak_dual
+
+253 experiments, 583 KB. Dual issue timed inside one warp. The warp reads SR_CLOCKLO before and after a
+looped body of independent pairs (X, Y) and writes the difference, so `dual X+Y {'d0': c0, 'd1': c1}` gives cycles a
+pair as the slope over the body's length, with X at delay 0 and at delay 1 (`/y`: bit 4 set). A pair whose d0 comes in
+near half its d1 dual-issues. The pairs are the 16 from 11 Nov plus an ALU op (FFMA, IADD, HFMA2, FSETP) followed by
+F2F and FFMA followed by LDC, NVIDIA's stall-0 pairs.
+
+The 11 Nov `dual` rows timed one-warp draws by the command buffer, but consecutive draws run side by side on both SMs
+and every scheduler. 8,192 stall-1 pairs (16,384 issue cycles at least) came in at 8.35 us at 768 MHz, so those rows
+measured the throughput of overlapping draws.
 
 ## What the app does for interlock_spin
 

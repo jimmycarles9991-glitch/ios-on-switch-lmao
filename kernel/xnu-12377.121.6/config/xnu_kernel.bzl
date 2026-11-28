@@ -220,6 +220,10 @@ def _xnu_kernel_impl(ctx):
 
     lto, link = LINKS[config]
     argv = (expand(lto) if lto else []) + ["--xnu-link--"] + expand(link) + ["-Wl,-oso_prefix,{root}/"]
+    if config == "RELEASE":
+        # make's STRIP_FLAGS_RELEASE (-S -x) at the link: Xcode's strip refuses the linked layout ("string table not at
+        # the end of the file"). The prelinker binds the kexts to global symbols only, which -x keeps.
+        argv += ["-Wl,-S", "-Wl,-x"]
 
     manifest = ctx.actions.declare_file(ctx.attr.name + ".links")
     ctx.actions.write(manifest, "".join(["{}\t{}\n".format(f.path, p) for f, p in farm]))

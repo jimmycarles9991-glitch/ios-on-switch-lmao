@@ -53,7 +53,13 @@ struct NVDECClient {
     uint8_t *va[64];
     uint64_t size[64];
     FakeListener *listener;
+    TegraNVDECSubmit submitBuffer;
 };
+
+TegraNVDECSubmit *nvdec_submit_buffer(NVDECClient *c)
+{
+    return c ? &c->submitBuffer : NULL;
+}
 
 static bool gFull, gPresentOn, gNativeOn, gEarlyCompletions;
 static uint32_t gFailFrom, gFailCount;  // jobs the fake engine cancels: a stalled one and those queued behind it

@@ -14,7 +14,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "../../../../../kits/SwitchLinux/SwitchLinuxLock.h"
+#include "../../../../../kits/SwitchLinux/SwitchLinux.h"
 #include "../../../../../kits/SwitchMMIO/SwitchMMIO.h"
 
 /* config: what the L4T build enables here */
@@ -225,13 +225,24 @@ static inline s64 ktime_ms_delta(const ktime_t later, const ktime_t earlier) { r
 #define readl(a) __raw_readl(a)
 #define writel(v, a) switch_mmio_write32_publish((volatile u8 *)(a), 0, (v))
 
-/* spinlocks: kits/SwitchLinux */
-typedef switch_linux_spinlock spinlock_t;
-#define __SPIN_LOCK_UNLOCKED(x) SWITCH_LINUX_SPINLOCK_INIT
+/* TegraDFLL only takes td->lock in thread context (work loops and thread_call timers), never in primary IRQ context.
+ * Backing it with a sleeping mutex keeps interrupts enabled across monitor polling and Vmin calibration. */
+typedef struct { void *slot; } spinlock_t;
+#define __SPIN_LOCK_UNLOCKED(x) { NULL }
 #define DEFINE_SPINLOCK(x) spinlock_t x = __SPIN_LOCK_UNLOCKED(x)
-#define spin_lock_init(l) do { (l)->holder = 0; } while (0)
-#define spin_lock_irqsave(l, flags) do { (flags) = switch_linux_spin_lock_irqsave(l); } while (0)
-#define spin_unlock_irqrestore(l, flags) switch_linux_spin_unlock_irqrestore((l), (flags))
+#define spin_lock_init(l) do { (l)->slot = NULL; (void)switch_linux_mutex_of(&(l)->slot); } while (0)
+#define spin_lock_irqsave(l, flags) \
+	do { \
+		void *mtx_ = __atomic_load_n(&(l)->slot, __ATOMIC_RELAXED); \
+		(flags) = 0; \
+		switch_linux_mutex_lock(mtx_ ? mtx_ : switch_linux_mutex_of(&(l)->slot)); \
+	} while (0)
+#define spin_unlock_irqrestore(l, flags) \
+	do { \
+		void *mtx_ = __atomic_load_n(&(l)->slot, __ATOMIC_RELAXED); \
+		(void)(flags); \
+		switch_linux_mutex_unlock(mtx_ ? mtx_ : switch_linux_mutex_of(&(l)->slot)); \
+	} while (0)
 #define lockdep_assert_held(l) do { } while (0)
 
 #endif

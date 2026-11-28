@@ -1,11 +1,14 @@
 import Darwin
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Kernel parked BOs (TegraGM20BInfoBoPark, bit 28) on the Metal facade and raw user client:
-/// 1. Idle chunks park with VM_PROT_NONE on give-back (phys_footprint drops >= 3 MiB) and unpark cleanly with zero
+/// 1. Idle chunks park with VM_PROT_NONE on the give-back of a trip to the background (phys_footprint drops >= 3 MiB)
+///    and unpark cleanly with zero
 ///    imports and zero host-zeroed bytes.
 /// 2. Shared MTLHeaps back on write-combined kernel BOs, keep an identical [buf contents] pointer across Volatile ->
 ///    give-back -> NonVolatile, and incur zero host-zeroed bytes.
@@ -17,7 +20,6 @@ struct ParkedBoPathTest: GPUPathTest {
     let bit: Int? = 28
     let counters: [String] = []
 
-    static let idleNs: UInt64 = 2_000_000_000
     static let chunkBytes = 4 << 20
     static let heapBytes = 4 << 20
     static let unparkResidentCeilingUs = 200
@@ -97,7 +99,7 @@ struct ParkedBoPathTest: GPUPathTest {
 
         // Arm 1: idle chunk park/unpark and footprint drop
         let footprintPeak = try await Self.touchPrivateChunk(gpu)
-        try await Task.sleep(nanoseconds: Self.idleNs)
+        await GM20BFacade.tripToBackground()
         let memParked = GM20BFacade.memory(of: gpu.device)
         let footprintParked = Self.footprint()
         let chunkParks = (memParked["chunk_parks"] ?? 0) - (initialMem["chunk_parks"] ?? 0)
@@ -106,7 +108,7 @@ struct ParkedBoPathTest: GPUPathTest {
         metrics.set("parked_chunks_kb", (memParked["parked_chunks"] ?? 0) >> 10)
         metrics.set("footprint_drop_kb", dropKb)
         if chunkParks <= 0 {
-            failures.append("idle give-back parked no chunks")
+            failures.append("the give-back parked no chunks")
         }
         if dropKb < Self.minFootprintDropKb {
             failures.append("footprint dropped \(dropKb) KiB while parked, expected >= \(Self.minFootprintDropKb)")
@@ -168,7 +170,7 @@ struct ParkedBoPathTest: GPUPathTest {
             failures.append("\(wrongPrePurge) bytes wrong on shared heap before purge")
         }
         heap.setPurgeableState(.volatile)
-        try await Task.sleep(nanoseconds: Self.idleNs)
+        await GM20BFacade.tripToBackground()
         let purgedState = heap.setPurgeableState(.keepCurrent)
         let restoredFrom = heap.setPurgeableState(.nonVolatile)
         let ptrAfter = UInt(bitPattern: heapBuf.contents())

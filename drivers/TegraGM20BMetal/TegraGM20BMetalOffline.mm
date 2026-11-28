@@ -162,7 +162,9 @@ void releaseStorage(const void *owner)
         return nil;
     }
     MTLFunctionConstantValues *snapshot = [values copy];
-    NSArray *indexed = [snapshot newIndexedConstantArray], *named = [snapshot newNamedConstantArray];
+    // Wrapper elements own and free `v.data` on dealloc; keep both arrays alive until the call below copies them.
+    __attribute__((objc_precise_lifetime)) NSArray *indexed = [snapshot newIndexedConstantArray];
+    __attribute__((objc_precise_lifetime)) NSArray *named = [snapshot newNamedConstantArray];
     std::vector<NmbConstant> constants;
     for (unsigned group = 0; group < 2; group++)
         for (id<SwitchMetalConstantValue> v in (group ? named : indexed)) {
@@ -222,11 +224,12 @@ void releaseStorage(const void *owner)
 @implementation GM20BOfflineDevice
 
 // The library of a metallib's AIR slice, as the frontend's metallibLibrary makes it; `storage` keeps the bytes, which the
-// translator reads in place. `sealed`: a sealed system volume's file (nmb_offline_library_new_held).
+// translator reads in place. `scope`: 0 for a sealed system volume's file, else the translator scope it is read in
+// (nmb_offline_library_new_held).
 - (GM20BOfflineLibrary *)libraryOf:(id)storage
                              bytes:(const uint8_t *)file
                             length:(size_t)length
-                            sealed:(bool)sealed
+                             scope:(uint64_t)scope
                              error:(NSError **)error
 {
     size_t offset = 0, size = 0;
@@ -236,7 +239,7 @@ void releaseStorage(const void *owner)
         return nil;
     }
     NmbOfflineLibrary *handle =
-        nmb_offline_library_new_held(file + offset, size, sealed, CFBridgingRetain(storage), releaseStorage);
+        nmb_offline_library_new_held(file + offset, size, scope, CFBridgingRetain(storage), releaseStorage);
     if (!handle) {
         if (error)
             *error = refusal(@(nmb_last_error()));
@@ -260,7 +263,7 @@ void releaseStorage(const void *owner)
     return (id<MTLLibrary>)[self libraryOf:bytes
                                      bytes:static_cast<const uint8_t *>(bytes.bytes)
                                     length:bytes.length
-                                    sealed:false
+                                     scope:nmb_offline_scope_new()
                                      error:error];
 }
 
@@ -273,19 +276,29 @@ void releaseStorage(const void *owner)
     return (id<MTLLibrary>)[self libraryOf:bytes
                                      bytes:static_cast<const uint8_t *>(bytes.bytes)
                                     length:bytes.length
-                                    sealed:true
+                                     scope:0
                                      error:error];
 }
 
 - (id<MTLLibrary>)newLibraryWithData:(dispatch_data_t)data error:(NSError **)error
 {
+    return [self newLibraryWithData:data scope:nmb_offline_scope_new() error:error];
+}
+
+- (id<MTLLibrary>)newLibraryWithData:(dispatch_data_t)data scope:(uint64_t)scope error:(NSError **)error
+{
+    if (!scope) {
+        if (error)
+            *error = refusal(@"a library of data in the sealed scope");
+        return nil;
+    }
     const void *bytes = nullptr;
     size_t size = 0;
     dispatch_data_t mapped = dispatch_data_create_map(data, &bytes, &size);
     return (id<MTLLibrary>)[self libraryOf:mapped
                                      bytes:static_cast<const uint8_t *>(bytes)
                                     length:size
-                                    sealed:false
+                                     scope:scope
                                      error:error];
 }
 

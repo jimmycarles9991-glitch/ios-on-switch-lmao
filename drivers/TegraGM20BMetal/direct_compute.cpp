@@ -19,6 +19,7 @@ namespace {
 constexpr uint32_t kTagBytes = 4096;  // the probe's payload: a descriptor's range below it is the function's window
 constexpr uint32_t kRootPush = 0x700;
 constexpr uint8_t kConstexpr = 0x80;
+constexpr int32_t kViewType2DArray = 5;  // VK_IMAGE_VIEW_TYPE_2D_ARRAY
 constexpr size_t kEntries = sizeof(PackKernel::entry) / sizeof(PackKernelEntry);
 constexpr size_t kCbufs = sizeof(ComputeRecord::cbufType);
 
@@ -152,7 +153,10 @@ private:
             why = "a texture view of VkFormat " + std::to_string(kw.viewFormat) + " NVK has no header for";
             return false;
         }
-        entries.push_back({offset, kw.plane ? KernelTexturePlane : KernelTexture, uint8_t(w.slot), word0});
+        if (vkFormatSrgb(kw.viewFormat))
+            word0 |= kKernelWindowSrgb;
+        const uint8_t slot = uint8_t(w.slot) | (w.viewType == kViewType2DArray ? kKernelTextureArray : 0);
+        entries.push_back({offset, kw.plane ? KernelTexturePlane : KernelTexture, slot, word0});
         return true;
     }
 
@@ -329,10 +333,11 @@ CompileOutcome directKernel(const NmbDirectKernel &k, const StageCompile &compil
     out.spill = spillOf(k.spill, k.spillWords);
     for (size_t i = 0; i < entries.entries.size(); ++i) {
         const auto &entry = entries.entries[i];
-        if (entry.slot >= 32)
-            continue;
-        const uint32_t bit = 1u << entry.slot;
         const bool texture = entry.kind == KernelTexture || entry.kind == KernelTexturePlane;
+        const uint8_t slot = texture ? kernelTextureSlot(entry) : entry.slot;
+        if (slot >= 32)
+            continue;
+        const uint32_t bit = 1u << slot;
         if ((entry.kind == KernelBuffer && (k.bufferReads & bit) && !(k.bufferWrites & bit)) ||
             (texture && (k.textureReads & bit) && !(k.textureWrites & bit)))
             r.readOnlyEntries |= 1ull << i;

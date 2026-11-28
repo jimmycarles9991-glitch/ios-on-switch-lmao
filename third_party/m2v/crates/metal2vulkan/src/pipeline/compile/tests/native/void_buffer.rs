@@ -75,10 +75,20 @@ fn generated_void_buffers_match_metal_and_survive_native_artifacts() {
     assert!(!native.portable_is_materialized());
 }
 
+// A constant pointee of a name that is no data type, with no layout, size or alignment, as the AIR
+// states a struct the library only declares: Metal answers it as it answers `void` (measured on an
+// M4, macOS 27.2, compiler_compile_only_test ARateMapsDataReflectsAsMetals: such a struct's
+// pointer and `rasterization_rate_map_data`'s, held by an argument buffer and bound directly)
 #[test]
-fn unknown_names_and_partial_layouts_are_still_refused() {
+fn a_declared_only_pointee_answers_as_void() {
+    let f = function("unrecognized", "");
+    let library = f.reflection(&Budget::standard()).unwrap().unwrap();
+    assert_binding(&library.bindings()[0], 0, BindingAccess::ReadOnly, 4);
+}
+
+#[test]
+fn partial_layouts_and_a_data_type_of_no_size_are_still_refused() {
     for (name, layout) in [
-        ("unrecognized", ""),
         ("void", r#"!"air.arg_type_size", i32 0, "#),
         ("void", r#"!"air.arg_type_align_size", i32 4, "#),
         ("float", ""),

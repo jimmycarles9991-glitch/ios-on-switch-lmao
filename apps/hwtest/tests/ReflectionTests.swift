@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
+import HWTestKit
 import Metal
 
 /// quad_vertex's corners at buffer 0 and solid_fragment's colour at buffer 0, from a state made with argument info

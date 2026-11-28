@@ -65,8 +65,11 @@ struct ViewModel {
 	std::map<std::pair<void *, uint32_t>, tgm_cpu_view> mappings;
 	// what each (task, address) maps now: a scratch, or ViewModel::surface(id)
 	std::map<std::pair<void *, uint64_t>, void *> mapped;
+	std::set<std::pair<void *, uint64_t>> readOnly;
 	std::set<void *> dead;
 	std::map<void *, int> holds;
+	std::map<uint64_t, int> markedPages;
+	int disconnectedCalls = 0;
 	int remaps = 0, scratchesPut = 0, scratchesDiscarded = 0;
 	std::set<void *>
 		badMappings;  // clients whose mapping is of part of the descriptor (tgm_cpu_view_of: -1)

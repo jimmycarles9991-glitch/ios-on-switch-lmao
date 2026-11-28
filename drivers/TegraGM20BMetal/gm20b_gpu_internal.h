@@ -2,6 +2,7 @@
 // The method names, constants and small helpers gpu.cpp and the units split from it share (see gpu.h).
 // They have internal linkage and are inline: each unit that includes this compiles and inlines its own copy.
 #pragma once
+#include "blit_overlap.h"
 #include "gpu.h"
 #include "kit.h"
 #include "multisample.h"
@@ -178,16 +179,9 @@ static inline bool linearTarget(const Texture &t)
 namespace {
 using CopySide = CopySurface;
 
-// z: a 3D texture's plane, or an array's layer (its own 2D image, layerBytes on: NVK's array_stride step)
 inline CopySide sideOf(const Texture &t, uint32_t x, uint32_t y, uint32_t z)
 {
-    if (!t.blockLinear)
-        return {t.va + uint64_t(y) * t.pitch + uint64_t(x) * t.bpp, t.pitch};
-    if (t.import && t.import->kernelTiled())
-        return {t.va, t.pitch, x + t.surfaceX, y + t.surfaceY, t.import->layout.height, true, t.blockHeight};
-    if (t.layers > 1)
-        return {t.va + z * t.layerBytes, t.pitch, x, y, t.height, true, t.blockHeight};
-    return {t.va, t.pitch, x, y, t.height, true, t.blockHeight, t.depth, z, t.blockDepth};
+    return copySideOf(t, x, y, z);
 }
 
 // SET_REMAP_COMPONENTS of a texel copy: DST_X..W = SRC_X..W, COMPONENT_SIZE, NUM_SRC_COMPONENTS, NUM_DST_COMPONENTS
@@ -215,9 +209,5 @@ inline void copySides(Push &p, const CopySide &s, const CopySide &d, uint32_t w,
     copyRemapped(p, s, d, w, h, texelRemap(bpp), bpp, stats);
 }
 }  // namespace
-
-#if SWITCH_METAL_DIAGNOSTICS
-void logEdgeMiss(const char *what, const Texture &t, const PixelBox &r, const char *detail);
-#endif
 
 }  // namespace gm20b

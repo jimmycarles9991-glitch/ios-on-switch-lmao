@@ -1,11 +1,20 @@
 // SPDX-License-Identifier: MIT
 #include "drivers/TegraGM20BMetal/plugin/SwitchCompileReply.h"
+#include <CommonCrypto/CommonDigest.h>
 #include <gtest/gtest.h>
 #include <thread>
 #include <vector>
 
 namespace {
 using namespace switch_compile_reply;
+
+// The reply's name as compiler_codegen.mm's replyName and the host's replies.py make it
+std::string sha256Hex(const void *bytes, size_t length)
+{
+    std::array<uint8_t, CC_SHA256_DIGEST_LENGTH> hash{};
+    CC_SHA256(bytes, CC_LONG(length), hash.data());
+    return hex(hash.data(), hash.size());
+}
 
 class Reply : public testing::Test {
 protected:
@@ -31,7 +40,7 @@ protected:
         std::string key(reinterpret_cast<const char *>(uuid.data()), uuid.size());
         key.append(reinterpret_cast<const char *>(&type), sizeof type);
         key.append(request);
-        name = digest(key.data(), key.size()) + ".reply";
+        name = sha256Hex(key.data(), key.size()) + ".reply";
         output = [@"MTLB retained output" dataUsingEncoding:NSUTF8StringEncoding];
         reply = [NSMutableData dataWithLength:48];
         auto *header = static_cast<uint8_t *>(reply.mutableBytes);
@@ -42,8 +51,6 @@ protected:
         memcpy(header + 8, &bytes, sizeof bytes);
         [reply appendBytes:"abc" length:3];
         [reply appendData:output];
-        header = static_cast<uint8_t *>(reply.mutableBytes);
-        CC_SHA256(header + 48, CC_LONG(reply.length - 48), header + 16);
         ASSERT_TRUE([reply writeToFile:@((directory + "/" + name).c_str()) atomically:YES]);
     }
 
@@ -71,8 +78,11 @@ TEST_F(Reply, ExactSourceCompilerAndOutputCommit)
     NSDictionary *metadata = record();
     ASSERT_NE(metadata, nil);
     EXPECT_TRUE([metadata[@"compilerUUID"] isEqualToString:@(hex(uuid.data(), uuid.size()).c_str())]);
-    EXPECT_TRUE([metadata[@"requestSHA256"] isEqualToString:@(digest(request.data(), request.size()).c_str())]);
-    EXPECT_TRUE([metadata[@"metallibSHA256"] isEqualToString:@(digest(output.bytes, output.length).c_str())]);
+    EXPECT_EQ([metadata[@"schema"] unsignedIntValue], 2u);
+    EXPECT_EQ(metadata[@"requestSHA256"], nil) << "the host hashes what it harvests";
+    EXPECT_EQ(metadata[@"replySHA256"], nil);
+    EXPECT_EQ(metadata[@"metallibSHA256"], nil);
+    EXPECT_EQ([metadata[@"requestBytes"] unsignedLongValue], request.size());
     EXPECT_EQ([metadata[@"requestType"] unsignedIntValue], 13u);
     const auto path = directory + "/" + name.substr(0, 64) + ".request";
     NSData *source = [NSData dataWithContentsOfFile:@(path.c_str())];
@@ -91,9 +101,9 @@ TEST_F(Reply, ActualOsRemainsDistinctFromTarget)
     EXPECT_NE(record("21H461"), nil);
 }
 
-TEST_F(Reply, InvalidKeyNeverPublishes)
+TEST_F(Reply, AMalformedNameNeverPublishes)
 {
-    name[0] = name[0] == '0' ? '1' : '0';
+    name = name.substr(1);
     EXPECT_FALSE(publish());
     EXPECT_EQ(record(), nil);
 }
@@ -111,15 +121,7 @@ TEST_F(Reply, ReplyEnvelopeAndOutputMustMatch)
     EXPECT_FALSE(
         write(directory, name, uuid.data(), 13, request.data(), request.size(), reply, wrong, "24B119", "24B119"));
     auto *bytes = static_cast<uint8_t *>(reply.mutableBytes);
-    bytes[16] ^= 1;
-    EXPECT_FALSE(publish());
-    EXPECT_EQ(record(), nil);
-}
-
-TEST_F(Reply, ChangedInstalledReplyCannotCommitMetadata)
-{
-    [[@"changed" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:@((directory + "/" + name).c_str())
-                                                          atomically:YES];
+    bytes[0] ^= 1;
     EXPECT_FALSE(publish());
     EXPECT_EQ(record(), nil);
 }
@@ -155,6 +157,6 @@ TEST_F(Reply, ConcurrentSameContentPublishesWholeMetadata)
     for (auto &thread : threads)
         thread.join();
     ASSERT_NE(record(), nil);
-    EXPECT_TRUE([record()[@"replySHA256"] isEqualToString:@(digest(reply.bytes, reply.length).c_str())]);
+    EXPECT_TRUE([record()[@"reply"] isEqualToString:@(name.c_str())]);
 }
 }  // namespace

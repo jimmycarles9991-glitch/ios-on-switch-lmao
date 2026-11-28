@@ -84,6 +84,19 @@ pub(crate) fn color_writes(
     out
 }
 
+/// An attachment's channel rules as the lowering reads them: where lane 0 takes the device's
+/// conversion and every other lane takes it too or is absent, every lane is written as computed
+/// and the module notes the conversion once, which lane 0 alone determines.
+pub(crate) fn read_rules(rules: [Option<ChannelWrite>; 4]) -> [Option<ChannelWrite>; 4] {
+    let device = |r: &Option<ChannelWrite>| matches!(r, None | Some(ChannelWrite::Device));
+    match rules {
+        [Some(ChannelWrite::Device), ref rest @ ..] if rest.iter().all(device) => {
+            [Some(ChannelWrite::Device), None, None, None]
+        }
+        _ => rules,
+    }
+}
+
 /// Whether profile `p`'s device stores Metal's codes itself (`VkProperty::MetalColorWrites`).
 fn metal_color_writes(p: &DeviceProfile) -> bool {
     p.fields()
@@ -760,8 +773,9 @@ fn writes_hold(
     let compiled = &fragment.interface.io.color_writes;
     let mut attachments = selected.keys().chain(exact.keys()).chain(compiled.keys());
     attachments.all(|a| {
-        let got = compiled.get(a);
-        got == selected.get(a) || got == exact.get(a)
+        let read = |m: &BTreeMap<u32, [Option<ChannelWrite>; 4]>| m.get(a).copied().map(read_rules);
+        let got = read(compiled);
+        got == read(&selected) || got == read(&exact)
     })
 }
 

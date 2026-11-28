@@ -707,8 +707,9 @@ impl BlendState {
 ///   the draws (a color attachment write of an earlier subpass or pass, a transfer, a load
 ///   operation), and the fragment shader's storage writes visible to later uses after them.
 ///
-/// A pass of more than one layer, and an amplified draw, are not implemented: the binder refuses
-/// them.
+/// In a layered pass the view is an array of its layers, which each primitive addresses at its
+/// layer, as an amplification drawn on its own does; a draw of multiview views is not implemented:
+/// the binder refuses it.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -829,17 +830,19 @@ impl StorageAttachmentUse {
     /// The unsigned-integer format of the texel size an attachment of the sRGB format `format`
     /// is viewed in, where a fragment function reads it in the storage form
     /// ([`uint_view`](Self::uint_view)): `R32_UINT` for `B8G8R8A8_SRGB`, `R8G8B8A8_SRGB` and
-    /// `A2R10G10B10_UNORM_PACK32`, `R16_UINT` for `R8G8_SRGB` and `A1R5G5B5_UNORM_PACK16`,
-    /// `R8_UINT` for `R8_SRGB`; `None` for any other format. A consumer that makes an attachment's
-    /// image before it knows the pipeline (a memoryless attachment's backing) makes it mutable to
-    /// this format. The compile layer sets the view only where it builds the form (today the
-    /// four-byte sRGB formats, `A1R5G5B5_UNORM_PACK16` and `A2R10G10B10_UNORM_PACK32`).
+    /// `A2R10G10B10_UNORM_PACK32`, `R16_UINT` for `R8G8_SRGB`, `A1R5G5B5_UNORM_PACK16` and
+    /// `R5G6B5_UNORM_PACK16`, `R8_UINT` for `R8_SRGB`; `None` for any other format. A consumer that
+    /// makes an attachment's image before it knows the pipeline (a memoryless attachment's backing)
+    /// makes it mutable to this format. The compile layer sets the view only where it builds the
+    /// form (today the four-byte sRGB formats and the packed formats of `fetch::packed`).
     pub fn uint_view_of(format: vk::Format) -> Option<vk::Format> {
         match format {
             vk::Format::B8G8R8A8_SRGB
             | vk::Format::R8G8B8A8_SRGB
             | vk::Format::A2R10G10B10_UNORM_PACK32 => Some(vk::Format::R32_UINT),
-            vk::Format::R8G8_SRGB | vk::Format::A1R5G5B5_UNORM_PACK16 => Some(vk::Format::R16_UINT),
+            vk::Format::R8G8_SRGB
+            | vk::Format::A1R5G5B5_UNORM_PACK16
+            | vk::Format::R5G6B5_UNORM_PACK16 => Some(vk::Format::R16_UINT),
             vk::Format::R8_SRGB => Some(vk::Format::R8_UINT),
             _ => None,
         }

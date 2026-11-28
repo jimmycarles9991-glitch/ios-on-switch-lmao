@@ -193,10 +193,6 @@ void tgm_chan_wanted(u32, u32)
 {
 }
 
-void tgm_stats_unlocked(enum tgm_unlocked, uint64_t)
-{
-}
-
 uint32_t tgm_waiter_seq(uint32_t)
 {
 	return nvxnu_wake_seq();

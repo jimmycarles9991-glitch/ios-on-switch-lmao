@@ -1,6 +1,9 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 import QuartzCore
 import UIKit
@@ -10,7 +13,9 @@ import UIKit
 /// preempts these draws. Per case (blended, framebuffer fetch inside the pixel interlock, 4x MSAA resolved) the same
 /// two full-screen draws of a ~15 ms fragment program are made banded and with the facade's band budget at 0: the bytes
 /// must be identical and only the first arm banded (banded_draws, bands); the fetch case must have drawn interlocked
-/// (interlock_draws), so its identity covers interlock tickets across bands and preempts. Then banded draws run back to
+/// (interlock_draws), so its identity covers interlock tickets across bands and preempts. It forces fetch rung 4: by
+/// default rule fetch.twin draws its quad as the barrier twin (gpu.gm20b.interlock_spin's default arm asserts that
+/// route). Then banded draws run back to
 /// back: the kernel's preemption latencies sampled for this process (debug kernels, TegraGM20BPathsABI.h `preempts`,
 /// `preempt_max_us`, buckets `preempt_lt250_us`..`preempt_ge4000_us`) must stay within the budget plus a context
 /// switch, and where each preempt landed (SwitchGpuPreemptLanding.h): `preempt_mid_job` at a band's release inside a
@@ -121,6 +126,16 @@ struct DrawBandsTest: HWTest {
         let pipeline = try gpu.render(vertex: "bands_vertex", fragment: blend.fragment, format: .bgra8Unorm) { _ in }
         let target = try gpu.texture(.bgra8Unorm, Self.width, Self.height)
         let connection = GPUConnection()
+        if case .unreadable("release_kernel", ENOENT) = GPUPaths.read(connection) {
+            await MainActor.run { layer.removeFromSuperlayer() }
+            await context.clearStage()
+            metrics.fitLog(within: 720, keeping: Self.judged)
+            if !failures.isEmpty { return .fail(failures.joined(separator: "; "), metrics) }
+            let why = KernelSysctl.isReleaseKernel()
+                ? "no preemption counters: a release kernel"
+                : "no preemption counters (build with --//bazel:stats_gpu)"
+            return .skip(why, metrics)
+        }
         for (arm, budgetNs) in [("", Self.budgetUs * 1000), ("_whole", 0)] {
             _ = Self.budget(gpu.device, budgetNs)
             _ = GPUPaths.read(connection)
@@ -309,8 +324,16 @@ struct DrawBandsTest: HWTest {
         let target = try gpu.texture(.bgra8Unorm, Self.width, Self.height)
         let msaa = test.samples > 1 ? try gpu.texture(.bgra8Unorm, Self.width, Self.height, samples: test.samples) : nil
         let before = GM20BFacade.counters(of: gpu.device)
-        let timing = try await gpu.run { commands in
+        let encode: (MTLCommandBuffer) -> Void = { commands in
             Self.encode(commands, pipeline, msaa ?? target, samples: test.samples, resolve: msaa == nil ? nil : target)
+        }
+        let timing: GPU.Timing
+        if test.name == "fetch",
+           let forced = try await GM20BFacade.forcingFetchRung(4, on: gpu.device, { try await gpu.run(encode) })
+        {
+            timing = forced
+        } else {
+            timing = try await gpu.run(encode)
         }
         let after = GM20BFacade.counters(of: gpu.device)
         let drawsBanded = (after["banded_draws"] ?? 0) - (before["banded_draws"] ?? 0)

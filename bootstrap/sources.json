@@ -110,9 +110,29 @@
       "sha256": "8354c3aa1ecdad8ebc47d9a76dfca6f830a2b757278068bd33b98bf1d638a9cb"
     },
     {
+      "name": "openssh_client",
+      "url": "https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/openssh/openssh-client_9.7p1-1_iphoneos-arm64.deb",
+      "sha256": "deafb689997363b3d86e0f5616c6878299fefb2ad292b6aede4227c2bb64af5d"
+    },
+    {
+      "name": "openssh_server",
+      "url": "https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/openssh/openssh-server_9.7p1-1_iphoneos-arm64.deb",
+      "sha256": "578a172e679c961d2966caaf300bd0a43cfdf0a311741712690cfdb6e16eca54"
+    },
+    {
+      "name": "openssh_sftp_server",
+      "url": "https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/openssh/openssh-sftp-server_9.7p1-1_iphoneos-arm64.deb",
+      "sha256": "d31534b270710381ddf5763f38458498c6bfe7308cbe09d1c45a1109d40dfb19"
+    },
+    {
       "name": "sileo_release",
       "url": "https://github.com/Sileo/Sileo/releases/download/2.5.1/org.coolstar.sileo_2.5.1_iphoneos-arm64.deb",
       "sha256": "8e3c90e5a7d32f4ca207a0ac30d3cfa8a13dca86a2b4e11cb3f9e5c68d7bc97a"
+    },
+    {
+      "name": "top",
+      "url": "https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/top/top_125_iphoneos-arm64.deb",
+      "sha256": "597cb277df8b5700e1eebfabd951b5d4861cde6199730b5ba3e700edf65c2d55"
     }
   ]
 }

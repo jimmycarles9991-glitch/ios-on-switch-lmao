@@ -219,6 +219,32 @@ bool SwitchMetalRangeEncode::command(size_t at)
 {
     SwitchMetalCommandBuffer *cb = cb_;
     gm20b::CommandBuffer *rc = rc_;
+    const bool own = !ahead_;
+    const SwitchMetalPlanOperation op = own ? cb->_plan.ownOperation(at) : cb->_plan.operation(at);
+    if (op.op == OpDraw && at != from_) {
+        const SwitchMetalPlanDraw &draw = cb->_plan.drawAt(op.payload, own);
+        {
+            SWITCH_METAL_ENCODE_SPAN(State);
+            encodePlannedDrawState(cb, draw.state, *rc, re_, stateCursor_, own, &namedBytesChunk_);
+        }
+        if (!re_->draw(draw.primitive, draw.first, draw.count, draw.instances, draw.baseInstance, why_))
+            return refused();
+        return true;
+    }
+    if (op.op == OpEnd && at != from_) {
+        stateCursor_.reset();
+        return endEncoder(at);
+    }
+    if (op.op == OpRender && at != from_) {
+        if (!gm20bContinuesPass(cb, at)) {
+            encoder_ = at;
+#if SWITCH_METAL_DIAGNOSTICS
+            traceFreshUses(cb, at);
+#endif
+        }
+        stateCursor_.reset();
+        return beginPass(at);
+    }
     const Cmd c = cb->_plan.legacy(at);
     // a compute command the encode refused fails its command buffer as its encoder names it (gm20b::ComputeFailure);
     // predication records the recording found misused are the client's
@@ -279,7 +305,7 @@ bool SwitchMetalRangeEncode::command(size_t at)
             ce_->setSerial(serialCompute_);
             stateCursor_.reset();
         }
-        encodePlannedState(cb, at, *rc, re_, &*ce_, stateCursor_);
+        encodePlannedState(cb, at, *rc, re_, &*ce_, stateCursor_, own, &namedBytesChunk_);
         const auto &regions = dispatch.regions;
         ce_->setStageInRegion(dispatch.stageIn);
         ce_->setStageInRegionIndirect(
@@ -311,15 +337,17 @@ bool SwitchMetalRangeEncode::command(size_t at)
             for (uint8_t region = 0; region < kernels->count; ++region) {
                 const auto &record = *kernels->jobs[region]->value()->rec;
                 for (uint32_t i = 0; i < record.entries; ++i)
-                    if (record.entry[i].kind == gm20b::KernelTexture && record.entry[i].slot < 31 &&
-                        gm20b::kernelEntryWrites(record, i))
-                        standInFresh_.erase((__bridge SwitchMetalTexture *)textures[record.entry[i].slot]);
+                    if ((record.entry[i].kind == gm20b::KernelTexture ||
+                         record.entry[i].kind == gm20b::KernelTexturePlane) &&
+                        gm20b::kernelTextureSlot(record.entry[i]) < 31 && gm20b::kernelEntryWrites(record, i))
+                        standInFresh_.erase(
+                            (__bridge SwitchMetalTexture *)textures[gm20b::kernelTextureSlot(record.entry[i])]);
             }
         return true;
     }
     {
         SWITCH_METAL_ENCODE_SPAN(State);
-        encodePlannedState(cb, at, *rc, re_, ce_ ? &*ce_ : nullptr, stateCursor_);
+        encodePlannedState(cb, at, *rc, re_, ce_ ? &*ce_ : nullptr, stateCursor_, own, &namedBytesChunk_);
     }
     if (isKernelCommand(c.op)) {
         SWITCH_METAL_ENCODE_SPAN(Compute);

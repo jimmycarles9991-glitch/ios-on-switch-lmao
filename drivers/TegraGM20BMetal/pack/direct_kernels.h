@@ -25,7 +25,13 @@ inline void dispatchOf(const Shape &s, const uint32_t threads[3], NSArray<MTLTex
     while (std::getline(text, pair, ','))
         memory[uint32_t(strtoul(pair.c_str(), nullptr, 10))] =
             uint32_t(strtoul(pair.c_str() + pair.find(':') + 1, nullptr, 10));
-    out = std::make_unique<gm20b::KernelDispatch>(threads, memory, s.regionMode);
+    uint32_t local[3] = {threads[0], threads[1], threads[2]};
+    if (s.factsOnly) {
+        local[0] = s.multipleOfWidth ? (s.maxThreads && s.maxThreads < 32 ? s.maxThreads : 32u) : 1u;
+        local[1] = 1;
+        local[2] = 1;
+    }
+    out = std::make_unique<gm20b::KernelDispatch>(local, memory, s.regionMode);
     for (size_t i = 0; i < s.textures.size(); i++) {
         MTLTextureDescriptor *d = [MTLTextureDescriptor new];
         d.pixelFormat = bound[i].pixelFormat;

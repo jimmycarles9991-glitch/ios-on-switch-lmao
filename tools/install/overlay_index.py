@@ -12,6 +12,12 @@ directory ids are what it refuses every change under, and a file keeps the Syste
 own CDHash equals the one its entry carries. A System file with several hard links has one entry per path, all with
 its id, one Data file's id and one CDHash: the kernel redirects whichever name a lookup arrives by.
 
+A boot package's own translations of files the tree holds otherwise (a deploy keeps Data, and the tree with it) go in
+/chosen/switch-pretranslated-updates (encode_updates; kits/SwitchPretranslated/switch_pretranslated_updates.h): "SWUP",
+u32 version (1), u32 entry count, u32 string bytes; then per entry, in path order, u32 the offset of its path in the
+string table and 20 bytes its CDHash; then the NUL-terminated System paths, sorted by bytes and unique. The deploy puts
+each one's bytes at Switch/pretranslated-updates/<path>, and the kernel points the tree's entry at it.
+
 Beside it, .originals (encode_originals) pairs the CDHash of each staged system app file, which installd copies out of
 the redirect's reach, with its translation's: "SWOR", u32 version (1), u32 pair count, u32 0; then per pair, by original
 ascending and unique, 20 bytes the original's CDHash and 20 bytes the translation's, which an index entry carries.
@@ -33,6 +39,11 @@ CDHASH = 20
 MAX_PATH = 1024
 MAX_FILES = 1 << 20
 MAX_DIRECTORIES = 1 << 20
+UPDATES_MAGIC = b'SWUP'
+UPDATES_VERSION = 1
+UPDATES_HEADER = struct.Struct('<4sIII')
+UPDATE = struct.Struct('<I20s')
+MAX_UPDATES = 64
 
 
 class OverlayIndexError(ValueError):
@@ -134,3 +145,18 @@ def encode_originals(pairs: list[tuple[bytes, bytes]]) -> bytes:
         raise OverlayIndexError('too many originals')
     body = b''.join(original + translated for original, translated in sorted(by_original.items()))
     return HEADER_ORIGINALS.pack(ORIGINALS_MAGIC, ORIGINALS_VERSION, len(by_original), 0) + body
+
+
+def encode_updates(updates: dict[str, bytes]) -> bytes:
+    """Return /chosen/switch-pretranslated-updates for {System path: the boot package's CDHash of its translation}."""
+    if not updates or len(updates) > MAX_UPDATES:
+        raise OverlayIndexError(f'{len(updates)} pretranslated updates: between 1 and {MAX_UPDATES}')
+    records, strings = b'', b''
+    for path in sorted(updates, key=str.encode):
+        check_path(path)
+        cdhash = bytes(updates[path])
+        if len(cdhash) != CDHASH:
+            raise OverlayIndexError(f'{path}: CDHash of {len(cdhash)} bytes')
+        records += UPDATE.pack(len(strings), cdhash)
+        strings += path.encode() + b'\0'
+    return UPDATES_HEADER.pack(UPDATES_MAGIC, UPDATES_VERSION, len(updates), len(strings)) + records + strings

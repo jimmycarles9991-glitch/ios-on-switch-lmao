@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 import QuartzCore
 import UIKit
@@ -9,7 +11,8 @@ import UIKit
 /// drivers/TegraGM20B/TegraGM20BCopyResetABI.h ArmAgain): the kernel cuts the present's copy as a context-switch timeout
 /// tick on the present's channel would, then cuts its redo too, while this app keeps GR busy with long draws. The second
 /// cut kills the client contexts the GPU holds, resets the copy engine and copies the frame again; the display flips it
-/// and the compositor's frames keep coming. On T-v4 the second cut panicked the system.
+/// and the compositor's frames keep coming. On T-v4 the second cut panicked the system. Direct scanout copies nothing,
+/// so the test holds it off (GPUCopyHold); a kernel that cannot hold it skips.
 struct RecoverKernelStallTest: HWTest {
     let id = "gpu.recover.kernel_second_timeout"
     let name = "The present stuck again before its redo landed: resident clients die, the frame is redone, no panic"
@@ -49,9 +52,12 @@ struct RecoverKernelStallTest: HWTest {
         defer { _ = PresentCopyResetTest.call(connection, PresentCopyResetTest.disarm) }
 
         let load = try (0 ..< Self.loadBuffers).map { _ in try Self.bands(gpu, bands, target) }
-        let (kr, _) = PresentCopyResetTest.call(connection, Self.armAgain)
-        var reply: [UInt8] = []
-        if kr == KERN_SUCCESS { reply = await PresentCopyResetTest.settle(connection, {}) }
+        let (kr, reply, held) = try await GPUCopyHold.during { held in
+            let (kr, _) = PresentCopyResetTest.call(connection, Self.armAgain)
+            var reply: [UInt8] = []
+            if kr == KERN_SUCCESS { reply = await PresentCopyResetTest.settle(connection, {}) }
+            return (kr, reply, held)
+        }
         load.forEach { $0.waitUntilCompleted() }
         await MainActor.run { compositor.stop() }
         let presented = await MainActor.run { compositor.presented }
@@ -79,9 +85,8 @@ struct RecoverKernelStallTest: HWTest {
         metrics.set("gap_bound_ms", Self.gapBoundMs, digits: 0)
         metrics.set("present_frames", shown.frames)
         metrics.set("probe_fill_errors", fillErrors)
-        if state == PresentCopyResetTest.armed {
-            return .skip("no frame came through a GPU copy (direct scanout)", metrics)
-        }
+        metrics.set("copy_held", held)
+        if state == PresentCopyResetTest.armed { return PresentCopyResetTest.uncut(held, metrics) }
         return .judged(
             [
                 ("the copy engine was reset under the present and under its redo", state == PresentCopyResetTest.done),

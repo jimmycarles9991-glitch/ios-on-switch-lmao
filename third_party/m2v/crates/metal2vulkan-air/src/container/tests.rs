@@ -319,15 +319,11 @@ fn only_a_dynamic_library_shares_bitcode() {
     }
     let err = parse(&exe.build()).unwrap_err();
     assert_eq!(container_kind(&err), ContainerError::BadOffset, "{err:?}");
-    // A hash that does not match the shared module is still refused.
-    let mut bad = dylib(&["a", "b"]);
-    bad.functions[1].hash = Some([0; 32]);
-    let err = parse(&bad.build()).unwrap_err();
-    assert_eq!(
-        container_kind(&err),
-        ContainerError::HashMismatch,
-        "{err:?}"
-    );
+    // A function's hash is taken as its tag states it, as Apple's loader takes it.
+    let mut stated = dylib(&["a", "b"]);
+    stated.functions[1].hash = Some([0; 32]);
+    let bytes = stated.build();
+    assert_eq!(metallib(&bytes).functions[1].hash, [0; 32]);
 }
 
 /// Malformed `HDYN` and `ILST` regions are container errors.
@@ -562,28 +558,21 @@ fn stage_codes() {
     }
 }
 
+/// A function's `HASH` is the content key its tag states: its bitcode is not read to check it.
 #[test]
-fn hash_is_verified() {
+fn a_hash_is_taken_as_its_tag_states_it() {
     let mut b = sample();
     b.functions[1].hash = Some([0; 32]);
     let bytes = b.build();
-    let err = parse(&bytes).unwrap_err();
-    assert_eq!(container_kind(&err), ContainerError::HashMismatch);
-    // Flipping one bitcode byte also fails the hash.
-    let bytes = sample().build();
-    let lib = metallib(&bytes);
-    let at = lib.functions[2].bitcode.as_ptr() as usize - bytes.as_ptr() as usize + 25;
-    let mut flipped = bytes.clone();
-    flipped[at] ^= 1;
-    assert_eq!(
-        container_kind(&parse(&flipped).unwrap_err()),
-        ContainerError::HashMismatch
-    );
+    assert_eq!(metallib(&bytes).functions[1].hash, [0; 32]);
+    let honest = sample().build();
+    let lib = metallib(&honest);
+    assert_eq!(lib.functions[2].hash, sha256(lib.functions[2].bitcode));
 }
 
 /// A Core Image library of format 2.8 or later is keyed by its module's own SHA-256, whatever its
 /// `HASH` says (24B119's `ci_stdlib` lists one value no digest of its module gives, and Metal
-/// loads it). Format 2.7's, and every other kind's, `HASH` is still verified.
+/// loads it). Format 2.7's, and every other kind's, `HASH` is taken as stated.
 #[test]
 fn a_core_image_library_from_format_2_8_is_keyed_by_its_module() {
     let core_image = |version: (u16, u16), hash: Option<[u8; 32]>| {
@@ -604,17 +593,12 @@ fn a_core_image_library_from_format_2_8_is_keyed_by_its_module() {
         assert!(lib.functions.iter().all(|f| f.hash == module), "{version:?}");
         assert_eq!(lib.functions[1].name, "_asgDownH");
     }
-    assert_eq!(
-        container_kind(&parse(&core_image((2, 7), apple)).unwrap_err()),
-        ContainerError::HashMismatch
-    );
+    let stated = core_image((2, 7), apple);
+    assert!(metallib(&stated).functions.iter().all(|f| f.hash == [0xb1; 32]));
     assert!(parse(&core_image((2, 7), None)).is_ok());
     let mut executable = sample();
     executable.functions[1].hash = apple;
-    assert_eq!(
-        container_kind(&parse(&executable.build()).unwrap_err()),
-        ContainerError::HashMismatch
-    );
+    assert_eq!(metallib(&executable.build()).functions[1].hash, [0xb1; 32]);
 }
 
 #[test]

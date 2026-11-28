@@ -58,7 +58,7 @@ static int switch_bootstrap_stderr_pipe(int descriptors[2], posix_spawn_file_act
 }
 
 static int switch_bootstrap_run_command(const char *path, char *const arguments[], bool update, bool capture_stderr,
-                                        int *daemon_status, bool *temporary_exit)
+                                        unsigned timeout, int *daemon_status, bool *temporary_exit)
 {
     if (switch_bootstrap_remaining_ms() < 1000)
         return ETIMEDOUT;
@@ -108,7 +108,6 @@ static int switch_bootstrap_run_command(const char *path, char *const arguments[
         os_log_error(OS_LOG_DEFAULT, "SwitchBootstrap: spawn %{public}s failed (%d)", path, error);
         return error;
     }
-    unsigned timeout = registration ? 180 : 60;
     // The registration client's XPC reply timeout is 180 seconds. Let it report EX_TEMPFAIL before killing it.
     if (temporary_exit)
         timeout += 5;
@@ -147,11 +146,12 @@ static int switch_bootstrap_run_command(const char *path, char *const arguments[
 
 int switch_bootstrap_run(const char *path, char *const arguments[])
 {
-    const bool finish_migration = !strcmp(path, "/usr/libexec/switch-appregd") && arguments[1] &&
-                                  !strcmp(arguments[1], "--finish-migration") && !arguments[2];
+    const bool registration = !strcmp(path, "/usr/libexec/switch-appregd");
+    const bool finish_migration = registration && arguments[1] && !strcmp(arguments[1], "--finish-migration") &&
+                                  !arguments[2];
     for (unsigned attempt = 0;; ++attempt) {
         bool temporary_exit = false;
-        const int error = switch_bootstrap_run_command(path, arguments, false, false, NULL,
+        const int error = switch_bootstrap_run_command(path, arguments, false, false, registration ? 180 : 60, NULL,
                                                        finish_migration ? &temporary_exit : NULL);
         if (!temporary_exit || attempt == 2)
             return error;
@@ -164,12 +164,12 @@ int switch_bootstrap_run(const char *path, char *const arguments[])
 
 int switch_bootstrap_run_prep(const char *path, char *const arguments[])
 {
-    return switch_bootstrap_run_command(path, arguments, false, true, NULL, NULL);
+    return switch_bootstrap_run_command(path, arguments, false, true, 240, NULL, NULL);
 }
 
 int switch_bootstrap_run_update(const char *path, char *const arguments[])
 {
-    return switch_bootstrap_run_command(path, arguments, true, true, NULL, NULL);
+    return switch_bootstrap_run_command(path, arguments, true, true, 240, NULL, NULL);
 }
 
 int switch_bootstrap_run_daemon(const char *action, const char *plist, int *result)
@@ -185,5 +185,5 @@ int switch_bootstrap_run_daemon(const char *action, const char *plist, int *resu
         (char *)plist,
         NULL,
     };
-    return switch_bootstrap_run_command(arguments[0], arguments, false, true, result, NULL);
+    return switch_bootstrap_run_command(arguments[0], arguments, false, true, 60, result, NULL);
 }

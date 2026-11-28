@@ -362,3 +362,61 @@ bool tile_check(CFStringRef encoderID, char *line, size_t size)
     CFRelease(session);
     return ok;
 }
+
+bool tile_pipeline_check(CFStringRef encoderID, void (*beforeComplete)(void *ctx, int submitsBefore), void *ctx,
+                         char *line, size_t size)
+{
+    gJobs = 0;
+    const void *specKeys[] = {kVTVideoEncoderSpecification_EncoderID};
+    const void *specValues[] = {encoderID};
+    CFDictionaryRef spec = CFDictionaryCreate(NULL, specKeys, specValues, 1, &kCFTypeDictionaryKeyCallBacks,
+                                              &kCFTypeDictionaryValueCallBacks);
+    Outputs outputs = {0};
+    VTTileCompressionSessionRef session = NULL;
+    OSStatus status = VTTileCompressionSessionCreate(NULL, (VTInt32Size){TILE, TILE}, kCMVideoCodecType_HEVC, spec,
+                                                     NULL, NULL, output, &outputs, &session);
+    CFRelease(spec);
+    if (status || !session) {
+        snprintf(line, size, "VTTileCompressionSessionCreate %d", (int)status);
+        return false;
+    }
+    setProperties(session);
+    VTInt32Size prepared = {0, 0};
+    VTTileCompressionSessionPrepareToEncodeTiles(session, false, &prepared);
+    CVPixelBufferRef source = makeSource(W, H), copy = makeSource(TILE, TILE);
+    fill(source, 0, 0, W, H);
+    fill(copy, TILE, TILE, TILE, TILE);
+
+    int asyncFlags = 0, failed = 0;
+    for (int i = 0; i < TILES; i++) {
+        VTEncodeInfoFlags flags = 0;
+        failed += VTTileCompressionSessionEncodeTile(session, i == COPIED ? copy : source, originOf(i), sizeOf(i), NULL,
+                                                     (void *)(intptr_t)i, &flags) != noErr;
+        if (flags & kVTEncodeInfo_Asynchronous)
+            asyncFlags++;
+    }
+    const int submittedBeforeComplete = gJobs;
+    const int emittedBeforeRelease = outputs.count;
+    if (beforeComplete)
+        beforeComplete(ctx, submittedBeforeComplete);
+    failed += VTTileCompressionSessionCompleteTiles(session) != noErr;
+
+    int wrongInput = gJobs != TILES;
+    for (int i = 0; i < gJobs; i++) {
+        wrongInput += !inputMatches(i, gInputs[i]);
+        free(gInputs[i]);
+    }
+    const int badOutput = badSamples(&outputs);
+    const bool ok = !failed && asyncFlags == TILES && submittedBeforeComplete == TILES && emittedBeforeRelease == 0 &&
+                    outputs.count == TILES && !outputs.failed && !wrongInput && !badOutput;
+    snprintf(line, size, "%s async %d/%d submitted %d before release (emitted %d), drained %d/%d", ok ? "ok" : "FAIL",
+             asyncFlags, TILES, submittedBeforeComplete, emittedBeforeRelease, outputs.count, TILES);
+    for (int i = 0; i < TILES; i++)
+        if (outputs.samples[i])
+            CFRelease(outputs.samples[i]);
+    CVPixelBufferRelease(source);
+    CVPixelBufferRelease(copy);
+    VTTileCompressionSessionInvalidate(session);
+    CFRelease(session);
+    return ok;
+}

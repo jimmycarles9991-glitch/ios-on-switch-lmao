@@ -42,31 +42,17 @@ KEPT = {
 
 # One or more names from each debug unit and each debug hook.
 DEBUG_ONLY = {
-    'switch_diag_user_syscall',
     'switch_diag_stage',
     'switch_diag_process_event',
     'switch_diag_console_putc',
     'switch_diag_hud_init',
     'switch_diag_hud_panic',
-    'switch_diag_files_update',
     'switch_diag_graphics_takeover',
     'switch_root_event',
     'switch_root_record',
     'switch_root_record_begin',
-    'switch_user_record',
-    'switch_block_record',
     'switch_power_trail',
     'switch_power_trail_report',
-    'switch_files_probe',
-    'switch_sd_probe',
-    'switch_fat_mount',
-    'switch_raw_apfs_open',
-    'switch_sd_read_sectors',
-    'switch_split_open',
-    'switch_gpt_find',
-    'switch_data_create',
-    'switch_block_create',
-    'switch_sd_dma_bind',
 }
 
 PANIC_TEXT = [
@@ -81,11 +67,23 @@ DEBUG_TEXT = [
     b'SWITCH NATIVE XNU DIAGNOSTICS',
     b'XNU PANIC - EXECUTION STOPPED',
     b'NATIVE ROOT BOOT IN PROGRESS',
-    b'READ-ONLY FAT FILE CHECK',
-    b'SD SECTOR 0 MATCHES U-BOOT',
     b'bsd_init entered',
     b'launchd exec attempt - EL0 not established',
     b'exec load_machfile enter',
+    b'SwitchTrap: ',
+    b'SwitchKprof: off',
+    b'SwitchDisplay: first frame accepted',
+    b'SwitchBacklight: panel %u (%u.%02u nits)',
+]
+
+RELEASE_FORBIDDEN_TEXT = [
+    b'SwitchKprof: sampling',
+    b'SwitchTouch stats:',
+    b'SwitchTouch geometry:',
+    b'SwitchMotion stats:',
+    b'tegra-gm20b: waits ',
+    b'tegra-gm20b: imports ',
+    b'SwitchPower: %llu ms: ',
 ]
 
 MH_MAGIC_64 = 0xFEEDFACF
@@ -146,7 +144,7 @@ class SwitchDiagLink(unittest.TestCase):
         self.assertTrue(set(self.units) >= EVERY_CONFIG_UNITS, sorted(self.units))
         self.assertEqual(KEPT - self.defined, set())
         for text in PANIC_TEXT:
-            self.assertIn(text, self.text, text)
+            self.assertTrue(text in self.text, f'missing panic string {text!r}')
 
     def test_release_links_no_debug_unit(self):
         if self.profile != 'release':
@@ -155,15 +153,15 @@ class SwitchDiagLink(unittest.TestCase):
         for name, (defined, undefined) in self.units.items():
             self.assertEqual(DEBUG_ONLY & defined, set(), name)
             self.assertEqual(DEBUG_ONLY & undefined, set(), name)
-        for text in DEBUG_TEXT:
-            self.assertNotIn(text, self.text, text)
+        for text in DEBUG_TEXT + RELEASE_FORBIDDEN_TEXT:
+            self.assertFalse(text in self.text, f'unexpected release string {text!r}')
 
     def test_debug_links_the_debug_units(self):
         if self.profile != 'debug':
             self.skipTest('a release build')
         self.assertEqual(DEBUG_ONLY - self.defined, set())
         for text in DEBUG_TEXT:
-            self.assertIn(text, self.text, text)
+            self.assertTrue(text in self.text, f'missing debug string {text!r}')
 
 
 if __name__ == '__main__':

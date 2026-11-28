@@ -615,6 +615,7 @@ pub fn writes_outside_interface(cx: &SelectCx<'_>) -> bool {
 /// the fragment's tile in the pass's tile memory.
 pub fn emit_entry(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>) -> BResult<()> {
     imageblock::emit_entry(cx, fb)?;
+    fetch::emit_entry(cx, fb)?;
     crate::lower::access::tile_memory::emit_entry(cx, fb)
 }
 

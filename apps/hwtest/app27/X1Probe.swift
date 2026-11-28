@@ -2,6 +2,7 @@ import Foundation
 import HWTestCore
 import HWTestGPU
 import HWTestKit
+import HWTestX1
 import Metal
 
 /// One hardware probe of the X1 research (out/agent-scratch/x1-probe/PROBES.md names each claim, its source and what
@@ -118,7 +119,8 @@ enum X1Probes {
         X1VICPitchProbe.probe, X1VICLayoutProbe.probe, X1VICFractionProbe.probe,
         X1VICPackedProbe.probe, X1VICTransposeProbe.probe, X1VICLargeProbe.probe, X1VICComposeProbe.probe,
         X1VICComposeProbe.display,
-        X1VICOddProbe.probe, X1IAdd3FormsProbe.probe, X1LayerPastCountProbe.probe,
+        X1VICOddProbe.probe, X1IAdd3FormsProbe.probe, X1LayerPastCountProbe.probe, X1CleanL2Probe.probe,
+        X1ShadowRamProbe.probe, X1Host1xMlockProbe.probe,
     ]
     /// The probe that runs after every other test of the app: its draw reads memory no other test's does
     static let last: [any HWTest] = [X1IndexLimitProbe.probe]

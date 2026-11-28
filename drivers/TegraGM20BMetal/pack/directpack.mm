@@ -12,7 +12,8 @@
 // each a u32 length and bytes, then a u32 of its register count, its bound-texture slot << 8 and its PackProgram::facts <<
 // 16), its constexpr sampler headers (u32 count, eight words each), which its entries number from 0,
 // and its fragment program's split: u32 0, or 1 and its PackSplit (no program indices), its per-pixel program and its prologue
-// (as the programs above; the prologue's header 80 bytes of zeros), its program variants, and the iterated blend program a
+// (as the programs above; the prologue's header 80 bytes of zeros), its program variants (u32 count, then each one's
+// assumptions, its program as above and its PackVariant::memoryEntries), and the iterated blend program a
 // fetch-free form names (u32 length and bytes: ca/fetchfree.py, iterated/table.py; empty for any other record), then its
 // argument tables' words (u32 count and words: the vertex table's, then the fragment table's), then m2v's own instantiation
 // of the probe draw that binds every buffer slot at its probe offset (TegraGM20BMetalDirect.h BoundDraw: its push mask, its 32 root push
@@ -40,6 +41,7 @@
 #include <cstdlib>
 #include <set>
 #include "../emit.h"
+#include "../record_parts.h"
 #include "../xr_pass.h"
 #include "../zeta.h"
 #include "TwoPlaneStandIn.h"
@@ -125,6 +127,7 @@ void record(Writer &w, const std::string &key, gm20b::CompileOutcome outcome, co
     for (const gm20b::RuntimeRecord::Variant &v : rec.variants) {
         w.u32(v.assume);
         program(v.program);
+        w.u32(gm20b::variantSetReads(rec, v.program));
     }
     w.text(iterated);
     w.list(rec.spill);
@@ -179,7 +182,7 @@ void markCandidates(const std::string &line, gm20b::PackPipeline &p)
 // The depth and stencil test classes a state's draws ask its variant for (TegraGM20BMetalCubic.mm drawnRecord): a state that fetches
 // beside a depth or stencil attachment without the storage form, each class fragment_tests.h FragmentTests names above Any
 // (Pass, ReadOnly, DepthWrite, StencilWrite: 1-4) that its attachments' formats can reach (fragmentTests answers DepthWrite
-// only of a zeta with depth, StencilWrite only of one with stencil, a Depth16Unorm's being testedZeta's)
+// only of a zeta with depth, StencilWrite only of one with stencil, a Depth16Unorm's or Depth32Float's being testedZeta's)
 std::vector<uint8_t> testClasses(const gm20b::PackPipeline &p, const std::string &key)
 {
     unsigned depth = 0, stencil = 0;

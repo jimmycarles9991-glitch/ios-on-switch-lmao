@@ -32,6 +32,7 @@ kernel_headers()
 kernel_driver(
     name = "TegraNVENC",
     srcs = [
+        "SwitchNVENCCompletions.cpp",
         "TegraNVENC.cpp",
         "TegraNVENCDirect.cpp",
         "TegraNVENCDump.cpp",

@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import HWTestCore
+import HWTestKit
 
 struct CPUAsyncTimersTest: HWTest {
     let id = "cpu.async_timers"

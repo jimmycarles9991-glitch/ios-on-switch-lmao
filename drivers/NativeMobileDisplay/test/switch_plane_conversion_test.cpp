@@ -1,355 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-#include <gtest/gtest.h>
-#include <array>
-#include <cstddef>
-#include <cstdlib>
-#include <cstring>
-#include <functional>
-#include <stdexcept>
-#include "../NativePlanes.h"
-#include "../../TegraDisplayFlip/TegraScanoutCopy.h"
-#include "../../TegraVIC/SwitchNativeScanout.h"
-#include "../../TegraVIC/SwitchNativeVICImage.h"
-#include "../../TegraVIC/SwitchVICScanoutConvert.h"
-#include "../SwitchScanoutBuffer.h"
-#define IONewZero(type, count)         static_cast<type *>(std::calloc(count, sizeof(type)))
-#define IODelete(pointer, type, count) std::free(pointer)
-
-struct switch_gpu_backing {
-    uint64_t id, content, bytes;
-    unsigned refs;
-};
-
-struct switch_gpu_cpu_lease {};
-
-struct OriginalLegacySwapRequest {
-    uint32_t swap = 0;
-};
-
-class OSObject {};
-
-using IOReturn = int;
-constexpr int kIOReturnSuccess = 0, kIOReturnNotReady = -10, kIOReturnAborted = -14;
+#include "switch_plane_conversion_harness.h"
 
 namespace {
-unsigned allocations, conversions, leases, backingCount, observations;
-bool offGate;
-std::function<void()> duringAdmission;
-
-uint64_t mach_absolute_time()
-{
-    return 100;
-}
-
-void native_legacy_transfer_observed(int, const OriginalLegacySwapRequest *, uint64_t)
-{
-    ++observations;
-}
-
-void IOLog(const char *, ...)
-{}
-
-[[noreturn]] void panic(const char *, ...)
-{
-    throw std::runtime_error("panic");
-}
-
-int convertError, exportError;
-TegraVICImage lastInput;
-TegraVICOp lastOperation;
-switch_gpu_cpu_lease lease;
-uint64_t pages[4096];
-}
-
-switch_gpu_backing *switch_display_scanout_buffer(size_t bytes)
-{
-    EXPECT_TRUE(offGate);
-    ++allocations;
-    ++backingCount;
-    return new switch_gpu_backing{allocations + 10, 0, bytes, 1};
-}
-
-extern "C" void switch_gpu_backing_retain(switch_gpu_backing *backing)
-{
-    ++backing->refs;
-}
-
-extern "C" void switch_gpu_backing_release(switch_gpu_backing *backing)
-{
-    if (!--backing->refs) {
-        --backingCount;
-        delete backing;
-    }
-}
-
-extern "C" void switch_gpu_backing_describe(switch_gpu_backing *backing, switch_gpu_backing_info *info)
-{
-    *info = {};
-    info->allocation_id = backing->id;
-    info->allocation_generation = 1;
-    info->content_generation = backing->content;
-    info->pages = pages;
-    info->page_count = uint32_t((backing->bytes + 4095) >> 12);
-}
-
-// The source slot's producer did not fail: a failure is the conversion's own.
-extern "C" int switch_gpu_backing_tokens_failure(const switch_gpu_backing_token *, uint32_t)
-{
-    return 0;
-}
-
-extern "C" int switch_gpu_backing_export_read(switch_gpu_backing *backing, switch_gpu_backing_token *producer,
-                                              switch_gpu_cpu_lease **out)
-{
-    if (exportError)
-        return exportError;
-    *out = &lease;
-    *producer = {backing->content + (uint64_t(2) << 32), 1, SWITCH_GPU_ENGINE_VIC, 11};
-    ++leases;
-    return 0;
-}
-
-void switch_native_scanout_release(SwitchNativeScanout *scanout)
-{
-    if (scanout->lease)
-        --leases;
-    if (scanout->view.native)
-        switch_gpu_backing_release(scanout->view.native);
-    *scanout = {};
-}
-
-int switch_vic_scanout_convert(const SwitchNativeScanout *source, const TegraVICImage *input,
-                               switch_gpu_backing *target, uint32_t width, uint32_t height, uint32_t pitch,
-                               const TegraVICOp *operation, SwitchNativeScanout *output)
-{
-    EXPECT_TRUE(offGate);
-    if (duringAdmission)
-        duringAdmission();
-    EXPECT_NE(source->lease, nullptr);
-    EXPECT_EQ(width, operation->dstW);
-    EXPECT_EQ(height, operation->dstH);
-    EXPECT_GE(pitch, width * 4);
-    ++conversions;
-    lastInput = *input;
-    lastOperation = *operation;
-    if (convertError)
-        return convertError;
-    ++target->content;
-    *output = {};
-    const int error = switch_gpu_backing_export_read(target, &output->view.producer, &output->lease);
-    if (!error) {
-        switch_gpu_backing_retain(target);
-        output->view.native = target;
-        switch_gpu_backing_describe(target, &output->allocation);
-    }
-    return error;
-}
-
-namespace {
-struct Event {
-    unsigned fires = 0;
-
-    void interruptOccurred(void *, void *, int)
-    {
-        ++fires;
-    }
-};
-
-struct Loop {
-    int runAction(int (*action)(OSObject *, void *, void *, void *, void *), OSObject *object)
-    {
-        offGate = false;
-        return action(object, nullptr, nullptr, nullptr, nullptr);
-    }
-};
-
-struct NativeLegacyDisplay : OSObject {
-    bool transferred = false, copyStopping = false, latchRetire = true, planeNextSet = true;
-    unsigned kicks = 0, unshown = 0, taken = 0;
-    static constexpr int kNoBuffer = -1;
-    static constexpr size_t swapId = offsetof(OriginalLegacySwapRequest, swap);
-    Event event;
-    Event *copySource = &event;
-    Loop loop;
-    const OriginalLegacySwapRequest *request = nullptr;
-
-    Loop *getWorkLoop()
-    {
-        return &loop;
-    }
-
-    const OriginalLegacySwapRequest *firstUntaken()
-    {
-        return request;
-    }
-
-    const OriginalLegacySwapRequest *pendingSwapRequest() const
-    {
-        return request;
-    }
-
-    static const OriginalLegacySwapRequest *queuedAfter(const OriginalLegacySwapRequest *)
-    {
-        return nullptr;
-    }
-
-    void kickSwapQueue()
-    {
-        ++kicks;
-    }
-
-    void noteTaken(const OriginalLegacySwapRequest *, uint64_t)
-    {
-        ++taken;
-    }
-
-    void retireSwapUnshown(const OriginalLegacySwapRequest *, int)
-    {
-        ++unshown;
-    }
-
-    static constexpr unsigned kPlaneSlots = 8;
-    static constexpr uint64_t kPlaneSlotSpan = 20ULL << 20;
-
-    struct Slot {
-        SwitchNativeScanout *native = nullptr;
-    } planeSlots[kPlaneSlots];
-
-    SwitchNativeScanout snapshots[kPlaneSlots];
-    bool busy[kPlaneSlots] = {};
-    bool failMap = false;
-    unsigned mappings = 0;
-
-    NativeLegacyDisplay()
-    {
-        for (unsigned i = 0; i < kPlaneSlots; ++i)
-            planeSlots[i].native = &snapshots[i];
-    }
-
-    bool planeSlotBusy(int slot) const
-    {
-        return busy[slot] || planeConversionUses(slot);
-    }
-
-    void planeDropSlot(unsigned slot)
-    {
-        switch_native_scanout_release(&snapshots[slot]);
-    }
-
-    void planeReleaseLease(unsigned slot)
-    {
-        switch_native_scanout_release(&snapshots[slot]);
-    }
-
-    int planeMapSnapshot(SwitchNativeScanout &snapshot, const native_planes::Image &, int avoid)
-    {
-        for (unsigned slot = 0; slot < kPlaneSlots; ++slot) {
-            if (int(slot) != avoid && snapshots[slot].lease && snapshots[slot].view.native == snapshot.view.native &&
-                snapshots[slot].allocation.content_generation == snapshot.allocation.content_generation) {
-                switch_native_scanout_release(&snapshot);
-                return int(slot);
-            }
-        }
-        if (!failMap) {
-            for (unsigned slot = 0; slot < kPlaneSlots; ++slot) {
-                if (int(slot) == avoid || busy[slot])
-                    continue;
-                planeDropSlot(slot);
-                snapshots[slot] = snapshot;
-                snapshot = {};
-                ++mappings;
-                return int(slot);
-            }
-        }
-        switch_native_scanout_release(&snapshot);
-        return -11;
-    }
-
-#include "../SwitchUnshownSource.h"
-#include "../SwitchPlaneConversionDisplay.h"
-
-    ~NativeLegacyDisplay()
-    {
-        stopPlaneConversion();
-        for (unsigned i = 0; i < kPlaneSlots; ++i)
-            planeDropSlot(i);
-        convertedStop();
-    }
-};
-
-using Display = NativeLegacyDisplay;
-
-class PlaneConversion : public testing::Test {
-protected:
-    Display *display;
-    OriginalLegacySwapRequest request;
-    native_planes::Layer layer;
-    native_planes::Image image;
-
-    void SetUp() override
-    {
-        allocations = conversions = leases = backingCount = observations = 0;
-        offGate = false;
-        duringAdmission = {};
-        convertError = exportError = 0;
-        display = new Display;
-        display->request = &request;
-        auto &source = display->snapshots[0];
-        source.view.native = new switch_gpu_backing{1, 3, 256 * 96, 1};
-        ++backingCount;
-        source.lease = &lease;
-        ++leases;
-        switch_gpu_backing_describe(source.view.native, &source.allocation);
-        display->busy[0] = true;
-        layer = {};
-        layer.kind = native_planes::kKindNv12Video;
-        layer.surface.format = native_planes::fourcc('4', '2', '0', 'v');
-        layer.surface.width = 128;
-        layer.surface.height = 64;
-        layer.surface.planes = 2;
-        layer.surface.colorMatrix = SWITCH_VIC_MATRIX_709;
-        layer.surface.stride[0] = layer.surface.stride[1] = 256;
-        layer.surface.planeHeight[0] = 64;
-        layer.surface.planeHeight[1] = 32;
-        layer.surface.offset[1] = 256 * 64;
-        layer.surface.allocation = layer.surface.descriptorBytes = 256 * 96;
-        layer.src = {0, 0, 128, 64};
-        layer.dst = {100, 200, 256, 128};
-    }
-
-    void TearDown() override
-    {
-        delete display;
-        EXPECT_EQ(leases, 0u);
-        EXPECT_EQ(backingCount, 0u);
-    }
-
-    int offer()
-    {
-        return display->planeConvertSlot(0, layer, 720, 1280, image, &request);
-    }
-
-    void work()
-    {
-        offGate = true;
-        display->planeConversionWork();
-        EXPECT_FALSE(offGate);
-    }
-
-    int convert()
-    {
-        const int result = offer();
-        if (result != -115)
-            return result;
-        work();
-        return display->planeConversion->status ? display->planeConversion->status : offer();
-    }
-
-    void advance()
-    {
-        ++display->snapshots[0].allocation.content_generation;
-    }
-};
 
 TEST_F(PlaneConversion, ConvertsOnceAndReusesTheSameContentWithoutAllocatingOrSubmitting)
 {
@@ -366,6 +18,167 @@ TEST_F(PlaneConversion, ConvertsOnceAndReusesTheSameContentWithoutAllocatingOrSu
     EXPECT_EQ(conversions, 1u);
     EXPECT_EQ(display->mappings, 1u);
     EXPECT_GT(display->snapshots[slot].view.producer.value, UINT32_MAX);
+}
+
+// A turned layer (a landscape video Core Animation hands the display once rotation is published) is turned by the job:
+// VIC gets the word and turns the source at its own size, and the window shows the turned plane untransformed where the
+// layer goes, scaled up to the layer's twice-the-source size.
+TEST_F(PlaneConversion, ATurnedVideoBecomesAnUntransformedTurnedPlane)
+{
+    layer.transform = 4;
+    layer.dst = {100, 200, 128, 256};
+    const int slot = convert();
+    ASSERT_GE(slot, 0);
+    EXPECT_EQ(lastOperation.transform, 4u);
+    EXPECT_EQ(lastOperation.srcW, 128u << 16);
+    EXPECT_EQ(lastOperation.srcH, 64u << 16);
+    EXPECT_EQ(lastOperation.dstW, 64u);
+    EXPECT_EQ(lastOperation.dstH, 128u);
+    EXPECT_EQ(image.dda, 0x08000800u);
+    EXPECT_FALSE(image.convert);
+    EXPECT_EQ(image.options & 0x15u, 0u);  // no direction bits: the plane is already turned
+    EXPECT_EQ(image.position, (200u << 16) | 100u);
+    EXPECT_EQ(image.size, (256u << 16) | 128u);
+    // The same content under another word is another plane.
+    layer.transform = 7;
+    advance();
+    EXPECT_GE(convert(), 0);
+    EXPECT_EQ(lastOperation.transform, 7u);
+    EXPECT_EQ(conversions, 2u);
+}
+
+// A turned decoder picture is turned straight from its blocks from the decoder's crop on: one VIC job, no pitch copy.
+TEST_F(PlaneConversion, ATurnedDecoderPictureIsReadFromItsBlocks)
+{
+    auto &view = display->snapshots[0].view;
+    view.layout.format = TEGRA_VIC_FOURCC('4', '2', '0', 'v');
+    view.layout.plane_count = 2;
+    view.layout.color_matrix = 2;
+    view.layout.planes[0] = {0, 256 * 64, 144, 64, 256, 1, SWITCH_GPU_BACKING_BLOCK_LINEAR, 1};
+    view.layout.planes[1] = {256 * 64, 256 * 32, 72, 32, 256, 2, SWITCH_GPU_BACKING_BLOCK_LINEAR, 1};
+    view.crop = {16, 0, 128, 64};
+    layer.transform = 7;
+    layer.dst = {100, 200, 128, 256};
+    ASSERT_GE(convert(), 0);
+    EXPECT_EQ(conversions, 1u);
+    EXPECT_TRUE(lastInput.blockLinear);
+    EXPECT_EQ(lastInput.pitch[0], 256u);
+    EXPECT_EQ(lastOperation.srcX, uint64_t(16) << 16);
+    EXPECT_EQ(lastOperation.srcW, uint64_t(128) << 16);
+    EXPECT_EQ(lastOperation.transform, 7u);
+    EXPECT_EQ(lastOperation.dstW, 64u);
+    EXPECT_EQ(lastOperation.dstH, 128u);
+}
+
+// A turned video shown small (a picture in picture at 1/5.8 across) is scaled by VIC: an RGB window stops at 1/4.
+TEST_F(PlaneConversion, ASmallTurnedVideoIsScaledByVICAndShownOneToOne)
+{
+    layer.transform = 4;
+    layer.dst = {100, 200, 11, 22};
+    ASSERT_GE(convert(), 0);
+    EXPECT_EQ(lastOperation.dstW, 11u);
+    EXPECT_EQ(lastOperation.dstH, 22u);
+    EXPECT_EQ(image.size, (22u << 16) | 11u);
+    EXPECT_EQ(image.dda, 0x10001000u);
+}
+
+// A turned layer one pixel on the screen (sliding in) is a plane of VIC's smallest side, 2, which the window halves.
+TEST_F(PlaneConversion, AOnePixelSliverIsAPlaneVICTakes)
+{
+    layer.transform = 4;
+    layer.dst = {719, 200, 128, 256};
+    ASSERT_GE(convert(), 0);
+    EXPECT_EQ(lastOperation.dstW, 2u);
+    EXPECT_EQ(lastOperation.dstH, 128u);
+    EXPECT_GE(lastOperation.srcH, 1u << 16);
+    EXPECT_EQ(image.position, (200u << 16) | 719u);
+    EXPECT_EQ(image.size, (256u << 16) | 1u);
+}
+
+// Only the part on the screen is converted: for word 4 (transpose, flip Y) the columns cut on the left are the source's
+// bottom rows.
+TEST_F(PlaneConversion, AClippedTurnedLayerConvertsOnlyItsPartOnTheScreen)
+{
+    layer.transform = 4;
+    layer.dst = {-50, 200, 128, 256};
+    ASSERT_GE(convert(), 0);
+    EXPECT_EQ(lastOperation.srcX, 0u);
+    EXPECT_EQ(lastOperation.srcY, 0u);
+    EXPECT_EQ(lastOperation.srcW, 128u << 16);
+    EXPECT_EQ(lastOperation.srcH, 39u << 16);
+    EXPECT_EQ(lastOperation.dstW, 39u);
+    EXPECT_EQ(lastOperation.dstH, 128u);
+    EXPECT_EQ(image.position, 200u << 16);
+    EXPECT_EQ(image.size, (256u << 16) | 78u);
+}
+
+// A video the job converts unturned, shown small (1/5 across), is scaled by VIC too: an RGB window stops at 1/4.
+TEST_F(PlaneConversion, ASmallVideoIsScaledByVICAndShownOneToOne)
+{
+    layer.dst = {100, 200, 25, 12};
+    ASSERT_GE(convert(), 0);
+    EXPECT_EQ(lastOperation.transform, 0u);
+    EXPECT_EQ(lastOperation.srcW, 128u << 16);
+    EXPECT_EQ(lastOperation.dstW, 25u);
+    EXPECT_EQ(lastOperation.dstH, 12u);
+    EXPECT_EQ(image.size, (12u << 16) | 25u);
+    EXPECT_EQ(image.dda, 0x10001000u);
+}
+
+// A GPU-tiled packed source is read in place in its blocks; one placed at an offset inside its backing is refused, as
+// the layout describes the backing's first page.
+TEST_F(PlaneConversion, ATiledPackedSourceIsReadInItsBlocksUnlessItIsAtAnOffset)
+{
+    layer = {};
+    layer.kind = native_planes::kKindBgra;
+    layer.surface.format = native_planes::fourcc('B', 'G', 'R', 'A');
+    layer.surface.width = 64;
+    layer.surface.height = 32;
+    layer.surface.stride[0] = 256;
+    layer.surface.planeHeight[0] = 32;
+    layer.surface.allocation = layer.surface.descriptorBytes = 256 * 32;
+    layer.src = {0, 0, 64, 32};
+    layer.dst = {0, 0, 32, 64};
+    layer.transform = 7;
+    layoutAnswer = 1;
+    tiledLayout = {};
+    tiledLayout.width = 64;
+    tiledLayout.height = 32;
+    tiledLayout.bpp = 4;
+    tiledLayout.row_bytes = 256;
+    tiledLayout.rows = 32;
+    tiledLayout.y_log2 = 2;
+    tiledLayout.bytes = 256 * 32;
+    ASSERT_GE(convert(), 0);
+    EXPECT_EQ(lastInput.blockLinear, 1u);
+    EXPECT_EQ(lastInput.blockHeightLog2, 2u);
+    display->snapshots[0].pitchOffset = 4096;
+    advance();
+    EXPECT_EQ(convert(), -95);
+    layoutAnswer = 0;
+}
+
+// A packed RGB layer the windows cannot scan turned (scaled, or pitch-linear with a quarter turn) converts the same way.
+TEST_F(PlaneConversion, APackedLayerTheWindowCannotTurnConvertsToo)
+{
+    layer = {};
+    layer.kind = native_planes::kKindBgra;
+    layer.surface.format = native_planes::fourcc('B', 'G', 'R', 'A');
+    layer.surface.width = 64;
+    layer.surface.height = 32;
+    layer.surface.stride[0] = 256;
+    layer.surface.planeHeight[0] = 32;
+    layer.surface.allocation = layer.surface.descriptorBytes = 256 * 32;
+    layer.src = {0, 0, 64, 32};
+    layer.dst = {0, 0, 64, 128};
+    layer.transform = 7;
+    const int slot = convert();
+    ASSERT_GE(slot, 0);
+    EXPECT_EQ(lastInput.blockLinear, 0u);
+    EXPECT_EQ(lastOperation.transform, 7u);
+    EXPECT_EQ(lastOperation.dstW, 32u);
+    EXPECT_EQ(lastOperation.dstH, 64u);
+    EXPECT_EQ(image.size, (128u << 16) | 64u);
 }
 
 TEST_F(PlaneConversion, NewContentCannotOverwriteLiveConvertedScanout)

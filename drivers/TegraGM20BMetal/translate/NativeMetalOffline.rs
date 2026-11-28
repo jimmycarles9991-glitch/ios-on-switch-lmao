@@ -173,9 +173,9 @@ impl Drop for Held {
     }
 }
 
-/// nmb_offline_library_new's library over bytes the caller holds, with no copy. `sealed`: a library read from a sealed
-/// system volume, whose functions' HASH tags are taken as stated, so only its function list is read until a function
-/// of it is compiled.
+/// nmb_offline_library_new's library over bytes the caller holds, with no copy, its functions' HASH tags taken as
+/// stated, so only its function list is read until a function of it is compiled. `scope`: 0 for a library read from a
+/// sealed system volume, else one nmb_offline_scope_new gave.
 ///
 /// # Safety
 /// `bytes` holds `length` bytes, unchanged until `release(owner)`, which is called once, on any thread, also when no
@@ -184,7 +184,7 @@ impl Drop for Held {
 pub unsafe extern "C" fn nmb_offline_library_new_held(
     bytes: *const c_void,
     length: usize,
-    sealed: bool,
+    scope: u64,
     owner: *const c_void,
     release: unsafe extern "C" fn(*const c_void),
 ) -> *mut NmbOfflineLibrary {
@@ -198,9 +198,18 @@ pub unsafe extern "C" fn nmb_offline_library_new_held(
         if held.bytes().is_empty() {
             return Err("no library bytes".into());
         }
-        let library = Library::from_held_metallib(held, sealed).map_err(e("metallib"))?;
+        let library = match scope {
+            0 => Library::from_held_metallib(held, true),
+            scope => Library::from_held_metallib_in(held, scope),
+        }
+        .map_err(e("metallib"))?;
         Ok(Box::into_raw(Box::new(NmbOfflineLibrary(library))))
     })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_offline_scope_new() -> u64 {
+    Library::new_scope()
 }
 
 #[unsafe(no_mangle)]

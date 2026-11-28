@@ -2975,6 +2975,13 @@ switch_shared_cache_text_pager(vm_object_t file_object, uint64_t file_offset, ui
 	}
 	return mo;
 }
+
+/* The main-screen-class MobileGestalt's site answers (switch_ui_scale_sites.h), at every scale. */
+int
+switch_ui_scale_main_screen_class(void)
+{
+	return SWITCH_US_CACHE->main_screen_class;
+}
 #endif /* XNU_SWITCH_VERIFIED_ROOT && CONFIG_CODE_DECRYPTION */
 
 #if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT

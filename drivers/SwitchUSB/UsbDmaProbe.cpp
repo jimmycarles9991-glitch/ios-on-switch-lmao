@@ -2,7 +2,7 @@
 // The development probe's prepare and complete lines; see UsbDmaProbe.h.
 #include "UsbDmaProbe.h"
 
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLib.h>
 #include "../TegraSMMU/TegraSMMU.h"

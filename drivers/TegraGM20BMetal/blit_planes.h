@@ -80,6 +80,7 @@ inline bool planeBytes(const Texture &t, uint32_t unit, Texture &out, bool store
         out.layerBytes = luma->layerBytes;
         out.surfaceX = luma->surfaceX * luma->bpp / unit;
         out.surfaceY = luma->surfaceY;
+        out.rowsPitch = luma->rowsPitch;
         out.storage = luma->storage;
         return true;
     }
@@ -112,12 +113,48 @@ inline uint64_t planeReadable(const Texture &plane)
     return (bo.vaBase ? bo.vaBase : bo.va) + bo.bytes - plane.va;
 }
 
+// A piece of a block-linear plane's region (planeRunPieces): texels [x, x + w) of the `h` rows from the region's row
+// plus `row`, landing `at` texels into each row's run
+struct PlaneRunPiece {
+    uint32_t x, row, w, at;
+};
+
+// A blit of `w` x `h` of a block-linear plane's texels from (x, y) (planeBytes' plane), as Metal reads it: each row one
+// run of bytes from x along the surface's rows as the CPU holds them, `rowsPitch` apart, on into the next rows where it
+// passes a row's end. The layout holds the rows' texels alone, so the run goes in pieces, one rectangle of `h` rows for
+// each surface row it touches; emit(piece) for each. False, and nothing emitted, where a piece reaches bytes the layout
+// does not hold: a row's padding past its texels, rows past the plane's last, or the rest of a crop's surface
+template <typename Emit>
+inline bool planeRunPieces(const Texture &plane, uint64_t x, uint64_t y, uint64_t w, uint64_t h, Emit &&emit)
+{
+    if (!w || !h || y + h > plane.height)
+        return false;
+    if (x + w <= plane.width) {
+        emit(PlaneRunPiece{uint32_t(x), 0, uint32_t(w), 0});
+        return true;
+    }
+    const uint64_t unit = plane.bpp, texels = uint64_t(plane.width) * unit, pitch = plane.rowsPitch;
+    if (!unit || !pitch || pitch % unit || pitch < texels || plane.surfaceX || plane.surfaceY)
+        return false;
+    const uint64_t first = x * unit, end = (x + w) * unit;
+    for (uint64_t j = first / pitch; j * pitch < end; j++)
+        if (std::min(end, (j + 1) * pitch) - j * pitch > texels || y + j + h > plane.height)
+            return false;
+    for (uint64_t j = first / pitch; j * pitch < end; j++) {
+        const uint64_t from = std::max(first, j * pitch), to = std::min(end, (j + 1) * pitch);
+        emit(PlaneRunPiece{uint32_t((from - j * pitch) / unit), uint32_t(j), uint32_t((to - from) / unit),
+                           uint32_t((from - first) / unit)});
+    }
+    return true;
+}
+
 // Whether a blit of `w` x `h` of `plane`'s texels from (x, y) reads its surface's bytes alone: a block-linear plane's
-// region inside its texels, a pitch plane's run up to the end of its surface's last page
+// run of bytes a row inside its rows' texels (planeRunPieces), a pitch plane's run up to the end of its surface's last
+// page
 inline bool planeRegionReadable(const Texture &plane, uint64_t x, uint64_t y, uint64_t w, uint64_t h)
 {
     if (plane.blockLinear)
-        return x + w <= plane.width && y + h <= plane.height;
+        return planeRunPieces(plane, x, y, w, h, [](const PlaneRunPiece &) {});
     return planeReach(plane, x, y, w, h) <= planeReadable(plane);
 }
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // The pool, address spaces, memory objects and their import notes.
 #include "gpu_internal.h"
+#include <subdev/mmu/vmm.h>
 
 /* Pool BOs are mapped into processes, and a process maps whole VM pages (four pool pages): each BO starts on one and is
  * padded to one, so its mapping never reaches another BO. */
@@ -31,6 +32,9 @@ void *tgm_pool_alloc_ready(uint64_t bytes, uint64_t align, uint64_t reserve, uin
 #if TGM_STATS
 /* stats: freed pool BOs the CPU zeroed for the copy engine (tgm_pool_free_zeroed) */
 u64 tgm_cpu_zeroes, tgm_cpu_zero_bytes;
+/* stats: retirement batches that took tgm_mem_del_finish's CPU-waited L2 flush and invalidate, the memory objects
+ * they covered, and the CPU time the invalidates took */
+u64 tgm_retire_invalidates, tgm_retire_objects, tgm_retire_invalidate_ns, tgm_retire_gpu_flushes;
 
 #endif
 void tgm_pool_free_zeroed(void *va, uint64_t bytes, uint64_t pa)
@@ -152,6 +156,36 @@ int tgm_vm_new(struct tgm_vm **pvm)
 	/* RAW: the client manages [0, 1<<39) with raw binds; nvkm allocates in [1<<39, 1<<40) */
 	ret = nvif_vmm_ctor(&tgm_gpu.mmu, "uvmm", NVIF_CLASS_VMM_GM200, RAW, TGM_KERNEL_VA,
 			    TGM_VA_LIMIT - TGM_KERNEL_VA, &args, sizeof(args), &vm->vmm);
+	if (!ret) {
+		struct nvkm_vmm *vmm = nvkm_uvmm_search(
+			(struct nvkm_client *)tgm_gpu.client.object.priv, vm->vmm.object.handle);
+
+		if (!IS_ERR_OR_NULL(vmm)) {
+			if (vmm->pd && vmm->pd->pt[0]) {
+				struct nvkm_mmu_pt *pd = vmm->pd->pt[0];
+				u32 target = 2;
+
+				switch (nvkm_memory_target(pd->memory)) {
+				case NVKM_MEM_TARGET_VRAM:
+					target = 0;
+					break;
+				case NVKM_MEM_TARGET_HOST:
+					target = 2;
+					break;
+				case NVKM_MEM_TARGET_NCOH:
+					target = 3;
+					break;
+				default:
+					target = 2;
+					break;
+				}
+				vm->tlb_mem_op_c = (u32)(pd->addr & 0xfffff000u) | (target << 10);
+				vm->tlb_mem_op_d = (u32)((pd->addr >> 32) & 0xffu) |
+						   NVB06F_MEM_OP_D_OPERATION_MMU_TLB_INVALIDATE;
+			}
+			nvkm_vmm_unref(&vmm);
+		}
+	}
 	mutex_unlock(&tgm_gpu.lock);
 	if (ret) {
 		mutex_destroy(&vm->map_lock);
@@ -229,13 +263,97 @@ void tgm_vm_claim_connection(struct tgm_vm *vm, const void *connection)
 
 static void mem_prepare_big_views(struct tgm_mem *mem);
 
-static int mem_new(const uint64_t *pas, uint32_t npages, u8 page, int compute_comp, int allow_smmu,
+static int mem_smmu_pages_unique(const uint64_t *pas, uint32_t npages)
+{
+	uint32_t small_table[64] = {0};
+	const uint32_t cap = switch_gpu_smmu_pfn_table_cap(npages);
+	uint32_t *table = NULL;
+	int unique = 0;
+	if (!cap)
+		return 0;
+	if (cap <= 64u)
+		return switch_gpu_smmu_pages_unique(pas, npages, small_table, 64u);
+	table = kzalloc((size_t)cap * sizeof(*table), GFP_KERNEL);
+	if (!table)
+		return 0;
+	unique = switch_gpu_smmu_pages_unique(pas, npages, table, cap);
+	kfree(table);
+	return unique;
+}
+
+/* The GPU's pool is RAM the kernel never gives the VM (xnu_glue.cpp nvxnu_pool_init): the one memory the GPU reaches
+ * with a[34] = 0, which no SMMU can confine. */
+static int mem_pool_page(u64 pa)
+{
+	return pa - nvxnu_pool_base_pa() < nvxnu_pool_size();
+}
+
+/* Pages [from, npages) of pas that are not the pool's reach the GPU through GPUB's view of RAM (SwitchGpuSmmu.h),
+ * held until the memory object goes (mem_release_ram): a GPU access to such a page after that faults at the MC. pages
+ * gets their encoded addresses; it may be NULL when none needs one. */
+static int mem_hold_ram(const uint64_t *pas, uint32_t from, uint32_t npages, u64 **pages)
+{
+	u64 *ram = NULL;
+	u32 count = 0;
+	u32 i = 0;
+	int ret = 0;
+	if (!switch_gpu_smmu_ram_ready())
+		return 0;
+	for (i = from; i < npages; ++i)
+		count += !mem_pool_page(pas[i]);
+	if (!count)
+		return 0;
+	ram = kmalloc_array(count, sizeof(*ram), GFP_KERNEL);
+	if (!*pages) {
+		*pages = kmalloc_array(npages, sizeof(**pages), GFP_KERNEL);
+		if (*pages)
+			memcpy(*pages, pas, (size_t)npages * sizeof(**pages));
+	}
+	if (!ram || !*pages) {
+		kfree(ram);
+		return -ENOMEM;
+	}
+	count = 0;
+	for (i = from; i < npages; ++i) {
+		if (!mem_pool_page(pas[i]))
+			ram[count++] = pas[i];
+	}
+	ret = switch_gpu_smmu_hold(ram, count);
+	kfree(ram);
+	if (ret)
+		return ret;
+	for (i = from; i < npages; ++i) {
+		if (!mem_pool_page(pas[i]))
+			(*pages)[i] = switch_gpu_smmu_ram_pa(pas[i]);
+	}
+	return 0;
+}
+
+/* The holds mem_hold_ram took, found again from the encoded addresses: one commit for the whole object. */
+static void mem_release_ram(const u64 *pages, u32 npages)
+{
+	if (pages)
+		switch_gpu_smmu_release_ram(pages, npages);
+}
+
+static int mem_holds_ram(const struct tgm_mem *mem)
+{
+	u32 i = 0;
+	for (i = 0; mem->smmu_pages && i < mem->npages; ++i) {
+		if (switch_gpu_smmu_is_ram_pa(mem->smmu_pages[i]))
+			return 1;
+	}
+	return 0;
+}
+
+static int mem_new(const uint64_t *pas, uint32_t npages, u8 page, int compute_comp, int smmu_mode,
 		   struct tgm_mem **pmem, uint64_t *lock_wait_ns)
 {
 	struct nvif_mem_ram_v0 args = {.version = 0, .dma = NULL, .sgl = NULL};
 	struct tgm_mem *mem = NULL;
 	const uint64_t *effective = pas;
 	u64 smmu_iova = 0;
+	u32 smmu_npages = 0;
 	u64 *smmu_pages = NULL;
 	u64 asked = 0;
 	int ret = 0;
@@ -245,24 +363,48 @@ static int mem_new(const uint64_t *pas, uint32_t npages, u8 page, int compute_co
 	if (!mem)
 		return -ENOMEM;
 	/* GM20B's L2 sits upstream of Tegra SMMU and tags lines by pre-SMMU address (BIT(34)|iova
-	 * vs direct PA). Only canonical exclusive compressible memory may acquire an SMMU IOVA. */
-	if (allow_smmu && compute_comp && switch_gpu_smmu_should_map(pas, npages)) {
+	 * vs direct PA). Only canonical backing-owned memory acquires an SMMU IOVA: mode 1 compacts
+	 * exact 64 KiB-multiple compressible allocations; mode 2 compacts the 64 KiB-aligned prefix
+	 * of uncompressed allocations under the headroom reserve, keeping any tail on direct PA. */
+	if (smmu_mode == 1 && compute_comp && switch_gpu_smmu_should_map(pas, npages) &&
+	    mem_smmu_pages_unique(pas, npages)) {
 		smmu_iova = switch_gpu_smmu_map(pas, npages);
-		if (smmu_iova) {
-			smmu_pages = kmalloc_array(npages, sizeof(*smmu_pages), GFP_KERNEL);
-			if (smmu_pages) {
-				uint32_t i = 0;
-				for (i = 0; i < npages; ++i) {
-					const u64 page_iova = smmu_iova + ((u64)i << PAGE_SHIFT);
-					smmu_pages[i] = switch_gpu_smmu_pa(page_iova);
-				}
-				effective = smmu_pages;
-			} else {
-				switch_gpu_smmu_unmap(smmu_iova, npages);
-				smmu_iova = 0;
+		if (smmu_iova)
+			smmu_npages = npages;
+	} else if (smmu_mode == 2 && switch_gpu_smmu_should_map_big(pas, npages) &&
+		   mem_smmu_pages_unique(pas, npages)) {
+		const u32 prefix = switch_gpu_smmu_prefix_pages(npages);
+		smmu_iova = switch_gpu_smmu_map_reserved(pas, prefix,
+							 SWITCH_GPU_SMMU_UNCOMPRESSED_RESERVE);
+		if (smmu_iova)
+			smmu_npages = prefix;
+	}
+	if (smmu_iova) {
+		smmu_pages = kmalloc_array(npages, sizeof(*smmu_pages), GFP_KERNEL);
+		if (smmu_pages) {
+			uint32_t i = 0;
+			for (i = 0; i < smmu_npages; ++i) {
+				const u64 page_iova = smmu_iova + ((u64)i << PAGE_SHIFT);
+				smmu_pages[i] = switch_gpu_smmu_pa(page_iova);
 			}
+			for (; i < npages; ++i)
+				smmu_pages[i] = pas[i];
+		} else {
+			switch_gpu_smmu_unmap(smmu_iova, smmu_npages);
+			smmu_iova = 0;
+			smmu_npages = 0;
 		}
 	}
+	ret = mem_hold_ram(pas, smmu_npages, npages, &smmu_pages);
+	if (ret) {
+		if (smmu_iova)
+			switch_gpu_smmu_unmap(smmu_iova, smmu_npages);
+		kfree(smmu_pages);
+		kfree(mem);
+		return ret;
+	}
+	if (smmu_pages)
+		effective = smmu_pages;
 	if (compute_comp)
 		page = (u8)tgm_comp_page_shift(effective, npages);
 	args.dma = (dma_addr_t *)effective;
@@ -271,6 +413,7 @@ static int mem_new(const uint64_t *pas, uint32_t npages, u8 page, int compute_co
 	mem->pages = effective;
 	mem->npages = npages;
 	mem->smmu_iova = smmu_iova;
+	mem->smmu_npages = smmu_npages;
 	mem->smmu_pages = smmu_pages;
 	asked = stats_on() && lock_wait_ns ? nvxnu_nanotime() : 0;
 	tgm_gpu_lock();
@@ -282,8 +425,9 @@ static int mem_new(const uint64_t *pas, uint32_t npages, u8 page, int compute_co
 		mem_prepare_big_views(mem);
 	mutex_unlock(&tgm_gpu.lock);
 	if (ret) {
+		mem_release_ram(smmu_pages, npages);
 		if (smmu_iova)
-			switch_gpu_smmu_unmap(smmu_iova, npages);
+			switch_gpu_smmu_unmap(smmu_iova, smmu_npages);
 		kfree(smmu_pages);
 		kfree(mem);
 		return ret;
@@ -320,7 +464,14 @@ int tgm_mem_new_exclusive_smmu(struct tgm_vm *vm, const uint64_t *pas, uint32_t 
 {
 	const int comp = tgm_gpu.stage >= 2 && tgm_gpu.device->ltc->num_tags;
 	(void)vm;
-	return mem_new(pas, npages, PAGE_SHIFT, comp, comp, pmem, NULL);
+	return mem_new(pas, npages, PAGE_SHIFT, comp, comp ? 1 : 0, pmem, NULL);
+}
+
+int tgm_mem_new_smmu_big(struct tgm_vm *vm, const uint64_t *pas, uint32_t npages,
+			 struct tgm_mem **pmem)
+{
+	(void)vm;
+	return mem_new(pas, npages, PAGE_SHIFT, 0, 2, pmem, NULL);
 }
 
 int tgm_mem_can_compress(const struct tgm_mem *mem)
@@ -341,12 +492,70 @@ void tgm_mem_del(struct tgm_mem **pmem)
 	tgm_gpu_lock();
 	mem_big_views_drop(mem);
 	nvif_mem_dtor(&mem->mem);
+	/* L2 lines are tagged by the pre-SMMU address: none may outlive the IOVA's mapping. nvkm_ltc_invalidate flushes
+	 * first. */
+	if (mem->smmu_iova && l2_on())
+		nvkm_ltc_invalidate(tgm_gpu.device->ltc);
 	mutex_unlock(&tgm_gpu.lock);
+	mem_release_ram(mem->smmu_pages, mem->npages);
 	if (mem->smmu_iova)
-		switch_gpu_smmu_unmap(mem->smmu_iova, mem->npages);
+		switch_gpu_smmu_unmap(mem->smmu_iova, mem->smmu_npages);
 	kfree(mem->smmu_pages);
 	kfree(mem);
 	*pmem = NULL;
+}
+
+/* A retirement batch's memory whose pages the GPU reaches through the SMMU (a window IOVA, or holds in GPUB's view of RAM)
+ * keeps them mapped until the batch's L2 invalidate, which flushes first: a dirty line it writes back must find its page
+ * still mapped. The backing's pages go back to the VM only after that (SwitchGpuAllocatedMemory.cpp flushed() /
+ * switch_gpu_backing_release_retired). */
+void tgm_mem_del_later(struct tgm_mem **pmem, struct tgm_mem **later)
+{
+	struct tgm_mem *mem = *pmem;
+	if (!mem || (!mem->smmu_iova && !mem_holds_ram(mem))) {
+		tgm_mem_del(pmem);
+		return;
+	}
+	tgm_gpu_lock();
+	mem_big_views_drop(mem);
+	nvif_mem_dtor(&mem->mem);
+	mutex_unlock(&tgm_gpu.lock);
+	mem->later = *later;
+	*later = mem;
+	*pmem = NULL;
+}
+
+void tgm_mem_del_release(struct tgm_mem *later)
+{
+	while (later) {
+		struct tgm_mem *next = later->later;
+		if (TGM_STATS)
+			__atomic_fetch_add(&tgm_retire_objects, 1, __ATOMIC_RELAXED);
+		mem_release_ram(later->smmu_pages, later->npages);
+		if (later->smmu_iova)
+			switch_gpu_smmu_unmap(later->smmu_iova, later->smmu_npages);
+		kfree(later->smmu_pages);
+		kfree(later);
+		later = next;
+	}
+}
+
+void tgm_mem_del_finish(struct tgm_mem *later)
+{
+	if (!later)
+		return;
+	tgm_gpu_lock();
+	if (l2_on()) {
+		const u64 began = TGM_STATS ? nvxnu_nanotime() : 0;
+		nvkm_ltc_invalidate(tgm_gpu.device->ltc);
+		if (TGM_STATS) {
+			__atomic_fetch_add(&tgm_retire_invalidates, 1, __ATOMIC_RELAXED);
+			__atomic_fetch_add(&tgm_retire_invalidate_ns, nvxnu_nanotime() - began,
+					   __ATOMIC_RELAXED);
+		}
+	}
+	mutex_unlock(&tgm_gpu.lock);
+	tgm_mem_del_release(later);
 }
 
 #include "SwitchGpuVmMap.h"

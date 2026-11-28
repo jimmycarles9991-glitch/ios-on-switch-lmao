@@ -1,0 +1,30 @@
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_shims", "host_test")
+
+lint_files()
+
+host_shims(
+    name = "kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "OriginalIOAESAccelerator.h",
+        "corecrypto/cc.h",
+        "kern/task.h",
+        "libkern/crypto/aes.h",
+        "libkern/crypto/crypto_internal.h",
+        "mach/vm_param.h",
+    ],
+    stubs = "native_aes_stubs.h",
+)
+
+host_test(
+    name = "native_aes_test",
+    srcs = [
+        "native_aes_test.cpp",
+        "//drivers/TegraSE:TegraSE.h",
+        "//kits/SwitchRefusal:SwitchRefusal.h",
+    ],
+    additional_compiler_inputs = ["//drivers/NativeAES:NativeAES.cpp"],
+    deps = [":kernel"],
+)

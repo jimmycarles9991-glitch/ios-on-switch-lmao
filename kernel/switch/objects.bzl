@@ -40,7 +40,10 @@ SWITCH_OBJECTS = {
         ("bsd/kern/kern_exec.c", "boot/icon_cache.c", []),
         ("bsd/kern/kern_exec.c", "boot/icon_cache_sweep.c", [], ["12377.121.6"]),
         ("bsd/kern/kern_exit.c", "diag/exit.c", []),
+        ("bsd/kern/kern_exit.c", "diag/deployed.c", []),
         ("bsd/kern/kdebug.c", "recorder/recorder.c", []),
+        ("bsd/kern/kdebug.c", "recorder/capture.c", []),
+        ("bsd/kern/kdebug.c", "recorder/store.c", []),
         ("bsd/kern/kern_event.c", "diag/workloop.c", []),
         ("bsd/net/necp.c", "diag/necp.c", [], ["12377.121.6"]),
         ("bsd/net/necp.c", "diag/necp_table.c", [], ["12377.121.6"]),
@@ -48,8 +51,10 @@ SWITCH_OBJECTS = {
         ("bsd/kern/lockdown_mode.c", "sysctl/lockdown.c", [], ["12377.121.6"]),
         ("bsd/kern/kern_shutdown.c", "shutdown/shutdown.c", []),
         ("bsd/vfs/vfs_lookup.c", "vfs/pretranslated.c", []),
+        ("bsd/vfs/vfs_lookup.c", "vfs/pretranslated_updates.c", []),
         ("bsd/vfs/vfs_cluster.c", "vm/prefetch.c", ["-include", "{owner_header}"]),
         ("bsd/vfs/vfs_cluster.c", "vm/prefetch_save.c", []),
+        ("bsd/vfs/vfs_cluster.c", "vm/prefetch_vnode.c", []),
         ("bsd/vfs/kpi_vfs.c", "vfs/auth_fs.c", []),
         ("bsd/vfs/vfs_syscalls.c", "vfs/identity.c", []),
         ("bsd/vfs/vfs_syscalls.c", "vfs/fsctl_diag.c", []),
@@ -57,6 +62,7 @@ SWITCH_OBJECTS = {
         ("bsd/vm/vm_unix.c", "vm/shared_cache.c", []),
         # The translator's core is //translate/arm64e's (its host tools and tests build the same files).
         ("bsd/kern/mach_loader.c", "translate/a64x_xnu.c", _A64X_COPTS, ["12377.121.6"]),
+        ("bsd/kern/mach_loader.c", "translate/a64x_traps.c", [], ["12377.121.6"]),
         ("bsd/kern/mach_loader.c", "//translate/arm64e/a64x/a64x_classify.c", _A64X_COPTS, ["12377.121.6"]),
         ("bsd/kern/mach_loader.c", "//translate/arm64e/a64x/a64x_rewrite.c", _A64X_COPTS, ["12377.121.6"]),
         ("bsd/kern/mach_loader.c", "//translate/arm64e/a64x/a64x_image.c", _A64X_COPTS, ["12377.121.6"]),
@@ -71,7 +77,9 @@ SWITCH_OBJECTS = {
     ],
     "osfmk": [
         ("osfmk/vm/vm_map.c", "security/dyld_policy.c", [], ["12377.121.6"]),
+        ("osfmk/vm/vm_shared_region.c", "vm/fvariant.c", ["-include", "{owner_header}"], ["12377.121.6"]),
         ("osfmk/vm/vm_map.c", "vm/park_vm.c", []),
+        ("osfmk/vm/vm_fault.c", "vm/tiled_fault.c", []),
         ("osfmk/arm/model_dep.c", "diag/threads.c", []),
         ("osfmk/ipc/ipc_kmsg.c", "diag/frames.c", []),
         ("osfmk/arm64/arm_vm_init.c", "ram/ram.c", [_KERNEL_VIRT_BASE]),
@@ -79,6 +87,9 @@ SWITCH_OBJECTS = {
         ("osfmk/kern/timer_call.c", "sched/stats.c", []),
         ("osfmk/kern/timer_call.c", "sched/render.c", []),
         ("osfmk/kern/timer_call.c", "sched/cpu.c", []),
+        ("osfmk/kern/timer_call.c", "sched/systime.c", []),
+        ("osfmk/kern/timer_call.c", "sched/callouts.c", []),
+        ("osfmk/kern/timer_call.c", "sched/limit_shadow.c", []),
         ("osfmk/kern/timer_call.c", "sched/watch.c", []),
         ("osfmk/kern/timer_call.c", "sched/watch_write.c", []),
         ("osfmk/kern/timer_call.c", "sched/commit.c", []),
@@ -86,6 +97,7 @@ SWITCH_OBJECTS = {
         ("osfmk/kern/sched_prim.c", "diag/stall_snapshot.c", []),
         ("osfmk/kern/sched_prim.c", "diag/stall_chain.c", []),
         ("osfmk/kern/sched_prim.c", "diag/stall_frame.c", []),
+        ("osfmk/kern/sched_prim.c", "diag/watch.c", []),
         ("osfmk/kern/sched_prim.c", "diag/heartbeat.c", []),
         ("osfmk/kern/sched_prim.c", "sched/busy.c", []),
         ("osfmk/kern/sched_prim.c", "sched/user_turnstile.c", []),
@@ -144,14 +156,18 @@ _RECORDER_OBJECTS = {
         "bsd/kern/kdebug.c",
         "bsd/kern/kdebug_common.c",
         "bsd/kern/kern_shutdown.c",
+        "switch:recorder/capture.c",
         "switch:recorder/recorder.c",
+        "switch:recorder/store.c",
     ],
     "osfmk": [
+        "osfmk/kern/sched_prim.c",
         "osfmk/kperf/kperf.c",
         "osfmk/kperf/kptimer.c",
         "switch:diag/stall.c",
         "switch:recorder/sample.c",
         "switch:recorder/watch.c",
+        "switch:sched/busy.c",
         "switch:sched/stats.c",
     ],
 }
@@ -168,17 +184,98 @@ def with_recorder(component, copts):
     """
     return copts | {obj: copts.get(obj, []) + ["-DSWITCH_RECORDER=1"] for obj in _RECORDER_OBJECTS.get(component, [])}
 
+_KPROF_OBJECTS = {
+    "osfmk": [
+        "osfmk/kern/switch_kprof.c",
+        "osfmk/kern/sched_prim.c",
+        "osfmk/arm/cpu_common.c",
+        "osfmk/vm/vm_fault.c",
+        "osfmk/vm/bsd_vm.c",
+        "osfmk/vm/vm_object.c",
+        "osfmk/arm64/sleh.c",
+    ],
+    "bsd": [
+        "bsd/kern/decmpfs.c",
+        "bsd/vfs/vfs_cluster.c",
+    ],
+}
+
+_STATS_SCHED_OBJECTS = {
+    "osfmk": [
+        "osfmk/kern/sched_prim.c",
+        "osfmk/kern/thread.c",
+        "osfmk/kern/thread_call.c",
+        "osfmk/kern/recount.c",
+        "osfmk/kern/ledger.c",
+        "osfmk/arm64/sleh.c",
+        "osfmk/ipc/ipc_kmsg.c",
+        "switch:sched/stats.c",
+        "switch:sched/render.c",
+        "switch:sched/cpu.c",
+        "switch:sched/systime.c",
+        "switch:sched/callouts.c",
+        "switch:sched/limit_shadow.c",
+        "switch:sched/watch.c",
+        "switch:sched/watch_write.c",
+        "switch:sched/commit.c",
+        "switch:sched/busy.c",
+        "switch:diag/stall.c",
+        "switch:diag/stall_frame.c",
+        "switch:diag/frames.c",
+    ],
+    "bsd": [
+        "bsd/kern/proc_info.c",
+        "bsd/kern/kern_resource.c",
+        "switch:diag/exit.c",
+    ],
+    "iokit": [
+        "iokit/Kernel/IOPMrootDomain.cpp",
+        "iokit/Kernel/IOTimerEventSource.cpp",
+    ],
+}
+
+_STATS_FRAME_OBJECTS = {
+    "osfmk": [
+        "osfmk/ipc/ipc_kmsg.c",
+        "switch:diag/frames.c",
+        "switch:sched/stats.c",
+        "switch:sched/render.c",
+        "switch:diag/stall_frame.c",
+    ],
+}
+
+_STATS_IO_OBJECTS = {
+    "osfmk": [
+        "osfmk/vm/bsd_vm.c",
+        "osfmk/vm/vm_fault.c",
+        "osfmk/vm/vm_object.c",
+        "osfmk/vm/vm_pageout.c",
+        "switch:diag/pagein.c",
+        "switch:vm/prefetch_vm.c",
+    ],
+    "bsd": [
+        "bsd/kern/decmpfs.c",
+        "bsd/vfs/vfs_cluster.c",
+        "bsd/vm/vnode_pager.c",
+        "switch:translate/a64x_xnu.c",
+        "switch:translate/a64x_traps.c",
+        "switch:vm/prefetch.c",
+    ],
+}
+
 def with_kprof(component, copts):
-    """A component's `copts` with SWITCH_KPROF for switch_kprof.c (--//kernel:kprof), the one object that reads it.
+    """A component's `copts` with SWITCH_KPROF on the objects that expand kprof hooks (--//kernel:kprof)."""
+    return copts | {obj: copts.get(obj, []) + ["-DSWITCH_KPROF=1"] for obj in _KPROF_OBJECTS.get(component, [])}
 
-    Args:
-        component: osfmk, bsd, ...
-        copts: the component's per-object copts.
-
-    Returns:
-        The copts, osfmk's with the define on that object.
-    """
-    if component != "osfmk":
-        return copts
-    kprof = "osfmk/kern/switch_kprof.c"
-    return copts | {kprof: copts.get(kprof, []) + ["-DSWITCH_KPROF=1"]}
+def switch_stats_copts(component, sched, frame, io):
+    """Per-object opt-in stats defines for one XNU component (debug + diagnostics only)."""
+    out = {}
+    for on, table, flag in (
+        (sched, _STATS_SCHED_OBJECTS, "-DSWITCH_STATS_SCHED=1"),
+        (frame, _STATS_FRAME_OBJECTS, "-DSWITCH_STATS_FRAME=1"),
+        (io, _STATS_IO_OBJECTS, "-DSWITCH_STATS_IO=1"),
+    ):
+        if on:
+            for obj in table.get(component, []):
+                out[obj] = out.get(obj, []) + [flag]
+    return out

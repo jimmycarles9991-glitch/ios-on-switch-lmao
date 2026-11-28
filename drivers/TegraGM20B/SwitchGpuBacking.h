@@ -190,6 +190,12 @@ void switch_gpu_backing_completed(void);
 /* The retirement work, which also retires the kernel copy queue's ended copies (switch_gpu_copy_retire) before the
  * backings they release. */
 void switch_gpu_backing_schedule_retirement(void);
+/* A retirement batch's backings whose GPU side is gone (the retiring_next list): their owners, the pinned pages, go back
+ * to the VM. The retirement work calls it right after the batch, unless switch_gpu_memory_retire_end took the batch
+ * because its memories wait for the GPU's L2 write-back and invalidate: then that flush's completion calls it, on the
+ * same work, after the memories' SMMU windows and holds are gone. No page goes back before the L2 lines over it are
+ * written back and invalidated. */
+void switch_gpu_backing_release_retired(struct switch_gpu_backing *retired);
 
 struct switch_gpu_backing_use {
 	struct switch_gpu_backing *backing;

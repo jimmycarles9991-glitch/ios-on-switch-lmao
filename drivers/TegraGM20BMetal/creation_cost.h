@@ -8,7 +8,7 @@
 
 #include <cstdint>
 
-#if SWITCH_METAL_DIAGNOSTICS
+#if SWITCH_METAL_PROF
 #include <mach/mach_time.h>
 
 namespace gm20b {

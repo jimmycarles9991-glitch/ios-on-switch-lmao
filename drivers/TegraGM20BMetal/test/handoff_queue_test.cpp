@@ -191,4 +191,29 @@ TEST(HandoffQueue, TheCompletionThreadTakesItsTargetOverQuietRanges)
     EXPECT_EQ(target.load(), 1u) << "the first range that interrupts";
 }
 
+TEST(HandoffQueue, TimedSleepWakesAtDeadlineAndEarlyOnWake)
+{
+    gm20b::HandoffQueue<Item> queue;
+    const auto t0 = std::chrono::steady_clock::now();
+    queue.sleep(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_MSEC));
+    const auto elapsedMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    EXPECT_GE(elapsedMs, 10);
+
+    std::atomic<bool> woke{false};
+    std::thread sleeper([&] {
+        queue.sleep(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+        woke.store(true, std::memory_order_release);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_FALSE(woke.load(std::memory_order_acquire));
+    const auto wakeAt = std::chrono::steady_clock::now();
+    queue.wake();
+    sleeper.join();
+    const auto wakeMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - wakeAt).count();
+    EXPECT_TRUE(woke.load(std::memory_order_acquire));
+    EXPECT_LT(wakeMs, 500);
+}
+
 }  // namespace

@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 
 /// Whether PixelFormatView textures can join compressed memory (a probe; LIST #7): a private RGBA8Unorm 256x256 target

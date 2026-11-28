@@ -92,11 +92,10 @@ struct TegraScanoutRing {
             pending = i;
             return kFlip;
         }
-        if (!replace || !mayReplace) {
-            held = i;  // kNone before: target() hands out no buffer while one is held, and the display waits for none
+        if (!replace || !mayReplace || superseded != kNone) {
+            held = i;
             return kHold;
         }
-        // superseded is kNone here: with it busy as well no buffer was free for i.
         superseded = pending;
         pending = i;
         return kReplace;

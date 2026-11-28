@@ -202,13 +202,50 @@ void reflectionsAsMetal()
         std::string entry, blob;
         ASSERT_EQ(engine.compile(p, entry, why), TegraGM20BCompileMade) << state << ": " << why;
         bool made = false;
-        ASSERT_TRUE(gm20b::decodeReflectionEntry(entry, p.key, made, blob) && made) << state << ": " << blob;
+        ASSERT_TRUE(gm20b::decodeReflectionEntry(entry, p.content, made, blob) && made) << state << ": " << blob;
         id raw = gm20bReflectionOf(reinterpret_cast<const uint8_t *>(blob.data()), blob.size(), true);
         ASSERT_TRUE(raw != nil) << state;
         reflection_compare::expectSameList(metal.bindings, [raw bindings], state);
     }
     EXPECT_FALSE(states.empty()) << "the sample has no kernel of no constants";
     printf("%zu compute reflections compared\n", states.size());
+}
+
+// The sample's render states asked in their full form (RequestForm::Full), as a client asks once a state it made is
+// placed: what each adds over its primary record (a fragment program's split, a program variant), written as
+// `full.bin`. Each made record is also headed as its primary content, so the state's own lookup reads it.
+void fullForms()
+{
+    switch_compiler::Engine engine;
+    std::string why;
+    ASSERT_TRUE(engine.open(0, {compiler_test::emptyPack(dir()), root(), {}}, why)) << why;
+    switch_compiler::SystemLibraries system(root());
+    uint32_t made = 0, split = 0, variants = 0;
+    for (gm20b::CompileRequest r : requests()) {
+        if (r.kind != gm20b::RequestKind::Render)
+            continue;
+        r.form = gm20b::RequestForm::Full;
+        switch_compiler::Prepared p;
+        std::string entry;
+        if (!switch_compiler::prepare(gm20b::encodeRequest(r), 0, system, p, why) ||
+            engine.compile(p, entry, why) != TegraGM20BCompileMade)
+            continue;
+        gm20b::RuntimeRecord record, filed;
+        std::string refusal;
+        ASSERT_EQ(gm20b::decodeEntry(entry, p.content, record, refusal), gm20b::RecordCache::Found::Record);
+        const std::string primary = switch_compiler::asPrimary(p, entry);
+        ASSERT_EQ(gm20b::decodeEntry(primary, p.primaryContent, filed, refusal), gm20b::RecordCache::Found::Record);
+        EXPECT_EQ(filed.variants.size(), record.variants.size());
+        EXPECT_EQ(filed.split, record.split);
+        made++;
+        split += record.split;
+        for (uint32_t i = 0; i < record.variants.size(); ++i)
+            variants += !(record.variants[i].assume & gm20b::AssumeTurned);
+    }
+    printf("%u full forms made: %u split, %u program variants\n", made, split, variants);
+    EXPECT_GT(made, 0u);
+    EXPECT_GT(split, 0u) << "no state of the sample was split in its full form";
+    EXPECT_GT(variants, 0u) << "no state of the sample got a program variant in its full form";
 }
 
 // A render state as a difference names it: its functions and its key's hash
@@ -272,7 +309,8 @@ void renderReflectionsAsMetal()
         std::string entry, blob;
         ASSERT_EQ(engine.compile(p, entry, why), TegraGM20BCompileMade) << state << ": " << why;
         bool reflected = false;
-        ASSERT_TRUE(gm20b::decodeReflectionEntry(entry, p.key, reflected, blob) && reflected) << state << ": " << blob;
+        ASSERT_TRUE(gm20b::decodeReflectionEntry(entry, p.content, reflected, blob) && reflected)
+            << state << ": " << blob;
         id raw = gm20bReflectionOf(reinterpret_cast<const uint8_t *>(blob.data()), blob.size(), false);
         ASSERT_TRUE(raw != nil) << state;
         differences.state = state;
@@ -287,6 +325,109 @@ void renderReflectionsAsMetal()
                                            << reflection_compare::Differences::summary(differences.found);
 }
 
+// The shader compiler's reflection of render request `r` (a Reflection request of its key): the facade's object
+id engineRenderReflection(switch_compiler::Engine &engine, gm20b::CompileRequest r, const std::string &state)
+{
+    switch_compiler::SystemLibraries system(root());
+    r.kind = gm20b::RequestKind::Reflection;
+    switch_compiler::Prepared p;
+    std::string why, entry, blob;
+    if (!switch_compiler::prepare(gm20b::encodeRequest(r), 0, system, p, why)) {
+        ADD_FAILURE() << state << ": " << why;
+        return nil;
+    }
+    if (engine.compile(p, entry, why) != TegraGM20BCompileMade) {
+        ADD_FAILURE() << state << ": " << why;
+        return nil;
+    }
+    bool reflected = false;
+    if (!gm20b::decodeReflectionEntry(entry, p.content, reflected, blob) || !reflected) {
+        ADD_FAILURE() << state << ": no reflection: " << blob;
+        return nil;
+    }
+    return gm20bReflectionOf(reinterpret_cast<const uint8_t *>(blob.data()), blob.size(), false);
+}
+
+// The answers Metal gives a vertex binding that a rate map's data is reached through, printed for the record
+void printRateMapBinding(id<MTLBinding> b)
+{
+    printf("  %s: type %lu", b.name.UTF8String, (unsigned long)b.type);
+    if (b.type != MTLBindingTypeBuffer) {
+        printf("\n");
+        return;
+    }
+    id<MTLBufferBinding> buffer = (id<MTLBufferBinding>)b;
+    printf(" data type %lu size %lu alignment %lu\n", (unsigned long)buffer.bufferDataType,
+           (unsigned long)buffer.bufferDataSize, (unsigned long)buffer.bufferAlignment);
+    for (MTLStructMember *m in buffer.bufferStructType.members) {
+        printf("    %s at %lu: data type %lu, id %lu", m.name.UTF8String, (unsigned long)m.offset,
+               (unsigned long)m.dataType, (unsigned long)m.argumentIndex);
+        if (MTLPointerType *ptr = m.pointerType)
+            printf(", element %lu, size %lu, alignment %lu, access %lu, argument buffer %d",
+                   (unsigned long)ptr.elementType, (unsigned long)ptr.dataSize, (unsigned long)ptr.alignment,
+                   (unsigned long)ptr.access, ptr.elementIsArgumentBuffer);
+        printf("\n");
+    }
+}
+
+// Weather's VFX particle functions hold a rasterization rate map's data in an argument buffer (`constant
+// rasterization_rate_map_data *` at an argument id, which the AIR states with no size or alignment), and a function may
+// bind it directly: the shader compiler's reflection of such a state is this Mac's Metal's, selector by selector. On
+// 24B119 the device's own Weather states (testdata/weather_vfx_24B119.corpus, linked functions, which this Mac's Metal
+// is not asked for) each have a reflection too.
+void rateMapReflectionAsMetal()
+{
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    ASSERT_TRUE(device != nil);
+    printf("Metal of %s, %s\n", device.name.UTF8String,
+           NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String);
+    switch_compiler::Engine engine;
+    std::string why;
+    ASSERT_TRUE(engine.open(0, {compiler_test::emptyPack(dir()), root(), {}}, why)) << why;
+    const std::string library = "/test/rate_map.metallib";
+    compiler_test::Requests made(root(), {{library, getenv("SWITCH_RATE_MAP_METALLIB")}});
+    const switch_compiler::Libraries libraries = compiler_test::deviceLibraries(device, root());
+    reflection_compare::Differences differences;
+    for (const char *vertex : {"rate_map_held_vertex", "rate_map_direct_vertex"}) {
+        const std::string line = "R ok=1 samples=1 topo=0 ds=0/0 c0=70:15:0:1:0:0:1:0:0 | v " + std::string(vertex) +
+                                 " lib=" + library + " | f rate_map_fragment lib=" + library;
+        gm20b::CompileRequest r;
+        ASSERT_TRUE(made.render(line, r, why)) << vertex << ": " << why;
+        std::vector<id<MTLFunction>> functions;
+        ASSERT_TRUE(switch_compiler::functions(r, libraries, functions, why)) << vertex << ": " << why;
+        MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+        gm20b::applyFields(r.fields, d);
+        d.vertexFunction = functions[0];
+        d.fragmentFunction = functions[gm20b::fragmentStage(r)];
+        MTLRenderPipelineReflection *metal = nil;
+        NSError *error = nil;
+        ASSERT_TRUE([device newRenderPipelineStateWithDescriptor:d
+                                                         options:MTLPipelineOptionArgumentInfo
+                                                      reflection:&metal
+                                                           error:&error] != nil)
+            << vertex << ": this Mac's Metal made no state: " << (error ? error.localizedDescription.UTF8String : "");
+        printf("%s, as Metal reflects it:\n", vertex);
+        for (id<MTLBinding> b in metal.vertexBindings)
+            printRateMapBinding(b);
+        id raw = engineRenderReflection(engine, r, vertex);
+        ASSERT_TRUE(raw != nil) << vertex;
+        differences.state = vertex;
+        reflection_compare::compareRender(metal, raw, reflection_compare::Options{true}, differences);
+    }
+    EXPECT_TRUE(differences.found.empty()) << differences.found.size() << " differences\n"
+                                           << reflection_compare::Differences::summary(differences.found);
+#ifdef SWITCH_WEATHER_VFX_STATES
+    compiler_test::Requests system(root());
+    size_t reflected = 0;
+    for (const std::string &line : compiler_test::corpusLines(getenv("SWITCH_WEATHER_VFX"))) {
+        gm20b::CompileRequest r;
+        ASSERT_TRUE(system.render(line, r, why)) << line.substr(0, 160) << ": " << why;
+        reflected += engineRenderReflection(engine, r, stateName(r)) != nil;
+    }
+    EXPECT_EQ(reflected, 4u) << "Weather's VFX states without a reflection";
+#endif
+}
+
 }  // namespace
 
 TEST(CompilerCompileOnly, AKernelsReflectionIsMetalsSelectorForSelector)
@@ -299,6 +440,18 @@ TEST(CompilerCompileOnly, ARenderStatesReflectionIsMetalsSelectorForSelector)
 {
     ASSERT_FALSE(root().empty());
     switch_ios::test::ExpectPassesInFreshProcess(renderReflectionsAsMetal);
+}
+
+TEST(CompilerCompileOnly, AStatesFullFormHasTheSplitAndVariantsAPackBuildGivesIt)
+{
+    ASSERT_FALSE(root().empty());
+    switch_ios::test::ExpectPassesInFreshProcess(fullForms);
+}
+
+TEST(CompilerCompileOnly, ARateMapsDataReflectsAsMetals)
+{
+    ASSERT_FALSE(root().empty());
+    switch_ios::test::ExpectPassesInFreshProcess(rateMapReflectionAsMetal);
 }
 
 TEST(CompilerCompileOnly, ItMakesARecordOfEveryKindTheSampleAsks)
@@ -327,7 +480,8 @@ TEST(CompilerCompileOnly, ItMakesARecordOfEveryKindTheSampleAsks)
             continue;
         }
         gm20b::RuntimeRecord record;
-        ASSERT_EQ(gm20b::decodeEntry(engine[i].entry, p.key, record, why), gm20b::RecordCache::Found::Record) << why;
+        ASSERT_EQ(gm20b::decodeEntry(engine[i].entry, p.content, record, why), gm20b::RecordCache::Found::Record)
+            << why;
         covered["render"]++;
         covered["constexpr samplers"] += !record.samplers.empty();
         covered["storage form"] += (record.pipeline.flags & gm20b::PipelineStorageMetadata) != 0;

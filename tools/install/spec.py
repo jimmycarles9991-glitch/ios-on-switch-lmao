@@ -73,7 +73,15 @@ def parse(raw_mount: str, cryptex_h: str, cryptex_cpp: str, block_cpp: str, volu
         'partition_name': name.group(1),
         'volumes': {
             'system': {'uuid': system, 'role': 0x0001},
-            'data': {'uuid': data, 'role': 0x0040, 'name': 'Switch-iOS-Data'},
+            # iOS apfs_create_fs sets expanded records (0x200) and clone mapping + attribution tags (0x0c) on Data;
+            # macOS diskutil addVolume leaves them clear, causing EINVAL/ENOTSUP on purgeable marks and dir stats.
+            'data': {
+                'uuid': data,
+                'role': 0x0040,
+                'name': 'Switch-iOS-Data',
+                'rocompat_features': 0x0C,
+                'incompat_features': 0x200,
+            },
             'preboot': {'uuid': preboot, 'role': 0x0010, 'name': 'Switch-iOS-Preboot'},
         },
         'cryptexes': cryptexes,

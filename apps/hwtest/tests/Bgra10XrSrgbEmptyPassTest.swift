@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A BGRA10_XR_sRGB (553) pass that draws nothing keeps every code, alpha past 894 included: an 8x8 shared texture

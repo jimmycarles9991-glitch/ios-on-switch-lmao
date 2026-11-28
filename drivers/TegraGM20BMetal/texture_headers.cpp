@@ -54,6 +54,7 @@ void Device::freeTic(uint32_t tic)
     partTics_.erase(made.first, made.second);
     for (const uint32_t part : parts)
         freeTic(part);
+    noteTicWrite();
 }
 
 uint32_t Device::allocTicPair()
@@ -77,6 +78,7 @@ void Device::freeTicPair(uint32_t first)
     memcpy(tic_.cpu + 32 * first, tic_.cpu, 32);
     memcpy(tic_.cpu + 32 * (first + 1), tic_.cpu, 32);
     freeTicPairs_.push_back(first);
+    noteTicWrite();
 }
 
 // Texture header of a pitch-linear 2D texture (Mesa NIL nvb097_fill_image_view_desc for a linear image: HEADER_VERSION PITCH,
@@ -138,7 +140,8 @@ void Device::writeTic(const Texture &t)
         setField(w, 175, 160, t.texelHeight - 1);
     }
     w[0] = swizzledWord0(w[0], t.swizzle);
-    memcpy(tic_.cpu + 32 * t.tic, w, 32);  // write-combined: visible at the next submission's header invalidate
+    memcpy(tic_.cpu + 32 * t.tic, w, 32);
+    noteTicWrite();
 }
 
 void Device::swizzle(Texture &t, const uint8_t channels[4])
@@ -155,6 +158,7 @@ void Device::swizzle(Texture &t, const uint8_t channels[4])
         uint32_t *s = reinterpret_cast<uint32_t *>(tic_.cpu + 32 * t.standIn->tic);
         s[0] = swizzledWord0(s[0], channels);
     }
+    noteTicWrite();
 }
 
 uint32_t swizzledWord0(uint32_t word0, const uint8_t channels[4])

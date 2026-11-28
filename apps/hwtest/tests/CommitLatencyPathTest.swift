@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 import QuartzCore
 import simd
@@ -15,7 +16,8 @@ import simd
 /// an event must have all but the encoders recorded since the worker was last handed the buffer (24 tape commands, 3 of
 /// these passes) and the two held for the look-ahead encoded ahead; its median from commit to GPU start must stay under
 /// what the remainder, the kernel's SubmitJob and a thread hop take (the encode was 2.2-4.6 ms of a scale frame before,
-/// boot 21); the event's shape is encoded at its commit, as before. Each pass draws into BGRA8 beside a memoryless
+/// boot 21); the event's shape, its event signalled after 8 passes, must have those 8 encoded ahead and none past them
+/// (the encode ahead stops at an event; core/EncodeAheadBound.swift). Each pass draws into BGRA8 beside a memoryless
 /// colour 1 in the format the state's line gives it (RGBA16Float on iOS 27). A pack without the state sends its first
 /// command buffers to m2v while the runtime makes its record: those warm it before any shape runs. The
 /// scale_buffer_geometry arm is the scale frame with each pass's first draw over buffer geometry (Core Animation's
@@ -33,6 +35,7 @@ struct CommitLatencyPathTest: HWTest {
     var subsystem: Subsystem { .metal }
     static let width = 256, height = 256, targets = 4, warmups = 6, measured = 16, stateWarmups = 20
     static let paceMicroseconds: UInt32 = 400
+    static let eventAfterPasses = 8
     /// The median from commit to the GPU's start a shape may take: the last encoders' encode (about a fifth of a
     /// 90-draw buffer's 0.9-1.4 ms loop), the job's SubmitJob (0.45-0.83 ms on boot 21's scale frames, being cut by
     /// x1-scale) and the worker's wake
@@ -106,7 +109,7 @@ struct CommitLatencyPathTest: HWTest {
                         draws: shape.draws / shape.passes + (pass < shape.draws % shape.passes ? 1 : 0),
                         geometry: shape.geometry ? geometry : nil
                     )
-                    if shape.event && pass == 7 {
+                    if shape.event && pass == Self.eventAfterPasses - 1 {
                         signalled += 1
                         commands.encodeSignalEvent(event, value: signalled)
                     }
@@ -160,13 +163,11 @@ struct CommitLatencyPathTest: HWTest {
             metrics.set(shape.name + "_veto", String(vetoes, radix: 16))
             if !openings.isEmpty { metrics.set(shape.name + "_pass_pixel_openings", Self.median(openings), digits: 0) }
             if measuredCount == 0 { continue }
-            if !shape.event && shape.passes > 3 && pipelined / n < encoders / n - 5 {
-                failures.append(
-                    "\(shape.name): \(pipelined / n) of \(encoders / n) encoders encoded ahead (veto \(vetoes))"
-                )
-            }
-            if shape.event && pipelined > 0 {
-                failures.append("\(shape.name): encoders encoded ahead of a command buffer with an event")
+            if let failure = EncodeAheadBound.failure(
+                shape.name, pipelined: pipelined / n, encoders: encoders / n, passes: shape.passes,
+                eventAfter: shape.event ? Self.eventAfterPasses : nil
+            ) {
+                failures.append("\(failure) (veto \(String(vetoes, radix: 16)))")
             }
             if shape.geometry {
                 let commit = Self.median(commitUs), scale = commitMedians["scale"] ?? 0

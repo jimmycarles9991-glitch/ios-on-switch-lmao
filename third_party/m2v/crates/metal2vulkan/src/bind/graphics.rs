@@ -14,7 +14,9 @@
 //!   cells, so a pass of more than one layer or an amplified draw is not implemented. An attachment
 //!   the fragment function reads in the interlocked storage form
 //!   (`GraphicsState::storage_attachments`) is `WriteSource::TileAttachment` in the attachment's
-//!   own format, likewise one 2D view, so such a pass or draw is not implemented either. A fragment
+//!   own format, one 2D view, or in a layered pass an array of its layers that each primitive
+//!   addresses at its layer (`VariantKey::layered_storage`), which an amplification drawn on its
+//!   own does too; a draw of multiview views is not implemented. A fragment
 //!   function's threadgroup arguments (`RuntimeFact::TileThreadgroupMemory`) are the pass's tile
 //!   memory, `WriteSource::TileMemory` as a tile function's (`plan::compute`): the shape's
 //!   `tile_threadgroup` places each argument, and its `render_area` and `imageblock_size` (the
@@ -106,7 +108,7 @@
 //!   them before the depth and stencil tests (tested storage writes, below): the plan of the
 //!   pipeline as compiled selects such a moved writer's tests from
 //!   `RuntimeFact::MovableStorageWrites`. A mesh pipeline's is not implemented, nor a
-//!   multisampled, layered or amplified draw's.
+//!   multisampled draw's or one of multiview views.
 //! - **Depth clamp range**. A draw in depth clamp mode through a range above 0 whose Vulkan depth
 //!   clamp holds 0 (`BindShape::depth_clamp_range`) runs the variant whose fragment function, where
 //!   it writes its depth, clamps that depth to the draw's range itself
@@ -830,15 +832,19 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
         return Err(not_implemented(Feature::Imageblocks));
     }
     // An attachment read in the interlocked storage form is one view of the pass's layers, each
-    // access at its primitive's layer in a layered pass (`VariantKey::layered_storage`): what an
-    // amplified draw reads and writes of each view is not modelled.
-    if !p.graphics.storage_attachments.is_empty() && shape.vertex_amplification.count > 1 {
+    // access at its primitive's layer in a layered pass (`VariantKey::layered_storage`). Drawn one
+    // amplification at a time, each amplification's primitives are at its own layer, in
+    // amplification order, as Metal renders them; what multiview views read and write of each
+    // view is not modelled.
+    let as_views = shape.vertex_amplification.count > 1 && amplification_draws.is_none();
+    if !p.graphics.storage_attachments.is_empty() && as_views {
         return Err(not_implemented(Feature::FramebufferFetch));
     }
     // The shader-side stencil's shadow holds a layered pass's layers, each fragment's texel at its
-    // layer (`layered_storage` below); what an amplified draw tests of each view is not modelled.
+    // layer (`layered_storage` below), which an amplification drawn on its own tests alike; what
+    // multiview views test of each view is not modelled.
     let shadow = shadow_template(p);
-    if shadow.is_some() && shape.vertex_amplification.count > 1 {
+    if shadow.is_some() && as_views {
         return Err(not_implemented(Feature::StencilExport));
     }
     // A fragment function's tile threadgroup memory is the pass's, every tile's in one buffer:
@@ -935,11 +941,9 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
         return Err(not_implemented(Feature::MeshShading));
     }
     // Nor a multisampled draw's, whose storage form reads and writes the attachment per sample,
-    // which runs the function per sample where a plain writer runs it per pixel; nor an amplified
-    // draw's (above).
-    if !interlocked_colors.is_empty()
-        && (p.graphics.rasterization_samples.as_raw() > 1 || shape.vertex_amplification.count > 1)
-    {
+    // which runs the function per sample where a plain writer runs it per pixel; nor a draw of
+    // multiview views (above).
+    if !interlocked_colors.is_empty() && (p.graphics.rasterization_samples.as_raw() > 1 || as_views) {
         return Err(not_implemented(Feature::FramebufferFetch));
     }
     let compiled_interlocked: std::collections::BTreeSet<u32> = p

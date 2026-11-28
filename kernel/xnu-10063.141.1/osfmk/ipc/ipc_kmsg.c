@@ -5208,7 +5208,7 @@ ipc_kmsg_copyin_from_kernel(
  * display's clients line). The display names the render server's task; its space pointer is only ever compared, so a
  * stale one (the server exited) costs nothing but a miscount until the next server opens the display.
  */
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && ((defined(SWITCH_STATS_FRAME) && SWITCH_STATS_FRAME) || (defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED))
 static void *volatile switch_render_server_space;
 static struct switch_render_senders switch_render_senders;
 static LCK_GRP_DECLARE(switch_render_senders_grp, "switch_render_senders");
@@ -5232,7 +5232,6 @@ switch_render_senders_line(char *out, size_t size, uint64_t window_ms, unsigned 
 	return switch_render_senders_format(&taken, window_ms, top, out, size);
 }
 
-/* Under the destination port's lock (a spin lock, so this lock nests inside it and takes nothing else). */
 static void
 switch_render_sender_note(mach_msg_id_t id)
 {
@@ -5422,12 +5421,27 @@ retry:
 		 */
 		ipc_special_reply_port_msg_sent(port);
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && ((defined(SWITCH_STATS_FRAME) && SWITCH_STATS_FRAME) || (defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED))
+		int switch_render_dir = 0;
+		mach_msg_id_t switch_render_id = 0;
+		int32_t switch_recv_pid = 0;
+		char switch_recv_name[16];
+
 		if (__improbable(switch_render_server_space != NULL) && !kernel_reply) {
 			if (ip_in_space(port, (ipc_space_t)switch_render_server_space)) {
-				switch_render_sender_note(hdr->msgh_id);
-			} else if (current_task()->itk_space == switch_render_server_space) {
-				switch_frames_render_server_sent(port);
+				switch_render_dir = 1;
+				switch_render_id = hdr->msgh_id;
+			} else if (current_task()->itk_space == switch_render_server_space &&
+			    switch_frames_touch_pending()) {
+				ipc_space_t space = ip_get_receiver(port);
+				task_t receiver = space != NULL ? space->is_task : TASK_NULL;
+				if (receiver != TASK_NULL && receiver != kernel_task) {
+					struct proc *proc = (struct proc *)get_bsdtask_info(receiver);
+					switch_recv_pid = task_pid(receiver);
+					strlcpy(switch_recv_name, proc ? proc_best_name(proc) : "kernel",
+					    sizeof(switch_recv_name));
+					switch_render_dir = 2;
+				}
 			}
 		}
 #endif
@@ -5435,6 +5449,16 @@ retry:
 		error = ipc_mqueue_send_locked(&port->ip_messages, kmsg,
 		    options, send_timeout);
 		/* port unlocked */
+
+#if (DEVELOPMENT || DEBUG) && ((defined(SWITCH_STATS_FRAME) && SWITCH_STATS_FRAME) || (defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED))
+		if (__improbable(switch_render_dir != 0)) {
+			if (switch_render_dir == 1) {
+				switch_render_sender_note(switch_render_id);
+			} else {
+				switch_frames_render_server_sent_to(switch_recv_pid, switch_recv_name);
+			}
+		}
+#endif
 	}
 
 #if IMPORTANCE_INHERITANCE

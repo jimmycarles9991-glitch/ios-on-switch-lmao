@@ -23,6 +23,7 @@ enum {
     TEGRA_HOST1X_ELOST = -5,       // the threshold was reached but its interrupt never came (before strict mode only)
     TEGRA_HOST1X_EAGAIN = -35,     // no command arena room until earlier jobs' fences pass
     TEGRA_HOST1X_EFALCON = -14,    // the engine's falcon raised an error (tegra_host1x_syncpt_wait_unless)
+    TEGRA_HOST1X_EBUSY = -16,      // another probe holds the probe syncpoints
 };
 
 // Host1x class IDs (Linux include/linux/host1x.h: HOST1X_CLASS_HOST1X, ..._NVENC, ..._VIC, ..._NVJPG, ..._NVDEC; L4T
@@ -90,24 +91,60 @@ static inline uint32_t tegra_host1x_op_incr_syncpt(uint32_t cond, uint32_t syncp
     return tegra_host1x_op_imm(0, ((cond & 0xff) << 8) | (syncpt & 0xff));
 }
 
+// Module locks, opcode 14, as L4T pushes them on T210 (host1x01_hardware.h op_acquire_mlock, op_release_mlock): TRM
+// 14.7 does not list it, so HW Test gpu.x1.host1x_mlock (SwitchHost1xMlockProbe.h) asks the unit first.
+static inline uint32_t tegra_host1x_op_acquire_mlock(uint32_t id)
+{
+    return (14u << 28) | (id & 0xff);
+}
+
+static inline uint32_t tegra_host1x_op_release_mlock(uint32_t id)
+{
+    return (14u << 28) | (1u << 24) | (id & 0xff);
+}
+
 // Brings host1x up once (clock and reset adopted or enabled, sync unit configured, the syncpoint interrupt claimed,
 // channel 0's command DMA started); each engine's own proof of life is the first increment completed by interrupt.
 // Idempotent; returns TEGRA_HOST1X_OK or the failure, after logging one line either way.
 int tegra_host1x_start(void);
 
-// Syncpoints this driver hands out (above the IDs the boot chain and Horizon use: hekate di.c waits on 9).
-int tegra_host1x_syncpt_alloc(uint32_t *id);
+// A syncpoint from this driver's pool (SwitchHost1xSyncptPool.h): never sleeps, any context. TEGRA_HOST1X_ENOMEM, with
+// one os_log_error naming `caller`, when every one is in use. The value is never reset: an owner reads its base fresh.
+int tegra_host1x_syncpt_alloc_named(uint32_t *id, const char *caller);
+#define tegra_host1x_syncpt_alloc(id) tegra_host1x_syncpt_alloc_named((id), __func__)
+// Back to the pool; the pool hands it out again only after every other free one. Thread context. The caller's contract,
+// which the driver cannot check, since the value is never reset and a new owner's increments would satisfy an old WAIT:
+// every job that named `id` has retired first (or was dropped by its channel's teardown and restart): a host1x
+// stream's INCR_SYNCPT or WAIT_SYNCPT, and a GPU channel's SYNCPOINTB increment or wait. An id not handed out now, or one
+// a CPU fence or waiter still names, panics; so does, on debug kernels, one whose value is short of a threshold a host1x
+// channel's fenced job was given and still holds.
+void tegra_host1x_syncpt_free(uint32_t id);
 uint32_t tegra_host1x_syncpt_read(uint32_t id);
 // Only after the exclusive producer stopped and retained completion records say failed; this never publishes success.
 // `max_increments`: the most the caller's cancelled jobs leave outstanding; a longer distance is refused. The jobs
 // waiting on the cancelled ones fail first, then the display stream waiting on any of them is cancelled, then the CPU
 // increments the syncpoint to `threshold`; an increment that does not take panics.
 int tegra_host1x_syncpt_release_failed(uint32_t id, uint32_t threshold, uint32_t max_increments);
+// A producer that failed but will still make its own increments (a GPU bridge job held at its gate, SwitchGpuBridge.h):
+// the jobs and the display stream waiting on syncpoint `id` short of `threshold` are cancelled as release_failed cancels
+// them, and the CPU makes no increment, so the producer's own pass a syncpoint nothing waits on any more.
+int tegra_host1x_syncpt_cancel_waiters(uint32_t id, uint32_t threshold);
 
 #if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
 // One CPU increment of a syncpoint no engine increments (SwitchHost1xCpuIncrement.h), so the stream waiting on it goes
 // on: a HW Test's gate (TegraVIC's SwitchVICGate.h).
 int tegra_host1x_syncpt_cpu_increment(uint32_t id);
+
+// The HW Test probes' syncpoints (the display's class 0x70 probe and window A flip run, the module lock probe): one set,
+// taken from the pool at the first claim and never given back, so Run All's probes cost the pool four. One probe holds
+// it at a time. A holder takes its thresholds from the values it finds and leaves no stream, condition or wait queued
+// on the set when it lets it go.
+enum {
+    SWITCH_HOST1X_PROBE_SYNCPTS = 4
+};
+
+int switch_host1x_probe_syncpts_claim(uint32_t ids[SWITCH_HOST1X_PROBE_SYNCPTS]);  // OK, EBUSY or ENOMEM
+void switch_host1x_probe_syncpts_release(void);
 #endif
 
 // A stopped engine's cancelled jobs' increments, done by the CPU up to `threshold` in one release: another engine's
@@ -142,8 +179,21 @@ enum {
     TEGRA_HOST1X_CHANNEL_NVENC = 2,
     TEGRA_HOST1X_CHANNEL_NVJPG = 3,
     TEGRA_HOST1X_CHANNEL_DISPLAY = 4,
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+    // VIC's second and third channels, for jobs that wait on their producers without holding up VIC's others (host1x
+    // item 5). Only the module lock probe runs on them until it answers, so debug kernels alone have them, and their
+    // rings and arenas are taken at its first run (switch_host1x_probe_channels_take).
+    TEGRA_HOST1X_CHANNEL_VIC_SECOND = 5,
+    TEGRA_HOST1X_CHANNEL_VIC_THIRD = 6,
+    TEGRA_HOST1X_CHANNELS = 7
+#else
     TEGRA_HOST1X_CHANNELS = 5
+#endif
 };
+
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+int switch_host1x_probe_channels_take(void);  // OK, ENODEV before host1x is up, or ENOMEM
+#endif
 
 // A job's stream is written in place in its channel's command arena (below 4 GiB) and host1x gathers it from there, so
 // nothing copies it. Reserve room for up to `capacity` words, write the stream (it starts with a SETCLASS), then submit

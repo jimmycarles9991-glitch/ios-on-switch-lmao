@@ -217,7 +217,8 @@ TEST(Vic422Model, QuarterTurnsOfBgraInto422v)
     TegraVICMatrix m;
     tegra_vic_matrix_rgb_to_ycc(TEGRA_VIC_YCC_709, false, &kTegraVICTraits.out, &m);
     const auto ycc = [&](uint32_t argb, uint32_t e[3]) {
-        const uint32_t in10[3] = {((argb >> 16) & 0xff) << 2, ((argb >> 8) & 0xff) << 2, (argb & 0xff) << 2};
+        const uint32_t in10[3] = {vic_model_widen((argb >> 16) & 0xff), vic_model_widen((argb >> 8) & 0xff),
+                                  vic_model_widen(argb & 0xff)};
         uint32_t o[3];
         tegra_vic_matrix_apply(&m, in10, o);
         e[0] = o[0] >> 2;

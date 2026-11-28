@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Dispatches of more threadgroups down or deep than one QMD's grid holds (65535): raw launches them in slices based

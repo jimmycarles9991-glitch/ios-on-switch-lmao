@@ -434,7 +434,8 @@ impl Cx<'_> {
     ) -> Result<BufferBinding, Error> {
         let untyped = !argument_buffer
             && b.layout.is_none()
-            && ty.name.as_ref().is_some_and(|name| name.to_string() == "void");
+            && (ty.name.as_ref().is_some_and(|name| name.to_string() == "void")
+                || opaque_pointee(ty, b));
         // Metal answers a constant buffer's pointee aligned to at least 4 bytes (`constant half &`:
         // 4, `device half *`: 2), and a void pointee without AIR layout metadata as 0 bytes aligned
         // 4 in the constant address space and 0 in device memory, whatever the stage and access
@@ -442,7 +443,7 @@ impl Cx<'_> {
         // `air.write` and `air.read_write`, and iOS 27 RenderBox's primitive_gradient_fragment).
         let constant = b.space == AddrSpace::Constant;
         let (size, align) = if untyped && ty.size.is_none() && ty.align.is_none() {
-            (0, if constant { 4 } else { 0 })
+            untyped_size_align(b)
         } else {
             let (size, align) = self.size_align(arg, ty)?;
             (size, if constant { align.max(4) } else { align })
@@ -596,8 +597,13 @@ impl Cx<'_> {
                     ParamRole::Sampler { .. } => (DataType::Sampler, TypeDetail::Plain),
                     ParamRole::Buffer(b) | ParamRole::ArgumentBuffer(b) => {
                         let nested = matches!(ia.role, ParamRole::ArgumentBuffer(_));
-                        let (size, align) = self.size_align(arg, &ia.ty)?;
-                        let (pointee, detail) = self.pointee(arg, &ia.ty, b.layout, nested)?;
+                        let ((size, align), (pointee, detail)) = match opaque_pointee(&ia.ty, b) {
+                            true => (untyped_size_align(b), (DataType::None, TypeDetail::Plain)),
+                            false => (
+                                self.size_align(arg, &ia.ty)?,
+                                self.pointee(arg, &ia.ty, b.layout, nested)?,
+                            ),
+                        };
                         let pointer = PointerType::new(
                             pointee,
                             binding_access(b.access),
@@ -697,6 +703,29 @@ impl Cx<'_> {
             Ok(0)
         }
     }
+}
+
+/// The size and alignment Metal answers for a pointee of no data type without AIR layout metadata:
+/// 0 bytes, aligned 4 in the constant address space and 0 in device memory.
+fn untyped_size_align(b: &BufferArg) -> (u64, u64) {
+    (0, if b.space == AddrSpace::Constant { 4 } else { 0 })
+}
+
+/// A constant pointee the AIR states with no layout, size or alignment, of a type that is no data
+/// type: Metal answers a pointer to it as it answers an untyped one, no data type, 0 bytes, aligned
+/// 4 (measured on an M4, macOS 27.2: `constant rasterization_rate_map_data *` and a pointer to a
+/// struct the library only declares, in an argument buffer, as Weather's VFX functions hold a rate
+/// map's data and WeatherUI's hold VFX's light buffer, and bound directly). Device memory's is not
+/// measured.
+fn opaque_pointee(ty: &ArgTypeInfo, b: &BufferArg) -> bool {
+    b.space == AddrSpace::Constant
+        && b.layout.is_none()
+        && ty.size.is_none()
+        && ty.align.is_none()
+        && ty
+            .name
+            .as_ref()
+            .is_some_and(|name| data_type(&name.to_string()).is_none())
 }
 
 /// Member `m` as an `MTLArrayType` of `dt` with `stride` when it is a C array (`array_len` above

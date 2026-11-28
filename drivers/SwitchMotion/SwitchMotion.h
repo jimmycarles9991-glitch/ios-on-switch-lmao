@@ -30,6 +30,14 @@ void switch_motion_display_power(bool on);
 // none yet). Any thread.
 void switch_motion_last_orientation(uint8_t *orientation, uint64_t *stamp);
 
+// Debug kernels' counts as sysctls (SwitchMotionTotals.cpp; a no-op on release kernels). From switch_motion_start.
+void switch_motion_totals_register(void);
+#if DEVELOPMENT || DEBUG
+// The device motion reports sent since boot and the raw gyroscope's client interval; both 0 before
+// switch_motion_start(). Any thread.
+void switch_motion_totals(uint64_t *reports, uint32_t *gyroIntervalUS);
+#endif
+
 #ifdef __cplusplus
 class IOService;
 class IOUserClient;

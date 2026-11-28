@@ -21,6 +21,8 @@ static uint32_t regs[0x300 / 4];
 static uint64_t now_ns;
 static unsigned long irqs_off;
 static unsigned int blocking;
+static unsigned int timer_fires;
+static int lock_slot;
 static unsigned long floor_hz, per_step_hz;
 static unsigned long slew_per_s; /* 0: the output reaches its rest at once */
 static unsigned int forced_out;  /* a request's forced output, coming down from forced_at */
@@ -159,14 +161,20 @@ void switch_linux_irq_restore(unsigned long flags)
 	irqs_off = flags;
 }
 
-void switch_linux_spin_contended(switch_linux_spinlock *lock, uintptr_t self)
+void *switch_linux_mutex_of(void **slot)
 {
-	__builtin_trap(); /* one thread: a held lock taken again is a deadlock */
+	if (!*slot)
+		*slot = &lock_slot;
+	return *slot;
 }
 
-uintptr_t switch_linux_model_thread(void)
+void switch_linux_mutex_lock(void *mutex)
 {
-	return 1;
+	blocking += irqs_off ? 1 : 0;
+}
+
+void switch_linux_mutex_unlock(void *mutex)
+{
 }
 
 uint64_t switch_linux_nanotime(void)
@@ -213,6 +221,11 @@ void *switch_linux_call_alloc(void (*fn)(void *arg), void *arg)
 	return &calls[ncalls++];
 }
 
+void *switch_linux_call_alloc_deferrable(void (*fn)(void *arg), void *arg)
+{
+	return switch_linux_call_alloc(fn, arg);
+}
+
 bool switch_linux_call_cancel(void *call)
 {
 	struct call *c = call;
@@ -236,6 +249,11 @@ bool switch_linux_call_enter_after(void *call, uint64_t delay_ns)
 	c->armed = true;
 	c->due = now_ns + delay_ns;
 	return was;
+}
+
+bool switch_linux_call_enter_after_leeway(void *call, uint64_t delay_ns, uint64_t leeway_ns)
+{
+	return switch_linux_call_enter_after(call, delay_ns);
 }
 
 struct regulator *tdfll_platform_regulator(struct device *dev, const char *id)
@@ -340,6 +358,7 @@ void tegra_dfll_landing_run_ms(unsigned int ms)
 		if (next->due > now_ns)
 			now_ns = next->due;
 		next->armed = false;
+		timer_fires++;
 		next->fn(next->arg);
 	}
 	now_ns = end;
@@ -377,4 +396,9 @@ unsigned long tegra_dfll_landing_dvco_rate_min(void)
 unsigned int tegra_dfll_landing_irqs_off_blocking(void)
 {
 	return blocking;
+}
+
+unsigned int tegra_dfll_landing_timer_fires(void)
+{
+	return timer_fires;
 }

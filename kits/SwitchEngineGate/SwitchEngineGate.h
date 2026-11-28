@@ -55,40 +55,52 @@ public:
     template <class... Args> bool start(const SwitchEngineGateOps &ops, Args... args)
     {
         ops_ = ops;
-        setPowered(true);
         if (!platform_.start(&SwitchEngineGate::fired, this, args...))
             return false;
-        platform_.arm(kIdleMs);
+        __atomic_store_n(&lastActivityUs_, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&state_, kPowered | kTimerArmed, __ATOMIC_RELEASE);
+        armTimer(platform_.nowUs(), kIdleMs);
         return true;
     }
 
     // Before a job is built for the engine: 0 with the engine powered and held until done(), or why it cannot run.
     int use()
     {
-        platform_.lock();
-        while (asleep_)
-            platform_.sleep(&asleep_);
-        const int error = powerOn();
-        if (!error)
-            users_++;
-        platform_.unlock();
-        return error;
+        uint32_t cur = __atomic_load_n(&state_, __ATOMIC_ACQUIRE);
+        while ((cur & (kPowered | kBlocked)) == kPowered) {
+            if (__atomic_compare_exchange_n(&state_, &cur, cur + 1, true, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE))
+                return 0;
+        }
+        return useSlow();
     }
 
     // The engine's driver found it off outside the gate (a reset that did not bring it back): the next use powers it
     // on. Takes no lock: the driver may hold its own, or the gate's, when it finds out.
     void lost()
     {
-        setPowered(false);
+        __atomic_fetch_and(&state_, ~kPowered, __ATOMIC_RELEASE);
     }
 
     void done()
     {
-        platform_.lock();
-        const bool last = --users_ == 0;
-        platform_.unlock();
-        if (last)
-            platform_.arm(kIdleMs);
+        uint32_t cur = __atomic_load_n(&state_, __ATOMIC_ACQUIRE);
+        uint64_t now = 0;
+        bool stamped = false;
+        for (;;) {
+            const uint32_t users = cur & kUserMask;
+            if (users == 1 && !stamped) {
+                now = platform_.nowUs();
+                __atomic_store_n(&lastActivityUs_, now, __ATOMIC_RELEASE);
+                stamped = true;
+            }
+            const bool arm = (users == 1) && (cur & kPowered) && !(cur & (kBlocked | kTimerArmed));
+            const uint32_t next = (cur - 1) | (arm ? kTimerArmed : 0);
+            if (__atomic_compare_exchange_n(&state_, &cur, next, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                if (arm)
+                    armTimer(now, kIdleMs);
+                return;
+            }
+        }
     }
 
     // The gate's lock held: the engine stays as it is until release(), with no power-on: no idle power-off, and sleep
@@ -96,45 +108,154 @@ public:
     // without the lock.
     void holdLocked()
     {
-        users_++;
+        __atomic_fetch_add(&state_, 1u, __ATOMIC_ACQ_REL);
         held_++;
     }
 
     void release()
     {
         platform_.lock();
-        const bool last = --users_ == 0;
+        const uint64_t now = platform_.nowUs();
+        __atomic_store_n(&lastActivityUs_, now, __ATOMIC_RELEASE);
+        bool arm = false;
+        uint32_t cur = __atomic_load_n(&state_, __ATOMIC_ACQUIRE);
+        for (;;) {
+            const uint32_t users = cur & kUserMask;
+            arm = (users == 1) && (cur & kPowered) && !(cur & (kBlocked | kTimerArmed));
+            const uint32_t next = (cur - 1) | (arm ? kTimerArmed : 0);
+            if (__atomic_compare_exchange_n(&state_, &cur, next, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                break;
+        }
+        if (arm)
+            __atomic_store_n(&deadlineUs_, now + kIdleUs, __ATOMIC_RELEASE);
         if (!--held_)
             platform_.wake(&held_);
         platform_.unlock();
-        if (last)
+        if (arm)
             platform_.arm(kIdleMs);
     }
 
     // The engine's queue drained. Takes no lock: the engine may call it under its own.
     void idle()
     {
-        platform_.arm(kIdleMs);
+        const uint64_t now = platform_.nowUs();
+        // Sequential consistency orders storing activity before observing kBlocked against expire() setting kBlocked
+        // before reading lastActivityUs_.
+        __atomic_store_n(&lastActivityUs_, now, __ATOMIC_SEQ_CST);
+        uint32_t cur = __atomic_load_n(&state_, __ATOMIC_SEQ_CST);
+        for (;;) {
+            if (!(cur & kPowered))
+                return;
+            if (cur & kBlocked) {
+                if (cur & kIdlePending)
+                    return;
+                if (__atomic_compare_exchange_n(&state_, &cur, cur | kIdlePending, true, __ATOMIC_ACQ_REL,
+                                                __ATOMIC_ACQUIRE))
+                    return;
+                continue;
+            }
+            if (cur & kTimerArmed)
+                return;
+            if (__atomic_compare_exchange_n(&state_, &cur, cur | kTimerArmed, true, __ATOMIC_ACQ_REL,
+                                            __ATOMIC_ACQUIRE)) {
+                armTimer(now, kIdleMs);
+                return;
+            }
+        }
     }
 
     void expire()
     {
         char line[160];
         line[0] = 0;
+        uint32_t rearmMs = 0;
         platform_.lock();
-        if (powered_ && !users_ && !asleep_) {
+        if (asleep_ || !(__atomic_load_n(&state_, __ATOMIC_ACQUIRE) & kPowered)) {
+            __atomic_fetch_and(&state_, ~(kTimerArmed | kIdlePending), __ATOMIC_RELEASE);
+            platform_.unlock();
+            return;
+        }
+        uint32_t cur = __atomic_fetch_or(&state_, kBlocked, __ATOMIC_SEQ_CST) | kBlocked;
+        if (cur & kUserMask) {
+            for (;;) {
+                if (!(cur & kPowered)) {
+                    __atomic_fetch_and(&state_, ~(kBlocked | kTimerArmed | kIdlePending), __ATOMIC_RELEASE);
+                    platform_.unlock();
+                    return;
+                }
+                if (!(cur & kUserMask)) {
+                    rearmMs = kIdleMs;
+                    const uint32_t next = (cur & ~(kBlocked | kIdlePending)) | kTimerArmed;
+                    if (__atomic_compare_exchange_n(&state_, &cur, next, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                        break;
+                    continue;
+                }
+                const uint32_t next = cur & ~(kBlocked | kTimerArmed | kIdlePending);
+                if (__atomic_compare_exchange_n(&state_, &cur, next, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                    break;
+            }
+            if (rearmMs)
+                __atomic_store_n(&deadlineUs_, platform_.nowUs() + static_cast<uint64_t>(rearmMs) * 1000,
+                                 __ATOMIC_RELEASE);
+            platform_.unlock();
+            if (rearmMs)
+                platform_.arm(rearmMs);
+            return;
+        }
+        const uint64_t deadline = __atomic_load_n(&deadlineUs_, __ATOMIC_ACQUIRE);
+        const uint64_t activity = __atomic_load_n(&lastActivityUs_, __ATOMIC_SEQ_CST);
+        if (activity) {
+            const uint64_t now = platform_.nowUs();
+            // now < deadline only occurs in host tests firing the timer directly without advancing a stub clock.
+            if (now >= deadline && now >= activity && now - activity < kIdleUs) {
+                const uint64_t remUs = kIdleUs - (now - activity);
+                const uint32_t remMs = static_cast<uint32_t>((remUs + 999) / 1000);
+                rearmMs = remMs ? remMs : 1;
+                __atomic_store_n(&deadlineUs_, now + static_cast<uint64_t>(rearmMs) * 1000, __ATOMIC_RELEASE);
+                cur = __atomic_load_n(&state_, __ATOMIC_RELAXED);
+                while (!__atomic_compare_exchange_n(&state_, &cur, (cur & ~(kBlocked | kIdlePending)) | kTimerArmed,
+                                                    true, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+                }
+                platform_.unlock();
+                platform_.arm(rearmMs);
+                return;
+            }
+        }
+        if (__atomic_load_n(&state_, __ATOMIC_ACQUIRE) & kPowered) {
             const int result = ops_.off(ops_.engine, false);
             if (result == SWITCH_ENGINE_GATE_OFF) {
-                setPowered(false);
+                __atomic_store_n(&lastActivityUs_, 0, __ATOMIC_RELAXED);
+                __atomic_fetch_and(&state_, ~(kPowered | kBlocked | kTimerArmed | kIdlePending), __ATOMIC_RELEASE);
                 count(line, sizeof(line));
             } else if (result < 0) {
-                setPowered(false);
+                __atomic_store_n(&lastActivityUs_, 0, __ATOMIC_RELAXED);
+                __atomic_fetch_and(&state_, ~(kPowered | kBlocked | kTimerArmed | kIdlePending), __ATOMIC_RELEASE);
                 snprintf(line, sizeof(line),
                          "%s: idle power-off refused by the hardware (%d); parked unpowered, the next use powers it on",
                          ops_.name, result);
+            } else {
+                cur = __atomic_load_n(&state_, __ATOMIC_ACQUIRE);
+                for (;;) {
+                    const bool idleRaced = (cur & kIdlePending) != 0;
+                    rearmMs = idleRaced ? kIdleMs : 0;
+                    uint32_t next = cur & ~(kBlocked | kIdlePending);
+                    if (idleRaced)
+                        next |= kTimerArmed;
+                    else
+                        next &= ~kTimerArmed;
+                    if (__atomic_compare_exchange_n(&state_, &cur, next, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                        break;
+                }
+                if (rearmMs)
+                    __atomic_store_n(&deadlineUs_, platform_.nowUs() + static_cast<uint64_t>(rearmMs) * 1000,
+                                     __ATOMIC_RELEASE);
             }
+        } else {
+            __atomic_fetch_and(&state_, ~(kBlocked | kTimerArmed | kIdlePending), __ATOMIC_RELEASE);
         }
         platform_.unlock();
+        if (rearmMs)
+            platform_.arm(rearmMs);
         if (line[0])
             platform_.log(line);
     }
@@ -143,11 +264,13 @@ public:
     {
         platform_.lock();
         asleep_ = true;
+        __atomic_fetch_or(&state_, kBlocked, __ATOMIC_SEQ_CST);
         while (held_)
             platform_.sleep(&held_);
-        if (powered_)
+        if (__atomic_load_n(&state_, __ATOMIC_ACQUIRE) & kPowered)
             (void)ops_.off(ops_.engine, true);
-        setPowered(false);
+        __atomic_store_n(&lastActivityUs_, 0, __ATOMIC_RELAXED);
+        __atomic_fetch_and(&state_, ~(kPowered | kTimerArmed | kIdlePending), __ATOMIC_RELEASE);
         platform_.unlock();
     }
 
@@ -156,16 +279,28 @@ public:
     {
         platform_.lock();
         asleep_ = false;
-        if (users_)
-            (void)powerOn();
+        if (__atomic_load_n(&state_, __ATOMIC_ACQUIRE) & kUserMask)
+            (void)powerOn(0);
+        bool arm = false;
+        uint32_t cur = __atomic_load_n(&state_, __ATOMIC_ACQUIRE);
+        for (;;) {
+            arm = (cur & kPowered) && !(cur & kUserMask) && !(cur & kTimerArmed);
+            const uint32_t next = (cur & ~(kBlocked | kIdlePending)) | (arm ? kTimerArmed : 0);
+            if (__atomic_compare_exchange_n(&state_, &cur, next, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                break;
+        }
+        if (arm)
+            __atomic_store_n(&deadlineUs_, platform_.nowUs() + kIdleUs, __ATOMIC_RELEASE);
         platform_.wake(&asleep_);
         platform_.unlock();
+        if (arm)
+            platform_.arm(kIdleMs);
     }
 
     // For lines that read the engine's registers: they must not while it is off.
     bool powered() const
     {
-        return __atomic_load_n(&powered_, __ATOMIC_RELAXED);
+        return (__atomic_load_n(&state_, __ATOMIC_RELAXED) & kPowered) != 0;
     }
 
     SwitchEngineGateStats stats() const
@@ -179,26 +314,50 @@ public:
     }
 
 private:
+    static constexpr uint64_t kIdleUs = static_cast<uint64_t>(kIdleMs) * 1000;
+    static constexpr uint32_t kPowered = 1u << 31;
+    static constexpr uint32_t kBlocked = 1u << 30;
+    static constexpr uint32_t kTimerArmed = 1u << 29;
+    static constexpr uint32_t kIdlePending = 1u << 28;
+    static constexpr uint32_t kUserMask = kIdlePending - 1;
+
     static void fired(void *gate)
     {
         static_cast<SwitchEngineGate *>(gate)->expire();
     }
 
-    void setPowered(bool on)
+    void armTimer(uint64_t now, uint32_t ms)
     {
-        __atomic_store_n(&powered_, on, __ATOMIC_RELAXED);
+        __atomic_store_n(&deadlineUs_, now + static_cast<uint64_t>(ms) * 1000, __ATOMIC_RELEASE);
+        platform_.arm(ms);
     }
 
-    int powerOn()
+    int useSlow()
     {
-        if (powered_)
+        platform_.lock();
+        while (asleep_)
+            platform_.sleep(&asleep_);
+        const int error = powerOn(1);
+        platform_.unlock();
+        return error;
+    }
+
+    int powerOn(uint32_t addUsers)
+    {
+        if (__atomic_load_n(&state_, __ATOMIC_ACQUIRE) & kPowered) {
+            if (addUsers)
+                __atomic_fetch_add(&state_, addUsers, __ATOMIC_ACQ_REL);
             return 0;
+        }
 #if SWITCH_ENGINE_GATE_STATS
         const uint64_t began = platform_.nowUs();
 #endif
         if (const int error = ops_.on(ops_.engine))
             return error;
-        setPowered(true);
+        uint32_t cur = __atomic_load_n(&state_, __ATOMIC_RELAXED);
+        while (!__atomic_compare_exchange_n(&state_, &cur, (cur | kPowered) + addUsers, true, __ATOMIC_ACQ_REL,
+                                            __ATOMIC_RELAXED)) {
+        }
 #if SWITCH_ENGINE_GATE_STATS
         const uint64_t us = platform_.nowUs() - began;
         stats_.ungates++;
@@ -225,6 +384,7 @@ private:
     Platform platform_;
     SwitchEngineGateOps ops_ = {};
     SwitchEngineGateStats stats_ = {};
-    uint32_t users_ = 0, held_ = 0;
-    bool powered_ = false, asleep_ = false;
+    uint64_t lastActivityUs_ = 0, deadlineUs_ = 0;
+    uint32_t state_ = 0, held_ = 0;
+    bool asleep_ = false;
 };

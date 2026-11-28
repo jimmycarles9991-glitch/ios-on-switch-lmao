@@ -1,5 +1,6 @@
 import HWTestCore
 import HWTestKit
+import HWTestShared
 import SwiftUI
 import UIKit
 

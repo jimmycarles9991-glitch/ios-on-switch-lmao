@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// The frame-weights capture (draw_times.h, through switchMetalFrameWeights: and switchMetalFrameWeightsTaken; debug

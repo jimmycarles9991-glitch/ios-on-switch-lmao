@@ -170,8 +170,12 @@ void tgm_chan_need(tgm_chan *, uint32_t seqno)
 	asked.push_back(seqno);
 }
 
+std::function<void(tgm_chan *)> onChanDel;
+
 void tgm_chan_del(tgm_chan **chan)
 {
+	if (*chan && onChanDel)
+		onChanDel(*chan);
 	*chan = nullptr;
 }
 
@@ -375,9 +379,11 @@ uint64_t nowNs()
 	return 0;
 }
 
+#if TGM_STATS
 void tgm_stats_bo_free(uint64_t)
 {
 }
+#endif
 
 void scheduleOrphanRelease()
 {
@@ -473,11 +479,19 @@ public:
 		}
 	} admissions_[kMaxChannels];
 
+	struct RetiringChannel {
+		tgm_chan *chan;
+		uint32_t queue;
+		uint64_t resetGeneration;
+		bool active;
+	};
+
 	uint64_t admissionCookies_[kMaxChannels] = {};
 	IOLock storage;
 	IOLock *lock_ = &storage;
 	void *vm_ = nullptr;
 	tgm_chan *chans_[kMaxChannels] = {};
+	RetiringChannel retiringChans_[kMaxChannels] = {};
 	Bo *bos_ = nullptr, *zombies_ = nullptr, *readyBos_ = nullptr;
 
 	struct HostMemory {
@@ -519,6 +533,8 @@ public:
 	Left left_ = {};
 	Call releaseStorage;
 	thread_call_t releaseCall_ = &releaseStorage;
+	Call chanRetireStorage;
+	thread_call_t chanRetireCall_ = &chanRetireStorage;
 	IOLock submitStorage[kMaxChannels];
 	IOLock *submitLocks_[kMaxChannels] = {
 		&submitStorage[0], &submitStorage[1], &submitStorage[2], &submitStorage[3],
@@ -543,6 +559,18 @@ public:
 		 retirementStopped_ = 0;
 	uint64_t retirementEpoch_ = 0, retireScanEpoch_ = 0, pool_bytes_ = 0, control_bytes_ = 0,
 		 smmu_compressible_bytes_ = 0;
+	uint64_t bindGen_ = 1, boGen_ = 1;
+
+	void bumpBindGen()
+	{
+		__atomic_add_fetch(&bindGen_, 1u, __ATOMIC_RELEASE);
+	}
+
+	void bumpBoGen()
+	{
+		__atomic_add_fetch(&boGen_, 1u, __ATOMIC_RELEASE);
+	}
+
 	SwitchGpuOwnerMemory ownerMemory_ = {};
 	Binding binds_[256] = {};
 	uint32_t nbinds_ = 0;
@@ -593,8 +621,10 @@ public:
 	void scheduleRetirement();
 	static void retirementFence(void *);
 	static void retirementWork(thread_call_param_t, thread_call_param_t);
+	static void chanRetireWork(thread_call_param_t, thread_call_param_t);
 	bool bindingIdle(const RetiredBinding *) const;
 	void retireBatch();
+	void retireChannels();
 	void takeRetiredOverlaps(uint64_t, uint64_t);
 	void retire(RetiredBinding *);
 	IOReturn cutOverlaps(uint64_t, uint64_t, bool, bool, RetiredBinding **);

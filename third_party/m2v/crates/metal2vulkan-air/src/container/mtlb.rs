@@ -25,7 +25,9 @@
 //!   `ci_filters` and `ci_raw`, CoreUI's and Vision's libraries list one value for every function
 //!   that no digest of the module's bytes gives (PencilKit's one is still the SHA-256). Apple's
 //!   loader takes them, so from format 2.8 a Core Image library's functions are keyed by their
-//!   module's own SHA-256. Every other library's `HASH` is verified.
+//!   module's own SHA-256. Every other library's `HASH` is taken as its tag states it, as Apple's
+//!   loader takes it: what a compile of an app's library makes is kept under that app's own scope.
+
 //! - The extended header's `HDYN` and `ILST` tags each hold an `(offset, size)` of a region of
 //!   the file. `HDYN`'s is a tag list: `NAME`, the library's install name (a dynamic library's
 //!   `installName`; an executable's file name), and one `DYNL` per dynamic library it was linked
@@ -145,7 +147,7 @@ pub struct LibraryFunction<'a> {
     pub name: &'a str,
     /// `TYPE`: the function's stage.
     pub stage: FunctionStage,
-    /// The SHA-256 of [`LibraryFunction::bitcode`], its `HASH` verified (or, for a Core Image
+    /// The SHA-256 of [`LibraryFunction::bitcode`] as its `HASH` states it (or, for a Core Image
     /// library of format 2.8 or later, computed): the function's content key.
     pub hash: Hash256,
     /// `VERS`: the AIR version, major and minor.
@@ -228,14 +230,9 @@ impl Fields<'_> {
     }
 }
 
+/// A metallib, each function's `HASH` taken as its tag states it, so its bitcode is read only when a function of it is
+/// compiled. A library that states no hash (a Core Image library of format 2.8 or later) is hashed here.
 pub(super) fn parse(bytes: &[u8]) -> Result<Metallib<'_>, Error> {
-    parse_hashes(bytes, true)
-}
-
-/// [`parse`], each function's `HASH` taken as its tag states it where `verify` is false: a library read from a sealed
-/// volume, whose bitcode is then read only when a function of it is compiled. A library that states no hash (Core
-/// Image's own) is hashed either way.
-pub(super) fn parse_hashes(bytes: &[u8], verify: bool) -> Result<Metallib<'_>, Error> {
     let have = bytes.len() as u64;
     let Some(head) = bytes.get(..HEADER_LEN) else {
         return Err(container_error(
@@ -355,7 +352,7 @@ pub(super) fn parse_hashes(bytes: &[u8], verify: bool) -> Result<Metallib<'_>, E
         );
     }
 
-    // Function bitcode ranges are disjoint, so verifying every hash is linear in the file size. A
+    // Function bitcode ranges are disjoint, so hashing a Core Image library's module is linear in the file size. A
     // dynamic library's or a Core Image library's functions may share one range exactly, which is hashed once.
     let shared = one_module;
     let mut ranges: Vec<(u64, u64, u64, usize)> = parsed
@@ -375,14 +372,11 @@ pub(super) fn parse_hashes(bytes: &[u8], verify: bool) -> Result<Metallib<'_>, E
     let own_hash =
         header.file_type == FILE_TYPE_CORE_IMAGE && header.version >= CORE_IMAGE_OWN_HASH;
     let mut hashed: Option<(u64, u64, Hash256)> = None;
-    for &(start, len, entry, i) in &ranges {
+    for &(start, len, entry, i) in ranges.iter().filter(|_| own_hash) {
         let p = parsed
             .get_mut(i)
             .ok_or_else(|| container_error(ContainerError::BadOffset, entry))?;
-        if !verify && !own_hash {
-            continue;
-        }
-        let digest = match hashed {
+        p.function.hash = match hashed {
             Some((s, l, digest)) if s == start && l == len => digest,
             _ => {
                 let digest = sha256(p.function.bitcode);
@@ -390,11 +384,6 @@ pub(super) fn parse_hashes(bytes: &[u8], verify: bool) -> Result<Metallib<'_>, E
                 digest
             }
         };
-        if own_hash {
-            p.function.hash = digest;
-        } else if digest != p.function.hash {
-            return Err(container_error(ContainerError::HashMismatch, entry));
-        }
     }
 
     // Metadata records are parsed only after their offsets are known to be disjoint, so each

@@ -37,6 +37,9 @@
 #include <kern/cpc.h>
 #include <stdint.h>
 #include <sys/errno.h>
+#if defined(SWITCH_ARMV8_PMUV3)
+#include <switch/pmuv3.h>
+#endif /* defined(SWITCH_ARMV8_PMUV3) */
 
 // KPC's implementation is maintained for backwards-compatibility,
 // but on ARM, its internals have been replaced by CPC.
@@ -199,13 +202,21 @@ kpc_get_fixed_config(kpc_config_t *configv __unused)
 uint64_t
 kpc_fixed_max(void)
 {
+#if defined(SWITCH_ARMV8_PMUV3)
+	return CPC_CPMU_MAX_COUNT;
+#else // defined(SWITCH_ARMV8_PMUV3)
 	return (1ULL << KPC_ARM64_COUNTER_WIDTH) - 1;
+#endif // !defined(SWITCH_ARMV8_PMUV3)
 }
 
 uint64_t
 kpc_configurable_max(void)
 {
+#if defined(SWITCH_ARMV8_PMUV3)
+	return CPC_CPMU_MAX_COUNT;
+#else // defined(SWITCH_ARMV8_PMUV3)
 	return (1ULL << KPC_ARM64_COUNTER_WIDTH) - 1;
+#endif // !defined(SWITCH_ARMV8_PMUV3)
 }
 
 int
@@ -227,8 +238,12 @@ kpc_get_configurable_config(kpc_config_t *configv, uint64_t pmc_mask)
 uint32_t
 kpc_get_classes(void)
 {
+#if defined(SWITCH_ARMV8_PMUV3)
+	return KPC_CLASS_FIXED_MASK | KPC_CLASS_CONFIGURABLE_MASK;
+#else // defined(SWITCH_ARMV8_PMUV3)
 	return KPC_CLASS_FIXED_MASK | KPC_CLASS_CONFIGURABLE_MASK |
 	       KPC_CLASS_RAWPMU_MASK;
+#endif // !defined(SWITCH_ARMV8_PMUV3)
 }
 
 int
@@ -238,6 +253,39 @@ kpc_get_pmu_version(void)
 }
 
 #pragma mark - Direct CPMU Access
+
+#if defined(SWITCH_ARMV8_PMUV3)
+
+uint32_t
+kpc_rawpmu_config_count(void)
+{
+	return 0;
+}
+
+int
+kpc_get_rawpmu_config(kpc_config_t *configv __unused)
+{
+	return 0;
+}
+
+static uint64_t
+_kpc_read_pmesr(uint32_t counter)
+{
+	if (counter < KPC_ARM64_FIXED_COUNT || counter >= CPMU_PMC_COUNT) {
+		return 0;
+	}
+	uint32_t typer = switch_pmuv3_read_evtyper(counter - 1U);
+	kpc_config_t config = switch_pmuv3_evtyper_event(typer);
+	if (switch_pmuv3_evtyper_counts_user(typer)) {
+		config |= CFGWORD_EL0A32EN_MASK | CFGWORD_EL0A64EN_MASK;
+	}
+	if (switch_pmuv3_evtyper_counts_kernel(typer)) {
+		config |= CFGWORD_EL1EN_MASK;
+	}
+	return config;
+}
+
+#else // defined(SWITCH_ARMV8_PMUV3)
 
 #define PMCR_PMC_8_9_OFFSET     (32)
 #define PMCR_PMC_8_9_SHIFT(PMC) (((PMC) - 8) + PMCR_PMC_8_9_OFFSET)
@@ -358,3 +406,5 @@ _kpc_read_pmesr(uint32_t counter)
 
 	return config;
 }
+
+#endif // !defined(SWITCH_ARMV8_PMUV3)

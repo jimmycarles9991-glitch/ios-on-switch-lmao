@@ -1,6 +1,7 @@
 import CoreVideo
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// A kernel sampling a two-plane 4:2:0 YCbCr texture (540, RGB8_420_2P read as codes, over a '420v' surface) beside an

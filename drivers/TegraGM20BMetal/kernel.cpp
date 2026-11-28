@@ -4,6 +4,7 @@
 #include "lock.h"
 #include "kernel.h"
 #include "TegraGM20BClockABI.h"
+#include "TegraGM20BSchedABI.h"
 #include "TegraGM20BVolatileABI.h"
 #include "encode_profile.h"
 
@@ -32,7 +33,7 @@ std::shared_ptr<SharedEvents> Kernel::sharedEvents()
 {
     if (!exactJobs())
         return nullptr;
-    std::lock_guard<gm20b::Mutex> lock(eventsLock_);
+    std::lock_guard<gm20b::UnfairMutex> lock(eventsLock_);
     if (!events_)
         events_ = SharedEvents::create(conn_, tunnel_, selector_);
     return events_;
@@ -96,6 +97,7 @@ bool Kernel::open(std::string &err)
         return false;
     }
     volatileWrites_ = (info_.flags & TegraGM20BInfoVolatileWrites) != 0;
+    sameUses_ = (info_.flags & TegraGM20BInfoSameUses) != 0;
     const uint64_t start = (info_.va_start + kVaGranule - 1) & ~(kVaGranule - 1);
     uint64_t end = info_.va_end & ~(kVaGranule - 1);
     if (supportsPackImage() && end > TGM_PACK_WINDOW_VA)
@@ -122,7 +124,7 @@ int Kernel::packImageMap(const TegraGM20BAbiPackCpuRange *cpuRanges, uint32_t cp
 
 uint64_t Kernel::allocVa(uint64_t bytes, uint64_t align)
 {
-    std::lock_guard<gm20b::Mutex> lock(vaLock_);
+    std::lock_guard<gm20b::UnfairMutex> lock(vaLock_);
     bytes = (bytes + kVaGranule - 1) & ~(kVaGranule - 1);
     const uint64_t minimumAlignment = bytes >= kBigPageAlignment ? kBigPageAlignment : kVaGranule;
     if (align < minimumAlignment)
@@ -145,7 +147,7 @@ uint64_t Kernel::allocVa(uint64_t bytes, uint64_t align)
 
 void Kernel::freeVa(uint64_t va, uint64_t bytes)
 {
-    std::lock_guard<gm20b::Mutex> lock(vaLock_);
+    std::lock_guard<gm20b::UnfairMutex> lock(vaLock_);
     bytes = (bytes + kVaGranule - 1) & ~(kVaGranule - 1);
     if (!va || !bytes)
         return;
@@ -189,12 +191,20 @@ bool Kernel::alloc(uint64_t bytes, bool coherent, Bo &bo, uint32_t kind, uint64_
         a.flags |= TegraGM20BBoControl;
     if (systemOnly && coherent && !control)
         a.flags |= TegraGM20BBoSystem;
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    if (!coherent && probeDirect.load(std::memory_order_relaxed))
+        a.flags |= TegraGM20BBoProbeDirect;
+#endif
     TegraGM20BAbiBoAllocReply r = {};
     bo = {};
     if (call(TegraGM20BMethodBoAlloc, &a, sizeof a, &r, sizeof r) != KERN_SUCCESS) {
         setError("BoAlloc failed");
         return false;
     }
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    probeDirectBos += (a.flags & TegraGM20BBoProbeDirect) != 0;
+    smmuBos += (r.reserved & TegraGM20BBoReplySmmu) != 0;
+#endif
     bo.handle = r.handle;
     bo.token = r.map_token;
     bo.bytes = bytes;
@@ -263,12 +273,24 @@ bool Kernel::surfaceGpuWrites(uint32_t surfaceId)
     return false;
 }
 
-bool Kernel::priority(uint32_t priority, uint32_t background)
+bool Kernel::priority(uint32_t priority, uint32_t background, bool *critical)
 {
     if (!(info_.flags & TegraGM20BInfoPriority))
         return false;
     const TegraGM20BAbiPriority in = {priority, background};
-    return call(TegraGM20BMethodPriority, &in, sizeof in, nullptr, 0) == KERN_SUCCESS;
+    if (info_.flags & TegraGM20BInfoPriorityReply) {
+        TegraGM20BAbiPriorityReply out = {};
+        if (call(TegraGM20BMethodPriority, &in, sizeof in, &out, sizeof out) != KERN_SUCCESS)
+            return false;
+        if (critical)
+            *critical = (out.flags & TegraGM20BPriorityCritical) != 0;
+        return true;
+    }
+    if (call(TegraGM20BMethodPriority, &in, sizeof in, nullptr, 0) != KERN_SUCCESS)
+        return false;
+    if (critical)
+        *critical = false;
+    return true;
 }
 
 uint32_t Kernel::surfaceLayout(const Bo &bo, uint32_t width, uint32_t height, uint32_t bpp, uint32_t bytesPerRow,
@@ -331,13 +353,14 @@ uint32_t Kernel::surfaceLayout(const Bo &bo, uint32_t width, uint32_t height, ui
     return out.layout;
 }
 
-int Kernel::nativeSurfaceView(const Bo &source, Bo &view, TegraGM20BAbiNativeSurfaceViewReply &layout)
+int Kernel::nativeSurfaceView(const Bo &source, Bo &view, TegraGM20BAbiNativeSurfaceViewReply &layout, bool writable)
 {
     layout = {};
     view = {};
     if (!exactJobs())
         return KERN_SUCCESS;
-    const TegraGM20BAbiNativeSurfaceView in = {source.handle, 0, 0};
+    const TegraGM20BAbiNativeSurfaceView in = {source.handle, writable ? uint32_t(TegraGM20BNativeSurfaceWrite) : 0u,
+                                               0};
     const int result = call(TegraGM20BMethodNativeSurfaceView, &in, sizeof in, &layout, sizeof layout);
     if (result != KERN_SUCCESS || !layout.handle)
         return result;
@@ -470,6 +493,12 @@ int Kernel::park(uint64_t handle, bool guardNone)
     return call(TegraGM20BMethodBoPark, &in, sizeof in, nullptr, 0);
 }
 
+void Kernel::sparesGiveBack()
+{
+    const TegraGM20BAbiSparesGiveBack in = {};
+    (void)call(TegraGM20BMethodSparesGiveBack, &in, sizeof in, nullptr, 0);
+}
+
 int Kernel::unpark(uint64_t handle, uint64_t &address, uint64_t &bytes, uint32_t &status)
 {
     address = 0;
@@ -508,7 +537,7 @@ bool Kernel::mapAt(uint32_t token, uint64_t bytes, uint64_t fixedVa, bool readOn
 
 bool Kernel::channel(uint32_t engines, uint32_t &channel, const volatile uint32_t *&fence)
 {
-    std::lock_guard<gm20b::Mutex> l(lostLock_);
+    std::lock_guard<gm20b::UnfairMutex> l(lostLock_);
     if (engines == TegraGM20BEngineCopy)
         engines |= TegraGM20BEngineCopyOnly;
     TegraGM20BAbiChannelCreate in = {engines, 0};
@@ -539,6 +568,19 @@ bool Kernel::channel(uint32_t engines, uint32_t &channel, const volatile uint32_
     return true;
 }
 
+bool Kernel::channelProgress(uint32_t channel, uint64_t &gpuVa)
+{
+    gpuVa = 0;
+    if (!(info_.flags & TegraGM20BInfoChannelProgress) || !channel)
+        return false;
+    const TegraGM20BAbiChannel in = {channel, 0};
+    TegraGM20BAbiChannelProgressReply r = {};
+    if (call(TegraGM20BMethodChannelProgress, &in, sizeof in, &r, sizeof r) != KERN_SUCCESS || !r.gpu_va)
+        return false;
+    gpuVa = r.gpu_va;
+    return true;
+}
+
 void Kernel::closeChannel(uint32_t channel)
 {
     const TegraGM20BAbiChannel in = {channel, 0};
@@ -547,7 +589,7 @@ void Kernel::closeChannel(uint32_t channel)
 
 const volatile uint32_t *Kernel::channelEpoch()
 {
-    std::lock_guard<gm20b::Mutex> l(lostLock_);
+    std::lock_guard<gm20b::UnfairMutex> l(lostLock_);
     if (!fenceMap_ && !map(info_.fence_token, true, fenceMap_, fenceMapBytes_))
         return nullptr;
     return reinterpret_cast<const volatile uint32_t *>(uintptr_t(fenceMap_)) + TegraGM20BChannelEpochWord;
@@ -625,7 +667,7 @@ bool Kernel::clockAnchors(const volatile TegraGM20BAbiClockAnchors *&table, uint
     TegraGM20BAbiClockAnchorsReply r = {};
     if (call(TegraGM20BMethodClockAnchors, nullptr, 0, &r, sizeof r) != KERN_SUCCESS || !r.gpu_va)
         return false;
-    std::lock_guard<gm20b::Mutex> l(lostLock_);
+    std::lock_guard<gm20b::UnfairMutex> l(lostLock_);
     if (!fenceMap_ && !map(r.fence_token, true, fenceMap_, fenceMapBytes_)) {
         fenceMap_ = 0;
         fenceMapBytes_ = 0;
@@ -650,7 +692,7 @@ void Kernel::notResponding(uint32_t channel, uint32_t opened)
 
 void Kernel::markLost(uint32_t channel, uint32_t opened)
 {
-    std::lock_guard<gm20b::Mutex> l(lostLock_);
+    std::lock_guard<gm20b::UnfairMutex> l(lostLock_);
     if (opened != opened_.load(std::memory_order_relaxed))
         return;
     TegraGM20BAbiStatus st;

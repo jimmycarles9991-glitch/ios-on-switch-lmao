@@ -43,18 +43,27 @@ void switch_diag_proc_exit(struct proc *p, int rv);
 void switch_diag_user_crash(struct task *task, const char *name, int pid, int signal, int exception, int64_t code,
                             int64_t subcode);
 void switch_diag_cpu_hog(struct task *task, const char *name, int pid);
-/* filt_wltouch, after a successful update: a sync wait that returns at once on another wait's knote (diag/workloop.c). */
-void switch_diag_wl_touched(uint32_t command, uint32_t sfflags, uint64_t workloop, uint64_t ident, const void *waiter);
 /* log_unnest_badness, after its rate limit: the current thread unnests [start, end) of its shared region (diag/unnest.c). */
 void switch_diag_unnest(uint64_t start, uint64_t end);
 /* vnode_pager_data_request, on the faulting thread after the pager's read: `bytes` asked of `vp`, `read` (mach) spent
  * in it: the whole read when the file system reads synchronously (a compressed file), its issue otherwise, the wait
  * then being a busy-page wait (diag/pagein.c); the 10 s scheduling report's lines of them. */
-void switch_diag_pagein(struct vnode *vp, uint64_t bytes, uint64_t read);
-struct switch_page_wait switch_diag_page_wait(void *pager, unsigned int absent);
-void switch_diag_page_waited(const struct switch_page_wait *wait);
 void switch_diag_pagein_report(char *line, size_t size, uint64_t window_ns);
 void switch_diag_cryptex_cache(switch_cryptex_cache_counts_t counts);
+#else
+static inline void switch_diag_proc_exit(__unused struct proc *p, __unused int rv)
+{}
+
+static inline void switch_diag_cpu_hog(__unused struct task *task, __unused const char *name, __unused int pid)
+{}
+
+static inline void switch_diag_unnest(__unused uint64_t start, __unused uint64_t end)
+{}
+#endif
+
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_DIAG_WORKLOOP) && SWITCH_DIAG_WORKLOOP
+/* filt_wltouch, after a successful update: a sync wait that returns at once on another wait's knote (diag/workloop.c). */
+void switch_diag_wl_touched(uint32_t command, uint32_t sfflags, uint64_t workloop, uint64_t ident, const void *waiter);
 /* iOS 27's workloop filter, once one of <switch/workloop_handoff.h>'s events happened: its line (diag/workloop.c). */
 void switch_diag_wl_event(enum switch_wl_kind kind, struct switch_wl_event *event);
 /* filt_wlwait_continue, under the workloop's lock: the owner and servicer the line names, by thread id. */
@@ -71,29 +80,9 @@ static inline const void *switch_diag_wl_waking(bool unwoken_wait, const void *w
     return __builtin_expect(unwoken_wait && waiter != NULL, 0) ? waiter : NULL;
 }
 #else
-static inline void switch_diag_proc_exit(__unused struct proc *p, __unused int rv)
-{}
-
-static inline void switch_diag_cpu_hog(__unused struct task *task, __unused const char *name, __unused int pid)
-{}
-
 static inline void switch_diag_wl_touched(__unused uint32_t command, __unused uint32_t sfflags,
                                           __unused uint64_t workloop, __unused uint64_t ident,
                                           __unused const void *waiter)
-{}
-
-static inline void switch_diag_unnest(__unused uint64_t start, __unused uint64_t end)
-{}
-
-static inline void switch_diag_pagein(__unused struct vnode *vp, __unused uint64_t bytes, __unused uint64_t read)
-{}
-
-static inline struct switch_page_wait switch_diag_page_wait(__unused void *pager, __unused unsigned int absent)
-{
-    return (struct switch_page_wait){NULL, 0};
-}
-
-static inline void switch_diag_page_waited(__unused const struct switch_page_wait *wait)
 {}
 
 static inline void switch_diag_wl_event(__unused enum switch_wl_kind kind, __unused struct switch_wl_event *event)
@@ -113,6 +102,23 @@ static inline const void *switch_diag_wl_waking(__unused bool unwoken_wait, __un
 {
     return NULL;
 }
+#endif
+
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
+void switch_diag_pagein(struct vnode *vp, uint64_t bytes, uint64_t read);
+struct switch_page_wait switch_diag_page_wait(void *pager, unsigned int absent);
+void switch_diag_page_waited(const struct switch_page_wait *wait);
+#else
+static inline void switch_diag_pagein(__unused struct vnode *vp, __unused uint64_t bytes, __unused uint64_t read)
+{}
+
+static inline struct switch_page_wait switch_diag_page_wait(__unused void *pager, __unused unsigned int absent)
+{
+    return (struct switch_page_wait){NULL, 0};
+}
+
+static inline void switch_diag_page_waited(__unused const struct switch_page_wait *wait)
+{}
 #endif
 
 __END_DECLS

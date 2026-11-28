@@ -52,6 +52,7 @@ struct switch_busy_episode {
 struct switch_busy {
     bool seen;
     bool open;
+    bool on;          /* on a core: dispatched and not departed since */
     bool off_waiting; /* its last departure was into a wait other than its run loop's */
     bool off_idle;    /* its last departure was into its run loop's wait */
     uint64_t off, off_cpu, cpu0;
@@ -95,6 +96,7 @@ static inline bool switch_busy_departed(struct switch_busy *b, uint64_t now, uin
         }
     }
     b->seen = true;
+    b->on = false;
     b->off = now;
     b->off_cpu = cpu;
     b->off_waiting = waiting && !idle;
@@ -110,6 +112,7 @@ static inline void switch_busy_dispatched(struct switch_busy *b, uint64_t now, u
 {
     const uint64_t ready = made != 0 && made >= b->off && made <= now ? made : now;
 
+    b->on = true;
     if (!b->seen) {
         return;
     }
@@ -136,6 +139,35 @@ static inline void switch_busy_dispatched(struct switch_busy *b, uint64_t now, u
         b->e.runnable += now - ready;
     }
     b->off_waiting = b->off_idle = false;
+}
+
+/*
+ * The open stretch's split as of `now`, for a capture while it lasts (zeros when none is open): its CPU time so far, from
+ * the thread's CPU time `cpu`, and its blocked and run-queue time counting the segment it is in. `made`: when the thread
+ * was last made runnable (0: it is not runnable). The split is otherwise counted at departures and dispatches only, so
+ * a thread 64 s on a run queue would read 0.
+ */
+static inline void switch_busy_split_now(const struct switch_busy *b, uint64_t now, uint64_t cpu, uint64_t made,
+                                         uint64_t *on, uint64_t *blocked, uint64_t *runnable)
+{
+    *on = *blocked = *runnable = 0;
+    if (!b->open) {
+        return;
+    }
+    *on = cpu >= b->cpu0 ? cpu - b->cpu0 : 0;
+    *blocked = b->e.blocked;
+    *runnable = b->e.runnable;
+    if (b->on || now <= b->off) {
+        return;
+    }
+    if (b->off_waiting) {
+        const uint64_t woke = made != 0 && made >= b->off && made <= now ? made : now;
+
+        *blocked += woke - b->off;
+        *runnable += now - woke;
+    } else {
+        *runnable += now - b->off;
+    }
 }
 
 /* The thread leaves a core still runnable with its user code at `pc` (switch_stall_user_where's `where` and value):

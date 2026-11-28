@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// RG8Unorm_sRGB through its RGBA8Unorm_sRGB stand-in (srgb_pair.h): a shared 4x1 one's red and green bytes read by

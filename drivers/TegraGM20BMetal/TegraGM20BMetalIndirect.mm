@@ -56,7 +56,7 @@ uint8_t kindsOf(const SwitchMetalICBCommand &c)
 // The buffers and kinds of the whole buffer follow each command's
 - (void)take:(SwitchMetalICBCommand)command at:(NSUInteger)index
 {
-    std::lock_guard<gm20b::Mutex> hold(_lock);
+    std::lock_guard<gm20b::UnfairMutex> hold(_lock);
     SwitchMetalICBCommand &was = _commands[index];
     if (command.kind != SwitchMetalICBCommand::None && !command.invalid) {
         command.invalid = was.invalid;
@@ -79,7 +79,7 @@ uint8_t kindsOf(const SwitchMetalICBCommand &c)
 
 - (uint8_t)kinds
 {
-    std::lock_guard<gm20b::Mutex> hold(_lock);
+    std::lock_guard<gm20b::UnfairMutex> hold(_lock);
     uint8_t kinds = 0;
     for (uint32_t bit = 0; bit < 4; bit++)
         kinds |= uint8_t((_kinds[bit] ? 1 : 0) << bit);
@@ -88,7 +88,7 @@ uint8_t kindsOf(const SwitchMetalICBCommand &c)
 
 - (SwitchMetalPred)invalidIn:(NSUInteger)first count:(NSUInteger)count why:(const char **)why
 {
-    std::lock_guard<gm20b::Mutex> hold(_lock);
+    std::lock_guard<gm20b::UnfairMutex> hold(_lock);
     for (NSUInteger i = first; i < std::min<NSUInteger>(first + count, _count); i++)
         if (_commands[i].invalid) {
             *why = _commands[i].invalidWhy;
@@ -99,7 +99,7 @@ uint8_t kindsOf(const SwitchMetalICBCommand &c)
 
 - (std::vector<SwitchMetalBuffer *>)buffers
 {
-    std::lock_guard<gm20b::Mutex> hold(_lock);
+    std::lock_guard<gm20b::UnfairMutex> hold(_lock);
     std::vector<SwitchMetalBuffer *> out;
     for (const auto &[buffer, uses] : _buffers)
         out.push_back((__bridge SwitchMetalBuffer *)buffer);

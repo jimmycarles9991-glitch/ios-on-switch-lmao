@@ -49,6 +49,9 @@ void switch_gpu_set_invalidate(struct switch_gpu_resource_set *set, uint32_t cau
  * not the set's. A member leaving the set waits for the submissions inside to record their jobs. */
 int switch_gpu_set_enter(struct switch_gpu_resource_set *set, uint32_t generation);
 void switch_gpu_set_leave(struct switch_gpu_resource_set *set);
+int switch_gpu_set_enter_slot(struct switch_gpu_resource_set *set, uint32_t slot,
+			      uint32_t generation);
+void switch_gpu_set_leave_slot(struct switch_gpu_resource_set *set, uint32_t slot);
 /* The slot's channel ran a job naming the set; only that slot's submitter calls it. */
 void switch_gpu_set_note_job(struct switch_gpu_resource_set *set, uint32_t slot,
 			     const struct switch_gpu_backing_token *job);

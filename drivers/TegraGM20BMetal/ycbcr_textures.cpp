@@ -85,6 +85,10 @@ bool Device::createYcbcrTexture(uint64_t surfaceId, void *base, uint64_t allocBy
     uint32_t imageWidth = width, imageHeight = height;
     if (plan.buffer)
         ycbcrBufferExtent(width, imageWidth, imageHeight);
+    // The kernel decides each plane's layout from the ask. It lays out no surface of planes block-linear
+    // (SwitchGpuSurfaceGeometry.h switch_gpu_surface_packed), as a re-laid plane would move the other plane's bytes and
+    // rows out from under the CPU and the video engines; a planeless surface read as luma alone may come back
+    // block-linear, as any surface of its shape does.
     if (!createSurfaceTexture(surfaceId, base, allocBytes, surface, plan.luma, plan.lumaWidth, imageHeight,
                               plan.lumaPitch, plan.lumaFormat, *y, false, plan.readable, plan.meet))
         return undo();
@@ -144,6 +148,7 @@ void Device::ycbcrImageHeader(Texture &t, uint8_t output, uint32_t packedCodes)
     // Y_SOURCE of a one-code texel, ZERO)
     if (output == YcbcrPackedPlane)
         w[0] &= ~(7u << 25 | (packedCodes == 1 ? 7u << 22 : 0u));
+    noteTicWrite();
 }
 
 }  // namespace gm20b

@@ -43,12 +43,21 @@ void libraryAnswers()
     id<MTLDevice> device = open(writePack(packKey(MTLPixelFormatBGRA8Unorm)));
     ASSERT_TRUE(device != nil);
     NSError *error = nil;
-    id<MTLLibrary> kernels = [device newLibraryWithURL:fileURL(writeMetallib()) error:&error];
+    const std::string path = writeMetallib();
+    id<MTLLibrary> kernels = [device newLibraryWithURL:fileURL(path) error:&error];
     ASSERT_TRUE(kernels != nil) << text(error);
     EXPECT_TRUE([kernels.functionNames isEqualToArray:(@[ @"v", @"f", @"k" ])]) << text(kernels.functionNames);
     EXPECT_EQ(externNames(kernels).count, 0u);
     EXPECT_EQ(kernels.type, MTLLibraryTypeExecutable);
     EXPECT_EQ([kernels newFunctionWithName:@"k"].options, MTLFunctionOptionNone);
+
+    // Espresso builds its default.metallib URL with +[NSURL URLWithString:@"/..."] (isFileURL == NO, scheme == nil).
+    NSURL *schemeless = [NSURL URLWithString:@(path.c_str())];
+    ASSERT_FALSE(schemeless.isFileURL);
+    ASSERT_EQ(schemeless.scheme, nil);
+    id<MTLLibrary> fromPathUrl = [device newLibraryWithURL:schemeless error:&error];
+    ASSERT_TRUE(fromPathUrl != nil) << text(error);
+    EXPECT_NE([fromPathUrl newFunctionWithName:@"k"], nil);
 
     const std::string ci = made_metallib::universal({"tint", "swap_rb"}, 0xB0, 0xEE, {5, 5});
     id<MTLLibrary> externs = [device newLibraryWithFile:@(writeFile("ci.metallib", ci).c_str()) error:&error];

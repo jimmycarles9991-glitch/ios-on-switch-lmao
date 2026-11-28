@@ -18,11 +18,11 @@ void gm20bChanged(SwitchMetalCommandBuffer *cb)
 void gm20bSetCompileWaits(SwitchMetalCommandBuffer *cb, std::vector<std::function<bool()>> waits)
 {
     {
-        std::lock_guard<gm20b::Mutex> l(cb->_lock);
+        std::lock_guard<gm20b::UnfairMutex> l(cb->_lock);
         cb->_compileWaits = std::move(waits);
     }
     cb->_compileWaitGen.fetch_add(1, std::memory_order_acq_rel);
-    cb->_submitOwner.clear();
+    cb->_submitOwner.clearIf(gRM->submitThread.load(std::memory_order_relaxed));
     gm20bChanged(cb);
 }
 
@@ -30,7 +30,7 @@ void gm20bClearCompileWaits(SwitchMetalCommandBuffer *cb)
 {
     std::vector<std::function<bool()>> cleared;
     {
-        std::lock_guard<gm20b::Mutex> l(cb->_lock);
+        std::lock_guard<gm20b::UnfairMutex> l(cb->_lock);
         cleared.swap(cb->_compileWaits);
     }
 }
@@ -43,7 +43,7 @@ void gm20bNoteCompileWaitReady(SwitchMetalCommandBuffer *cb)
 
 static std::vector<std::function<bool()>> copyCompileWaits(SwitchMetalCommandBuffer *cb)
 {
-    std::lock_guard<gm20b::Mutex> l(cb->_lock);
+    std::lock_guard<gm20b::UnfairMutex> l(cb->_lock);
     return cb->_compileWaits;
 }
 
@@ -51,7 +51,7 @@ NSArray *gm20bTakeHandlers(SwitchMetalCommandBuffer *cb, NSMutableArray *__stron
 {
     if (!added.load())
         return nil;
-    std::lock_guard<gm20b::Mutex> l(cb->_lock);
+    std::lock_guard<gm20b::UnfairMutex> l(cb->_lock);
     NSArray *taken = list;
     list = nil;
     return taken;
@@ -114,12 +114,10 @@ static void commandBufferDropped(void *object)
     if (SwitchMetalEncoder *__unsafe_unretained e = (SwitchMetalEncoder *)b->_active)
         e->_cb = nil;
     b->_active = nil;
-#if SWITCH_METAL_DIAGNOSTICS
-    if (b->_lateWriteSampled)
-        gm20bDropLateWrites(b);
-#endif
     if (!completed) {
         b->_deferredPresents.clear();
+        b->_residencySets = nil;
+        b->_residencySnapshots.clear();
         gm20bRecordingDone(b);
     }
 }
@@ -141,19 +139,18 @@ void gm20bPoolCommandBuffers()
         return;
     _owners.push_back(object);
     SwitchMetalResourceFacts facts;
-    if ([object isKindOfClass:[SwitchMetalTexture class]]) {
+    if (__unsafe_unretained SwitchMetalTexture *texture = gm20bAsTexture(object)) {
         facts.kind = SwitchMetalResourceKind::Texture;
-        __unsafe_unretained SwitchMetalTexture *texture = (SwitchMetalTexture *)object;
         facts.roles = uint8_t(texture->_raw.converted() ? SwitchMetalResourceFacts::Converted : 0);
         __unsafe_unretained SwitchMetalTexture *root = texture->_levelsOwner ?: texture;
         facts.surfaceWrites = root->_surfaceWrites;
         facts.cpuBuffer = (__bridge void *)root->_buffer;
-    } else if ([object isKindOfClass:[SwitchMetalBuffer class]]) {
+    } else if (gm20bAsBuffer(object)) {
         facts.kind = SwitchMetalResourceKind::Buffer;
         facts.cpuBuffer = (__bridge void *)object;
-    } else if ([object isKindOfClass:[SwitchMetalSampler class]])
+    } else if (gm20bAsSampler(object))
         facts.kind = SwitchMetalResourceKind::Sampler;
-    else if ([object isKindOfClass:[SwitchMetalHeap class]])
+    else if (gm20bAsHeap(object))
         facts.kind = SwitchMetalResourceKind::Heap;
     _plan.registerResource((__bridge void *)object, facts);
 }
@@ -171,8 +168,115 @@ static const gm20b::Pipeline *recordedPipeline(const gm20b::RasterState &raster)
 {
     if (const gm20b::Pipeline *native = static_cast<const gm20b::Pipeline *>(raster.nativePipeline))
         return native;
-    __unsafe_unretained SwitchMetalPipeline *pipeline = (__bridge SwitchMetalPipeline *)raster.pipeline;
-    return [(id)pipeline isKindOfClass:[SwitchMetalPipeline class]] ? pipeline->_raw : nullptr;
+    __unsafe_unretained SwitchMetalPipeline *pipeline = gm20bAsPipeline((__bridge id)raster.pipeline);
+    return pipeline ? pipeline->_raw : nullptr;
+}
+
+static void resolveDrawUses(__unsafe_unretained SwitchMetalCommandBuffer *cb, const gm20b::Pipeline *native,
+                            bool captures)
+{
+    auto &plan = cb->_plan;
+    const uint32_t index = plan.ownDraw(plan.size() - 1).state;
+    const auto &state = plan.renderStates.own(index);
+    if (state.usesFinal)
+        return;
+    if (!captures)
+        native = recordedPipeline(plan.raster.own(state.raster));
+    if (!native || !native->rec)
+        return;
+    plan.resolveRenderUses(index, native, [&](std::vector<gm20b::ResourceUse> &bound) {
+        const auto &record = *native->rec;
+        const gm20b::SetEntries &entries = native->entries;
+        for (uint32_t i = 0; i < entries.size(); ++i) {
+            const auto &entry = entries[i];
+            if (entry.kind == gm20b::EntryUbo && entry.stage >= 1 && entry.stage <= 2 && entry.slot < 31) {
+                const auto &binding = plan.buffers[entry.stage - 1].current()[entry.slot];
+                if (binding.source == gm20b::BufferBinding::Source::Buffer)
+                    bound.push_back(
+                        {binding.object,
+                         uint8_t(gm20b::ResourceUse::Read |
+                                 (gm20b::bufferStorage(entry) ? gm20b::ResourceUse::Write : 0))});
+            } else if ((entry.kind == gm20b::EntryTexture || entry.kind == gm20b::EntryTexture3d) &&
+                       entry.slot < gm20b::kStageTextures) {
+                const uint32_t at = gm20b::handleStage(entry);
+                const bool written =
+                    entry.stage == 2 && entry.slot < gm20b::kWrittenSlots && (native->writtenSlots >> entry.slot & 1);
+                bound.push_back({plan.textures[at].current().objects[entry.slot],
+                                 uint8_t(gm20b::ResourceUse::Read | gm20b::ResourceUse::Sample |
+                                         (written ? gm20b::ResourceUse::Write : 0))});
+            }
+            if ((entry.kind == gm20b::EntryTexture || entry.kind == gm20b::EntryTexture3d ||
+                 entry.kind == gm20b::EntrySamplerOnly) &&
+                entry.samplerKind == gm20b::SamplerSlot && entry.sampler < gm20b::kStageSamplers) {
+                const uint32_t at = gm20b::handleStage(entry);
+                bound.push_back({plan.samplers[at].current().objects[entry.sampler], gm20b::ResourceUse::Read});
+            }
+        }
+        if (record.vertexSlot < 31 && record.vertexStride) {
+            const auto &binding = plan.buffers[0].current()[record.vertexSlot];
+            if (binding.source == gm20b::BufferBinding::Source::Buffer)
+                bound.push_back({binding.object, gm20b::ResourceUse::Read});
+        }
+        // the buffer slots a stage reaches through its root table, which may be written there too
+        for (uint32_t stage = 0; stage < 2; ++stage)
+            for (uint32_t slots = record.rootSlots[stage]; slots; slots &= slots - 1) {
+                const auto &binding = plan.buffers[stage].current()[__builtin_ctz(slots)];
+                if (binding.source == gm20b::BufferBinding::Source::Buffer)
+                    bound.push_back({binding.object, uint8_t(gm20b::ResourceUse::Read | gm20b::ResourceUse::Write)});
+            }
+    });
+}
+
+void gm20bRecordDraw(__unsafe_unretained SwitchMetalCommandBuffer *cb, uint8_t primitive, uint32_t start,
+                     uint32_t count, uint32_t instances, uint32_t base, const gm20b::Pipeline *native)
+{
+    const bool captures = cb->_plan.capturesRender();
+    cb->_plan.recordDraw(primitive, start, count, instances, base, captures && native && native->rec);
+    resolveDrawUses(cb, native, captures);
+}
+
+void gm20bBeginKeptRender(__unsafe_unretained SwitchMetalCommandBuffer *cb,
+                          __unsafe_unretained MTLRenderPassDescriptor *pass, uint32_t passAt)
+{
+    cb->_predicates.otherWork();
+    cb->_plan.recordRenderBegin((__bridge void *)pass, passAt);
+    cb->_recordedPass = passAt;
+    std::vector<gm20b::ResourceUse> &uses = cb->_plan.recordUses();
+    const SwitchMetalPass &facts = cb->_passes.own(passAt);
+    for (uint8_t mask = facts.colorMask; mask; mask &= uint8_t(mask - 1)) {
+        const SwitchMetalPass::Color &a = facts.color[__builtin_ctz(mask)];
+        uses.push_back({(__bridge void *)a.texture,
+                        uint8_t(gm20b::ResourceUse::Write | (a.load == MTLLoadActionLoad ? gm20b::ResourceUse::Read : 0))});
+        if (a.resolve)
+            uses.push_back({(__bridge void *)a.resolve, gm20b::ResourceUse::Write});
+    }
+    if (facts.depth)
+        uses.push_back({(__bridge void *)facts.depth,
+                        uint8_t(gm20b::ResourceUse::Write |
+                                (facts.depthLoad == MTLLoadActionLoad || facts.stencilLoad == MTLLoadActionLoad
+                                     ? gm20b::ResourceUse::Read
+                                     : 0))});
+    if (id stencil = facts.zeta[1].texture; stencil && stencil != facts.depth)
+        uses.push_back({(__bridge void *)stencil,
+                        uint8_t(gm20b::ResourceUse::Write |
+                                (facts.stencilLoad == MTLLoadActionLoad ? gm20b::ResourceUse::Read : 0))});
+    if (facts.depthResolve)
+        uses.push_back({(__bridge void *)facts.depthResolve, gm20b::ResourceUse::Write});
+    if (facts.stencilResolve)
+        uses.push_back({(__bridge void *)facts.stencilResolve, gm20b::ResourceUse::Write});
+    if (!uses.empty())
+        cb->_plan.addUses(cb->_plan.size() - 1, uses);
+}
+
+void gm20bEndEncoder(__unsafe_unretained SwitchMetalCommandBuffer *cb)
+{
+    cb->_plan.recordEnd();
+    if (cb->_encOpen) {
+        if (gm20bAheadReads(cb))
+            gm20bPrepareEncoder(cb, cb->_encAt, cb->_plan.size());
+        cb->_encOpen = false;
+        gm20bPublishEncoder(cb);
+    }
 }
 
 - (void)record:(const Cmd &)cmd
@@ -194,70 +298,21 @@ static const gm20b::Pipeline *recordedPipeline(const gm20b::RasterState &raster)
     if (_plan.record(cmd, _extra.ownData(), _extra.size(), native && native->rec)) {
         std::vector<gm20b::ResourceUse> &uses = _plan.recordUses();
         if (draws) {
-            const uint32_t index = _plan.ownDraw(_plan.size() - 1).state;
-            const auto &state = _plan.renderStates.own(index);
-            if (!state.usesFinal) {
-                if (!captures)
-                    native = recordedPipeline(_plan.raster.own(state.raster));
-                if (native && native->rec) {
-                    _plan.resolveRenderUses(index, native, [&](std::vector<gm20b::ResourceUse> &bound) {
-                        const auto &record = *native->rec;
-                        const gm20b::SetEntries &entries = native->entries;
-                        for (uint32_t i = 0; i < entries.size(); ++i) {
-                            const auto &entry = entries[i];
-                            if (entry.kind == gm20b::EntryUbo && entry.stage >= 1 && entry.stage <= 2 &&
-                                entry.slot < 31) {
-                                const auto &binding =
-                                    _plan.buffers[entry.stage - 1][state.buffers[entry.stage - 1]][entry.slot];
-                                if (binding.source == gm20b::BufferBinding::Source::Buffer)
-                                    bound.push_back(
-                                        {binding.object,
-                                         uint8_t(gm20b::ResourceUse::Read |
-                                                 (gm20b::bufferStorage(entry) ? gm20b::ResourceUse::Write : 0))});
-                            } else if ((entry.kind == gm20b::EntryTexture || entry.kind == gm20b::EntryTexture3d) &&
-                                       entry.slot < gm20b::kStageTextures) {
-                                const uint32_t at = gm20b::handleStage(entry);
-                                const bool written = entry.stage == 2 && entry.slot < gm20b::kWrittenSlots &&
-                                                     (native->writtenSlots >> entry.slot & 1);
-                                bound.push_back({_plan.textures[at][state.textures[at]].objects[entry.slot],
-                                                 uint8_t(gm20b::ResourceUse::Read | gm20b::ResourceUse::Sample |
-                                                         (written ? gm20b::ResourceUse::Write : 0))});
-                            }
-                            if ((entry.kind == gm20b::EntryTexture || entry.kind == gm20b::EntryTexture3d ||
-                                 entry.kind == gm20b::EntrySamplerOnly) &&
-                                entry.samplerKind == gm20b::SamplerSlot && entry.sampler < gm20b::kStageSamplers) {
-                                const uint32_t at = gm20b::handleStage(entry);
-                                bound.push_back({_plan.samplers[at][state.samplers[at]].objects[entry.sampler],
-                                                 gm20b::ResourceUse::Read});
-                            }
-                        }
-                        if (record.vertexSlot < 31 && record.vertexStride) {
-                            const auto &binding = _plan.buffers[0][state.buffers[0]][record.vertexSlot];
-                            if (binding.source == gm20b::BufferBinding::Source::Buffer)
-                                bound.push_back({binding.object, gm20b::ResourceUse::Read});
-                        }
-                        // the buffer slots a stage reaches through its root table, which may be written there too
-                        for (uint32_t stage = 0; stage < 2; ++stage)
-                            for (uint32_t slots = record.rootSlots[stage]; slots; slots &= slots - 1) {
-                                const auto &binding = _plan.buffers[stage][state.buffers[stage]][__builtin_ctz(slots)];
-                                if (binding.source == gm20b::BufferBinding::Source::Buffer)
-                                    bound.push_back({binding.object,
-                                                     uint8_t(gm20b::ResourceUse::Read | gm20b::ResourceUse::Write)});
-                            }
-                    });
-                }
-            }
+            resolveDrawUses(self, native, captures);
         } else if (cmd.op == OpDispatch && cmd.obj2) {
             admitComputeDispatch(self, _plan.size() - 1,
                                  static_cast<const gm20b::ComputeKernelSet<gm20b::ComputeState> *>(cmd.obj2), nullptr);
         } else if (cmd.op == OpRender) {
             _recordedPass = uint32_t(cmd.x);
             const SwitchMetalPass &pass = _passes.own(cmd.x);
-            for (const SwitchMetalPass::Color &a : pass.color)
-                if (a.texture)
-                    uses.push_back({(__bridge void *)a.texture,
-                                    uint8_t(gm20b::ResourceUse::Write |
-                                            (a.load == MTLLoadActionLoad ? gm20b::ResourceUse::Read : 0))});
+            for (uint8_t mask = pass.colorMask; mask; mask &= uint8_t(mask - 1)) {
+                const SwitchMetalPass::Color &a = pass.color[__builtin_ctz(mask)];
+                uses.push_back({(__bridge void *)a.texture,
+                                uint8_t(gm20b::ResourceUse::Write |
+                                        (a.load == MTLLoadActionLoad ? gm20b::ResourceUse::Read : 0))});
+                if (a.resolve)
+                    uses.push_back({(__bridge void *)a.resolve, gm20b::ResourceUse::Write});
+            }
             if (pass.depth)
                 uses.push_back({(__bridge void *)pass.depth,
                                 uint8_t(gm20b::ResourceUse::Write |
@@ -268,9 +323,6 @@ static const gm20b::Pipeline *recordedPipeline(const gm20b::RasterState &raster)
                 uses.push_back({(__bridge void *)stencil,
                                 uint8_t(gm20b::ResourceUse::Write |
                                         (pass.stencilLoad == MTLLoadActionLoad ? gm20b::ResourceUse::Read : 0))});
-            for (const SwitchMetalPass::Color &a : pass.color)
-                if (a.resolve)
-                    uses.push_back({(__bridge void *)a.resolve, gm20b::ResourceUse::Write});
             if (pass.depthResolve)
                 uses.push_back({(__bridge void *)pass.depthResolve, gm20b::ResourceUse::Write});
             if (pass.stencilResolve)
@@ -285,10 +337,6 @@ static const gm20b::Pipeline *recordedPipeline(const gm20b::RasterState &raster)
         if (cmd.op == OpEnd && _encOpen) {
             if (gm20bAheadReads(self))
                 gm20bPrepareEncoder(self, _encAt, _plan.size());
-#if SWITCH_METAL_DIAGNOSTICS
-            if (!_lateWriteChecked)
-                gm20bSampleLateWrites(self, _encAt, _plan.size());
-#endif
             [self closeEncoder];
             gm20bPublishEncoder(self);
         }
@@ -313,7 +361,7 @@ static const gm20b::Pipeline *recordedPipeline(const gm20b::RasterState &raster)
 
 - (NSMutableDictionary *)userDictionary
 {
-    std::lock_guard<gm20b::Mutex> l(_lock);
+    std::lock_guard<gm20b::UnfairMutex> l(_lock);
     if (!_userDictionary)
         _userDictionary = [NSMutableDictionary dictionary];
     return _userDictionary;
@@ -321,16 +369,17 @@ static const gm20b::Pipeline *recordedPipeline(const gm20b::RasterState &raster)
 
 - (uint64_t)globalTraceObjectID
 {
-    std::lock_guard<gm20b::Mutex> l(_lock);
+    std::lock_guard<gm20b::UnfairMutex> l(_lock);
     if (!_traceId)
         _traceId = nextTraceId();
     return _traceId;
 }
 
-// Every allocation is mapped in the one GPU VM and stays resident: a residency set asks nothing of the driver
+// Every allocation is mapped in the one GPU VM and stays resident; what the set's host-visible allocations ask of the
+// command buffer's jobs is gm20bNameResidencySets'
 - (void)useResidencySet:(id)set
 {
-    (void)set;
+    gm20bUseResidencySet(self, set);
 }
 
 // (QuartzCore 27, per command buffer: the kernel charges GPU time to the task that submits it, this one)
@@ -342,13 +391,13 @@ static const gm20b::Pipeline *recordedPipeline(const gm20b::RasterState &raster)
 
 - (void)useResidencySets:(const __unsafe_unretained id *)sets count:(NSUInteger)count
 {
-    (void)sets;
-    (void)count;
+    for (NSUInteger k = 0; k < count; k++)
+        gm20bUseResidencySet(self, sets[k]);
 }
 
 - (MTLCommandBufferStatus)status
 {
-    return _status.load();
+    return _status.load(std::memory_order_acquire);
 }
 
 - (NSError *)error
@@ -448,7 +497,7 @@ static const gm20b::Pipeline *recordedPipeline(const gm20b::RasterState &raster)
     }
     _hasScheduledHandlers.store(true);
     {
-        std::lock_guard<gm20b::Mutex> l(_lock);
+        std::lock_guard<gm20b::UnfairMutex> l(_lock);
         // once scheduled() took the handlers, one added is run behind them (was: until they ran, it joined a list no one read
         // again, and a presentDrawable added then never presented)
         if (!_scheduledSent) {
@@ -457,8 +506,11 @@ static const gm20b::Pipeline *recordedPipeline(const gm20b::RasterState &raster)
             [_scheduledHandlers addObject:[block copy]];
         } else {
             _handlersQueued = true;
-            dispatch_async(_queue->_handlers, ^{
-                block((id<MTLCommandBuffer>)self);
+            MTLCommandBufferHandler copy = [block copy];
+            _queue->_handlerExec.enqueue([self, copy] {
+                @autoreleasepool {
+                    copy((id<MTLCommandBuffer>)self);
+                }
             });
         }
     }
@@ -478,7 +530,7 @@ static const gm20b::Pipeline *recordedPipeline(const gm20b::RasterState &raster)
     bool now;
     _hasCompletedHandlers.store(true);
     {
-        std::lock_guard<gm20b::Mutex> l(_lock);
+        std::lock_guard<gm20b::UnfairMutex> l(_lock);
         now = _completedSent;  // as addScheduledHandler: once finish() took the handlers
         if (!now) {
             if (!_completedHandlers)
@@ -506,7 +558,7 @@ static void deferPresent(SwitchMetalCommandBuffer *cb, id<MTLDrawable> drawable,
     bool failed = false;
     bool wake = false;
     {
-        std::lock_guard<gm20b::Mutex> l(cb->_lock);
+        std::lock_guard<gm20b::UnfairMutex> l(cb->_lock);
         completed = cb->_completedSent.load(std::memory_order_seq_cst);
         if (!completed) {
             cb->_presents.store(true, std::memory_order_release);
@@ -572,7 +624,7 @@ static void deferPresent(SwitchMetalCommandBuffer *cb, id<MTLDrawable> drawable,
 
 - (void)enqueue
 {
-#if SWITCH_METAL_DIAGNOSTICS
+#if SWITCH_METAL_STATS
     gm20bNoteEnqueue(self);
 #endif
     enqueueBuffer(self);
@@ -580,10 +632,10 @@ static void deferPresent(SwitchMetalCommandBuffer *cb, id<MTLDrawable> drawable,
 
 - (void)commit
 {
-    if (_committed.exchange(true))
+    if (_committed.exchange(true, std::memory_order_acq_rel))
         return;
     gm20bClaimCommitSlot(self);
-    _status = MTLCommandBufferStatusCommitted;
+    _status.store(MTLCommandBufferStatusCommitted, std::memory_order_release);
     _kernelStart = hostSeconds();
 #if SWITCH_METAL_DIAGNOSTICS
     _committedTicks = mach_absolute_time();
@@ -599,13 +651,7 @@ static void deferPresent(SwitchMetalCommandBuffer *cb, id<MTLDrawable> drawable,
 #endif
     if (_active)
         [(SwitchMetalEncoder *)_active endEncoding];
-#if SWITCH_METAL_DIAGNOSTICS
-    if (_lateWriteSampled)
-        gm20bCheckLateWrites(self);
-#endif
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-    glassProbeCommitted(self);
-#endif
+    gm20bSnapshotResidencySets(self);
     [(SwitchMetalDevice *)_device gm20bCommit:self];
 #if SWITCH_FRAME_TIMELINE
     _frame.mark(switch_frame::Back);
@@ -624,41 +670,42 @@ static void deferPresent(SwitchMetalCommandBuffer *cb, id<MTLDrawable> drawable,
     // A failed one returns once finish() withdrew the writes it will never make (TegraGM20BMetalSchedule.mm cancelPromises), so
     // a present its caller makes next of a surface it was to write is refused, never shown with the frame before
     auto returns = [&] {
-        return gm20b::scheduledWaitReturns(_scheduledDone,
+        return gm20b::scheduledWaitReturns(_scheduledDone.load(std::memory_order_acquire),
                                            _segError.set() && _promised.load(std::memory_order_acquire));
     };
-    if (_committed && !returns()) {
+    if (_committed.load(std::memory_order_acquire) && !returns()) {
 #if SWITCH_FRAME_TIMELINE
         const switch_frame::WaitScope frameWait(_frame);
 #endif
-#if SWITCH_METAL_DIAGNOSTICS
+#if SWITCH_METAL_STATS
         const BlockedWait blocked(gRM->stats.scheduledWaits, gRM->stats.scheduledWaitUs);
         const uint64_t from = nowUs();
 #endif
         waitFor(self, returns);
-#if SWITCH_METAL_DIAGNOSTICS
+#if SWITCH_METAL_STATS
         gm20bNoteScheduledWait(self, from, nowUs());
 #endif
     }
-#if SWITCH_METAL_DIAGNOSTICS
+#if SWITCH_METAL_STATS
     uint64_t none = 0;
-    if (_held && !_scheduledDone && _heldReturnUs.compare_exchange_strong(none, nowUs()))
+    if (_held.load(std::memory_order_acquire) && !_scheduledDone.load(std::memory_order_acquire) &&
+        _heldReturnUs.compare_exchange_strong(none, nowUs(), std::memory_order_acq_rel, std::memory_order_relaxed))
         gRM->stats.heldReturns++;
 #endif
 }
 
 - (void)waitUntilCompleted
 {
-    if (!_committed || _completedDone)
+    if (!_committed.load(std::memory_order_acquire) || _completedDone.load(std::memory_order_acquire))
         return;
-#if SWITCH_METAL_DIAGNOSTICS
+#if SWITCH_METAL_STATS
     const BlockedWait blocked(gRM->stats.completedWaits, gRM->stats.completedWaitUs);
 #endif
     // a range of it in flight may have ended quiet: the completion thread waits for the newest one
     gRM->completionWaiters.fetch_add(1, std::memory_order_seq_cst);
     gRM->inflight.wake();
     waitFor(self, [&] {
-        return _completedDone.load();
+        return _completedDone.load(std::memory_order_acquire);
     });
     gRM->completionWaiters.fetch_sub(1, std::memory_order_relaxed);
 }
@@ -666,8 +713,8 @@ static void deferPresent(SwitchMetalCommandBuffer *cb, id<MTLDrawable> drawable,
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
 - (NSNumber *)switchMetalWholePrograms
 {
-    std::lock_guard<gm20b::Mutex> lock(_lock);
-    if (_committed)
+    std::lock_guard<gm20b::UnfairMutex> lock(_lock);
+    if (_committed.load(std::memory_order_relaxed))
         return @NO;
     gm20bPipelineVeto(self, VetoProbes);
     _forceWholePrograms = true;
@@ -678,8 +725,8 @@ static void deferPresent(SwitchMetalCommandBuffer *cb, id<MTLDrawable> drawable,
 // inlineStates)
 - (NSNumber *)switchMetalInlineStates
 {
-    std::lock_guard<gm20b::Mutex> lock(_lock);
-    if (_committed)
+    std::lock_guard<gm20b::UnfairMutex> lock(_lock);
+    if (_committed.load(std::memory_order_relaxed))
         return @NO;
     gm20bPipelineVeto(self, VetoProbes);
     _inlineStates = true;
@@ -690,7 +737,7 @@ static void deferPresent(SwitchMetalCommandBuffer *cb, id<MTLDrawable> drawable,
 // stamps) or "host" (the host's window from submission to completion, which stands in where no stamp was read)
 - (NSString *)switchGpuClock
 {
-    if (!_completedSent)
+    if (!_completedSent.load(std::memory_order_acquire))
         return @"pending";
     return _gpuStamped ? @"ns" : @"host";
 }
@@ -701,7 +748,7 @@ static void deferPresent(SwitchMetalCommandBuffer *cb, id<MTLDrawable> drawable,
 // mark this acquires.
 - (NSString *)switchMetalPath
 {
-    if (!_completedSent)
+    if (!_completedSent.load(std::memory_order_acquire))
         return @"pending";
     if (!_error)
         return @"gm20b";
@@ -736,7 +783,7 @@ static void deferPresent(SwitchMetalCommandBuffer *cb, id<MTLDrawable> drawable,
 // kernel's anchors)
 - (NSDictionary<NSString *, NSNumber *> *)switchMetalPipelined
 {
-    if (!_completedSent)
+    if (!_completedSent.load(std::memory_order_acquire))
         return nil;
     NSMutableDictionary *out = [@{
         @"encoders" : @(_pipelineEncoders),
@@ -800,17 +847,24 @@ static void deferPresent(SwitchMetalCommandBuffer *cb, id<MTLDrawable> drawable,
 
 @implementation SwitchMetalQueue
 
+// nil where its handler thread cannot be made, as Metal's newCommandQueue answers nil where it makes no queue
 - (instancetype)init
 {
     if ((self = [super init])) {
         queuePriorityAdd(self);
-        _handlers = followingSerialQueue("com.brunostjohn.switch.gm20b.command.handlers");
+        int err = 0;
+        if (!_handlerExec.start(err)) {
+            os_log_error(gm20bLog(), "SwitchMetal: %{public}s: no command queue made: its handler thread: %{public}s",
+                         getprogname(), strerror(err));
+            return nil;
+        }
     }
     return self;
 }
 
 - (void)dealloc
 {
+    _handlerExec.stop();
     queuePriorityRemove(self);
 }
 
@@ -820,7 +874,7 @@ static void deferPresent(SwitchMetalCommandBuffer *cb, id<MTLDrawable> drawable,
     SwitchMetalCommandBuffer *b = [SwitchMetalCommandBuffer new];
     b->_device = _device;
     b->_queue = self;
-    b->_status = MTLCommandBufferStatusNotEnqueued;
+    b->_status.store(MTLCommandBufferStatusNotEnqueued, std::memory_order_relaxed);
     gm20bTakeRecording(b);
 #if SWITCH_FRAME_TIMELINE
     switch_frame::made(b->_frame);
@@ -842,27 +896,27 @@ static void deferPresent(SwitchMetalCommandBuffer *cb, id<MTLDrawable> drawable,
 - (void)insertDebugCaptureBoundary
 {}
 
-// (as the command buffer's: everything is resident)
+// Every command buffer of the queue uses these sets (gm20bSnapshotResidencySets, gm20bNameResidencySets)
 - (void)addResidencySet:(id)set
 {
-    (void)set;
+    gm20bQueueAddResidencySet(self, set);
 }
 
 - (void)addResidencySets:(const __unsafe_unretained id *)sets count:(NSUInteger)count
 {
-    (void)sets;
-    (void)count;
+    for (NSUInteger k = 0; k < count; k++)
+        gm20bQueueAddResidencySet(self, sets[k]);
 }
 
 - (void)removeResidencySet:(id)set
 {
-    (void)set;
+    gm20bQueueRemoveResidencySet(self, set);
 }
 
 - (void)removeResidencySets:(const __unsafe_unretained id *)sets count:(NSUInteger)count
 {
-    (void)sets;
-    (void)count;
+    for (NSUInteger k = 0; k < count; k++)
+        gm20bQueueRemoveResidencySet(self, sets[k]);
 }
 
 - (void)setCompletionQueue:(dispatch_queue_t)queue

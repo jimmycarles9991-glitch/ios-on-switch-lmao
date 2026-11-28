@@ -1,5 +1,7 @@
 import Darwin
 import HWTestCore
+import HWTestKit
+import HWTestShared
 
 /// SOC_THERM's hardware throttle as the kernel programmed it (kern.switch_soctherm, debug kernels;
 /// drivers/SwitchPower/SwitchSocThermThrottle.h): L4T's T210B01 setting is one heavy indicator at PLLX 94.5 C that

@@ -532,3 +532,166 @@ fn native_sm53_memory_conversions_preserve_every_half_bit_pattern() {
         );
     }
 }
+
+/// A `half` `fast::powr` on SM53 (`NativeShaderTarget::ieee_half_powr`) is the device's `Log2`, an
+/// exact product and its `Exp2`, with no select around them and no other extended instruction.
+#[test]
+fn native_sm53_half_powr_is_the_bare_composition() {
+    let h = float(16);
+    // `None`: the kernel's loads and stores of both operands alone, which hold their own selects
+    let words = |ieee: Option<bool>| {
+        let routines = std::collections::BTreeMap::new();
+        let m = kernel(&[h, h], h, &|fb, x| {
+            let Some(ieee) = ieee else {
+                return fb.binary_with(BinOp::FAdd, x[0], x[1], Contraction::Allowed);
+            };
+            fb.module().set_ieee_half_powr(ieee);
+            fb.module()
+                .set_quantize_form(crate::spirv::builder::QuantizeForm::Converted);
+            math::float_fn(
+                fb,
+                FloatFn::FastPowr,
+                h,
+                Contraction::Allowed,
+                NanTest::IsNan,
+                x,
+                &Lib::native(&routines),
+            )
+        })
+        .expect("kernel");
+        crate::spirv::serialize::serialize(m).expect("words").words
+    };
+    const OP_EXT_INST: u32 = 12;
+    const OP_SELECT: u32 = 169;
+    const OP_DECORATE: u32 = 71;
+    const NO_CONTRACTION: u32 = 42;
+    const GLSL_EXP2: u32 = 29;
+    const GLSL_LOG2: u32 = 30;
+    let census = |w: &[u32]| {
+        let (mut selects, mut glsl, mut exact) = (0, Vec::new(), 0);
+        let mut i = 5;
+        while i < w.len() {
+            let (n, op) = ((w[i] >> 16) as usize, w[i] & 0xFFFF);
+            match op {
+                OP_SELECT => selects += 1,
+                OP_EXT_INST => glsl.push(w[i + 4]),
+                OP_DECORATE if w[i + 2] == NO_CONTRACTION => exact += 1,
+                _ => {}
+            }
+            i += n.max(1);
+        }
+        (selects, glsl, exact)
+    };
+    let (framed, _, _) = census(&words(None));
+    let (selects, glsl, exact) = census(&words(Some(true)));
+    assert_eq!(selects, framed);
+    assert_eq!(glsl, [GLSL_LOG2, GLSL_EXP2]);
+    assert!(exact >= 1);
+    let (selects, _, _) = census(&words(Some(false)));
+    assert!(
+        selects >= framed + 3,
+        "the selects the device fact removes: {selects} of {framed}"
+    );
+}
+
+/// What `NativeShaderTarget::ieee_half_powr` rests on: IEEE `log2`, `exp2` and multiplication give
+/// Metal's `fast::powr` of `half` operands (`math::fast_powr_special`'s rule, measured on the M3 and
+/// the M4) at every special operand, and its value everywhere else. Each step here rounds to `f32`,
+/// as the device's do, and the answer to `half`.
+#[test]
+fn ieee_composition_is_metals_half_powr_at_every_special_operand() {
+    let metal = |x: f64, y: f64, y_negative: bool| -> Option<f64> {
+        if x.is_nan() || y.is_nan() {
+            return Some(f64::NAN);
+        }
+        if x < 0.0
+            || (y == 0.0 && (x == 0.0 || x == f64::INFINITY))
+            || (y.is_infinite() && x == 1.0)
+        {
+            return Some(f64::NAN);
+        }
+        let log_infinite = x == 0.0 || x.is_infinite();
+        if (log_infinite && y != 0.0) || y.is_infinite() {
+            let log_negative = x == 0.0 || (x.is_finite() && x < 1.0);
+            return Some(if log_negative != y_negative {
+                0.0
+            } else {
+                f64::INFINITY
+            });
+        }
+        None
+    };
+    let composed = |x: f64, y: f64| -> f64 {
+        let l = f64::from((x as f32).log2());
+        let p = f64::from((y as f32) * (l as f32));
+        f16_to_f64(f64_to_f16(f64::from((p as f32).exp2())))
+    };
+    let mut halves: Vec<u16> = vec![
+        0, 0x8000, 0x0001, 0x8001, 0x03FF, 0x0400, 0x3BFF, 0x3C00, 0x3C01, 0xBC00, 0x4000, 0x3800,
+        0x7BFF, 0xFBFF, 0x7C00, 0xFC00, 0x7E00, 0xFE00, 0x7C01,
+    ];
+    halves.extend((0..=u16::MAX).step_by(251).map(|h| h as u16));
+    let mut checked = 0;
+    for &xb in &halves {
+        for &yb in &halves {
+            let (x, y) = (f16_to_f64(xb), f16_to_f64(yb));
+            let Some(want) = metal(x, y, yb & 0x8000 != 0) else {
+                continue;
+            };
+            let got = composed(x, y);
+            assert!(
+                (got.is_nan() && want.is_nan())
+                    || (got == want && got.is_sign_negative() == want.is_sign_negative()),
+                "powr({xb:#06x}, {yb:#06x}): {got} != {want}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 1000);
+}
+
+/// A `half` division by native device maths is the device's quotient rounded to `half`, with no
+/// scale: the `float` divisor bound `2^126` is `+inf` as a `half`, so its test was false on every
+/// lane.
+#[test]
+fn native_half_division_takes_no_divisor_scale() {
+    let h = float(16);
+    let body = |fb: &mut FunctionBuilder<'_>, x: &[Value]| -> BResult<Value> {
+        fb.module()
+            .set_quantize_form(crate::spirv::builder::QuantizeForm::Converted);
+        super::super::divide::native(fb, h, x[0], x[1])
+    };
+    let selects = |m: TypedModule| {
+        let w = crate::spirv::serialize::serialize(m).expect("words").words;
+        let (mut n, mut i) = (0, 5);
+        while i < w.len() {
+            n += usize::from(w[i] & 0xFFFF == 169);
+            i += ((w[i] >> 16) as usize).max(1);
+        }
+        n
+    };
+    let framed = selects(
+        kernel(&[h, h], h, &|fb, x| {
+            fb.binary_with(BinOp::FAdd, x[0], x[1], Contraction::Allowed)
+        })
+        .expect("kernel"),
+    );
+    assert_eq!(selects(kernel(&[h, h], h, &body).expect("kernel")), framed);
+    let halves: Vec<u64> = vec![
+        0, 0x8000, 0x0001, 0x03FF, 0x0400, 0x3C00, 0xBC00, 0x3555, 0x7BFF, 0xFBFF, 0x7C00, 0xFC00,
+        0x7E00,
+    ];
+    let cases = pairs(&halves, &halves);
+    check(
+        "native half division",
+        &[h, h],
+        h,
+        &body,
+        &cases,
+        &|c| {
+            let (x, y) = (f16_to_f64(arg(c, 0) as u16), f16_to_f64(arg(c, 1) as u16));
+            Some(vec![u64::from(f64_to_f16(f64::from(x as f32 / y as f32)))])
+        },
+        false,
+    );
+}

@@ -78,15 +78,13 @@ int VFS_VGET(Mount *mount, ino64_t id, vnode_t *out, int)
     }
     return ENOENT;
 }
-int switch_bootstrap_lock;
-void lck_mtx_lock(int *) {}
-void lck_mtx_unlock(int *) {}
 vnode_t switch_bootstrap_root;
 Mount *switch_bootstrap_data;
 uint64_t switch_bootstrap_root_id, switch_bootstrap_data_id;
 #include "bootstrap_membership.h"
 
-char *zalloc(int) { return static_cast<char *>(std::malloc(MAXPATHLEN)); }
+int zalloc_calls;
+char *zalloc(int) { ++zalloc_calls; return static_cast<char *>(std::malloc(MAXPATHLEN)); }
 void zfree(int, void *memory) { std::free(memory); }
 int vn_getpath(vnode_t vp, char *path, int *length)
 {
@@ -446,6 +444,26 @@ TEST_F(BootstrapApps, MaintainerScriptsRequireRetainedOwnedOriginalAndSignedInte
     image.ip_scriptvp = nullptr;
     EXPECT_EQ(switch_bootstrap_exec_preflight(&current, &image), 0u);
     EXPECT_EQ(switch_bootstrap_exec_check(&image), EPERM);
+}
+
+TEST_F(BootstrapApps, InactiveOrOffVolumeFastPathsSkipPathAllocation)
+{
+    zalloc_calls = 0;
+    vnode foreign{&system, 10, 1, "/System/Library/Frameworks/Foundation.framework/Foundation"};
+    foreign.directory = false;
+    EXPECT_FALSE(switch_bootstrap_app_access(&foreign, FREAD));
+    EXPECT_FALSE(switch_bootstrap_read_access(&foreign, FREAD));
+    EXPECT_FALSE(switch_bootstrap_app_lookup(&foreign, "Foundation", 10));
+    EXPECT_EQ(preflight(&current, &foreign), 0u);
+    EXPECT_EQ(zalloc_calls, 0);
+
+    switch_bootstrap_root = nullptr;
+    EXPECT_FALSE(switch_bootstrap_app_access(&asset, FREAD));
+    EXPECT_FALSE(switch_bootstrap_read_access(&asset, FREAD));
+    EXPECT_FALSE(switch_bootstrap_app_lookup(&root, "Applications", 12));
+    EXPECT_FALSE(switch_bootstrap_app_preflight(&data, "/var/jb/Applications/Example.app/Info.plist", 43));
+    EXPECT_EQ(preflight(&current, &executable), 0u);
+    EXPECT_EQ(zalloc_calls, 0);
 }
 }
 

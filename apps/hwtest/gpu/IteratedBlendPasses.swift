@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// QuartzCore's multiply over BGRA8 (PBGRAXm_TimgBmpyA2Xhf_Isrc, its colour 1 write-masked), which the facade draws

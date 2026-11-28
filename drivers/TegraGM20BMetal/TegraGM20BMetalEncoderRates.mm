@@ -5,46 +5,15 @@
 #include "scheduled_wait.h"
 #include <cstdarg>
 
-#if SWITCH_METAL_DIAGNOSTICS
+#if SWITCH_METAL_STATS
 namespace {
-
-struct LateWriteSample {
-    struct BufferEntry {
-        __unsafe_unretained SwitchMetalBuffer *buffer;
-        size_t length;
-        uint64_t hash;
-    };
-
-    struct TextureEntry {
-        __unsafe_unretained SwitchMetalTexture *root;
-        uint32_t replaceCount;
-        uint32_t surfaceSeed;
-        bool hasSurface;
-    };
-
-    static constexpr size_t kMaxBuffers = 4, kMaxTextures = 8, kMaxHashBytes = 4096;
-    BufferEntry buffers[kMaxBuffers];
-    TextureEntry textures[kMaxTextures];
-    size_t bufferCount = 0, textureCount = 0;
-};
-
-LateWriteSample gLateWriteSlot;
-std::atomic<void *> gLateWriteOwner{nullptr};
-
-uint64_t hashPrefix(const uint8_t *bytes, size_t n)
-{
-    uint64_t h = 1469598103934665603ull;
-    for (size_t i = 0; i < n; ++i)
-        h = (h ^ bytes[i]) * 1099511628211ull;
-    return h;
-}
 
 // A wait this long is named on its own line as it ends, with where its time went
 constexpr uint64_t kLongWaitUs = 50000;
 
 const char *const kVetoNames[32] = {
-    "-",      "counters", "shadows", "variant", "probes", "parallel", "ops",     "refused",
-    "planar", "native",   "failed",  "other",   "device", "zcull",    "channel",
+    "-",       "counters", "shadows", "variant", "probes", "parallel", "ops",
+    "refused", "planar",   "native",  "failed",  "other",  "device",   "channel",
 };
 
 const char *const kLostNames[] = {"-", "short", "busy", "late"};
@@ -136,110 +105,6 @@ void gm20bNoteEnqueue(SwitchMetalCommandBuffer *cb)
                                                                        : gm20b::EnqueueTiming::BeforeCommit);
 }
 
-void gm20bSampleLateWrites(SwitchMetalCommandBuffer *cb, size_t from, size_t to)
-{
-    cb->_lateWriteChecked = true;
-    const uint32_t period = gm20b::frameCpuCounts().lateWritePeriod.load(std::memory_order_relaxed);
-    static std::atomic<uint64_t> seen{0};
-    if (!period || (seen.fetch_add(1, std::memory_order_relaxed) + 1) % period != 0)
-        return;
-    void *expected = nullptr;
-    if (!gLateWriteOwner.compare_exchange_strong(expected, (__bridge void *)cb, std::memory_order_acq_rel))
-        return;
-    LateWriteSample &sample = gLateWriteSlot;
-    sample.bufferCount = 0;
-    sample.textureCount = 0;
-    void *written[32];
-    size_t writtenCount = 0;
-    cb->_plan.forEachOperationUse(from, to, [&](void *object, uint8_t access) {
-        if (!(access & gm20b::ResourceUse::Write) || writtenCount >= 32)
-            return;
-        for (size_t i = 0; i < writtenCount; ++i)
-            if (written[i] == object)
-                return;
-        written[writtenCount++] = object;
-    });
-    const auto wasWritten = [&](void *object) {
-        for (size_t i = 0; i < writtenCount; ++i)
-            if (written[i] == object)
-                return true;
-        return false;
-    };
-    cb->_plan.forEachOperationUse(from, to, [&](void *object, uint8_t access) {
-        if (!object || !(access & (gm20b::ResourceUse::Read | gm20b::ResourceUse::Sample)))
-            return;
-        const SwitchMetalResourceFacts *facts = cb->_plan.factsOf(object);
-        if (!facts)
-            return;
-        if (facts->kind == SwitchMetalResourceKind::Buffer && sample.bufferCount < LateWriteSample::kMaxBuffers) {
-            __unsafe_unretained SwitchMetalBuffer *b = (__bridge SwitchMetalBuffer *)object;
-            for (size_t i = 0; i < sample.bufferCount; ++i)
-                if (sample.buffers[i].buffer == b)
-                    return;
-            if (b->_raw.hostVisible && b->_raw.cpu && b->_raw.length && !b->_raw.arena && !b->_aliasable &&
-                !b->_gpuDirty.load(std::memory_order_acquire)) {
-                const size_t n = std::min<size_t>(size_t(b->_raw.length), LateWriteSample::kMaxHashBytes);
-                sample.buffers[sample.bufferCount++] = {b, n, hashPrefix(b->_raw.cpu, n)};
-            }
-        } else if (facts->kind == SwitchMetalResourceKind::Texture && !(access & gm20b::ResourceUse::Write) &&
-                   sample.textureCount < LateWriteSample::kMaxTextures) {
-            __unsafe_unretained SwitchMetalTexture *t = (__bridge SwitchMetalTexture *)object;
-            __unsafe_unretained SwitchMetalTexture *root = t->_levelsOwner ?: t;
-            if (wasWritten((__bridge void *)t) || wasWritten((__bridge void *)root))
-                return;
-            for (size_t i = 0; i < sample.textureCount; ++i)
-                if (sample.textures[i].root == root)
-                    return;
-            sample.textures[sample.textureCount++] = {root, root->_replaceCount.load(std::memory_order_relaxed),
-                                                      root->_surface ? IOSurfaceGetSeed(root->_surface) : 0u,
-                                                      root->_surface != nullptr};
-        }
-    });
-    if (sample.bufferCount || sample.textureCount)
-        cb->_lateWriteSampled = true;
-    else
-        gLateWriteOwner.store(nullptr, std::memory_order_release);
-}
-
-void gm20bCheckLateWrites(SwitchMetalCommandBuffer *cb)
-{
-    cb->_lateWriteSampled = false;
-    if (gLateWriteOwner.load(std::memory_order_acquire) != (__bridge void *)cb)
-        return;
-    const LateWriteSample &sample = gLateWriteSlot;
-    bool bufChanged = false, replaceChanged = false, surfaceChanged = false;
-    for (size_t i = 0; i < sample.bufferCount; ++i) {
-        const auto &e = sample.buffers[i];
-        if (hashPrefix(e.buffer->_raw.cpu, e.length) != e.hash) {
-            bufChanged = true;
-            break;
-        }
-    }
-    for (size_t i = 0; i < sample.textureCount; ++i) {
-        const auto &e = sample.textures[i];
-        if (e.root->_replaceCount.load(std::memory_order_relaxed) != e.replaceCount)
-            replaceChanged = true;
-        if (e.hasSurface && IOSurfaceGetSeed(e.root->_surface) != e.surfaceSeed)
-            surfaceChanged = true;
-    }
-    gLateWriteOwner.store(nullptr, std::memory_order_release);
-    gm20b::FrameCpuCounts &c = gm20b::frameCpuCounts();
-    c.lateWriteSampled.fetch_add(1, std::memory_order_relaxed);
-    if (bufChanged)
-        c.lateWriteBuffer.fetch_add(1, std::memory_order_relaxed);
-    if (replaceChanged)
-        c.lateWriteReplace.fetch_add(1, std::memory_order_relaxed);
-    if (surfaceChanged)
-        c.lateWriteSurface.fetch_add(1, std::memory_order_relaxed);
-}
-
-void gm20bDropLateWrites(SwitchMetalCommandBuffer *cb)
-{
-    cb->_lateWriteSampled = false;
-    void *expected = (__bridge void *)cb;
-    gLateWriteOwner.compare_exchange_strong(expected, nullptr, std::memory_order_release);
-}
-
 void gm20bNoteScheduledWait(SwitchMetalCommandBuffer *cb, uint64_t fromUs, uint64_t toUs)
 {
     const gm20b::ScheduledWait w = gm20b::splitScheduledWait(cb->_scheduleNotes, fromUs, toUs);
@@ -273,7 +138,7 @@ void gm20bNoteScheduledWait(SwitchMetalCommandBuffer *cb, uint64_t fromUs, uint6
 
 size_t metal_frame_rates(char *out, size_t size)
 {
-#if SWITCH_METAL_DIAGNOSTICS
+#if SWITCH_METAL_STATS
     if (!gRM || !size)
         return 0;
     gm20b::FrameCpuCounts &c = gm20b::frameCpuCounts();
@@ -295,8 +160,17 @@ size_t metal_frame_rates(char *out, size_t size)
     const uint64_t pipelined = gRM->stats.pipelinedEncoders.load(std::memory_order_relaxed),
                    sealed = gRM->stats.sealedEncoders.load(std::memory_order_relaxed);
     const uint64_t kicks = take(c.kicks), kickUs = take(c.kickUs);
+    put(line, " ind=%llu/%llu", (unsigned long long)take(c.indirectDrained), (unsigned long long)take(c.indirectFree));
     put(line, " split=%llu kick=%llu/%lluus", (unsigned long long)take(c.splits),
         (unsigned long long)(kicks ? kickUs / kicks : 0), (unsigned long long)take(c.kickMaxUs));
+    // the Shared spans zeroed at the front of a command buffer since the last line (scrubs.cpp), against buffers
+    static uint64_t lastScrubRuns, lastScrubBytes;
+    const uint64_t scrubRuns = gRM->raw->stats.scrubbedRuns.load(std::memory_order_relaxed),
+                   scrubBytes = gRM->raw->stats.scrubbedBytes.load(std::memory_order_relaxed);
+    put(line, " scrub=%llu/%lluKiB", (unsigned long long)(scrubRuns - lastScrubRuns),
+        (unsigned long long)((scrubBytes - lastScrubBytes) >> 10));
+    lastScrubRuns = scrubRuns;
+    lastScrubBytes = scrubBytes;
     put(line, " ahead=%llu/%llu enc=%llu/%llu why=", (unsigned long long)take(c.ahead), (unsigned long long)buffers,
         (unsigned long long)(pipelined - lastPipelined), (unsigned long long)(sealed - lastSealed));
     lastPipelined = pipelined;
@@ -337,13 +211,13 @@ size_t metal_frame_rates(char *out, size_t size)
         (unsigned long long)take(c.longestParts[0]), (unsigned long long)take(c.longestParts[1]),
         (unsigned long long)take(c.longestParts[2]), (unsigned long long)take(c.longestParts[3]),
         (unsigned long long)take(c.longestParts[4]));
+    put(line, " early=");
+    for (size_t k = 0; k < size_t(gm20b::EarlyOutcome::Count); k++)
+        put(line, "%s%llu", k ? "/" : "", (unsigned long long)take(c.early[k]));
     using E = gm20b::EnqueueTiming;
-    put(line, " enq=%llu/%llu/%llu latew=%llu/%llu/%llu/%llu",
-        (unsigned long long)take(c.enqueues[size_t(E::BeforeFirstEncoder)]),
+    put(line, " enq=%llu/%llu/%llu", (unsigned long long)take(c.enqueues[size_t(E::BeforeFirstEncoder)]),
         (unsigned long long)take(c.enqueues[size_t(E::BeforeCommit)]),
-        (unsigned long long)take(c.enqueues[size_t(E::Never)]), (unsigned long long)take(c.lateWriteSampled),
-        (unsigned long long)take(c.lateWriteBuffer), (unsigned long long)take(c.lateWriteReplace),
-        (unsigned long long)take(c.lateWriteSurface));
+        (unsigned long long)take(c.enqueues[size_t(E::Never)]));
     return line.used;
 #else
     (void)out;
@@ -351,14 +225,3 @@ size_t metal_frame_rates(char *out, size_t size)
     return 0;
 #endif
 }
-
-#if SWITCH_METAL_DIAGNOSTICS
-@implementation SwitchMetalDevice (FrameRates)
-
-- (NSNumber *)switchMetalProbeLateWritePeriod:(NSNumber *)period
-{
-    return @(gm20b::frameCpuCounts().lateWritePeriod.exchange(period.unsignedIntValue, std::memory_order_relaxed));
-}
-
-@end
-#endif

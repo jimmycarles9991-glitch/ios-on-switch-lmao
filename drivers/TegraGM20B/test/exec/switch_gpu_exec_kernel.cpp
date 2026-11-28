@@ -93,6 +93,15 @@ void switch_linux_udelay(uint64_t)
 {
 }
 
+void switch_linux_usleep_range(uint64_t, uint64_t)
+{
+}
+
+bool switch_linux_can_sleep(void)
+{
+	return true;
+}
+
 void nvxnu_log(const char *format, ...)
 {
 	char line[512];

@@ -7,8 +7,10 @@
 
 namespace {
 
+// One of the two
 struct FreshEntry {
     __weak SwitchMetalTexture *texture;
+    __weak SwitchMetalBuffer *buffer;
 };
 
 gm20b::FreshQueue<FreshEntry> gFresh;
@@ -16,8 +18,7 @@ gm20b::FreshQueue<FreshEntry> gFresh;
 #if SWITCH_METAL_DIAGNOSTICS
 std::atomic<uint64_t> gFilled{0}, gFilledBytes{0}, gCleared{0};
 std::mutex gTraceLock;
-NSMapTable<SwitchMetalTexture *, NSString *>
-    *gUnwritten;  // fresh textures no command wrote yet: the read before it, if one came
+NSMapTable<SwitchMetalTexture *, NSNumber *> *gUnwritten;
 std::atomic<uint64_t> gEarlyReads{0};
 #endif
 
@@ -107,7 +108,64 @@ FirstUse firstUse(SwitchMetalCommandBuffer *cb, size_t from, size_t to, SwitchMe
     return FirstUse::None;
 }
 
+// Whether an encoder of [from, to) names buffer `b`: its first use, which the fill goes ahead of whatever it does
+bool namesBuffer(SwitchMetalCommandBuffer *cb, size_t from, size_t to, SwitchMetalBuffer *b)
+{
+    bool named = false;
+    cb->_plan.forEachResource(from, to, SwitchMetalResourceKind::Buffer, [&](const SwitchMetalRangeResource &use) {
+        named |= (__bridge SwitchMetalBuffer *)use.object == b;
+    });
+    return named;
+}
+
+uint64_t writeFreshBuffer(gm20b::BlitEncoder &blit, SwitchMetalBuffer *b)
+{
+    blit.fillBytes(b->_raw.va, b->_raw.length, 0);
+    return b->_raw.length;
+}
+
+// An entry's first use in [from, to) (all of a whole range when `to` is not past `from`): a buffer's is any use
+FirstUse entryUse(SwitchMetalCommandBuffer *cb, size_t from, size_t to, const FreshEntry &e)
+{
+    if (SwitchMetalBuffer *b = e.buffer)
+        return to <= from || namesBuffer(cb, from, to, b) ? FirstUse::Other : FirstUse::None;
+    SwitchMetalTexture *t = e.texture;
+    return to > from ? firstUse(cb, from, to, t) : FirstUse::Other;
+}
+
+uint64_t writeEntry(gm20b::BlitEncoder &blit, const FreshEntry &e)
+{
+    if (SwitchMetalBuffer *b = e.buffer)
+        return writeFreshBuffer(blit, b);
+    return writeFresh(blit, e.texture);
+}
+
+bool live(const FreshEntry &e)
+{
+    if (e.buffer)
+        return true;
+    SwitchMetalTexture *t = e.texture;
+    return t && !t->_heap;
+}
+
+id objectOf(const FreshEntry &e)
+{
+    return e.buffer ? (id)e.buffer : (id)e.texture;
+}
+
+FreshEntry entryOf(id object)
+{
+    if ([object isKindOfClass:[SwitchMetalBuffer class]])
+        return {nil, (SwitchMetalBuffer *)object};
+    return {(SwitchMetalTexture *)object, nil};
+}
+
 }  // namespace
+
+void establishFreshBuffer(SwitchMetalBuffer *b)
+{
+    gFresh.add({nil, b});
+}
 
 bool freshFills(SwitchMetalTexture *t, MTLTextureDescriptor *d)
 {
@@ -119,12 +177,12 @@ void establishFresh(SwitchMetalTexture *t, MTLTextureDescriptor *d)
 {
     if (!freshFills(t, d))
         return;
-    gFresh.add({t});
+    gFresh.add({t, nil});
 #if SWITCH_METAL_DIAGNOSTICS
     std::lock_guard<std::mutex> l(gTraceLock);
     if (!gUnwritten)
         gUnwritten = [NSMapTable weakToStrongObjectsMapTable];
-    [gUnwritten setObject:@"" forKey:t];
+    [gUnwritten setObject:@NO forKey:t];
     t->_freshUnwritten.store(true, std::memory_order_relaxed);
 #endif
 }
@@ -137,22 +195,21 @@ static std::vector<id> writeEntries(SwitchMetalCommandBuffer *cb, size_t from, s
     std::vector<id> handled;
     gm20b::BlitEncoder *b = nullptr;
     for (FreshEntry &e : entries) {
-        SwitchMetalTexture *t = e.texture;
-        if (!t || t->_heap)
+        if (!live(e))
             continue;
-        const FirstUse use = to > from ? firstUse(cb, from, to, t) : FirstUse::Other;
+        const FirstUse use = entryUse(cb, from, to, e);
         if (use == FirstUse::None) {
-            later.push_back({t});
+            later.push_back(e);
             continue;
         }
-        handled.push_back(t);
+        handled.push_back(objectOf(e));
         if (use == FirstUse::ClearsAll) {
             SWITCH_METAL_DIAGNOSTIC(gCleared.fetch_add(1, std::memory_order_relaxed));
             continue;
         }
         if (!b)
             b = rc.blit();
-        const uint64_t bytes = writeFresh(*b, t);
+        const uint64_t bytes = writeEntry(*b, e);
         SWITCH_METAL_DIAGNOSTIC(gFilledBytes.fetch_add(bytes, std::memory_order_relaxed));
         SWITCH_METAL_DIAGNOSTIC(gFilled.fetch_add(1, std::memory_order_relaxed));
         (void)bytes;
@@ -177,15 +234,14 @@ bool FreshWrites::claim(SwitchMetalCommandBuffer *cb, size_t from, size_t to)
         return false;
     std::vector<FreshEntry> taken = gFresh.take(), later;
     for (FreshEntry &e : taken) {
-        SwitchMetalTexture *t = e.texture;
-        if (!t || t->_heap)
+        if (!live(e))
             continue;
-        const FirstUse use = firstUse(cb, from, to, t);
+        const FirstUse use = entryUse(cb, from, to, e);
         if (use == FirstUse::None) {
-            later.push_back({t});
+            later.push_back(e);
             continue;
         }
-        (use == FirstUse::ClearsAll ? handled_ : pending_).push_back(t);
+        (use == FirstUse::ClearsAll ? handled_ : pending_).push_back(objectOf(e));
         SWITCH_METAL_DIAGNOSTIC(gCleared.fetch_add(use == FirstUse::ClearsAll, std::memory_order_relaxed));
     }
     gFresh.settle(std::move(later), false);
@@ -197,8 +253,8 @@ void FreshWrites::written(gm20b::CommandBuffer &rc)
     if (pending_.empty())
         return;
     gm20b::BlitEncoder *b = rc.blit();
-    for (id t : pending_) {
-        const uint64_t bytes = writeFresh(*b, (SwitchMetalTexture *)t);
+    for (id object : pending_) {
+        const uint64_t bytes = writeEntry(*b, entryOf(object));
         SWITCH_METAL_DIAGNOSTIC(gFilledBytes.fetch_add(bytes, std::memory_order_relaxed));
         SWITCH_METAL_DIAGNOSTIC(gFilled.fetch_add(1, std::memory_order_relaxed));
         (void)bytes;
@@ -221,8 +277,8 @@ FreshWrites::~FreshWrites()
         return;
     std::vector<FreshEntry> back;
     for (const std::vector<id> *list : {&handled_, &pending_})
-        for (id t : *list)
-            back.push_back({(SwitchMetalTexture *)t});
+        for (id object : *list)
+            back.push_back(entryOf(object));
     gFresh.settle(std::move(back), false);
 }
 
@@ -248,7 +304,7 @@ bool freshBeforeTransfer(SwitchMetalTexture *t)
                 rc->abandon();
         }
         if (!submitted)
-            gFresh.add({t});
+            gFresh.add({t, nil});
         return submitted;
     });
 }
@@ -268,56 +324,24 @@ void traceFreshUses(SwitchMetalCommandBuffer *cb, size_t begin)
     if (!unwritten)
         return;
     std::lock_guard<std::mutex> l(gTraceLock);
-    NSString *here = nil;
-    auto describe = [&] {
-        if (here)
-            return here;
-        const auto op = cb->_plan.operation(begin).op;
-        NSString *state = @"-";
-        if (op == OpRender)
-            for (void *p : cb->_plan.renderPipelines(begin, end))
-                if (NSString *label = ((__bridge SwitchMetalPipeline *)p).label) {
-                    state = label;
-                    break;
-                }
-        here = [NSString stringWithFormat:@"%s %zu of command buffer %p (%@)",
-                                          op == OpRender ? "pass"
-                                          : op == OpBlit ? "blit"
-                                                         : "compute",
-                                          begin, cb, state];
-        return here;
-    };
     cb->_plan.forEachResource(begin, end, SwitchMetalResourceKind::Texture, [&](const SwitchMetalRangeResource &use) {
         SwitchMetalTexture *t = ownerOf((__bridge SwitchMetalTexture *)use.object);
-        NSString *readBy = [gUnwritten objectForKey:t];
-        if (!readBy)
+        NSNumber *seen = [gUnwritten objectForKey:t];
+        if (!seen)
             return;
         if (t->_heap) {
             [gUnwritten removeObjectForKey:t];
             t->_freshUnwritten.store(false, std::memory_order_relaxed);
             return;
         }
-        const gm20b::Texture &x = t->_raw;
         const bool reads = (use.access & gm20b::ResourceUse::Sample) ||
                            ((use.access & gm20b::ResourceUse::Read) && !(use.access & gm20b::ResourceUse::Write));
-        if (reads && !readBy.length) {
-            const uint64_t n = gEarlyReads.fetch_add(1, std::memory_order_relaxed) + 1;
-            if (n <= 64 || n % 256 == 0)
-                os_log(gm20bLog(),
-                       "SwitchMetal: fresh %ux%u format %u texture %{public}@ read by %{public}@ before any command "
-                       "wrote it "
-                       "(#%llu)",
-                       x.width, x.height, x.format, t.label ?: @"-", describe(), (unsigned long long)n);
-            readBy = describe();
-            [gUnwritten setObject:readBy forKey:t];
+        if (reads && !seen.boolValue) {
+            gEarlyReads.fetch_add(1, std::memory_order_relaxed);
+            [gUnwritten setObject:@YES forKey:t];
         }
         if (!(use.access & gm20b::ResourceUse::Write))
             return;
-        if (readBy.length)
-            os_log(gm20bLog(),
-                   "SwitchMetal: fresh %ux%u format %u texture %{public}@ first written by %{public}@, after "
-                   "%{public}@ read it",
-                   x.width, x.height, x.format, t.label ?: @"-", describe(), readBy);
         [gUnwritten removeObjectForKey:t];
         t->_freshUnwritten.store(false, std::memory_order_relaxed);
     });

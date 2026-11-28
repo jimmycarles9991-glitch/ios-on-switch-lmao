@@ -5,6 +5,7 @@
 #import "TegraGM20BMetalResolveAsk.h"
 #import "TegraGM20BMetalBlitImages.h"
 #import "TegraGM20BMetalBlitRules.h"
+#import "TegraGM20BMetalCopyClamp.h"
 #import "TegraGM20BMetalDecoded.h"
 #import "TegraGM20BMetalXrCopies.h"
 #include "blit_planes.h"
@@ -52,9 +53,12 @@ const char *planesCopyForm(SwitchMetalTexture *a, NSUInteger sl, MTLOrigin so, M
         (!blitImage(a, uint32_t(sl), image) || !gm20b::imageInUnits(image, unit, from) ||
          !gm20b::unitRegionReadable(from, imageBytes(image), so.x, so.y, size.width, size.height)))
         return "into a texture held through planes, read in its unit past its source's memory";
-    if (fromPlanes &&
-        (!gm20b::planeBytes(s, unit, from) || !gm20b::planeRegionReadable(from, so.x, so.y, size.width, size.height)))
+    if (fromPlanes && !gm20b::planeBytes(s, unit, from))
         return "of a region that reads past the end of its surface's last page";
+    if (fromPlanes && !gm20b::planeRegionReadable(from, so.x, so.y, size.width, size.height))
+        return from.blockLinear ? "of a region whose rows run into bytes a block-linear surface does not lay out (a "
+                                  "row's padding, or past its plane's rows)"
+                                : "of a region that reads past the end of its surface's last page";
     if (intoPlanes &&
         (!gm20b::planeBytes(d, unit, to, true) || dorg.x + size.width > to.width || dorg.y + size.height > to.height))
         return "of a region past a plane's rows";
@@ -68,7 +72,7 @@ bool bufferCopy(__unsafe_unretained SwitchMetalCommandBuffer *cb, const char *ca
                 NSUInteger slice, NSUInteger level, MTLOrigin &o, MTLSize &size, NSUInteger offset, NSUInteger row,
                 NSUInteger image, MTLBlitOption options, bool intoTexture, int &aspect)
 {
-    SwitchMetalBuffer *a = [(id)s isKindOfClass:[SwitchMetalBuffer class]] ? (SwitchMetalBuffer *)s : nil;
+    SwitchMetalBuffer *a = gm20bAsBuffer(s);
     aspect = gm20b::kAspectWhole;
     if (!a) {
         gm20bCallInvalid(cb, PredCallBufForeign, offset, 0,
@@ -115,16 +119,47 @@ bool bufferCopy(__unsafe_unretained SwitchMetalCommandBuffer *cb, const char *ca
     }
     if (t->_descriptor.sampleCount > 1) {
         SwitchMetalTexture *owner = t->_levelsOwner ?: t;
-        bool made;
-        @synchronized(owner) {
-            made = gRM->raw->sampleRows(owner->_raw);
-        }
-        if (!made) {
-            failNoStencilTemp(cb, call);
-            return false;
+        if (!__atomic_load_n(&owner->_raw.sampleRows, __ATOMIC_ACQUIRE)) {
+            os_unfair_lock_lock(&owner->_auxLock);
+            const bool made = gRM->raw->sampleRows(owner->_raw);
+            os_unfair_lock_unlock(&owner->_auxLock);
+            if (!made) {
+                failNoStencilTemp(cb, call);
+                return false;
+            }
         }
     }
     return true;
+}
+
+bool isIdentityTextureCopy(SwitchMetalTexture *a, NSUInteger ss, NSUInteger sl, MTLOrigin so, SwitchMetalTexture *b,
+                           NSUInteger ds, NSUInteger dl, MTLOrigin dorg, uint32_t form)
+{
+    if (so.x != dorg.x || so.y != dorg.y || so.z != dorg.z)
+        return false;
+    if (form == kCopyStencilOut || form == kCopyStencilIn || form == kCopyPlaneBytes || gm20b::heldInPlanes(a->_raw) ||
+        gm20b::heldInPlanes(b->_raw))
+        return false;
+    if (gm20bCopyClamps(a, uint32_t(sl), b, uint32_t(dl)))
+        return false;
+    SwitchMetalTexture *ao = a->_ownForm ? a : a->_levelsOwner ?: a;
+    SwitchMetalTexture *bo = b->_ownForm ? b : b->_levelsOwner ?: b;
+    if (ao == bo) {
+        if (a->_raw.storePitch)
+            return false;
+        const NSUInteger aLevel = a->_ownForm ? sl : a->_levelsBase + sl;
+        const NSUInteger bLevel = b->_ownForm ? dl : b->_levelsBase + dl;
+        const NSUInteger aSlice = a->_ownForm ? ss : a->_slicesBase + ss;
+        const NSUInteger bSlice = b->_ownForm ? ds : b->_slicesBase + ds;
+        return aLevel == bLevel && aSlice == bSlice;
+    }
+    if (ao->_buffer && ao->_buffer == bo->_buffer && !a->_raw.blockLinear && !b->_raw.blockLinear) {
+        if (a->_raw.storePitch || b->_raw.storePitch)
+            return false;
+        return a->_raw.bpp == b->_raw.bpp && a->_raw.va == b->_raw.va && a->_raw.pitch == b->_raw.pitch &&
+               a->_raw.layers == b->_raw.layers && a->_raw.layerBytes == b->_raw.layerBytes && sl == dl && ss == ds;
+    }
+    return false;
 }
 }  // namespace
 
@@ -176,11 +211,13 @@ bool bufferCopy(__unsafe_unretained SwitchMetalCommandBuffer *cb, const char *ca
         if (!copySideOk(a, ss, sl, so, size) || !copySideOk(b, ds, dl, dorg, size))
             return failNoImage(_cb, call);
     }
+    if (isIdentityTextureCopy(a, ss, sl, so, b, ds, dl, dorg, form))
+        return;
     [_cb retain:s];
     [_cb retain:d];
     noteReadAsData(s);
-    if ([(id)d isKindOfClass:[SwitchMetalTexture class]])
-        declareGpuWrites((SwitchMetalTexture *)d);
+    if (SwitchMetalTexture *dst = gm20bAsTexture(d))
+        declareGpuWrites(dst);
     Cmd m = cmd(OpCopyTexture);
     m.a = form;
     m.obj = (__bridge void *)s;
@@ -246,8 +283,8 @@ bool bufferCopy(__unsafe_unretained SwitchMetalCommandBuffer *cb, const char *ca
 
 - (void)fillBuffer:(id<MTLBuffer>)b range:(NSRange)r value:(uint8_t)value
 {
-    SwitchMetalBuffer *t = (SwitchMetalBuffer *)b;
-    if (![(id)t isKindOfClass:[SwitchMetalBuffer class]])
+    SwitchMetalBuffer *t = gm20bAsBuffer(b);
+    if (!t)
         return gm20bCallInvalid(_cb, PredCallBufForeign, NSMaxRange(r), 0,
                                 b ? "a fill of a buffer not made by this device" : "a fill of a nil buffer");
     if (NSMaxRange(r) > t->_raw.length) {
@@ -272,8 +309,8 @@ bool bufferCopy(__unsafe_unretained SwitchMetalCommandBuffer *cb, const char *ca
      destinationOffset:(NSUInteger)dof
                   size:(NSUInteger)n
 {
-    SwitchMetalBuffer *a = (SwitchMetalBuffer *)s, *b = (SwitchMetalBuffer *)d;
-    if (![(id)a isKindOfClass:[SwitchMetalBuffer class]] || ![(id)b isKindOfClass:[SwitchMetalBuffer class]])
+    SwitchMetalBuffer *a = gm20bAsBuffer(s), *b = gm20bAsBuffer(d);
+    if (!a || !b)
         return gm20bCallInvalid(_cb, PredCallBufForeign, so + n, dof + n,
                                 s && d ? "a copy of a buffer not made by this device" : "a copy of a nil buffer");
     if (so + n > a->_raw.length || dof + n > b->_raw.length) {
@@ -333,8 +370,8 @@ bool bufferCopy(__unsafe_unretained SwitchMetalCommandBuffer *cb, const char *ca
         return;
     [_cb retain:s];
     [_cb retain:d];
-    if ([(id)d isKindOfClass:[SwitchMetalTexture class]])
-        declareGpuWrites((SwitchMetalTexture *)d);
+    if (SwitchMetalTexture *dst = gm20bAsTexture(d))
+        declareGpuWrites(dst);
     Cmd m = cmd(OpCopyBufferToTexture);
     m.obj = (__bridge void *)s;
     m.obj2 = (__bridge void *)d;

@@ -23,6 +23,7 @@ protected:
         switch_linux_stub_interrupts = TRUE;
         switch_linux_stub_preemption = 0;
         switch_linux_stub_now = 5000;
+        switch_linux_stub_tick = 0;
         switch_linux_stub_wait_result = THREAD_AWAKENED;
     }
 };
@@ -85,6 +86,16 @@ TEST_F(SwitchLinux, IrqSaveReturnsWhatItFound)
     EXPECT_FALSE(switch_linux_irqs_disabled());
 }
 
+TEST_F(SwitchLinux, CanSleepRequiresInterruptsAndPreemption)
+{
+    EXPECT_TRUE(switch_linux_can_sleep());
+    switch_linux_stub_preemption = 1;
+    EXPECT_FALSE(switch_linux_can_sleep());
+    switch_linux_stub_preemption = 0;
+    switch_linux_stub_interrupts = FALSE;
+    EXPECT_FALSE(switch_linux_can_sleep());
+}
+
 TEST_F(SwitchLinux, TimeIsMachAbsoluteTimeInNanoseconds)
 {
     switch_linux_stub_now = 9000;
@@ -100,6 +111,16 @@ TEST_F(SwitchLinux, DelaysAreXnusDelayWithTheRangeAsLeeway)
     switch_linux_cond_resched();
     EXPECT_THAT(gSwitchLinuxCalls, ElementsAre("delay 40 1000", "delay 1000 leeway 1000 1000", "delay 50 leeway 0 1000",
                                                "thread_yield_to_preemption"));
+}
+
+// A hardware settle of a few microseconds spins on the clock instead of sleeping on a timer, as Linux's udelay does
+TEST_F(SwitchLinux, ShortDelaysSpinOnTheClock)
+{
+    switch_linux_stub_tick = 100;
+    switch_linux_udelay(2);
+    switch_linux_udelay(20);
+    EXPECT_TRUE(gSwitchLinuxCalls.empty());
+    EXPECT_GE(switch_linux_stub_now, 5000u + 2 * (2000 + 20000));
 }
 
 TEST_F(SwitchLinux, EventSleepsAssertThenBlock)
@@ -183,6 +204,18 @@ TEST_F(SwitchLinux, CallsMoveWhenEnteredAgainAndCancel)
                 ElementsAre("thread_call_allocate priority 0 options 1", "thread_call_enter_delayed 5200",
                             "thread_call_enter", "thread_call_enter", "thread_call_cancel", "thread_call_cancel_wait",
                             "thread_call_free"));
+}
+
+TEST_F(SwitchLinux, DeferrableCallsUseKernelPriorityAndLeeway)
+{
+    int weight = 1;
+    void *call = switch_linux_call_alloc_deferrable(fire, &weight);
+    EXPECT_FALSE(switch_linux_call_enter_after_leeway(call, 100, 50));
+    EXPECT_TRUE(switch_linux_call_enter_after_leeway(call, 0, 50));
+    switch_linux_call_free(call);
+    EXPECT_THAT(gSwitchLinuxCalls, ElementsAre("thread_call_allocate priority 1 options 1",
+                                               "thread_call_enter_delayed_with_leeway 5200 100 0x22",
+                                               "thread_call_enter", "thread_call_free"));
 }
 
 // flush_work: a run still queued is made by the flusher; with none queued nothing runs.

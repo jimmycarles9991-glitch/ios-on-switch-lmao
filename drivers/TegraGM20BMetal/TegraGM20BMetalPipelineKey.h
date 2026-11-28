@@ -9,6 +9,7 @@
 // framework where it is not QuartzCore; no trailing blank.
 #pragma once
 #import <Metal/Metal.h>
+#include <objc/message.h>
 #include <cstdio>
 #include <string>
 #include "pipeline_fields.h"
@@ -123,9 +124,8 @@ inline std::string linkedSegment(const char *tag, const StageKey &f, const std::
 // colour output to a half-float target rounded toward zero, 2 to nearest even
 inline uint64_t textureWriteRoundingOf(MTLRenderPipelineDescriptor *d)
 {
-    return [d respondsToSelector:NSSelectorFromString(@"textureWriteRoundingMode")]
-               ? [[d valueForKey:@"textureWriteRoundingMode"] unsignedLongLongValue]
-               : 0;
+    static const SEL sel = sel_registerName("textureWriteRoundingMode");
+    return [d respondsToSelector:sel] ? reinterpret_cast<NSUInteger (*)(id, SEL)>(objc_msgSend)(d, sel) : 0;
 }
 
 // The descriptor's fields a key names (pipeline_fields.h): what a compile request carries of it, so the shader compiler
@@ -298,40 +298,9 @@ inline uint64_t fastKey(const PipelineFields &f, uint64_t vertex, uint64_t fragm
                         uint64_t framework)
 {
     KeyWords k;
-    for (const uint64_t w : {f.samples, f.topology, f.depthFormat, f.stencilFormat})
+    keyFieldWords(f, [&k](uint64_t w) {
         k.add(w);
-    for (unsigned i = 0; i < 8; i++) {
-        const ColorFields &c = f.color[i];
-        if (!c.format)
-            continue;
-        for (const uint64_t w : {uint64_t(0x100 + i), c.format, c.writeMask, c.blending, c.sourceRGB, c.destinationRGB,
-                                 c.operationRGB, c.sourceAlpha, c.destinationAlpha, c.operationAlpha})
-            k.add(w);
-    }
-    for (unsigned i = 0; i < 31; i++) {
-        const AttributeFields &a = f.attributes[i];
-        if (!a.format)
-            continue;
-        const uint64_t stride = a.stride == UINT64_MAX ? UINT32_MAX : a.stride;
-        for (const uint64_t w : {uint64_t(0x200 + i), a.format, a.offset, a.buffer, stride, a.step, a.rate})
-            k.add(w);
-    }
-    if (f.patchType) {
-        const TessellationFields &t = f.tessellation;
-        for (const uint64_t w : {uint64_t(0x300), t.partition, t.factorFormat, t.factorStep, t.winding,
-                                 t.controlPointIndex, t.maxFactor, t.factorScale})
-            k.add(w);
-    }
-    if (f.amplification > 1) {
-        k.add(0x400);
-        k.add(f.amplification);
-    }
-    if (f.textureWriteRounding == 2)
-        k.add(0x500);
-    if (!f.rasterization)
-        k.add(0x600);
-    if (f.alphaToCoverage)
-        k.add(0x680);
+    });
     for (const uint64_t w : {uint64_t(0x700), vertex, fragment, linked, framework})
         k.add(w);
     return k.done();

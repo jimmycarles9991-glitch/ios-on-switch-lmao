@@ -72,6 +72,51 @@ TEST(XnuSchedBusy, AStretchSplitsIntoRunningBlockedAndWaitingForACore)
     EXPECT_EQ(t.done.longest[0].pc, 0x1234u);
 }
 
+struct Split {
+    uint64_t on, blocked, runnable;
+};
+
+Split SplitAt(const Thread &t, uint64_t now, uint64_t cpu, uint64_t made)
+{
+    Split s{};
+    switch_busy_split_now(&t.b, now, cpu, made, &s.on, &s.blocked, &s.runnable);
+    return s;
+}
+
+// A capture reads the stretch while it lasts. backboardd's 64 s boot stretch was spent on a run queue: the segment the
+// thread is in counts, whichever of the three it is.
+TEST(XnuSchedBusy, AStretchStillOpenCountsTheSegmentItIsIn)
+{
+    Thread t;
+    t.leave(100, 50, true, true);
+    t.run(210, 200);
+    const Split on = SplitAt(t, 300, 140, 0);
+    EXPECT_EQ(on.on, 90u) << "on a core: its CPU time since the stretch began";
+    EXPECT_EQ(on.blocked, 0u);
+    EXPECT_EQ(on.runnable, 10u);
+
+    t.leave(400, 240, true, false, 2);
+    const Split blocked = SplitAt(t, 450, 240, 0);
+    EXPECT_EQ(blocked.on, 190u);
+    EXPECT_EQ(blocked.blocked, 50u) << "in a wait: since it left the core";
+    EXPECT_EQ(blocked.runnable, 10u);
+    const Split woken = SplitAt(t, 600, 240, 500);
+    EXPECT_EQ(woken.blocked, 100u) << "woken at 500 and not yet run: blocked until then";
+    EXPECT_EQ(woken.runnable, 10u + 100u);
+
+    t.run(620, 500);
+    t.leave(700, 320, false, false);
+    const Split queued = SplitAt(t, 64700, 320, 700);
+    EXPECT_EQ(queued.on, 270u);
+    EXPECT_EQ(queued.blocked, 100u);
+    EXPECT_EQ(queued.runnable, 10u + 120u + 64000u) << "preempted: on a run queue since it left the core";
+
+    Thread idle;
+    idle.leave(100, 50, true, true);
+    const Split none = SplitAt(idle, 900, 50, 0);
+    EXPECT_EQ(none.on + none.blocked + none.runnable, 0u) << "no stretch open";
+}
+
 TEST(XnuSchedBusy, ShortStretchesAreNotReportedAndTheNextStartsFresh)
 {
     Thread t;
@@ -280,7 +325,9 @@ TEST(XnuSchedBusySource, ReleaseKernelsCompileItToNothing)
     for (const char *hook : {"switch_sched_off_core(", "switch_sched_busy_exec(", "switch_sched_busy_tick("})
         EXPECT_THAT(stubs, HasSubstr(std::string("static inline void ") + hook)) << hook;
     const std::string source = switch_ios::test::SourceText("../switch/sched/busy.c");
-    EXPECT_THAT(source, HasSubstr("\n#if DEVELOPMENT || DEBUG\n"));
+    EXPECT_THAT(source, HasSubstr("\n#if (DEVELOPMENT || DEBUG) && \\\n"
+                                  "    ((defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED) || "
+                                  "(defined(SWITCH_RECORDER) && SWITCH_RECORDER))\n"));
     EXPECT_THAT(source, HasSubstr("\n#endif /* DEVELOPMENT || DEBUG */\n"));
 }
 

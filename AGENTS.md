@@ -11,6 +11,14 @@ question it. Scrutinise until you are absolutely certain that it's the right cou
 driver doesn't mean PIO is the right way to do so if USB wasn't under any meaningful load at the time of capture. Apply
 this same logic to other things.
 
+## No logging on a hot path
+
+Never log (`os_log`, `IOLog`, `kprintf`, `printf`, etc.) on a hot path: per draw, per pass, per command buffer, per
+frame, per swap, per touch or HID event, per allocation or memory move, per syscall or fault, or per shader compile.
+Not even in `debug` builds. Genuine error/fault paths and one-time startup summaries are fine; anything that fires on a
+hot path belongs behind an explicit opt-in diagnostic or profiling flag that is off in default `debug` and `release`,
+or should not exist at all.
+
 ## Respect Apple's assumptions
 
 If you see a behavior wherein some persistent Apple service or application keeps using up CPU/GPU resources, don't just

@@ -1813,6 +1813,7 @@ extern lck_grp_t vm_page_lck_grp_local;
 extern "C" {
 #endif
 extern bool switch_vm_prefetch_used_locked(void) __attribute__((weak));
+extern void switch_vm_prefetch_first_use(void *object, uint64_t offset) __attribute__((weak));
 #ifdef __cplusplus
 }
 #endif
@@ -1820,6 +1821,7 @@ extern bool switch_vm_prefetch_used_locked(void) __attribute__((weak));
 #define VM_PAGE_CONSUME_CLUSTERED_WAKE(mem, wake_flag)          \
 	MACRO_BEGIN                                             \
 	ppnum_t	__phys_page;                                    \
+	bool __switch_first_use = false;                        \
 	__phys_page = VM_PAGE_GET_PHYS_PAGE(mem);               \
 	pmap_lock_phys_page(__phys_page);                       \
 	if (mem->vmp_clustered) {                               \
@@ -1829,6 +1831,7 @@ extern bool switch_vm_prefetch_used_locked(void) __attribute__((weak));
 	        o->pages_used++;                                \
 	        mem->vmp_clustered = FALSE;                     \
 	        if (__improbable(mem->vmp_switch_prefetched)) { \
+	                __switch_first_use = true;              \
 	                if (switch_vm_prefetch_used_locked != NULL && \
 	                    switch_vm_prefetch_used_locked()) { \
 	                        (wake_flag) = TRUE;             \
@@ -1837,6 +1840,11 @@ extern bool switch_vm_prefetch_used_locked(void) __attribute__((weak));
 	        VM_PAGE_SPECULATIVE_USED_ADD();                 \
 	}                                                       \
 	pmap_unlock_phys_page(__phys_page);                     \
+	if (__improbable(__switch_first_use) &&                 \
+	    switch_vm_prefetch_first_use != NULL) {             \
+	        switch_vm_prefetch_first_use(VM_PAGE_OBJECT(mem), \
+	            (mem)->vmp_offset);                         \
+	}                                                       \
 	MACRO_END
 
 #define VM_PAGE_CONSUME_CLUSTERED(mem)                          \

@@ -5,8 +5,8 @@ import Metal
 
 /// The facade's event jobs (drivers/TegraGM20BMetal/TegraGM20BMetalEventJobs.mm, debug runtimes): jobs of no
 /// work it made, by what they carried, and the signals whose value the CPU set after the work before them.
-enum EventJobs {
-    static func read(_ device: MTLDevice) -> [String: Int] {
+public enum EventJobs {
+    public static func read(_ device: MTLDevice) -> [String: Int] {
         let selector = NSSelectorFromString("switchMetalEvents")
         guard let device = device as? NSObject, device.responds(to: selector),
               let answer = device.perform(selector)?.takeUnretainedValue() as? [String: NSNumber]
@@ -16,13 +16,13 @@ enum EventJobs {
 }
 
 /// A value a handler sets on another thread, read once the handler signalled it ran
-final class HandlerValue<T>: @unchecked Sendable {
+public final class HandlerValue<T>: @unchecked Sendable {
     private let lock = NSLock()
     private var held: T
 
-    init(_ value: T) { held = value }
+    public init(_ value: T) { held = value }
 
-    var value: T {
+    public var value: T {
         get { lock.withLock { held } }
         set { lock.withLock { held = newValue } }
     }
@@ -33,17 +33,19 @@ final class HandlerValue<T>: @unchecked Sendable {
 /// handle hears its GPU signal; a plain event orders another queue's copy after a fill; a command buffer that ends in a
 /// wait completes (where its producer stood then is logged, the two completions being unordered). No signal's value is
 /// set by the CPU.
-struct NativeSharedEventTest: NativeObjectTest {
-    let id = "metal.native.shared_event"
-    let name = "Events are the device's own: GPU signals with no work, handles, listeners, GPU waits"
+public struct NativeSharedEventTest: NativeObjectTest {
+    public let id = "metal.native.shared_event"
+    public let name = "Events are the device's own: GPU signals with no work, handles, listeners, GPU waits"
 
-    static func completion(of buffer: MTLCommandBuffer) -> DispatchSemaphore {
+    public init() {}
+
+    public static func completion(of buffer: MTLCommandBuffer) -> DispatchSemaphore {
         let done = DispatchSemaphore(value: 0)
         buffer.addCompletedHandler { _ in done.signal() }
         return done
     }
 
-    static func waited(_ semaphore: DispatchSemaphore, seconds: Double) async -> Bool {
+    public static func waited(_ semaphore: DispatchSemaphore, seconds: Double) async -> Bool {
         await withCheckedContinuation { continuation in
             DispatchQueue.global().async {
                 continuation.resume(returning: semaphore.wait(timeout: .now() + seconds) == .success)
@@ -52,7 +54,7 @@ struct NativeSharedEventTest: NativeObjectTest {
     }
 
     /// Whether the event reaches `value` within a second (MTLSharedEvent's own wait, off the test's task)
-    static func reached(_ event: MTLSharedEvent, _ value: UInt64) async -> Bool {
+    public static func reached(_ event: MTLSharedEvent, _ value: UInt64) async -> Bool {
         let held = HandlerValue<MTLSharedEvent?>(event)
         return await withCheckedContinuation { continuation in
             DispatchQueue.global().async {
@@ -61,7 +63,7 @@ struct NativeSharedEventTest: NativeObjectTest {
         }
     }
 
-    func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
+    public func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         let device = gpu.device
         guard let plain = device.makeEvent(), let shared = device.makeSharedEvent(),
               let other = device.makeCommandQueue()

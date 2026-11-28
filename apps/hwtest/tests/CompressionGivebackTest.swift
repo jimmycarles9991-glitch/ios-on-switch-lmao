@@ -2,6 +2,8 @@ import Darwin
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 
 /// A private target whose compressed memory the kernel refused for a shortage asks again when this process gives some
@@ -40,17 +42,18 @@ struct CompressionGivebackTest: HWTest {
         let heldCompressed = CompressionSettled.comptags(gpu.device, held!) ?? -1
         metrics.set("held_comptags", heldCompressed)
         guard heldCompressed == 1 else { return .fail("no compressed RGBA16Float target to give back", metrics) }
-        var handles = Self.fill(connection)
-        defer { Self.free(connection, handles) }
-        metrics.set("filled_kib", handles.reduce(0) { $0 + $1.kib })
+        var fillers = Self.fillAll(startingWith: connection)
+        defer { Self.freeAll(fillers) }
+        metrics.set("filled_connections", fillers.count)
+        metrics.set("filled_kib", fillers.reduce(0) { $0 + $1.handles.reduce(0) { $0 + $1.kib } })
         let before = GM20BFacade.compression(of: gpu.device)
         let movesBefore = GM20BFacade.counters(of: gpu.device)["private_compressed_moves"] ?? 0
         let target = try gpu.texture(.bgra8Unorm, Self.width, Self.height)
         let atCreation = CompressionSettled.comptags(gpu.device, target) ?? -1
         try await CompressionSettled.settle(gpu.device)
         let refused = GM20BFacade.compression(of: gpu.device)
-        Self.free(connection, handles)
-        handles = []
+        Self.freeAll(fillers)
+        fillers = []
         let beforeRelease = GM20BFacade.compression(of: gpu.device)
         autoreleasepool { held = nil }
         try await CompressionSettled.settle(gpu.device)
@@ -90,6 +93,25 @@ struct CompressionGivebackTest: HWTest {
                 ("moved once (\(moves))", moves == 1),
             ], metrics, proof: gpu.proof
         ).onRawPath(gpu)
+    }
+
+    static func fillAll(
+        startingWith first: GPUConnection
+    ) -> [(connection: GPUConnection, handles: [(handle: UInt64, kib: Int)])] {
+        var fillers: [(connection: GPUConnection, handles: [(handle: UInt64, kib: Int)])] = []
+        let firstHandles = Self.fill(first)
+        if !firstHandles.isEmpty { fillers.append((first, firstHandles)) }
+        for _ in 1 ..< 8 {
+            guard let conn = GPUConnection() else { break }
+            let handles = Self.fill(conn)
+            if handles.isEmpty { break }
+            fillers.append((conn, handles))
+        }
+        return fillers
+    }
+
+    static func freeAll(_ fillers: [(connection: GPUConnection, handles: [(handle: UInt64, kib: Int)])]) {
+        for filler in fillers { Self.free(filler.connection, filler.handles) }
     }
 
     /// Compressible BoAllocs of CompressedFloorTest's sizes until the kernel refuses one, then the smaller sizes once

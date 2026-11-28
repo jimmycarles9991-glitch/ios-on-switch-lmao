@@ -19,6 +19,8 @@ LIB = '/System/Library/PrivateFrameworks/RenderBox.framework/default.metallib'
 FLOAT = 'c0=115:15:0:1:0:0:1:0:0 c1=105:0:0:1:0:0:1:0:0 c2=115:0:0:1:0:0:1:0:0'
 SECOND = 'c0=115:0:0:1:0:0:1:0:0 c1=105:0:0:1:0:0:1:0:0 c2=115:15:0:1:0:0:1:0:0'
 EIGHT_BIT = 'c0=80:15:0:1:0:0:1:0:0 c1=105:0:0:1:0:0:1:0:0 c2=80:0:0:1:0:0:1:0:0'
+PLANAR = 'c0=542:15:0:1:0:0:1:0:0 c1=105:0:0:1:0:0:1:0:0 c2=80:0:0:1:0:0:1:0:0'
+PLANAR_17 = 'c0=542:15:0:1:0:0:1:0:0 c1=65:0:0:1:0:0:1:0:0 c2=80:0:0:1:0:0:1:0:0'
 XR = 'c0=550:15:0:1:0:0:1:0:0 c1=105:0:0:1:0:0:1:0:0 c2=550:0:0:1:0:0:1:0:0'
 XR_17 = 'c0=554:15:0:1:0:0:1:0:0 c1=65:0:0:1:0:0:1:0:0 c2=552:0:0:1:0:0:1:0:0'
 COLOR, GRADIENT, IMAGE = 'primitive_color_fragment', 'primitive_gradient_fragment', 'primitive_image_fragment'
@@ -77,6 +79,25 @@ class RenderBox27(unittest.TestCase):
         normal = with_word(with_word(MULTIPLY, 1, 0x00020000), 3, 0x39)  # normal, extended_color cleared
         self.assertEqual(self.classify(IMAGE, normal), (0, 'saturates a source alpha the float target does not clamp'))
 
+    def test_planar_542_renders_through_float_stand_in_for_iterated_and_non_saturating_fixed_modes(self):
+        # word 2 format=542 (0x21e), word 3 extended=0 float=0 (0x21)
+        planar_mpy = with_word(with_word(MULTIPLY, 2, 0x0000FA1E), 3, 0x21)
+        self.assertEqual(self.classify(IMAGE, planar_mpy, PLANAR), (3, 'mpy'))
+        tag, why = rbfree.tag(self.t, line(IMAGE, planar_mpy, PLANAR))
+        self.assertEqual((tag, why), (' rung=3 free=3:0:mpy;f/#0:36:47009004000019001efa000000000000', ''))
+        planar_screen = with_word(planar_mpy, 1, 0x000C0000)  # screen (not in saturated_unless_extended)
+        self.assertEqual(self.classify(IMAGE, planar_screen, PLANAR), (2, ''))
+        tag, why = rbfree.tag(self.t, line(IMAGE, planar_screen, PLANAR))
+        self.assertEqual(
+            (tag, why),
+            (' rung=2 free=2:0:;f/#0:36:4700900400000c001efa000000000000,c0=542:15:1:1:3:0:1:5:0', ''),
+        )
+        planar_normal = with_word(planar_mpy, 1, 0x00020000)  # normal (saturates without extended)
+        self.assertEqual(
+            self.classify(IMAGE, planar_normal, PLANAR),
+            (0, 'saturates a source alpha the float target does not clamp'),
+        )
+
     def test_blends_not_linear_in_coverage_keep_the_storage_form(self):
         for fragment, state, colours, why in (
             (COLOR, COPY, FLOAT, rbfree.KEPT['copy']),
@@ -91,7 +112,12 @@ class RenderBox27(unittest.TestCase):
     def test_targets_and_reads_the_rop_cannot_stand_in_for(self):
         own_coverage = FLOAT.replace('c1=105:0:', 'c1=105:4:')  # the coverage target written
         for fragment, state, colours, why in (
-            (IMAGE, '4704110000001a0026fa000025000000', XR, 'blended colour 550 not RGBA8, BGRA8 or RGBA16Float'),
+            (
+                IMAGE,
+                '4704110000001a0026fa000025000000',
+                XR,
+                'blended colour 550 not RGBA8, BGRA8, RGBA16Float or RGB8_444_2P',
+            ),
             (IMAGE, '470010040080190073f800002d000000', SECOND, 'blended colour not the first'),
             (COLOR, '850000000040190073f800006d000000', own_coverage, 'reads the coverage target it writes'),
             (IMAGE + '_depth', MULTIPLY, FLOAT, 'draws through its tests=1..4 variants'),
@@ -121,6 +147,7 @@ class RenderBox17(unittest.TestCase):
             rbfree.classify(self.t, line(IMAGE, self.MULTIPLY, FLOAT)), (0, 'draws through its tests=1..4 variants')
         )
         self.assertEqual(rbfree.classify(self.t, line(IMAGE, self.MULTIPLY, FLOAT, ds='0/0')), (3, 'mpy'))
+        self.assertEqual(rbfree.classify(self.t, line(IMAGE, self.MULTIPLY, PLANAR_17, ds='0/0')), (3, 'mpy'))
 
 
 class Tagger(unittest.TestCase):

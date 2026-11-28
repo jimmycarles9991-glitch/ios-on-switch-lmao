@@ -24,16 +24,16 @@ void AGXDeviceUserClient::pushWakes()
 		const uint32_t slot = uint32_t(__builtin_ctz(slots));
 		slots &= slots - 1;
 		IOLockLock(submitLocks_[slot]);
-		bool admitted = submitGate_.enterFast();
+		bool admitted = submitGate_.enterFast(slot);
 		if (!admitted) {
 			IOLockLock(lock_);
-			admitted = submitGate_.enterSlow(lock_);
+			admitted = submitGate_.enterSlow(slot, lock_);
 			IOLockUnlock(lock_);
 		}
 		if (admitted) {
 			if (chans_[slot])
 				tgm_chan_quiet_wake(chans_[slot]);
-			submitGate_.leaveFast(lock_);
+			submitGate_.leaveFast(slot, lock_);
 		}
 		IOLockUnlock(submitLocks_[slot]);
 	}

@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Alpha to coverage and alpha to one on the driver (SET_ANTI_ALIAS_ALPHA_CONTROL, caps 3D-E5): white drawn at alpha

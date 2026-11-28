@@ -9,6 +9,7 @@
 #include "../buffer_encoders.h"
 #include "../compile_request.h"
 #include "../reflection_blob.h"
+#include "request_store_key.h"
 #include "../../../kits/SwitchSeedPack/SwitchSeedStore.h"
 #include "bazel/testing/fresh_process.h"
 
@@ -82,14 +83,11 @@ struct EncodersCompiler {
                 found = compiled().find(r.stages[0].function);
             if (found == compiled().end())
                 return int32_t(TegraGM20BCompileUnavailable);
-            std::vector<gm20b::LibraryIdentity> ids;
-            for (const gm20b::RequestLibrary &l : r.libraries)
-                ids.push_back(gm20b::identityOf(l));
             const gm20b::CacheKey k = gm20b::bufferEncodersCacheKey(r.stack, r.key.substr(sizeof kPrefix - 1));
+            const gm20b::StoreKey key = harness::requestStoreKey(k, r);
             const std::string blob = gm20b::encodeBufferEncoders(found->second);
-            const std::string entry = gm20b::encodeReflectionEntry(k, &blob, "");
-            const gm20b::Digest name = gm20b::storeName(k, r, ids);
-            store.put(name.data(), reinterpret_cast<const uint8_t *>(entry.data()), uint32_t(entry.size()));
+            const std::string entry = gm20b::encodeReflectionEntry(key.content, &blob, "");
+            store.put(key.name.data(), reinterpret_cast<const uint8_t *>(entry.data()), uint32_t(entry.size()));
             return int32_t(TegraGM20BCompileMade);
         };
         return true;

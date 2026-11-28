@@ -2,8 +2,8 @@
 #   limits_table_test       LimitsTable.h: the device's answers in the base class's limits table, past a field the base
 #                           class reads elsewhere (21H461's minConstantBufferAlignmentBytes)
 #   queue_priority_test     QueuePriority.h: the process's GPU priority from its Metal queues' (Core Animation's)
-#   gpu_memory_release_test GpuMemoryRelease.h: the idle release waits for the command buffers in flight and comes at the
-#                           deadline their drain sets; a release asked for (memory pressure's) runs with work in flight
+#   gpu_memory_release_test GpuMemoryRelease.h: memory goes back on pressure and once per trip to the background, never
+#                           at a pause
 #   image_filter_link_test  ImageFilterLink.h: Core Image's filter-function link request for the system's Metal compiler
 #   metallib_entries_test   MetallibEntries.h: a metallib's function list, which entries Metal answers as extern, and a
 #                           function's patch from its TESS tag (Xcode's bytes for it)
@@ -122,6 +122,9 @@ host_test(
         "switch_frame_timeline_test.cpp",
         "//drivers/TegraGM20BMetal:plugin/SwitchFrameTimeline.h",
     ],
-    copts = ["-Idrivers/TegraGM20BMetal/plugin"],
+    copts = [
+        "-Idrivers/TegraGM20BMetal/plugin",
+        "-DSWITCH_STATS_FRAME=1",
+    ],
     cxx_std = "c++17",
 )

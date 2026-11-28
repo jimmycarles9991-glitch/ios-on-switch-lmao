@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// generateMipmapsForTexture: of mipmapped 3D textures on the driver: every level drawn a plane a pass by the pack's

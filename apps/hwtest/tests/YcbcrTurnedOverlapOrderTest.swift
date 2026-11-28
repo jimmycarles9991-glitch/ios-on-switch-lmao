@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// The store order of a turned YCbCr target whose rows overlap (gpu/YcbcrTurnedOverlapOrder.swift): a 540 over a '420v'

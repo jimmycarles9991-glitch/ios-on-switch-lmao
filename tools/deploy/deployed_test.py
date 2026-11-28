@@ -70,8 +70,10 @@ class Record(unittest.TestCase):
         seed.parent.mkdir(parents=True)
         seed.write_text(json.dumps({'ipsw': '24B119'}))
         manifest.write_text(
-            '# gpu stage 1 _main/gpu/bundle.stage\n'
-            'ngpu/addons/TegraGM20BMetal.seed/shared/MANIFEST.json\tunused\t20\t644\t_main/seed/MANIFEST.json\n'
+            '# gpu stage 2 runfiles _main/gpu/bundle.stage\n'
+            '# kext deadbeef\n'
+            'file\tngpu/addons/TegraGM20BMetal.seed/shared/MANIFEST.json\tunused\t20\t644\t_main/seed/MANIFEST.json\n'
+            'pref\tmobile/Library/Preferences/com.apple.backboardd.plist\t501\tCAEnableDeepFramebuffer\tfalse\n'
         )
         kernel = self.root / 'kernel.macho'
         kernel.write_bytes(b'kernel')
@@ -104,6 +106,18 @@ class Record(unittest.TestCase):
         self.assertEqual(output.getvalue().strip(), str(package))
         self.assertEqual((package / 'switchroot/ios/bl33.bin').read_bytes(), b'boot')
         self.assertEqual((package / 'kernel.macho').read_bytes(), b'kernel')
+        self.assertEqual(
+            (package / 'gpu/gpu.stage').read_text().splitlines(),
+            [
+                '# gpu stage 2 tree',
+                '# kext deadbeef',
+                (
+                    'file\tngpu/addons/TegraGM20BMetal.seed/shared/MANIFEST.json\tunused\t20\t644\t'
+                    'ngpu/addons/TegraGM20BMetal.seed/shared/MANIFEST.json'
+                ),
+                'pref\tmobile/Library/Preferences/com.apple.backboardd.plist\t501\tCAEnableDeepFramebuffer\tfalse',
+            ],
+        )
         (checkout / 'a').write_text('later')
         self.git(checkout, 'commit', '-qam', 'later')
         self.assertNotEqual(self.git(checkout, 'rev-parse', 'HEAD'), head)

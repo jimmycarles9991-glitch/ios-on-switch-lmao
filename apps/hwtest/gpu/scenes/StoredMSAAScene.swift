@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Stored (private) multisampled colour, depth and stencil at 2 and 4 samples, in four parts that fail on their own. Colour:

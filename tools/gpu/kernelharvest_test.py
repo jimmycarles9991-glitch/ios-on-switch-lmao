@@ -67,6 +67,14 @@ def harvest_parts(text: str, name: str = '0123456789abcdef') -> list[dict]:
     ]
 
 
+def facts_harvest_parts(text: str, name: str = '0123456789abcdef', process: str = 'cameracaptured') -> list[dict]:
+    parts = [text[i : i + kernelharvest.PART_CHARS] for i in range(0, len(text), kernelharvest.PART_CHARS)]
+    return [
+        record(f'SwitchMetal: facts harvest {name} {i + 1}/{len(parts)} {part.rstrip()}', process)
+        for i, part in enumerate(parts)
+    ]
+
+
 class KernelHarvestTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -139,6 +147,41 @@ class KernelHarvestTest(unittest.TestCase):
     def test_a_boot_naming_no_build_is_skipped(self):
         new, report = self.run_harvest([record(REFUSED)], build=None)
         self.assertEqual((new, report.boots), ([], ['boot-1: names no OS build, skipped (--build names it)']))
+
+    def test_a_facts_harvest_line_becomes_a_facts_only_corpus_line(self):
+        constants = '#0:29:01000000' + ''.join(f' #{i}:29:ffffffff' for i in range(1, 60))
+        constants += ' | in a0=29:0:1:12:5:1 i=0:4'
+        key = f'facts | {AIR} | {constants} | max=256 tgm=1'
+        new, report = self.run_harvest(facts_harvest_parts(f'lib={VT} function=cam_isp spec {key}'))
+        self.assertEqual(len(new), 1, report.left)
+        self.assertEqual(
+            new[0],
+            f'D ok=1 tg=0,0,0 edge=0,0,0 threads=0 os=24B119 | form=d opt=0 max=256 tgm=1 label=-'
+            f' | k cam_isp lib={VT} spec {constants} | ',
+        )
+        self.assertEqual(report.added, {'cameracaptured': 1})
+        again, report = self.run_harvest(facts_harvest_parts(f'lib={VT} function=cam_isp spec {key}'), corpus=new)
+        self.assertEqual((again, report.present), ([], {'cameracaptured': 1}))
+
+    def test_a_facts_harvest_already_covered_by_a_dispatch_is_not_added_but_a_dispatch_adds_over_facts(self):
+        facts_key = f'facts | {OTHER_AIR} | #0:33:1 | max=0 tgm=0'
+        new, report = self.run_harvest(
+            facts_harvest_parts(f'lib={VT} function=VTMTSComputeFunction1x1 {facts_key}'), corpus=[CORPUS]
+        )
+        self.assertEqual((new, report.present), ([], {'cameracaptured': 1}))
+        facts_line = (
+            'D ok=1 tg=0,0,0 edge=0,0,0 threads=0 os=24B119 | form=d opt=0 max=0 tgm=0 label=-'
+            f' | k VTMTSComputeFunction1x1 lib={VT} #0:33:41524742 #3:29:ffffffff | '
+        )
+        dispatched, report = self.run_harvest([record(MADE, 'mediaanalysisd')], corpus=[facts_line])
+        self.assertEqual(len(dispatched), 1)
+        self.assertIn('tg=32,32,1', dispatched[0])
+
+    def test_a_facts_harvest_linking_functions_is_left_out(self):
+        linked = f'facts | {AIR} |  | kl {OTHER_AIR} | max=0 tgm=0'
+        new, report = self.run_harvest(facts_harvest_parts(f'lib={VT} function=cam_linked {linked}'))
+        self.assertEqual(new, [])
+        self.assertEqual(report.left, {('cameracaptured', 'a kernel that links functions'): 1})
 
 
 if __name__ == '__main__':

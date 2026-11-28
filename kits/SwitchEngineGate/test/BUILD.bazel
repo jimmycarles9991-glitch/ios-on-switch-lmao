@@ -14,3 +14,17 @@ host_test(
     ],
     copts = ["-DDEVELOPMENT=1"],
 )
+
+host_test(
+    name = "switch_engine_gate_tsan_test",
+    srcs = [
+        "switch_engine_gate_test.cpp",
+        "//kits/SwitchEngineGate:SwitchEngineGate.h",
+    ],
+    copts = [
+        "-DDEVELOPMENT=1",
+        "-fsanitize=thread",
+    ],
+    linkopts = ["-fsanitize=thread"],
+    sanitize = False,
+)

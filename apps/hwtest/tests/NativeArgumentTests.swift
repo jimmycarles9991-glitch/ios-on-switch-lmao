@@ -1,4 +1,5 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
 import Metal
@@ -97,6 +98,7 @@ struct NativeArgumentEncoderTest: NativeObjectTest {
         let draws: [(String, (GPU) async throws -> String)] = [
             ("draw_path", drawThroughArguments), ("texture_draw_path", drawTexturesThroughArguments),
             ("array_draw_path", drawArraysThroughArguments), ("slot_draw_path", drawSlotThroughArguments),
+            ("one_sampler_draw_path", drawOneSamplerThroughArguments),
             ("kernel_path", dispatchThroughArguments),
             ("spill_draw_path", { try await drawSpillThroughArguments($0, .fragment) }),
             ("spill_vertex_draw_path", { try await drawSpillThroughArguments($0, .vertex) }),

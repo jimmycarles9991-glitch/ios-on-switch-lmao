@@ -19,7 +19,7 @@
 #include <kern/waitq.h>
 #include <os/log.h>
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED
 
 static uint64_t last_commit; /* the newest commit message's time, every committer's store */
 static uint64_t server_tid;

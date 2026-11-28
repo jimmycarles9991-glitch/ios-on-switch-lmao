@@ -372,7 +372,7 @@ def os_volume_uuid(kind):
 _CRYPTEX_STAGING = "/private/preboot/Switch-Staging/"
 
 def _ipsw_volumes_header_impl(ctx):
-    kind = ctx.attr._kind[BuildSettingInfo].value
+    kind = ctx.attr.kind or ctx.attr._kind[BuildSettingInfo].value
     volumes = IPSWS[kind].get("volumes")
     if not volumes:
         fail("IPSW kind {} has no \"volumes\" in ipsw/pins.bzl".format(kind))
@@ -404,6 +404,7 @@ ipsw_volumes_header = rule(
     attrs = {
         "out": attr.output(mandatory = True),
         "lines": attr.string_list(doc = "lines written before the volumes'"),
+        "kind": attr.string(doc = "this kind's header instead of the selected kind's (host tests of each kind)"),
         "_kind": attr.label(default = "//ipsw:kind"),
     },
 )

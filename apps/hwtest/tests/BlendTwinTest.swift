@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
+import HWTestKit
 import Metal
 
 /// A state that fetches its own colour, by its storage form (the fetch, and the pipeline's blend where it has one, inside

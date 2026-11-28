@@ -462,6 +462,8 @@ thread_terminate_self(void)
 	int threadcnt;
 
 	pal_thread_terminate_self(thread);
+	switch_sched_limit_ended();
+	switch_sched_watch_exiting(thread);
 
 	DTRACE_PROC(lwp__exit);
 
@@ -2955,6 +2957,8 @@ thread_set_cpulimit(int action, uint8_t percentage, uint64_t interval_ns)
 
 	if (action == THREAD_CPULIMIT_BLOCK && switch_sched_cpulimit_lift(&percentage, interval_ns)) {
 		action = THREAD_CPULIMIT_DISABLE;
+	} else {
+		switch_sched_limit_ended();
 	}
 
 	if (action == THREAD_CPULIMIT_DISABLE) {

@@ -2,12 +2,14 @@
 // The SwitchAudio service: state and shared members across SwitchAudio*.cpp.
 #pragma once
 #include "SwitchAudioRegisters.h"
+#include "SwitchCodecSeq.h"
 #include "SwitchHDA.h"
 #include <kern/thread_call.h>
 
 struct alignas(8) SwitchAudioSink {
     uint32_t formats, generation;
 };
+
 SwitchAudioSink switch_audio_display_sink();
 
 // NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs external linkage
@@ -19,6 +21,9 @@ class SwitchAudio : public IOService {
     IOBufferMemoryDescriptor *memory[5] = {};
     IOMemoryDescriptor *hostClockWire = nullptr;  // pins patched 19.2 MHz shared-cache page against VM eviction
     SwitchAudioControl *control = nullptr;
+    IOWorkLoop *displayLoop = nullptr;
+    IOCommandGate *displayGate = nullptr;
+    IOTimerEventSource *displayPowerTimer = nullptr;
     SwitchHDA displayAudio;
     IOInterruptEventSource *displayInterrupt = nullptr;
     IOInterruptEventSource *displayEvent = nullptr;
@@ -29,6 +34,7 @@ class SwitchAudio : public IOService {
     void displayFree();
     static void displayFired(OSObject *, IOInterruptEventSource *, int);
     static void displayChanged(OSObject *, IOInterruptEventSource *, int);
+    static void displayPowerFired(OSObject *, IOTimerEventSource *);
     static void displayProbe(thread_call_param_t, thread_call_param_t);
     static IOReturn displayPrepareGated(OSObject *, void *, void *, void *, void *);
     static IOReturn displayConnectGated(OSObject *, void *, void *, void *, void *);
@@ -52,17 +58,43 @@ class SwitchAudio : public IOService {
     SwitchEngineGate<SwitchEngineGateKernel> apeGate;
     bool apeHeld = false;
     bool ahubActive = false;
+    bool ahubDraining = false;
+    bool ahubStopping = false;
+    bool hwBusy = false;
+    uint32_t mmioWait = 0;
     bool playbackSfcActive = false;
     bool captureSfcActive = false;
 
+    struct CodecSeqHost {
+        SwitchAudio *audio = nullptr;
+        void armTimer(uint32_t ms) const;
+        void cancelTimer() const;
+        void onBiasReady() const;
+        void onRouteReady(rt5639::Route route) const;
+        void onOff() const;
+    };
+
     IOWorkLoop *codecLoop = nullptr;
     IOCommandGate *codecGate = nullptr;
-    IOInterruptEventSource *jackSource = nullptr, *pv6Source = nullptr;
+    IOInterruptEventSource *jackSource = nullptr, *pv6Source = nullptr, *codecEvent = nullptr;
     IOTimerEventSource *jackTimer = nullptr, *idleTimer = nullptr;
+    IOTimerEventSource *codecTimer = nullptr, *headsetTimer = nullptr, *unmuteTimer = nullptr, *pauseTimer = nullptr;
+    switch_audio::SwitchCodecSeq<SwitchRT5639, CodecSeqHost> codecSeq;
     bool codecOn = false, jackKnown = false, jackIn = false, headset = false, speakerOnly = false;
     bool captureProven = false;
     bool captureRunning = false;
     bool captureCodecOn = false;
+    bool wantCaptureCodec = false;
+    bool wantUnmuted = false;
+    bool unmuteTimerArmed = false;
+    bool pauseRampPending = false;
+    bool headsetDetectPending = false;
+    bool headsetDetectActive = false;
+    bool bootPrecharge = false;
+    bool wantReleaseApe = false;
+    bool codecQuiescing = false;
+    uint32_t codecWaitToken = 0;
+    rt5639::Route lastAppliedOpeRoute = rt5639::kRouteNone;
     uint64_t captureStartFrame = 0;
     uint32_t requestedRoute = SwitchAudioRouteAuto;
     uint32_t headphoneAttenuationMdB = 0;
@@ -73,9 +105,12 @@ class SwitchAudio : public IOService {
     IONotifier *shutdownNotifier = nullptr;
     SwitchRT5639 codec;
 #if DEVELOPMENT || DEBUG
+    uint32_t statUnderruns = 0;
+#endif
+#if SWITCH_STATS_IO
     IOTimerEventSource *statsTimer = nullptr;
     uint64_t statFrames = 0, statFramesShown = 0, statIoCyclesShown = 0, statIoFramesShown = 0;
-    uint32_t statStarts = 0, statStartsShown = 0, statUnderruns = 0;
+    uint32_t statStarts = 0, statStartsShown = 0;
     bool statsArmed = false, statsShown = false;
     int statPeak = 0;
     uint32_t statRingPeakL = 0, statRingPeakR = 0;
@@ -144,6 +179,23 @@ class SwitchAudio : public IOService {
         return static_cast<uint32_t>(4ULL * switch_audio_hw::kOutPeriodFrames * 1000ULL / r);
     }
 
+    struct HwTransitionGuard {
+        SwitchAudio *self;
+
+        explicit HwTransitionGuard(SwitchAudio *audio) : self(audio)
+        {
+            while (self->hwBusy)
+                self->gate->commandSleep(&self->hwBusy, THREAD_UNINT);
+            self->hwBusy = true;
+        }
+
+        ~HwTransitionGuard()
+        {
+            self->hwBusy = false;
+            self->gate->commandWakeup(&self->hwBusy, false);
+        }
+    };
+
     void startPlla();
     static void stopPlla();
     void startClocks();
@@ -151,6 +203,7 @@ class SwitchAudio : public IOService {
     void tegraAhubAndDma();
     void tegraAgic();
     void tegraInit();
+    bool waitMmio(const volatile uint8_t *base, uint32_t offset, uint32_t mask, uint32_t value, uint32_t timeoutUs);
     void softReset(uint32_t reg, const char *what);
     void i2sSoftReset(uint32_t reg, const char *what);
     void stopUnit(uint32_t enable, uint32_t status, const char *what);
@@ -163,8 +216,10 @@ class SwitchAudio : public IOService {
     void releaseApe();
     void publishHwAnchor(uint64_t sampleTime, uint64_t hostTime, bool bumpSeed);
     int32_t desiredMvcMdB() const;
+    void applyMvcLiveUnlocked(bool immediate);
     void applyMvcLive(bool immediate);
     bool rampMvcMute();
+    static IOReturn finishStopGated(OSObject *owner, void *, void *, void *, void *);
     void reconfigureOpeForRoute();
 
     void tegraStart();
@@ -173,7 +228,7 @@ class SwitchAudio : public IOService {
     void captureStop();
     void tegraStop();
     void playedPeriod();
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
     void notePlayed(const switch_audio_sample_t *slot, uint64_t done);
 #endif
     void captureOff();
@@ -185,7 +240,11 @@ class SwitchAudio : public IOService {
     rt5639::Route wantedRoute() const;
     void codecPowerUp();
     void captureCodec(bool on);
-    void codecPowerDown();
+    void codecPowerDown(bool wait, bool releaseWhenOff);
+    void codecBiasReady();
+    void codecRouteReady(rt5639::Route route);
+    void codecNowOff();
+    static void codecWaitGateMS(void *ctx, uint32_t ms);
 
     enum CodecStep : uintptr_t {
         kCodecPowerUp,
@@ -203,13 +262,20 @@ class SwitchAudio : public IOService {
     static IOReturn codecGated(OSObject *owner, void *step, void *, void *, void *);
     void codecStep(CodecStep step);
     static void codecIdle(OSObject *owner, IOTimerEventSource *);
+    static void codecSeqTimerFired(OSObject *owner, IOTimerEventSource *);
+    static void headsetDetectSettled(OSObject *owner, IOTimerEventSource *);
+    static void codecUnmuteFired(OSObject *owner, IOTimerEventSource *);
+    static void codecPauseFired(OSObject *owner, IOTimerEventSource *);
+    static void codecNoMicFired(OSObject *owner, IOInterruptEventSource *, int);
     static void jackEdge(OSObject *owner, IOInterruptEventSource *, int);
     void noteJack();
     void publishJack();
     static void jackSettled(OSObject *owner, IOTimerEventSource *);
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
     static void statsFired(OSObject *owner, IOTimerEventSource *sender);
     void statsResume();
+#endif
+#if DEVELOPMENT || DEBUG
     void registerSysctl();
 #endif
     void codecStart();
@@ -223,6 +289,8 @@ class SwitchAudio : public IOService {
     void systemShutdown();
 
 public:
+    static bool waitMmioActive(const volatile uint8_t *base, uint32_t offset, uint32_t mask, uint32_t value,
+                               uint32_t timeoutUs);
     void systemSleep(bool entering);
     void displaySink();
     void displayStartProbe();

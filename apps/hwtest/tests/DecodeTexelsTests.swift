@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUDecode
+import HWTestKit
 import Metal
 
 /// PVRTC decoded on the GPU as it is uploaded (drivers/TegraGM20BMetal/decoded.h): each of the driver's

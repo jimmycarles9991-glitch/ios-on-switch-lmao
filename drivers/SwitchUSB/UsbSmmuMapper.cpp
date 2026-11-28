@@ -12,7 +12,6 @@
 // bounces). The tables, the window and their flushes are UsbSmmuSpace.h's, as the XUDC's are.
 #include "UsbSmmuMapper.h"
 #include <IOKit/IOLib.h>
-#include <IOKit/IOLocks.h>
 #include "../TegraSMMU/TegraSMMU.h"
 #include "UsbSmmuSpace.h"
 
@@ -28,8 +27,7 @@ struct Slot {
 };
 
 UsbSmmuSpace gSpace;
-IOLock *gLock;
-Slot *gSlots;  // by the window index of a mapping's first page, under gLock
+Slot *gSlots;  // by the window index of a mapping's first page, under gSpace.lock()
 
 auto segments(IOMemoryDescriptor *memory, uint64_t offset)
 {
@@ -56,9 +54,8 @@ bool switch_usb_smmu_start(uint64_t firmwarePa, uint64_t firmwareBytes, uint64_t
         snprintf(why, whySize, "the firmware image or the bounce pool is not at its own IOVA");
         return false;
     }
-    gLock = IOLockAlloc();
     gSlots = IONewZero(Slot, gSpace.windowPages());
-    if (!gLock || !gSlots) {
+    if (!gSlots) {
         snprintf(why, whySize, "no memory for the window's slots");
         return false;
     }
@@ -84,15 +81,16 @@ bool switch_usb_smmu_map(IOMemoryDescriptor *memory, uint64_t offset, uint64_t l
     const uint32_t pages = UsbIovaWindow::pagesFor(inPage, length);
     const uint32_t alignPages =
         alignment > UsbIovaWindow::kPage ? static_cast<uint32_t>(alignment / UsbIovaWindow::kPage) : 1;
-    const int64_t index = gSpace.map(pages, alignPages, [memory, offset, length, pages](auto mapPage) {
+    gSpace.lock();
+    const int64_t index = gSpace.mapUnlocked(pages, alignPages, [memory, offset, length, pages](auto mapPage) {
         uint32_t mapped = 0;
         return usb_iova_map_pages(segments(memory, offset), length, pages, mapPage, &mapped);
     });
+    if (index >= 0)
+        gSlots[index] = {memory, offset, static_cast<uint32_t>(length), pages, writable};
+    gSpace.unlock();
     if (index < 0)
         return false;
-    IOLockLock(gLock);
-    gSlots[index] = {memory, offset, static_cast<uint32_t>(length), pages, writable};
-    IOLockUnlock(gLock);
     *address = gSpace.iova(static_cast<uint32_t>(index)) + inPage;
     return true;
 }
@@ -102,7 +100,7 @@ uint64_t switch_usb_smmu_fixed(uint64_t pa, uint64_t length)
     return gSpace.attached() ? gSpace.fixedIova(pa, length) : UINT64_MAX;
 }
 
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
 uint32_t switch_usb_smmu_entry(uint64_t address)
 {
     return gSpace.attached() ? gSpace.entry(address) : 0;
@@ -120,15 +118,15 @@ bool switch_usb_smmu_unmap(const IOMemoryDescriptor *memory, uint64_t address, u
     if (!switch_usb_smmu_owns(address))
         return false;
     const uint32_t index = gSpace.index(address);
-    IOLockLock(gLock);
+    gSpace.lock();
     const Slot slot = gSlots[index];
     if (slot.memory != memory || !slot.pages) {
-        IOLockUnlock(gLock);
+        gSpace.unlock();
         return false;
     }
     gSlots[index] = {};
-    IOLockUnlock(gLock);
-    gSpace.unmap(index, slot.pages);
+    gSpace.unmapUnlocked(index, slot.pages);
+    gSpace.unlock();
     *offset = slot.offset;
     *length = slot.length;
     *writable = slot.writable;

@@ -7,6 +7,9 @@ struct MediaHostOffer {
 static inline SwitchHost1xDisplayStream mediaHostStream;
 static inline MediaHostOffer mediaHostOffers[2] = {};
 static inline uint32_t mediaHostGeneration = 0;  // the flip whose stream is queued; 0 once it completed
+// The flip whose stream wrote its set, from the stream's completion until that completion's writeMediaFlip claims it:
+// both on the completion's thread.
+static inline uint32_t mediaHostWrote = 0;
 
 bool startMediaHostFlip()
 {
@@ -19,20 +22,20 @@ bool startMediaHostFlip()
 // A stream that ran (its own status 0) wrote its set and request, whatever its producers' final status says by now: the
 // set is the latch's, as an early write's is, and the gate reads why it failed. A stream the display cancelled itself
 // (SC7 entry, its stop, an overlay recovery: switch_host1x_display_cancel's restore) completes kIOReturnAborted, as a
-// stopped copy does; any other is its producers'. The generation is let go only after the claim: a gate writer that
-// still finds it asks host1x, which says the stream wrote its set.
+// stopped copy does; any other is its producers'.
+// Ordering: the set is claimed written in the completion's writeMediaFlip, after gpuComplete signalled its pass
+// (gpuDonePending), so a frame end that takes the written flip always finds the pass it runs. The generation is let go
+// only after that claim: a gate writer that still finds it asks host1x, which says the stream wrote its set.
 template <class Self> static void mediaHostCompleted(void *context, int status)
 {
     const auto &offer = *static_cast<const MediaHostOffer *>(context);
     auto *display = static_cast<Self>(offer.display);
-    if (!mediaHostStream.status && offer.generation == display->mediaFlip.generation() &&
-        (!status || !display->mediaFlip.early()) && display->mediaFlip.claim(0)) {
-        display->stampMediaHostFlip();
-        display->mediaFlip.claimed(SwitchCompletionFlip::kWritten);
-    }
+    const bool wrote = !mediaHostStream.status && offer.generation == display->mediaFlip.generation() &&
+                       (!status || !display->mediaFlip.early());
+    __atomic_store_n(&mediaHostWrote, wrote ? offer.generation : 0u, __ATOMIC_RELAXED);
+    native_legacy_gpu_complete(offer.display, status && mediaHostStream.restore ? kIOReturnAborted : status);
     uint32_t queued = offer.generation;
     __atomic_compare_exchange_n(&mediaHostGeneration, &queued, 0u, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
-    native_legacy_gpu_complete(offer.display, status && mediaHostStream.restore ? kIOReturnAborted : status);
 }
 
 template <class Self> static void mediaHostFiltered(void *context)
@@ -48,7 +51,7 @@ void stampMediaHostFlip()
     mediaFlip.writtenAt = mach_absolute_time();
 }
 
-int submitMediaHostFlip(const switch_gpu_backing_token *producers, unsigned count)
+int submitMediaHostFlip(const switch_gpu_backing_token *producers, unsigned count, switch_gpu_bridge *bridge = nullptr)
 {
     const uint32_t generation = mediaFlip.generation();
     auto &offer = mediaHostOffers[generation & 1];
@@ -56,11 +59,12 @@ int submitMediaHostFlip(const switch_gpu_backing_token *producers, unsigned coun
     __atomic_store_n(&mediaHostGeneration, generation, __ATOMIC_RELEASE);
     const int error = switch_host1x_display_submit(&mediaHostStream, producers, count, mediaFlip.word, mediaFlip.value,
                                                    mediaFlip.stores, mediaFlip.update, mediaFlip.request,
-                                                   &mediaHostCompleted<decltype(this)>, &offer);
+                                                   &mediaHostCompleted<decltype(this)>, &offer, bridge);
     if (error) {
         __atomic_store_n(&mediaHostGeneration, 0u, __ATOMIC_RELEASE);
         withdrawMediaFlip();
-        IOLog("SwitchDisplay: host1x refused windows B and C's controller stream (%d)\n", error);
+        if (!bridge)
+            IOLog("SwitchDisplay: host1x refused windows B and C's controller stream (%d)\n", error);
         return error;
     }
     if (mediaFlip.state() == SwitchCompletionFlip::kArmed) {

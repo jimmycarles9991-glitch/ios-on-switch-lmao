@@ -341,4 +341,17 @@ mod sm53_xmad_tests {
             }
         }
     }
+    /// XMAD needs no scoreboard
+    #[test]
+    fn xmad_is_fixed_latency() {
+        let xmad = Op::Xmad(Box::new(OpXmad {
+            dst: RegRef::new(RegFile::GPR, 1, 1).into(),
+            srcs: [Src::ZERO, Src::ZERO, Src::ZERO],
+            hi: [false; 2],
+            psl: false,
+            mrg: false,
+            cbcc: false,
+        }));
+        assert!(xmad.has_fixed_latency(53));
+    }
 }

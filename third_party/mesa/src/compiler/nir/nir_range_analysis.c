@@ -844,16 +844,6 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
       case nir_op_f2f16_rtne:
       case nir_op_f2f32:
       case nir_op_f2f64:
-      case nir_op_fdot2:
-      case nir_op_fdot3:
-      case nir_op_fdot4:
-      case nir_op_fdot8:
-      case nir_op_fdot16:
-      case nir_op_fdot2_replicated:
-      case nir_op_fdot3_replicated:
-      case nir_op_fdot4_replicated:
-      case nir_op_fdot8_replicated:
-      case nir_op_fdot16_replicated:
          push_fp_query(state, alu->src[0].src.ssa);
          return;
       case nir_op_fadd:
@@ -865,6 +855,16 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
       case nir_op_fmulz:
       case nir_op_fpow:
       case nir_op_vec2:
+      case nir_op_fdot2:
+      case nir_op_fdot3:
+      case nir_op_fdot4:
+      case nir_op_fdot8:
+      case nir_op_fdot16:
+      case nir_op_fdot2_replicated:
+      case nir_op_fdot3_replicated:
+      case nir_op_fdot4_replicated:
+      case nir_op_fdot8_replicated:
+      case nir_op_fdot16_replicated:
          push_fp_query(state, alu->src[0].src.ssa);
          push_fp_query(state, alu->src[1].src.ssa);
          return;
@@ -1414,6 +1414,9 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
 fp_class_mask
 nir_analyze_fp_class(nir_fp_analysis_state *fp_state, const nir_def *def)
 {
+   if (fp_state->impl->ssa_alloc > fp_state->size)
+      nir_grow_fp_analysis_state(fp_state);
+
    struct fp_query query_alloc[64];
    uint32_t result_alloc[64];
 
@@ -1444,6 +1447,54 @@ nir_create_fp_analysis_state(nir_function_impl *impl)
    state.bitset = calloc(BITSET_BYTES(state.size), 1);
    state.arr = malloc(state.size * sizeof(uint16_t));
    return state;
+}
+
+void
+nir_grow_fp_analysis_state(nir_fp_analysis_state *state)
+{
+   if (state->impl->ssa_alloc <= state->size)
+      return;
+
+   uint32_t size = state->impl->ssa_alloc + state->impl->ssa_alloc / 4u;
+   BITSET_WORD *bitset = calloc(BITSET_BYTES(size), 1);
+   if (state->max >= 0)
+      memcpy(bitset, state->bitset, BITSET_BYTES(state->max + 1));
+   free(state->bitset);
+   state->bitset = bitset;
+   state->arr = realloc(state->arr, size * sizeof(uint16_t));
+   state->size = size;
+}
+
+void
+nir_invalidate_fp_analysis_users(nir_fp_analysis_state *state, nir_def *def)
+{
+   if (state->max < 0)
+      return;
+
+   if (def->index <= (uint32_t)state->max)
+      BITSET_CLEAR(state->bitset, def->index);
+
+   /* Early stop at uncached users relies on every cached ALU def having all
+    * sources it inspects (including depth-2 fneg look-throughs) cached too.
+    */
+   nir_def *stack_alloc[64];
+   struct util_dynarray stack;
+   util_dynarray_init_from_stack(&stack, stack_alloc, sizeof(stack_alloc));
+   util_dynarray_append_typed(&stack, nir_def *, def);
+
+   while (stack.size) {
+      nir_def *changed = util_dynarray_pop(&stack, nir_def *);
+      nir_foreach_use(use, changed) {
+         nir_def *user = nir_instr_def(nir_src_use_instr(use));
+         if (!user || user->index > (uint32_t)state->max ||
+             !BITSET_TEST(state->bitset, user->index))
+            continue;
+         BITSET_CLEAR(state->bitset, user->index);
+         util_dynarray_append_typed(&stack, nir_def *, user);
+      }
+   }
+
+   util_dynarray_fini(&stack);
 }
 
 void

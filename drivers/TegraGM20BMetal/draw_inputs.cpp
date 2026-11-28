@@ -63,6 +63,38 @@ uint64_t RenderEncoder::rootTable(const PackPipeline &r, uint32_t k, bool writes
     return va;
 }
 
+bool RenderEncoder::guestSlotMoved(const Pipeline &pl) const
+{
+    if (moved_.all)
+        return true;
+    for (const Pipeline::GuestBase &g : pl.guestBases) {
+        if (!g.word)
+            break;
+        if (g.stage <= 1 && g.slot < 31 && (moved_.buffers[g.stage + 1] >> g.slot & 1))
+            return true;
+    }
+    return false;
+}
+
+uint32_t RenderEncoder::guestBaseWords(const Pipeline &pl, uint32_t (&want)[32])
+{
+    uint32_t written = 0;
+    SWITCH_METAL_DIAGNOSTIC(cb_->counts_.guestHoleWrites += pl.guestBases[0].word != 0);
+    for (const Pipeline::GuestBase &g : pl.guestBases) {
+        if (!g.word)
+            break;
+        if (g.word > 31 || g.stage > 1 || g.slot >= 31)
+            continue;
+        const Bound &b = bufs_[g.stage + 1][g.slot];
+        if (b.buffer)
+            cb_->use(*b.buffer, true, pl.writesMemory[g.stage]);
+        want[g.word - 1] = uint32_t(b.va);
+        want[g.word] = uint32_t(b.va >> 32);
+        written |= 3u << (g.word - 1);
+    }
+    return written;
+}
+
 // A colour matrix form's draw: its iterated blend program and constants from the matrix uniform the draw binds, which
 // the GPU's macro reads through a non-prefetched GPFIFO entry over the uniform's bytes (the CPU reads none of them). A
 // uniform of the rows alone (a QuartzCore whose matrix has no clamp) is followed by a clamp pair of 0 in an entry of its

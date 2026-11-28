@@ -7,9 +7,9 @@
 #include <stdint.h>
 
 struct SwitchMotionStats {
-    uint64_t start = 0, last = 0;  // the window's first interrupt and the latest; 0: none yet
-    uint32_t interrupts = 0, empty = 0, posted[2] = {};
-    uint32_t drains = 0, records = 0, overflows = 0;  // the driver's own counts at the window's start
+    uint64_t start = 0, last = 0;                        // the window's first interrupt and the latest; 0: none yet
+    uint32_t interrupts = 0, empty = 0, posted[3] = {};  // accelerometer, gyroscope, device motion
+    uint32_t drains = 0, records = 0, overflows = 0;     // the driver's own counts at the window's start
 };
 
 // What the driver converts and for whom, as the line finds it.
@@ -20,6 +20,7 @@ struct SwitchMotionState {
     bool detecting, lit, fifo;
     unsigned watermark;
     uint32_t drains, records, overflows;
+    uint32_t motionUS = 0;  // the device motion client's report interval
 };
 
 inline void switchMotionRestart(SwitchMotionStats &s, uint64_t now, const SwitchMotionState &state)
@@ -51,13 +52,14 @@ inline size_t switchMotionLine(char *out, size_t size, const SwitchMotionStats &
         return 0;
     const int n = snprintf(
         out, size,
-        "%llu ms at %u mHz: accel %d (client %u us, batch %u us), gyro %d (client %u us, batch %u us), detector %d, "
-        "panel lit %d, FIFO %d (watermark %u); %u interrupts (%llu/s), %u empty, posted %u accel %u gyro, %u drains "
-        "of %u records, %u overflows",
+        "%llu ms at %u mHz: accel %d (client %u us, batch %u us), gyro %d (client %u us, batch %u us), motion %u us, "
+        "detector %d, panel lit %d, FIFO %d (watermark %u); %u interrupts (%llu/s), %u empty, posted %u accel %u gyro "
+        "%u motion, %u drains of %u records, %u overflows",
         static_cast<unsigned long long>(ms), state.milliHz, state.on[0], state.intervalUS[0], state.batchUS[0],
-        state.on[1], state.intervalUS[1], state.batchUS[1], state.detecting, state.lit, state.fifo, state.watermark,
-        s.interrupts, static_cast<unsigned long long>(ms ? uint64_t{s.interrupts} * 1000 / ms : 0), s.empty,
-        s.posted[0], s.posted[1], state.drains - s.drains, state.records - s.records, state.overflows - s.overflows);
+        state.on[1], state.intervalUS[1], state.batchUS[1], state.motionUS, state.detecting, state.lit, state.fifo,
+        state.watermark, s.interrupts, static_cast<unsigned long long>(ms ? uint64_t{s.interrupts} * 1000 / ms : 0),
+        s.empty, s.posted[0], s.posted[1], s.posted[2], state.drains - s.drains, state.records - s.records,
+        state.overflows - s.overflows);
     if (n < 0)
         return 0;
     return static_cast<size_t>(n) < size ? static_cast<size_t>(n) : size - 1;

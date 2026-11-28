@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Program slots that run in place from the pack are cleaned from the CPU caches by the kernel at their grain's import

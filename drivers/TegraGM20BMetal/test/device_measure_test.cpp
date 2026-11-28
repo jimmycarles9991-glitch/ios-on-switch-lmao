@@ -4,6 +4,7 @@
 // completion teaches is measured no more than its warm picks and one in kRemeasureEvery, and learnCompleted, which the
 // next command buffer's begin calls, teaches what the GPU wrote.
 #include "device_harness.h"
+#include "timed_gpu.h"
 #include "../record.h"
 #include "../stamps.h"
 #include "../../../kits/SwitchGM20BEmit/SwitchGM20BPushDecode.h"
@@ -28,23 +29,34 @@ gm20b::RuntimeRecord plainRecord(uint64_t key)
     return r;
 }
 
-// A submission's words: its tiled-cache flushes, and the draw stamps it releases (their addresses and payloads)
+// A submission's words: its tiled-cache flushes, draw stamps and band progress releases
 struct Words {
     uint32_t flushes = 0;
+    uint32_t progressReleases = 0;
+    uint32_t jobs = 0;
+    uint32_t internalFences = 0;
     std::vector<std::pair<uint64_t, uint32_t>> stamps;
     std::vector<long> stampAt, flushAt;  // their places among the methods
 };
 
-Words read(const std::vector<uint32_t> &words, uint64_t cbStampPage)
+Words read(const std::vector<uint32_t> &words, uint64_t cbStampPage, uint64_t progressVa)
 {
     Words w;
     std::vector<switch_gm20b_method> m(words.size());
     const long n = switch_gm20b_push_decode(words.data(), words.size(), m.data(), m.size());
     EXPECT_GE(n, 0);
+    constexpr uint32_t kProgressRelease = NVDEF(NVB06F, SEMAPHORED, OPERATION, RELEASE) |
+                                          NVDEF(NVB06F, SEMAPHORED, RELEASE_WFI, EN) |
+                                          NVDEF(NVB06F, SEMAPHORED, RELEASE_SIZE, 16BYTE);
     for (long i = 0; i < n; i++) {
         if (m[i].method == kTiledCacheFlush) {
             w.flushes++;
             w.flushAt.push_back(i);
+        }
+        if (progressVa && m[i].method == NVB06F_SEMAPHORED && m[i].value == kProgressRelease && i >= 3) {
+            const uint64_t va = uint64_t(m[i - 3].value & 0xff) << 32 | m[i - 2].value;
+            if (va == progressVa)
+                w.progressReleases++;
         }
         if (m[i].method == NVB197_SET_REPORT_SEMAPHORE_D && m[i].value == gm20b::kDrawStampRelease && i >= 3) {
             const uint64_t va = uint64_t(m[i - 3].value) << 32 | m[i - 2].value;
@@ -76,36 +88,53 @@ protected:
         ASSERT_NE(pl, nullptr) << why;
     }
 
-    // One command buffer of one pass of `draws` full-target draws of `pl`: its submitted words, read
-    Words pass(uint32_t draws)
+    Words passOn(gm20b::Texture &into, uint32_t draws, gm20b::Pipeline *first = nullptr, uint32_t *outSeq = nullptr)
     {
-        const size_t before = kernel_model::model.jobs.size();
         gm20b::CommandBuffer *cb = dev.begin();
         EXPECT_NE(cb, nullptr);
+        const size_t before = kernel_model::model.jobs.size();
         gm20b::PassDesc desc;
-        desc.color[0].texture = &target;
+        desc.color[0].texture = &into;
         desc.color[0].load = gm20b::ColorAttachment::Load;
         desc.count = 1;
         gm20b::RenderEncoder *e = cb->render(desc);
         EXPECT_NE(e, nullptr);
-        e->setPipeline(pl);
         for (uint32_t i = 0; i < draws; i++) {
+            e->setPipeline(i == 0 && first ? first : pl);
             const char *why = nullptr;
             EXPECT_TRUE(e->draw(kTriangle, 0, 3, 1, 0, &why)) << (why ? why : "");
         }
         e->end();
         uint32_t seqno = 0;
         EXPECT_TRUE(cb->commit(seqno));
+        if (outSeq)
+            *outSeq = seqno;
         std::vector<uint32_t> words;
-        for (size_t j = before; j < kernel_model::model.jobs.size(); j++)
+        uint32_t internalFences = 0;
+        for (size_t j = before; j < kernel_model::model.jobs.size(); j++) {
             words.insert(words.end(), kernel_model::model.jobs[j].words.begin(),
                          kernel_model::model.jobs[j].words.end());
-        return read(words, dev.loopRecordVa(1) - gm20b::kLoopWordsBase);
+            for (const auto &push : kernel_model::model.jobs[j].pushes)
+                if (push.flags & TegraGM20BPushFence)
+                    internalFences++;
+        }
+        Words w = read(words, dev.loopRecordVa(1) - gm20b::kLoopWordsBase, dev.channelProgressVa());
+        w.jobs = uint32_t(kernel_model::model.jobs.size() - before);
+        w.internalFences = internalFences;
+        return w;
+    }
+
+    // One command buffer of one pass of `draws` full-target draws of `pl`: its submitted words, read
+    Words pass(uint32_t draws)
+    {
+        return passOn(target, draws);
     }
 };
 
-TEST_F(DeviceMeasure, AMeasuredDrawAddsItsStampsAndNoTiledCacheFlush)
+TEST_F(DeviceMeasure, AMeasuredWholeDrawAddsItsStampsAndNoTiledCacheFlush)
 {
+    // A state already learned to run under budget stays whole and measures via pass-level stamps without extra flushes.
+    gm20b::learn(pl->bandRate, 100'000, uint64_t(kSide) * kSide);
     const Words measured = pass(1);
     ASSERT_EQ(measured.stamps.size(), 2u);
     for (uint32_t i = 1; i < gm20b::kWarmSamples; i++)
@@ -114,7 +143,6 @@ TEST_F(DeviceMeasure, AMeasuredDrawAddsItsStampsAndNoTiledCacheFlush)
     EXPECT_TRUE(unmeasured.stamps.empty());
     EXPECT_EQ(measured.flushes, unmeasured.flushes);
     EXPECT_GE(unmeasured.flushes, 1u);
-    // the end stamp follows the pass's own drain of the draw, the start stamp precedes it
     const auto drain = std::find_if(measured.flushAt.begin(), measured.flushAt.end(), [&](long at) {
         return at > measured.stampAt[0] && at < measured.stampAt[1];
     });
@@ -123,12 +151,81 @@ TEST_F(DeviceMeasure, AMeasuredDrawAddsItsStampsAndNoTiledCacheFlush)
     EXPECT_EQ(measured.stamps[1].first - measured.stamps[0].first, offsetof(gm20b::StampSlot, end));
 }
 
-TEST_F(DeviceMeasure, OnlyADrawAloneInItsPassIsMeasured)
+TEST_F(DeviceMeasure, OnlyALearnedWholeDrawAloneInItsPassIsMeasured)
 {
+    gm20b::learn(pl->bandRate, 100'000, uint64_t(kSide) * kSide);
     EXPECT_TRUE(pass(2).stamps.empty());
     EXPECT_TRUE(pass(5).stamps.empty());
     EXPECT_EQ(pl->bandRate.picks.load(), 0u);
     EXPECT_EQ(pass(1).stamps.size(), 2u);
+}
+
+TEST_F(DeviceMeasure, SmallUnmeasuredDrawInSecondSlotStaysWholeWhileHeavyOneBandsAndTeaches)
+{
+    std::string why;
+    gm20b::Pipeline *fast = dev.addRecord(plainRecord(0x3e02), false, why);
+    ASSERT_NE(fast, nullptr) << why;
+    gm20b::learn(fast->bandRate, 100'000, uint64_t(kSide) * kSide);
+
+    const uint64_t smallBandsBefore = dev.stats.bands.load();
+    const Words smallWords = passOn(target, 2, fast);
+    EXPECT_EQ(dev.stats.bands.load(), smallBandsBefore);
+    EXPECT_EQ(smallWords.progressReleases, 0u);
+    EXPECT_TRUE(smallWords.stamps.empty());
+
+    gm20b::RuntimeRecord heavyRec = plainRecord(0x3e04);
+    heavyRec.programs[1].id = "fs_heavy";
+    heavyRec.programs[1].image.assign(128 + 4096 * 8, 0);
+    gm20b::Pipeline *heavy = dev.addRecord(heavyRec, false, why);
+    ASSERT_NE(heavy, nullptr) << why;
+    pl = heavy;
+
+    const uint64_t bandsBefore = dev.stats.bands.load();
+    const Words w = passOn(target, 2, fast);
+    const uint64_t emittedBands = dev.stats.bands.load() - bandsBefore;
+    EXPECT_EQ(emittedBands, 6u);
+    EXPECT_EQ(w.progressReleases, emittedBands + 1);
+    EXPECT_EQ(w.internalFences, 0u);
+    EXPECT_EQ(w.jobs, 1u);
+    ASSERT_EQ(w.stamps.size(), 2u);
+    const uint64_t ticks[2] = {1000, 1000 + 20 * 614'400};
+    for (size_t i = 0; i < 2; i++) {
+        const gm20b::StampRelease r{w.stamps[i].second, 0, ticks[i]};
+        memcpy(kernel_model::model.host(w.stamps[i].first), &r, sizeof r);
+    }
+    dev.learnCompleted();
+    EXPECT_EQ(pl->bandRate.samples.load(), 1u);
+    EXPECT_EQ(pl->bandRate.psPerUnit.load(), 20'000'000'000ull / (uint64_t(kSide) * kSide));
+}
+
+TEST_F(DeviceMeasure, BackToBackHeavyUnmeasuredDrawsVaryBandCountAndSeparateOverhead)
+{
+    std::string why;
+    gm20b::RuntimeRecord uberRec = plainRecord(0x3e05);
+    uberRec.programs[1].id = "fs_uber";
+    uberRec.programs[1].image.assign(128 + 15152 * 8, 0);
+    gm20b::Pipeline *uber = dev.addRecord(uberRec, false, why);
+    ASSERT_NE(uber, nullptr) << why;
+    pl = uber;
+
+    const uint64_t bandsBefore = dev.stats.bands.load();
+    const Words w = passOn(target, 2);
+    const uint64_t totalBands = dev.stats.bands.load() - bandsBefore;
+    EXPECT_EQ(totalBands, 9u);
+    ASSERT_EQ(w.stamps.size(), 4u);
+    const uint32_t bandsPerDraw[2] = {6, 3};
+    for (size_t d = 0; d < 2; d++) {
+        const uint64_t msTicks = (1 + bandsPerDraw[d] * 2) * 614'400ull;  // 1 ms pixels + 2 ms/band
+        const uint64_t ticks[2] = {1000 + d * 10'000'000, 1000 + d * 10'000'000 + msTicks};
+        for (size_t i = 0; i < 2; i++) {
+            const gm20b::StampRelease r{w.stamps[d * 2 + i].second, 0, ticks[i]};
+            memcpy(kernel_model::model.host(w.stamps[d * 2 + i].first), &r, sizeof r);
+        }
+    }
+    dev.learnCompleted();
+    EXPECT_TRUE(pl->bandRate.separated.load());
+    EXPECT_NEAR(double(pl->bandRate.nsPerBand.load()), 2'000'000.0, 200'000.0);
+    EXPECT_NEAR(double(gm20b::estimatedNs(pl->bandRate, uint64_t(kSide) * kSide, 0)), 1'000'000.0, 150'000.0);
 }
 
 // The bench's case: nothing ever teaches the state, which is measured at its warm picks and then one in kRemeasureEvery
@@ -211,6 +308,107 @@ TEST_F(DeviceMeasure, AMeasuredDrawTheGpuHasNotRunWaits)
     }
     dev.learnCompleted();
     EXPECT_EQ(pl->bandRate.samples.load(), 1u);
+}
+
+TEST_F(DeviceMeasure, PriorityZeroNonCriticalAppIsNotCompositorClassAndIsBanded)
+{
+    kernel_model::model.priorityCritical = false;
+    ASSERT_TRUE(dev.gpuPriority(0, 4));
+    EXPECT_FALSE(dev.compositorClass());
+
+    const Words w = pass(1);
+    ASSERT_EQ(w.stamps.size(), 2u);
+    const uint64_t ticks[2] = {1000, 1000 + 10 * 614'400};
+    for (size_t i = 0; i < 2; i++) {
+        const gm20b::StampRelease r{w.stamps[i].second, 0, ticks[i]};
+        memcpy(kernel_model::model.host(w.stamps[i].first), &r, sizeof r);
+    }
+    const uint64_t bandsBefore = dev.stats.bands.load();
+    pass(1);
+    EXPECT_EQ(dev.stats.bands.load() - bandsBefore, 10u);
+
+    kernel_model::model.priorityCritical = true;
+    ASSERT_TRUE(dev.gpuPriority(0, 4));
+    EXPECT_TRUE(dev.compositorClass());
+    const uint64_t bandsAfter = dev.stats.bands.load();
+    pass(1);
+    EXPECT_EQ(dev.stats.bands.load(), bandsAfter);
+}
+
+TEST_F(DeviceMeasure, TwoCommandBuffersOnTimedGpuLearnRateForTheSecond)
+{
+    timed_gpu::Gpu gpu;
+    gpu.setPerJob(std::chrono::microseconds(500));
+    uint32_t seq1 = 0;
+    const Words first = passOn(target, 1, nullptr, &seq1);
+    ASSERT_EQ(first.stamps.size(), 2u);
+    const uint64_t ticks[2] = {2000, 2000 + 12 * 614'400};  // 12 ms
+    for (size_t i = 0; i < 2; i++) {
+        const gm20b::StampRelease r{first.stamps[i].second, 0, ticks[i]};
+        memcpy(kernel_model::model.host(first.stamps[i].first), &r, sizeof r);
+    }
+    ASSERT_TRUE(dev.wait(seq1));
+    const uint64_t bandsBefore = dev.stats.bands.load();
+    uint32_t seq2 = 0;
+    passOn(target, 1, nullptr, &seq2);
+    ASSERT_TRUE(dev.wait(seq2));
+    EXPECT_EQ(dev.stats.bands.load() - bandsBefore, 12u);
+}
+
+TEST_F(DeviceMeasure, Learned248MsDrawSplitsInto2DTilesInOneJobWithProgressWord)
+{
+    gm20b::Texture hd;
+    ASSERT_TRUE(dev.createTexture(1280, 720, kRGBA8, hd));
+    gm20b::learn(pl->bandRate, 248'000'000, 1280ull * 720);
+    const uint64_t bandsBefore = dev.stats.bands.load();
+    const Words w = passOn(hd, 1);
+    const uint64_t bands = dev.stats.bands.load() - bandsBefore;
+    EXPECT_GE(bands, 248u);
+    EXPECT_EQ(w.jobs, 1u);
+    EXPECT_EQ(w.internalFences, 0u);
+    EXPECT_EQ(w.progressReleases, bands);
+}
+
+TEST(DeviceMeasureLegacy, LegacyKernelWithoutProgressWordCapsBandsAndUsesInternalFences)
+{
+    kernel_model::model = {};
+    kernel_model::model.vaEnd = uint64_t(1) << 40;
+    kernel_model::model.infoFlags = TegraGM20BInfoTiledCache | TegraGM20BInfoPushFences;
+    kernel_model::model.channelProgress = false;
+    gm20b::Device legacy;
+    std::string err;
+    ASSERT_TRUE(legacy.open(harness::emptyPack().c_str(), 0, err, gm20b::Device::Role::Client)) << err;
+    gm20b::Texture hd;
+    ASSERT_TRUE(legacy.createTexture(1280, 720, kRGBA8, hd));
+    std::string why;
+    gm20b::Pipeline *lpl = legacy.addRecord(plainRecord(0x3e03), false, why);
+    ASSERT_NE(lpl, nullptr) << why;
+    gm20b::learn(lpl->bandRate, 248'000'000, 1280ull * 720);
+
+    gm20b::CommandBuffer *cb = legacy.begin();
+    ASSERT_NE(cb, nullptr);
+    const size_t before = kernel_model::model.jobs.size();
+    gm20b::PassDesc desc;
+    desc.color[0].texture = &hd;
+    desc.color[0].load = gm20b::ColorAttachment::Load;
+    desc.count = 1;
+    gm20b::RenderEncoder *e = cb->render(desc);
+    ASSERT_NE(e, nullptr);
+    e->setPipeline(lpl);
+    const char *drawErr = nullptr;
+    ASSERT_TRUE(e->draw(kTriangle, 0, 3, 1, 0, &drawErr)) << (drawErr ? drawErr : "");
+    e->end();
+    uint32_t seqno = 0;
+    ASSERT_TRUE(cb->commit(seqno));
+
+    uint32_t internalFences = 0;
+    for (size_t j = before; j < kernel_model::model.jobs.size(); j++)
+        for (const auto &push : kernel_model::model.jobs[j].pushes)
+            if (push.flags & TegraGM20BPushFence)
+                internalFences++;
+    EXPECT_EQ(legacy.channelProgressVa(), 0u);
+    EXPECT_EQ(legacy.stats.bands.load(), gm20b::kMaxBands);
+    EXPECT_GT(internalFences, 0u);
 }
 
 }  // namespace

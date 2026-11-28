@@ -34,7 +34,7 @@ def c_objects(clang: list[str], base: list[str], scratch: str, env: dict) -> lis
             flags += clang[at : at + 2]
             at += 2
             continue
-        if a.startswith(('-I', '-D', '-O')):
+        if a.startswith(('-I', '-D', '-O', '-flto')):
             flags.append(a)
         at += 1
     out = []
@@ -76,7 +76,7 @@ def main() -> None:
         clang = ['-I', str(Path(scratch, 'H')), *clang]
     # Absolute paths, as the CMake flow gave them, mapped back to the path root.
     clang = [os.path.join(here, a) if (not a.startswith('-') and os.path.exists(a)) else a for a in clang]
-    base = ['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-isysroot', xcode['IPHONEOS_SDK']]
+    base = ['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-mcpu=cortex-a57', '-isysroot', xcode['IPHONEOS_SDK']]
     maps = common.prefix_maps(args.path_root, args.bin_dir, 'external/+http_archive+xnu')
     clang = c_objects(clang, base + maps, scratch, env)
     command = [*base, *clang, *maps]
@@ -84,16 +84,15 @@ def main() -> None:
     subprocess.run(command, check=True, env=env)
     if args.strip:
         subprocess.run(['xcrun', 'strip', '-x', args.out], check=True, env=env)
-    if True:
-        # Ad hoc, as the CMake flow signed them (identifier defaults to the file name).
-        sign = ['codesign', '-f', '-s', '-']
-        if args.pagesize:
-            sign += ['--pagesize', args.pagesize]
-        if args.sign_identifier:
-            sign += ['--identifier', args.sign_identifier]
-        if args.entitlements:
-            sign += ['--entitlements', args.entitlements]
-        subprocess.run([*sign, args.out], check=True, env=env)
+    # Ad hoc, as the CMake flow signed them (identifier defaults to the file name).
+    sign = ['codesign', '-f', '-s', '-']
+    if args.pagesize:
+        sign += ['--pagesize', args.pagesize]
+    if args.sign_identifier:
+        sign += ['--identifier', args.sign_identifier]
+    if args.entitlements:
+        sign += ['--entitlements', args.entitlements]
+    subprocess.run([*sign, args.out], check=True, env=env)
     data = Path(args.out).read_bytes()
     if here.encode() in data:
         sys.exit(f'{args.out} names the execution root')

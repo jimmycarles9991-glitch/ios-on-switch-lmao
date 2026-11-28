@@ -5,10 +5,11 @@
 #include <os/log.h>
 #include <cstdint>
 #include <string>
+#include "../stats.h"
 
 namespace switch_compiler {
 
-#if SWITCH_DEBUG
+#if SWITCH_DEBUG && SWITCH_METAL_STATS
 const char *resultName(int32_t result);
 // A job's line: its result, where its wait went (the kernel's hand-over at `takenNs`, its prepare to `preparedNs`, then
 // the pool) and where its compile went (compiler_times.h, this worker's), for pid `pid`'s request of `key`
@@ -16,6 +17,8 @@ void logJob(os_log_t log, int32_t result, uint64_t takenNs, uint64_t preparedNs,
             const std::string &key);
 // What jetsam holds against the plist's JetsamProperties: the footprint now and its peak this process, and the heap's part
 void logFootprint(os_log_t log, const char *when);
+#endif
+#if SWITCH_DEBUG
 // HW Test gpu.compile.first_draw: the compiler dies as the memory limit kills one, holding the next request of the pid
 // com.brunostjohn.switch.debug.compiler-dies-at-next-request's notify state holds, so a run shows that request's
 // creation completing once launchd's next compiler takes it

@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// A kernel no pack holds (this app's multiply_add, at a threadgroup shape of its own): on the facade its record is made

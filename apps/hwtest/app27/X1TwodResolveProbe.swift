@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestX1
 import Metal
 
 extension X1TwodProbes {
@@ -44,13 +45,39 @@ extension X1TwodProbes {
                 offPath.append("\(format.name)_samples:\(off)")
                 continue
             }
+            let colors = try sampleColors(gpu, format)
+            let isSrgb = format.channels.contains(.srgb8)
+            let metalRule = format.metalResolveRounding
             for samples in [2, 4] where gpu.device.supportsTextureSampleCount(samples) {
                 let name = "\(format.name)_\(samples)x"
                 journal.starting(name)
-                let colors = try sampleColors(gpu, format)
                 let pipeline = try gpu.render(
                     fragment: "x1_sample_fragment", format: format.pixelFormat, samples: samples
                 )
+                let expectedLinear: [[X1RuleCodes]] = (0 ..< 4).map { set in
+                    let exact = average(format, stored[set], samples, srgbLinear: true)
+                    return format.channels.enumerated().map { c, ch in X1RuleCodes(exact[c], ch, metal: metalRule) }
+                }
+                let expectedCodes: [[X1RuleCodes]] =
+                    isSrgb
+                        ? (0 ..< 4).map { set in
+                            let exact = average(format, stored[set], samples, srgbLinear: false)
+                            return format.channels.enumerated().map { c, ch in
+                                X1RuleCodes(exact[c], ch, metal: metalRule)
+                            }
+                        }
+                        : []
+                let expectedPairs: [[[X1RuleCodes]]] =
+                    samples == 4
+                        ? separable.map { reading in
+                            (0 ..< 4).map { set in
+                                let exact = pairAverage(format, stored[set], reading)
+                                return format.channels.enumerated().map { c, ch in
+                                    X1RuleCodes(exact[c], ch, metal: metalRule)
+                                }
+                            }
+                        }
+                        : []
                 for arm in ["twod", "draw"] where arm == "twod" || format.name != "rgb10a2" {
                     let ms = try gpu.texture(
                         format.pixelFormat, w, h, usage: [.renderTarget], samples: samples,
@@ -80,22 +107,17 @@ extension X1TwodProbes {
                     var tally = X1RuleTally(), codesTally = X1RuleTally()
                     let pairReadings = samples == 4 && arm == "twod" ? separable : []
                     var pairTallies = [X1RuleTally](repeating: X1RuleTally(), count: pairReadings.count)
-                    for t in 0 ..< w * h {
-                        let set = (t % w + 3 * (t / w)) % 4
-                        let got = format.codes(bytes, t)
-                        tally.add(
-                            got, exact: average(format, stored[set], samples, srgbLinear: true),
-                            channels: format.channels, metal: format.metalRounding, at: t
-                        )
-                        codesTally.add(
-                            got, exact: average(format, stored[set], samples, srgbLinear: false),
-                            channels: format.channels, metal: format.metalRounding, at: t
-                        )
-                        for (k, reading) in pairReadings.enumerated() {
-                            pairTallies[k].add(
-                                got, exact: pairAverage(format, stored[set], reading),
-                                channels: format.channels, metal: format.metalRounding, at: t
-                            )
+                    let trackCodes = isSrgb && arm == "twod"
+                    bytes.withUnsafeBufferPointer { bp in
+                        let base = bp.baseAddress!
+                        for t in 0 ..< w * h {
+                            let set = (t % w + 3 * (t / w)) % 4
+                            let got = format.codes4(base, t)
+                            tally.add(got, expected: expectedLinear[set], at: t)
+                            if trackCodes { codesTally.add(got, expected: expectedCodes[set], at: t) }
+                            for k in 0 ..< pairTallies.count {
+                                pairTallies[k].add(got, expected: expectedPairs[k][set], at: t)
+                            }
                         }
                     }
                     if arm == "twod" {
@@ -109,7 +131,7 @@ extension X1TwodProbes {
                         } else {
                             explained.append((name, tally))
                         }
-                        if format.channels.contains(.srgb8) { linear.append("\(name):\(codesTally.text)") }
+                        if isSrgb { linear.append("\(name):\(codesTally.text)") }
                     } else {
                         draws.append((name, tally))
                     }

@@ -7,6 +7,7 @@
 #include <thread>
 #include <vector>
 
+#include "SwitchGpuCompilerScope.h"
 #include "SwitchGpuShaderCompiler.h"
 #include "SwitchGpuShaderCompilerQueue.h"
 #include "TegraGM20BCompilerABI.h"
@@ -15,6 +16,14 @@
 extern "C" int proc_selfpid(void)
 {
 	return 448;
+}
+
+// The asking process's scope as a test sets it: what the kernel reads in the caller's context
+TegraGM20BAbiCompilerScope gAskingScope = {TegraGM20BCompilerScopeFile, 24, {0xc5}};
+
+void switch_gpu_compiler_scope(TegraGM20BAbiCompilerScope &out)
+{
+	out = gAskingScope;
 }
 
 namespace

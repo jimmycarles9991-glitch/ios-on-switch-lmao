@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Turned surface textures of formats the GM20B renders through a stand-in land every frame pixel where a BGRA8 texture

@@ -108,8 +108,10 @@ ios_binary(
         "//kits/SwitchRefusal:SwitchRefusal.h",
         "//kits/SwitchServiceWait:SwitchServiceWait.h",
     ],
-    copts = [
-        "-O2",
+    copts = select({
+        "//bazel:release": ["-O3"],
+        "//conditions:default": ["-O2"],
+    }) + [
         "-Wall",
         "-Wextra",
         "-Werror",

@@ -58,7 +58,8 @@ IOReturn AGXDeviceUserClient::cutOverlaps(uint64_t va, uint64_t range, bool now,
 		// The snapshot of the work that may still use the cut PTEs is taken before a bind epoch for what they hold
 		// up is published: a submission that reads the new epoch is then never in it, so never waits on itself.
 		retire(record);
-		if (now) {
+		// Pure unmaps defer L2 flush and TLB invalidation to retireBatch off lock_ and submitGate_.
+		if (now && replace) {
 			switch_gpu_vm_unmap(vm_, &record->mapping);
 			switch_gpu_mapping *const parts[] = {below, above};
 			for (auto *part : parts)
@@ -153,11 +154,14 @@ bool AGXDeviceUserClient::workQueued(uint64_t va, uint64_t range) const
 	}
 	if (!held)
 		return false;
-	for (uint32_t slot = 0; slot < kMaxChannels; ++slot)
+	for (uint32_t slot = 0; slot < kMaxChannels; ++slot) {
+		if (retiringChans_[slot].active)
+			return true;
 		if (chans_[slot] && !tgm_chan_error(chans_[slot]) &&
 		    int32_t(tgm_chan_completed(chans_[slot]) - tgm_chan_submitted(chans_[slot])) <
 			    0)
 			return true;
+	}
 	return false;
 }
 
@@ -257,7 +261,7 @@ void AGXDeviceUserClient::logFaultBindings()
 	}
 }
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 static_assert(kMaxChannels == TGM_BIND_CHANNELS, "a note keeps each slot's submitted seqno");
 
 void AGXDeviceUserClient::noteBind(uint8_t op, uint64_t va, uint64_t range, const Bo *bo,

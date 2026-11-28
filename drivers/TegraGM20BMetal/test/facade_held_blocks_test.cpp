@@ -8,6 +8,7 @@
 #include "encode_cost_shape.h"
 #include "held_sites.h"
 #include "timed_gpu.h"
+#include "../frame_cpu_counts.h"
 
 #include <gtest/gtest.h>
 #include <time.h>
@@ -20,9 +21,48 @@ using encode_cost::kBuffers;
 constexpr int kDraws[2] = {8, 16};
 constexpr size_t kSiteFrames = 8;
 constexpr double kRuntimeHeldMost = 2, kHeldMost = 4;
+// Each arm keeps the least of this many measured windows. A kept recording grows its range lists on the submit thread
+// the first time the encode ahead splits one of its command buffers in two (gm20bPipelineSplit, where the encode ahead
+// had got to at the commit's turn), once for each recording, and a window can catch that first time in either arm;
+// growth with the draws shows in every window.
+constexpr int kWindows = 3;
+constexpr const char *kSubmitThread = "com.brunostjohn.switch.gm20b.submit";
+
+uint64_t splitsNow()
+{
+    return gm20b::frameCpuCounts().splits.load(std::memory_order_relaxed);
+}
+
+// The runtime's blocks on the submit thread in `w`, by site: a kept recording's range lists growing (prepareRange,
+// classifyRange, the retirement writes' capture) or another, each other site named, and the window's encode-ahead splits
+std::string submitTags(const held_sites::Window &w, uint64_t splits)
+{
+    long ranges = 0, other = 0;
+    std::string named;
+    for (const held_sites::Site &s : w.sites) {
+        const auto on = s.threads.find(kSubmitThread);
+        if (s.owner != held_sites::Owner::Runtime || on == s.threads.end())
+            continue;
+        bool range = false;
+        std::vector<uintptr_t> frames = s.frames;
+        frames.push_back(s.ownerFrame);
+        for (uintptr_t pc : frames) {
+            const std::string symbol = pc ? held_sites::frame(pc).symbol : std::string();
+            for (const char *site : {"prepareRange", "classifyRange", "captureWrittenRange", "RetirementWrites"})
+                range |= symbol.find(site) != std::string::npos;
+        }
+        (range ? ranges : other) += on->second;
+        if (!range)
+            named += " " + held_sites::shortName(s.ownerFrame ? s.ownerFrame : s.frames.front()) + " x" +
+                     std::to_string(on->second);
+    }
+    return "submit thread: " + std::to_string(ranges) + " range-list growth, " + std::to_string(other) + " other" +
+           (named.empty() ? "" : " (" + named + " )") + "; encode-ahead splits " + std::to_string(splits);
+}
 
 struct Arm {
     double misses = 0;
+    uint64_t splits = 0;
     held_sites::Window window;
     std::map<std::string, unsigned> paths;
 };
@@ -46,12 +86,14 @@ Arm heldArm(timed_gpu::Gpu &gpu, int draws, bool gpuHeld)
         if (gpuHeld)
             gpu.hold(true);
         NSDictionary<NSString *, NSNumber *> *profiled = encode_cost::profile();
+        const uint64_t splits = splitsNow();
         held_sites_start();
         for (int i = 0; i < kBuffers; i++)
             [held addObject:encode_cost::commitOne(draws)];
         size_t events = 0;
         bool overflow = false;
         const held_sites_event *log = held_sites_stop(&events, &overflow);
+        arm.splits = splitsNow() - splits;
         arm.misses = profileCount(profiled, encode_cost::profile(), @"recording_misses") / kBuffers;
         arm.window = held_sites::collect(log, events, overflow, kSiteFrames);
         if (gpuHeld)
@@ -67,6 +109,7 @@ Arm heldArm(timed_gpu::Gpu &gpu, int draws, bool gpuHeld)
 // the command buffers that found no kept recording
 struct Sequence {
     double held[2] = {}, allocations[2] = {}, misses[2] = {};
+    uint64_t splits[2] = {};
     held_sites::Window allocated[2];
 };
 
@@ -80,12 +123,14 @@ Sequence hwTestSequence()
             encode_cost::finish(encode_cost::batchUnpooled(kDraws[a]));
             NSDictionary<NSString *, NSNumber *> *before = encode_cost::profile();
             NSMutableArray<id<MTLCommandBuffer>> *held = [[NSMutableArray alloc] initWithCapacity:kBuffers];
+            const uint64_t splits = splitsNow();
             held_sites_start();
             for (int i = 0; i < kBuffers; i++)
                 [held addObject:encode_cost::commitOne(kDraws[a])];
             size_t events = 0;
             bool overflow = false;
             const held_sites_event *log = held_sites_stop(&events, &overflow);
+            out.splits[a] = splitsNow() - splits;
             out.misses[a] = profileCount(before, encode_cost::profile(), @"recording_misses") / kBuffers;
             const held_sites::Window w = held_sites::collect(log, events, overflow, kSiteFrames);
             held_sites::Window all = held_sites::collect(log, events, overflow, kSiteFrames, true);
@@ -181,19 +226,29 @@ TEST(GM20BFacadeHeldBlocks, ACommittedCommandBufferHoldsNoBlockOfTheRuntimePerDr
         EXPECT_TRUE(encode_cost::settle(draws));
     for (const bool gpuHeld : {false, true}) {
         double runtime[2] = {};
+        Arm kept[2];
         for (int a = 0; a < 2; a++) {
-            const Arm arm = heldArm(gpu, kDraws[a], gpuHeld);
-            const held_sites::Window &w = arm.window;
-            EXPECT_LE(arm.misses, 0.1) << kDraws[a] << " draws, gpu " << (gpuHeld ? "held" : "running");
-            for (const auto &[path, n] : arm.paths)
-                EXPECT_EQ(path, "gm20b") << n << " command buffers at " << kDraws[a] << " draws";
-            EXPECT_FALSE(w.overflow);
-            runtime[a] = double(w.held(held_sites::Owner::Runtime)) / kBuffers;
-            EXPECT_LE(runtime[a], kRuntimeHeldMost) << "the runtime's blocks a command buffer holds at " << kDraws[a]
-                                                    << " draws, gpu " << (gpuHeld ? "held" : "running");
+            for (int window = 0; window < kWindows; window++) {
+                Arm arm = heldArm(gpu, kDraws[a], gpuHeld);
+                EXPECT_LE(arm.misses, 0.1) << kDraws[a] << " draws, gpu " << (gpuHeld ? "held" : "running");
+                for (const auto &[path, n] : arm.paths)
+                    EXPECT_EQ(path, "gm20b") << n << " command buffers at " << kDraws[a] << " draws";
+                EXPECT_FALSE(arm.window.overflow);
+                const double held = double(arm.window.held(held_sites::Owner::Runtime)) / kBuffers;
+                if (window == 0 || held < runtime[a]) {
+                    runtime[a] = held;
+                    kept[a] = std::move(arm);
+                }
+            }
+            EXPECT_LE(runtime[a], kRuntimeHeldMost)
+                << "the runtime's blocks a command buffer holds at " << kDraws[a] << " draws, gpu "
+                << (gpuHeld ? "held" : "running") << "; " << submitTags(kept[a].window, kept[a].splits);
         }
-        EXPECT_LT(runtime[1] - runtime[0], 0.5) << "the runtime's held blocks grow with the draws: " << runtime[0]
-                                                << " at " << kDraws[0] << ", " << runtime[1] << " at " << kDraws[1];
+        EXPECT_LT(runtime[1] - runtime[0], 0.5)
+            << "the runtime's held blocks grow with the draws: " << runtime[0] << " at " << kDraws[0] << ", "
+            << runtime[1] << " at " << kDraws[1] << "\n  " << kDraws[0] << " draws, "
+            << submitTags(kept[0].window, kept[0].splits) << "\n  " << kDraws[1] << " draws, "
+            << submitTags(kept[1].window, kept[1].splits);
     }
 }
 
@@ -202,15 +257,29 @@ TEST(GM20BFacadeHeldBlocks, TheHwTestsSequenceHoldsAndAllocatesNoMoreWithItsDraw
     ASSERT_NE(scale_frames::opened().device, nil);
     ASSERT_NE(encode_cost::profile()[@"recording_misses"], nil) << "no recording counts in the encode profile";
     timed_gpu::Gpu gpu;
-    const Sequence s = hwTestSequence();
-    for (int a = 0; a < 2; a++) {
-        EXPECT_LE(s.held[a], kHeldMost) << kDraws[a] << " draws";
-        EXPECT_LE(s.misses[a], 0.1) << kDraws[a] << " draws";
+    Sequence s;
+    for (int window = 0; window < kWindows; window++) {
+        Sequence run = hwTestSequence();
+        for (int a = 0; a < 2; a++) {
+            EXPECT_LE(run.misses[a], 0.1) << kDraws[a] << " draws";
+            if (window == 0 || run.held[a] < s.held[a])
+                s.held[a] = run.held[a];
+            if (window == 0 || run.allocations[a] < s.allocations[a]) {
+                s.allocations[a] = run.allocations[a];
+                s.splits[a] = run.splits[a];
+                s.allocated[a] = std::move(run.allocated[a]);
+            }
+        }
     }
+    for (int a = 0; a < 2; a++)
+        EXPECT_LE(s.held[a], kHeldMost) << kDraws[a] << " draws";
     EXPECT_LT(s.held[1] - s.held[0], 0.5);
-    EXPECT_LT(s.allocations[1] - s.allocations[0], 0.5) << held_sites::differences(
-        s.allocated[0], s.allocated[1], held_sites::Owner::Runtime, std::to_string(kDraws[0]) + " draws",
-        std::to_string(kDraws[1]) + " draws", kBuffers, "command buffer");
+    EXPECT_LT(s.allocations[1] - s.allocations[0], 0.5)
+        << kDraws[0] << " draws, " << submitTags(s.allocated[0], s.splits[0]) << "\n"
+        << kDraws[1] << " draws, " << submitTags(s.allocated[1], s.splits[1]) << "\n"
+        << held_sites::differences(s.allocated[0], s.allocated[1], held_sites::Owner::Runtime,
+                                   std::to_string(kDraws[0]) + " draws", std::to_string(kDraws[1]) + " draws", kBuffers,
+                                   "command buffer");
 }
 
 // The GPU going idle at every command buffer (a frame's on a device) moves the idle release's deadline without a timer
@@ -267,7 +336,8 @@ TEST(GM20BFacadeHeldBlocks, AStandardContainerTheTestGrowsIsTheTests)
 }
 
 // The runtime's allocations on every thread over a batch, by site: the device's encode profile counts the encoding
-// thread's, which here include the kernel model's records of each job (the kernel's own memory on a device)
+// thread's, which here include the kernel model's records of each job (the kernel's own memory on a device). Each arm
+// keeps the least of kWindows windows.
 TEST(GM20BFacadeHeldBlocks, ACommandBuffersAllocationsDoNotGrowWithItsDraws)
 {
     ASSERT_NE(scale_frames::opened().device, nil);
@@ -279,38 +349,54 @@ TEST(GM20BFacadeHeldBlocks, ACommandBuffersAllocationsDoNotGrowWithItsDraws)
         });
     };
     double runtime[2] = {};
+    uint64_t splits[2] = {};
     held_sites::Window w[2];
     for (int a = 0; a < 2; a++) {
         EXPECT_TRUE(settle(kDraws[a]));
         EXPECT_TRUE(settle(kDraws[a]));
-        held_sites_start();
-        EXPECT_TRUE(settle(kDraws[a]));
-        size_t events = 0;
-        bool overflow = false;
-        const held_sites_event *log = held_sites_stop(&events, &overflow);
-        w[a] = held_sites::collect(log, events, overflow, kSiteFrames, true);
-        runtime[a] = double(w[a].held(held_sites::Owner::Runtime)) / kBuffers;
+        for (int window = 0; window < kWindows; window++) {
+            const uint64_t before = splitsNow();
+            held_sites_start();
+            EXPECT_TRUE(settle(kDraws[a]));
+            size_t events = 0;
+            bool overflow = false;
+            const held_sites_event *log = held_sites_stop(&events, &overflow);
+            held_sites::Window got = held_sites::collect(log, events, overflow, kSiteFrames, true);
+            const double held = double(got.held(held_sites::Owner::Runtime)) / kBuffers;
+            if (window == 0 || held < runtime[a]) {
+                runtime[a] = held;
+                splits[a] = splitsNow() - before;
+                w[a] = std::move(got);
+            }
+        }
     }
     EXPECT_LT(runtime[1] - runtime[0], 0.5)
+        << kDraws[0] << " draws, " << submitTags(w[0], splits[0]) << "\n"
+        << kDraws[1] << " draws, " << submitTags(w[1], splits[1]) << "\n"
         << held_sites::differences(w[0], w[1], held_sites::Owner::Runtime, std::to_string(kDraws[0]) + " draws",
                                    std::to_string(kDraws[1]) + " draws", kBuffers, "command buffer");
 }
 
-// Once nothing is in flight, the completion thread gives back at the last drain's deadline, never before it. Last: the
-// release it starts runs on while a later test would count allocations.
-TEST(GM20BFacadeHeldBlocks, TheCompletionThreadGivesBackAtTheLastDrainsDeadline)
+// A client gives back what no resource holds when its app goes to the background, before that call returns, and
+// nothing at a pause (owner, 25 Nov: no idle timer). Last: the release it starts runs on while a later test would count
+// allocations.
+TEST(GM20BFacadeHeldBlocks, ATripToTheBackgroundGivesBackAndAPauseDoesNot)
 {
     ASSERT_NE(scale_frames::opened().device, nil);
     timed_gpu::Gpu gpu;
     @autoreleasepool {
         [encode_cost::commitOne(kDraws[0]) waitUntilCompleted];
     }
-    const uint64_t due = gRM->idle.due(0);
-    ASSERT_NE(due, 0u) << "no deadline after a drain";
-    const uint64_t until = due + 2 * uint64_t(GpuMemoryRelease::kIdleNs);
-    while (gRM->idle.due(0) && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < until)
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    const uint64_t seen = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    ASSERT_EQ(gRM->idle.due(0), 0u) << "nothing given back two seconds past the deadline";
-    EXPECT_GE(seen, due);
+    gm20b::Device::Held before = {}, paused = {}, after = {};
+    ASSERT_TRUE(gRM->raw->held(before, true));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    ASSERT_TRUE(gRM->raw->held(paused, true));
+    EXPECT_EQ(paused.chunks, before.chunks) << "a pause gave chunks back";
+    EXPECT_EQ(paused.parkedChunks, before.parkedChunks) << "a pause parked chunks";
+    gRawRelease.backgrounded();
+    ASSERT_TRUE(gRM->raw->held(after, true));
+    EXPECT_TRUE(after.chunks < paused.chunks || after.parkedChunks > paused.parkedChunks ||
+                after.writeCombined < paused.writeCombined)
+        << "the trip to the background gave nothing back before it returned";
+    gRawRelease.foregrounded();
 }

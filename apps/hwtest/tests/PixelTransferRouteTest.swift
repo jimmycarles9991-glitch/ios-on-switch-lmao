@@ -1,5 +1,7 @@
 import Foundation
 import HWTestCore
+import HWTestKit
+import HWTestShared
 import HWTestVideo
 
 /// VTPixelTransferSession over each pair (video/PixelTransferRoutes.swift), five transfers a pair. Judged:

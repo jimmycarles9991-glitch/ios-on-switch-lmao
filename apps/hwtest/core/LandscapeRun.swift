@@ -9,6 +9,7 @@ public struct LandscapeSample: Sendable, Equatable {
     public static let query: UInt32 = 3
     public static let portrait: UInt32 = 4
     public static let fail: UInt32 = 5
+    public static let copy: UInt32 = 6
     /// PORTRAIT's bound, in frame ends (SWITCH_DISPLAY_LANDSCAPE_PORTRAIT_FRAMES).
     public static let portraitFrames: UInt32 = 3600
     public static let done: UInt32 = 2

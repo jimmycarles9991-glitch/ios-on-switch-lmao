@@ -64,7 +64,8 @@ tgm_copy_job rowsJob(uint32_t srcPitch, uint32_t dstPitch, uint32_t rowBytes, ui
 		nullptr,
 		TEGRA_GM20B_CE_NO_SYNCPT,
 		0,
-		TEGRA_GM20B_CE_NO_SYNCPT};
+		TEGRA_GM20B_CE_NO_SYNCPT,
+		0};
 }
 
 void expectRows(const std::vector<uint8_t> &d, uint64_t dstOffset, uint32_t dstPitch,

@@ -1,6 +1,7 @@
 import CoreImage
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 import MetalPerformanceShaders
 

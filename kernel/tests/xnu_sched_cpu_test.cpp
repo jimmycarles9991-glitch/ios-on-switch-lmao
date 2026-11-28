@@ -136,4 +136,38 @@ TEST(XnuSchedCpu, ALineCutShortStaysInItsBuffer)
     EXPECT_EQ(std::string(line).size(), sizeof(line) - 1);
 }
 
+TEST(XnuSchedCpu, BootTotalsGoMostFirstAcrossAsManyLinesAsTheyNeed)
+{
+    switch_cpu_task all[5] = {{1, "launchd", 10 * kMs, 30 * kMs},
+                              {30, "SpringBoard", 900 * kMs, 300 * kMs},
+                              {0, "kernel_task", 0, 2000 * kMs},
+                              {69, "backboardd", 500 * kMs, 400 * kMs},
+                              {7, "logd", 1 * kMs, 1 * kMs}};
+    switch_cpu_tasks_sort(all, 5);
+    EXPECT_EQ(all[0].pid, 0);
+    EXPECT_EQ(all[1].pid, 30);
+    EXPECT_EQ(all[2].pid, 69);
+    EXPECT_EQ(all[4].pid, 7);
+    char line[48];
+    std::string joined;
+    uint32_t first = 0, lines = 0;
+    while (first < 5) {
+        const uint32_t next = switch_cpu_totals_format(line, sizeof(line), all, 5, first, kNumer, kDenom);
+        ASSERT_GT(next, first) << "every line takes at least one process";
+        EXPECT_LT(std::string(line).size(), sizeof(line));
+        joined += std::string(lines++ ? " | " : "") + line;
+        first = next;
+    }
+    EXPECT_EQ(joined, "kernel_task[0] 0+2000, SpringBoard[30] 900+300 | backboardd[69] 500+400, launchd[1] 10+30 | "
+                      "logd[7] 1+1");
+}
+
+TEST(XnuSchedCpu, ATotalTooLongForTheLineIsNotCut)
+{
+    const switch_cpu_task one[1] = {{30, "SpringBoard", 900 * kMs, 300 * kMs}};
+    char line[8];
+    EXPECT_EQ(switch_cpu_totals_format(line, sizeof(line), one, 1, 0, kNumer, kDenom), 0u);
+    EXPECT_EQ(std::string(line), "");
+}
+
 }  // namespace

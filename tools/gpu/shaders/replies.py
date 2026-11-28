@@ -23,12 +23,15 @@ def sha(data: bytes) -> str:
 
 
 def payload(data: bytes) -> bytes | None:
+    """The reply's metallib. A device-made reply carries no digest (all zero): its bytes are checked here only when
+    one is stated."""
     if len(data) < HEADER or data[:4] != MAGIC:
         return None
     warnings, length = struct.unpack_from('<IQ', data, 4)
     if not length or HEADER + warnings + length != len(data):
         return None
-    if hashlib.sha256(data[HEADER:]).digest() != data[16:HEADER]:
+    stated = data[16:HEADER]
+    if any(stated) and hashlib.sha256(data[HEADER:]).digest() != stated:
         return None
     return data[HEADER + warnings :]
 
@@ -52,7 +55,8 @@ def _unique_fields(pairs: list[tuple[str, object]]) -> dict:
 
 def _identity(root: Path, path: Path) -> dict:
     record = json.loads(path.read_text(), object_pairs_hook=_unique_fields)
-    if not isinstance(record, dict) or type(record.get('schema')) is not int or record['schema'] != 1:
+    # schema 2: the device's, with no digests (the host hashes the files itself)
+    if not isinstance(record, dict) or type(record.get('schema')) is not int or record['schema'] not in (1, 2):
         raise ValueError('unsupported provenance schema')
     name, os_build = record.get('reply'), record.get('osBuild')
     if not isinstance(name, str) or not NAME.fullmatch(name) or not _component(os_build):
@@ -77,7 +81,7 @@ def _request(root: Path, record: dict) -> Path:
     if request_path.stat().st_size != length:
         raise ValueError('request length does not match provenance')
     request = request_path.read_bytes()
-    if sha(request) != record.get('requestSHA256'):
+    if record['schema'] == 1 and sha(request) != record.get('requestSHA256'):
         raise ValueError('request hash does not match provenance')
     key = sha(bytes.fromhex(record['compilerUUID']) + struct.pack('<I', record['requestType']) + request)
     if record['reply'] != key + '.reply':
@@ -89,10 +93,14 @@ def _record(root: Path, path: Path, entries: dict) -> tuple[dict, Path]:
     record = _identity(root, path)
     request_path = _request(root, record)
     reply = entries.get(record['reply'])
-    if not reply or record.get('replySHA256') != reply['sha256']:
+    if not reply:
         raise ValueError('reply hash does not match provenance')
-    if record.get('metallibSHA256') != reply['metallibSHA256']:
+    if record['schema'] == 1 and record.get('replySHA256') != reply['sha256']:
+        raise ValueError('reply hash does not match provenance')
+    if record['schema'] == 1 and record.get('metallibSHA256') != reply['metallibSHA256']:
         raise ValueError('output library hash does not match reply')
+    if record['schema'] == 2 and any(k in record for k in ('requestSHA256', 'replySHA256', 'metallibSHA256')):
+        raise ValueError('a device provenance record states a digest')
     return record, request_path
 
 

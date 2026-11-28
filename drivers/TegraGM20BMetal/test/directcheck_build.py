@@ -9,7 +9,7 @@ from pathlib import Path
 
 METAL = Path('drivers/TegraGM20BMetal')
 PLUGIN = Path('drivers/TegraGM20BMetal/plugin')
-DIRECT_RUNTIME = ('direct', 'direct_compute', 'record_parts', 'emit', 'pack', 'metallib')
+DIRECT_RUNTIME = ('direct', 'direct_compute', 'record_parts', 'emit', 'pack', 'metallib', 'gm20b_cache', 'kernel_cache')
 
 
 def main() -> None:

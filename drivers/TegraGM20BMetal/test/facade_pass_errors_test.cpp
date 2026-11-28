@@ -241,6 +241,23 @@ void aResolveAcrossTheEightBitTwinsIsRaws()
     expectRaw(device, otherCount);
 }
 
+// A 4x BGRA8Unorm_sRGB resolve (Maps' drawable) is the pass of its own 4x state, which reads the samples' codes through
+// the attachment's UNORM twin: a pack with that state alone draws it, where the counted state it took before is absent
+void anSrgbResolveAtFourSamplesTakesItsFourSampleState()
+{
+    id<MTLDevice> device = open(writePack(packKey(MTLPixelFormatBGRA8Unorm), {}, {}, true, "",
+                                          {{"raw.resolve.resolve_bgra8_srgb_4x_frag", MTLPixelFormatBGRA8Unorm}}));
+    ASSERT_TRUE(device != nil);
+    id<MTLTexture> four = texture(device, MTLPixelFormatBGRA8Unorm_sRGB, 4);
+    const MTLTextureUsage usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    id<MTLTexture> into = texture(device, MTLPixelFormatBGRA8Unorm_sRGB, 1, usage, MTLStorageModeShared);
+    ASSERT_TRUE(four != nil && into != nil);
+    MTLRenderPassDescriptor *p = colourPass(four);
+    p.colorAttachments[0].resolveTexture = into;
+    p.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+    expectRaw(device, p);
+}
+
 // A1BGR5Unorm renders through an RGBA32Float stand-in whose load and store states this pack lacks
 void aStandInTargetWithoutItsStatesFailsAsItIsEncoded()
 {
@@ -548,6 +565,11 @@ TEST(GM20BFacadePassErrors, ResolvesAppleRunsAreRawsAndOneAcrossFormatsFails)
 TEST(GM20BFacadePassErrors, AResolveAcrossTheEightBitTwinsAndIntoAnotherSampleCountIsRaws)
 {
     switch_ios::test::ExpectPassesInFreshProcess(aResolveAcrossTheEightBitTwinsIsRaws);
+}
+
+TEST(GM20BFacadePassErrors, AnSrgbResolveAtFourSamplesTakesItsFourSampleState)
+{
+    switch_ios::test::ExpectPassesInFreshProcess(anSrgbResolveAtFourSamplesTakesItsFourSampleState);
 }
 
 TEST(GM20BFacadePassErrors, AFourByteColourAsDepthIsRawsAndOtherDepthAttachmentsMetalStopsFail)

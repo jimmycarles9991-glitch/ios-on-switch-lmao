@@ -210,9 +210,9 @@ fn probe_address(stage: u32, slot: u32) -> u64 {
 
 /// The bind state of probe.mm's draw `run`: every buffer slot of both stages bound (inline bytes, or the bound run's
 /// buffers at each slot's own offset; a buffer of the run's bytes at a slot of `addressed`, which m2v reaches by its
-/// device address; vertex buffers at `binds`' stride), 16 textures of `format` and `samples` and 16 samplers at the
-/// fragment stage, a texture of its declaration at each of `declared` and a sampler at each of `vertex_samplers`, `binds`'
-/// in their places
+/// device address or whose Metal address its programs read; vertex buffers at `binds`' stride), 16 textures of `format`
+/// and `samples` and 16 samplers at the fragment stage, a texture of its declaration at each of `declared` and a sampler
+/// at each of `vertex_samplers`, `binds`' in their places
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn probe_state(
     run: usize,

@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// The blender's rounding on a 10-bit unorm target under ONE / ONE_MINUS_SOURCE1_ALPHA, the blend that composites

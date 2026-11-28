@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// State segments (drivers/TegraGM20BMetal/state_segment.h): a pipeline's registers are written once

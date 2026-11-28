@@ -50,6 +50,7 @@ filegroup(
         "//kits/SwitchIdle:switch_idle_governor.h",
         "//kits/SwitchPretranslated:switch_pretranslated.h",
         "//kits/SwitchPretranslated:switch_pretranslated_originals.h",
+        "//kits/SwitchPretranslated:switch_pretranslated_updates.h",
         "//translate/arm64e:a64x/a64x.h",
         "//translate/arm64e:a64x/a64x_fp16.h",
         "//translate/arm64e:a64x/a64x_vlive.h",

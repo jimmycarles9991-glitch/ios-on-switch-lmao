@@ -12,6 +12,7 @@
 #include <kern/kalloc.h>
 #include <switch/app_code.h>
 #include <switch/app_code_macho.h>
+#include <switch/bootstrap.h>
 #include <switch/capabilities.h>
 
 _Static_assert((SWITCH_P_LAPP_CODE & (P_LDELAYTERM | P_LHASTASK | P_LTERM | P_LEXIT | P_LPEXIT |
@@ -22,7 +23,8 @@ _Static_assert((SWITCH_P_LAPP_CODE & (P_LDELAYTERM | P_LHASTASK | P_LTERM | P_LE
 
 static int switch_app_code_lookup(const char *path, struct vnode **vp)
 {
-    struct nameidata *nd = kalloc_type(struct nameidata, Z_WAITOK | Z_NOFAIL);
+    struct nameidata *nd = kalloc_type(struct nameidata, Z_WAITOK);
+    if (!nd) return ENOMEM;
     NDINIT(nd, LOOKUP, OP_LOOKUP, NOFOLLOW, UIO_SYSSPACE, CAST_USER_ADDR_T(path), vfs_context_kernel());
     nd->ni_flag |= NAMEI_NOFOLLOW_ANY;
     const int error = namei(nd);
@@ -37,6 +39,8 @@ static int switch_app_code_lookup(const char *path, struct vnode **vp)
 bool switch_app_code_image(struct vnode *vp)
 {
     if (!vp || !vnode_isreg(vp)) return false;
+    mount_t data = switch_bootstrap_data_mount();
+    if (data && vnode_mount(vp) != data) return false;
     char *path = zalloc(ZV_NAMEI);
     int length = MAXPATHLEN;
     bool enabled = false;

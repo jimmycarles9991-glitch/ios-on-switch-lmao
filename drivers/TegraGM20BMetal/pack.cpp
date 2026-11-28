@@ -338,4 +338,56 @@ bool Pack::declares(const PackArchive &archive, uint64_t keyHash) const
     return std::binary_search(keys, keys + archive.count, keyHash);
 }
 
+namespace {
+
+bool segmentTableValid(const Pack &pack, PackSegmentTable &tbl)
+{
+    const uint64_t size = pack.bytes(PackSegments);
+    if (size < sizeof(PackSegmentTable))
+        return false;
+    memcpy(&tbl, pack.section<uint8_t>(PackSegments), sizeof tbl);
+    const uint64_t need = sizeof(PackSegmentTable) +
+                          uint64_t(tbl.pipelineCount) * (sizeof(PackSegment) + sizeof(uint32_t)) +
+                          uint64_t(tbl.variantComboCount) * sizeof(PackSegment);
+    return need <= size;
+}
+
+}  // namespace
+
+const PackSegment *Pack::pipelineSegment(uint32_t recIndex) const
+{
+    PackSegmentTable tbl = {};
+    if (!segmentTableValid(*this, tbl) || recIndex >= tbl.pipelineCount)
+        return nullptr;
+    const auto *base = reinterpret_cast<const PackSegment *>(section<uint8_t>(PackSegments) + sizeof(PackSegmentTable));
+    return base[recIndex].words ? &base[recIndex] : nullptr;
+}
+
+bool Pack::segmentWords(uint32_t &heapOffset, uint32_t &bytes) const
+{
+    PackSegmentTable tbl = {};
+    if (!segmentTableValid(*this, tbl) || !tbl.wordsBytes)
+        return false;
+    heapOffset = tbl.wordsOffset;
+    bytes = tbl.wordsBytes;
+    return true;
+}
+
+const PackSegment *Pack::variantSegment(uint32_t recIndex, uint32_t comboIndex) const
+{
+    PackSegmentTable tbl = {};
+    if (!segmentTableValid(*this, tbl) || recIndex >= tbl.pipelineCount)
+        return nullptr;
+    const uint8_t *raw = section<uint8_t>(PackSegments);
+    const uint64_t varBaseOff = sizeof(PackSegmentTable) + uint64_t(tbl.pipelineCount) * sizeof(PackSegment);
+    uint32_t first = 0;
+    memcpy(&first, raw + varBaseOff + uint64_t(recIndex) * sizeof(uint32_t), sizeof first);
+    if (first == ~0u || uint64_t(first) + comboIndex >= tbl.variantComboCount)
+        return nullptr;
+    const uint64_t combosOff = varBaseOff + uint64_t(tbl.pipelineCount) * sizeof(uint32_t);
+    const auto *combos = reinterpret_cast<const PackSegment *>(raw + combosOff);
+    const PackSegment &seg = combos[first + comboIndex];
+    return seg.words ? &seg : nullptr;
+}
+
 }  // namespace gm20b

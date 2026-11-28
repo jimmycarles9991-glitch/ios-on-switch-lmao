@@ -195,7 +195,7 @@ public struct BenchExperiment: Equatable, Sendable {
     public let height: UInt32
     public let rect: [UInt32]
     public let clear: [Float]
-    public let fill: Data?
+    public var fill: Data?
     public let program: BenchProgram?
     public let threads: [UInt32]
     public let groups: [UInt32]

@@ -1826,3 +1826,251 @@ fn an_integer_threadgroup_address_outside_the_static_objects_is_refused() {
         }
     }
 }
+
+mod undef_pointer_phi {
+    use super::*;
+
+    #[test]
+    fn threadgroup_phi_with_undef_and_poison_lowers_and_runs() {
+        let globals = "@tg = internal addrspace(3) global [16 x i32] undef, align 4\n\
+             declare void @air.wg.barrier(i32, i32)";
+        let body = r#"entry:
+  %init = getelementptr inbounds [16 x i32], ptr addrspace(3) @tg, i32 0, i32 %t
+  %seed = add i32 %t, 10
+  store i32 %seed, ptr addrspace(3) %init, align 4
+  tail call void @air.wg.barrier(i32 2, i32 1)
+  %lsb = and i32 %t, 1
+  %even = icmp eq i32 %lsb, 0
+  br i1 %even, label %bb_even, label %bb_odd
+bb_even:
+  %pe = getelementptr inbounds [16 x i32], ptr addrspace(3) @tg, i32 0, i32 %t
+  br label %merge
+bb_odd:
+  %po = getelementptr inbounds [16 x i32], ptr addrspace(3) @tg, i32 0, i32 %t
+  br label %merge
+merge:
+  %p0 = phi ptr addrspace(3) [ %pe, %bb_even ], [ undef, %bb_odd ]
+  %p1 = phi ptr addrspace(3) [ poison, %bb_even ], [ %po, %bb_odd ]
+  br i1 %even, label %use_even, label %use_odd
+use_even:
+  %le = load i32, ptr addrspace(3) %p0, align 4
+  %we = add i32 %le, 100
+  store i32 %we, ptr addrspace(3) %p0, align 4
+  br label %done
+use_odd:
+  %lo = load i32, ptr addrspace(3) %p1, align 4
+  %wo = add i32 %lo, 200
+  store i32 %wo, ptr addrspace(3) %p1, align 4
+  br label %done
+done:
+  %v0 = phi i32 [ %we, %use_even ], [ %wo, %use_odd ]
+  tail call void @air.wg.barrier(i32 2, i32 1)
+  %peer = xor i32 %t, 1
+  %rp = getelementptr inbounds [16 x i32], ptr addrspace(3) @tg, i32 0, i32 %peer
+  %v1 = load i32, ptr addrspace(3) %rp, align 4"#;
+        let Some(bc) = assemble(
+            "tg_phi_undef",
+            &two_word_kernel("tg_phi_undef", globals, body),
+        ) else {
+            return;
+        };
+        let want: Vec<u32> = (0..16u32)
+            .flat_map(|t| {
+                let own = t + 10 + if t & 1 == 0 { 100 } else { 200 };
+                let peer = t ^ 1;
+                let other = peer + 10 + if peer & 1 == 0 { 100 } else { 200 };
+                [own, other]
+            })
+            .collect();
+        for stem in PROFILES {
+            let prof = p(stem);
+            l3(&bc, "tg_phi_undef", &prof, stem);
+            let (plan, m) = typed_module(&bc, "tg_phi_undef", &prof).expect("module");
+            let res = resources(&plan, 0, 32, 16, &[]);
+            assert_eq!(run_both(&m, &res).expect("run"), want, "{stem}");
+        }
+    }
+
+    #[test]
+    fn threadgroup_select_with_undef_and_poison_lowers_and_runs() {
+        let globals = "@tg = internal addrspace(3) global [16 x i32] undef, align 4";
+        let body = r#"entry:
+  %p = getelementptr inbounds [16 x i32], ptr addrspace(3) @tg, i32 0, i32 %t
+  %val = add i32 %t, 30
+  store i32 %val, ptr addrspace(3) %p, align 4
+  %lsb = and i32 %t, 1
+  %even = icmp eq i32 %lsb, 0
+  %s0 = select i1 %even, ptr addrspace(3) %p, ptr addrspace(3) undef
+  %s1 = select i1 %even, ptr addrspace(3) poison, ptr addrspace(3) %p
+  br i1 %even, label %bb_even, label %bb_odd
+bb_even:
+  %ve = load i32, ptr addrspace(3) %s0, align 4
+  br label %done
+bb_odd:
+  %vo = load i32, ptr addrspace(3) %s1, align 4
+  br label %done
+done:
+  %v0 = phi i32 [ %ve, %bb_even ], [ %vo, %bb_odd ]
+  %v1 = add i32 %v0, 1"#;
+        let Some(bc) = assemble(
+            "tg_select_undef",
+            &two_word_kernel("tg_select_undef", globals, body),
+        ) else {
+            return;
+        };
+        let want: Vec<u32> = (0..16u32).flat_map(|t| [t + 30, t + 31]).collect();
+        for stem in PROFILES {
+            let prof = p(stem);
+            l3(&bc, "tg_select_undef", &prof, stem);
+            let (plan, m) = typed_module(&bc, "tg_select_undef", &prof).expect("module");
+            let res = resources(&plan, 0, 32, 16, &[]);
+            assert_eq!(run_both(&m, &res).expect("run"), want, "{stem}");
+        }
+    }
+
+    #[test]
+    fn private_alloca_phi_and_select_with_undef_and_poison_lowers_and_runs() {
+        let body = r#"entry:
+  %a = alloca [4 x i32], align 4
+  %slot = and i32 %t, 3
+  %p = getelementptr inbounds [4 x i32], ptr %a, i32 0, i32 %slot
+  %val = add i32 %t, 50
+  store i32 %val, ptr %p, align 4
+  %lsb = and i32 %t, 1
+  %even = icmp eq i32 %lsb, 0
+  %sel = select i1 %even, ptr %p, ptr poison
+  br i1 %even, label %bb_even, label %bb_odd
+bb_even:
+  br label %merge
+bb_odd:
+  br label %merge
+merge:
+  %phi = phi ptr [ undef, %bb_even ], [ %p, %bb_odd ]
+  br i1 %even, label %use_even, label %use_odd
+use_even:
+  %ve = load i32, ptr %sel, align 4
+  br label %done
+use_odd:
+  %vo = load i32, ptr %phi, align 4
+  br label %done
+done:
+  %v0 = phi i32 [ %ve, %use_even ], [ %vo, %use_odd ]
+  %v1 = add i32 %v0, 2"#;
+        let Some(bc) = assemble(
+            "priv_phi_undef",
+            &two_word_kernel("priv_phi_undef", "", body),
+        ) else {
+            return;
+        };
+        let want: Vec<u32> = (0..16u32).flat_map(|t| [t + 50, t + 52]).collect();
+        for stem in PROFILES {
+            let prof = p(stem);
+            l3(&bc, "priv_phi_undef", &prof, stem);
+            let (plan, m) = typed_module(&bc, "priv_phi_undef", &prof).expect("module");
+            let res = resources(&plan, 0, 32, 16, &[]);
+            assert_eq!(run_both(&m, &res).expect("run"), want, "{stem}");
+        }
+    }
+
+    #[test]
+    fn handle_phi_with_undef_and_poison_lowers() {
+        let ir = r#"declare i32 @air.get_width_texture_2d(ptr addrspace(1), i32)
+
+define void @handle_phi_undef(ptr addrspace(1) %out, ptr addrspace(1) %a, ptr addrspace(1) %b, i32 %gid) {
+entry:
+  %lsb = and i32 %gid, 1
+  %even = icmp eq i32 %lsb, 0
+  br i1 %even, label %bb_even, label %bb_odd
+bb_even:
+  br label %merge
+bb_odd:
+  br label %merge
+merge:
+  %t0 = phi ptr addrspace(1) [ %a, %bb_even ], [ undef, %bb_odd ]
+  %t1 = phi ptr addrspace(1) [ poison, %bb_even ], [ %b, %bb_odd ]
+  br i1 %even, label %use_even, label %use_odd
+use_even:
+  %w0 = call i32 @air.get_width_texture_2d(ptr addrspace(1) %t0, i32 0)
+  br label %done
+use_odd:
+  %w1 = call i32 @air.get_width_texture_2d(ptr addrspace(1) %t1, i32 0)
+  br label %done
+done:
+  %w = phi i32 [ %w0, %use_even ], [ %w1, %use_odd ]
+  %p = getelementptr inbounds i32, ptr addrspace(1) %out, i32 %gid
+  store i32 %w, ptr addrspace(1) %p, align 4
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @handle_phi_undef, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5, !6}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint", !"air.arg_name", !"out"}
+!4 = !{i32 1, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.sample", !"air.arg_type_name", !"texture2d<float, sample>", !"air.arg_name", !"a"}
+!5 = !{i32 2, !"air.texture", !"air.location_index", i32 1, i32 1, !"air.sample", !"air.arg_type_name", !"texture2d<float, sample>", !"air.arg_name", !"b"}
+!6 = !{i32 3, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint", !"air.arg_name", !"gid"}
+"#;
+        let Some(bc) = assemble("handle_phi_undef", ir) else {
+            return;
+        };
+        for stem in PROFILES {
+            let prof = p(stem);
+            l3(&bc, "handle_phi_undef", &prof, stem);
+        }
+    }
+
+    #[test]
+    fn null_in_threadgroup_and_private_phi_stays_refused() {
+        let cases = [
+            (
+                "tg_phi_null",
+                "@tg = internal addrspace(3) global [16 x i32] undef, align 4",
+                r#"entry:
+  %p = getelementptr inbounds [16 x i32], ptr addrspace(3) @tg, i32 0, i32 %t
+  store i32 %t, ptr addrspace(3) %p, align 4
+  %even = icmp eq i32 %t, 0
+  br i1 %even, label %bb_even, label %bb_odd
+bb_even:
+  br label %merge
+bb_odd:
+  br label %merge
+merge:
+  %phi = phi ptr addrspace(3) [ %p, %bb_even ], [ null, %bb_odd ]
+  %v0 = load i32, ptr addrspace(3) %phi, align 4
+  %v1 = add i32 %v0, 1"#,
+            ),
+            (
+                "priv_phi_null",
+                "",
+                r#"entry:
+  %a = alloca [4 x i32], align 4
+  store i32 %t, ptr %a, align 4
+  %even = icmp eq i32 %t, 0
+  br i1 %even, label %bb_even, label %bb_odd
+bb_even:
+  br label %merge
+bb_odd:
+  br label %merge
+merge:
+  %phi = phi ptr [ %a, %bb_even ], [ null, %bb_odd ]
+  %v0 = load i32, ptr %phi, align 4
+  %v1 = add i32 %v0, 1"#,
+            ),
+        ];
+        for (name, globals, body) in cases {
+            let Some(bc) = assemble(name, &two_word_kernel(name, globals, body)) else {
+                return;
+            };
+            for stem in PROFILES {
+                match compile(&bc, name, &p(stem)) {
+                    Err(Error::Unsupported(u)) => {
+                        assert_eq!(u.feature, Feature::Lowering(LowerFamily::Access), "{name} {stem}");
+                        assert_eq!(u.needs, Needs::NotImplemented, "{name} {stem}");
+                    }
+                    other => panic!("{name} {stem}: expected refusal, got {other:?}"),
+                }
+            }
+        }
+    }
+}

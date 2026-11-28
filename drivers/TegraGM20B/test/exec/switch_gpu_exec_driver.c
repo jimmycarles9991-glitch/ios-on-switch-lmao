@@ -16,6 +16,7 @@ struct tgm_gate tgm_sc7_gate;
 DEFINE_MUTEX(tgm_gate_lock);
 LIST_HEAD(tgm_live_chans);
 DEFINE_MUTEX(tgm_live_lock);
+struct switch_gpu_live_dir tgm_live_dir;
 
 static struct nvkm_device device;
 static u32 parked;
@@ -23,10 +24,39 @@ static enum switch_exec_kick_kind test_sched_kick;
 static int test_deadline_later;
 static u64 test_ptimer;
 
+static uint32_t test_syncpt, test_syncpt_marked;
+
+void switch_exec_set_syncpt(uint32_t id)
+{
+	test_syncpt = id;
+	test_syncpt_marked = 0;
+}
+
+uint32_t switch_exec_syncpt_marked(void)
+{
+	return test_syncpt_marked;
+}
+
+int switch_gpu_timeline_has_syncpt(const struct switch_gpu_timeline *timeline)
+{
+	(void)timeline;
+	return test_syncpt != 0;
+}
+
+uint32_t switch_gpu_timeline_syncpt_next(struct switch_gpu_timeline *timeline, uint32_t first,
+					 uint32_t last)
+{
+	if (test_syncpt)
+		test_syncpt_marked = last;
+	return test_syncpt;
+}
+
 void switch_exec_reset_driver(void)
 {
+	switch_exec_set_syncpt(0);
 	memset(&tgm_stats, 0, sizeof(tgm_stats));
 	memset(&tgm_busy, 0, sizeof(tgm_busy));
+	memset(&tgm_live_dir, 0, sizeof(tgm_live_dir));
 	test_sched_kick = SWITCH_EXEC_KICK_CLEAR;
 	test_deadline_later = 0;
 	test_ptimer = 0;
@@ -99,10 +129,20 @@ int switch_gpu_promise_park_locked(uint32_t offset, uint32_t value, const char *
 				   const char *who, const struct switch_gpu_giveup_job *reader,
 				   int display)
 {
-	if (!switch_exec_mutex_held())
-		nvxnu_panic("promise parked outside live owner");
+	if (switch_exec_mutex_held())
+		nvxnu_panic("promise parked while holding tgm_live_lock");
 	++parked;
 	return 1;
+}
+
+void switch_exec_live_lock(void)
+{
+	mutex_lock(&tgm_live_lock);
+}
+
+void switch_exec_live_unlock(void)
+{
+	mutex_unlock(&tgm_live_lock);
 }
 
 uint32_t switch_exec_parked_promises(void)
@@ -187,6 +227,10 @@ void tgm_hold_released(unsigned int chid, uint64_t end_pt, int job_last)
 {
 }
 
+void tgm_hold_progress(unsigned int chid, const volatile void *progress_cpu)
+{
+}
+
 void tgm_hold_track(struct nvkm_device *dev, unsigned int chid, int on)
 {
 }
@@ -215,20 +259,12 @@ void tgm_stats_tick(void)
 {
 }
 
+#if TGM_STATS
 void tgm_stats_loud(struct tgm_chan *chan, uint32_t reason)
 {
 }
 
-void tgm_stats_gr_context(void)
-{
-}
-
-#if TGM_STATS
 void switch_gpu_compositor_job(uint64_t ns)
-{
-}
-
-void switch_gpu_compositor_sync(uint32_t syncs, uint64_t ns, int behind)
 {
 }
 #endif

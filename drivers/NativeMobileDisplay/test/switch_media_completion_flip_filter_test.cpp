@@ -189,7 +189,8 @@ TEST_F(MediaFlipFilter, AFilterSetWhoseCompletionFailsIsOneLineAndTheNextFilterW
     frame();
     EXPECT_EQ(d.shown.back(), seq);
     ASSERT_EQ(gLog.size(), 1u);
-    EXPECT_NE(gLog[0].find("whose completion then failed (-5)"), std::string::npos) << gLog[0];
+    EXPECT_NE(gLog[0].find("whose completion then failed (-5, its engine producers' -3)"), std::string::npos)
+        << gLog[0];
     ASSERT_TRUE(armed(3));
     d.model.written.clear();
     d.filter();

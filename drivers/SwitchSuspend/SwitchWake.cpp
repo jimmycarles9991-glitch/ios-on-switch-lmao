@@ -59,8 +59,8 @@ switch_bt_buttons gButtons;  // SwitchBluetooth's receive path only (its ACL pac
 #if DEVELOPMENT || DEBUG
 bool gButtonsLogged;  // the same: the first controller report of the boot was logged
 #endif
-volatile bool gButtonsStale;  // a client came or went: every connection's buttons go (switch_wake_bt_reset)
-uint64_t gReconnectUntil;     // switch_bt_reconnect_open's window after a Bluetooth wake (ns; atomic, 0 closed)
+bool gButtonsStale;        // a client came or went: every connection's buttons go (switch_wake_bt_reset)
+uint64_t gReconnectUntil;  // switch_bt_reconnect_open's window after a Bluetooth wake (ns; atomic, 0 closed)
 
 // NOLINTNEXTLINE(misc-const-correctness): the compare-and-swap below writes through slot
 IOLock *once(IOLock *volatile *slot)
@@ -306,8 +306,10 @@ extern "C" void switch_wake_bt_acl(const uint8_t *acl, size_t length)
     const int held = switch_wake_bt_buttons(acl, length, &handle, &report);
     if (held < 0)
         return;
-    if (__atomic_exchange_n(&gButtonsStale, false, __ATOMIC_ACQ_REL))
+    if (__builtin_expect(__atomic_load_n(&gButtonsStale, __ATOMIC_RELAXED), 0) &&
+        __atomic_exchange_n(&gButtonsStale, false, __ATOMIC_ACQ_REL)) {
         bzero(&gButtons, sizeof(gButtons));
+    }
     const bool dark = !switch_display_is_on();
     const switch_bt_buttons_step step =
         switch_bt_buttons_report(&gButtons, handle, (uint8_t)held, switch_now_ns(), dark);

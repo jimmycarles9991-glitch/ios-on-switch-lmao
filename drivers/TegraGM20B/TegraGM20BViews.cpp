@@ -30,11 +30,40 @@ namespace
 {
 int drain(tgm_coh *c, tgm_tiled &t);
 
-constexpr uint32_t kLock = 2, kLockReadOnly = 0x1, kLockAvoidSync = 0x2;
+constexpr uint32_t kLock = 2, kLockReadOnly = 0x1, kLockAvoidSync = 0x2, kProtWrite = 0x2;
+uint32_t gUnlockedWrites;
 #if TGM_STATS
 constexpr uint32_t kBusyLocks =
 	4;  // debug: more locks than this in a second name the surface (a CPU producer)
 #endif
+
+void unmarkScratch(tgm_tiled &t)
+{
+	if (!t.scratchMarked || !t.scratch)
+		return;
+	tgm_relayout_pages rows;
+	tgm_scratch_pages(t.scratch, &rows);
+	tgm_tiled_unmark_pages(rows.pas, rows.npages);
+	__atomic_store_n(&t.scratchMarked, 0, __ATOMIC_RELEASE);
+}
+
+void markUnlockedWrite(tgm_tiled &t)
+{
+	t.wrote = 1;
+	if (!__atomic_load_n(&t.unlockedWrote, __ATOMIC_RELAXED)) {
+		__atomic_store_n(&t.unlockedWrote, 1, __ATOMIC_RELEASE);
+		__atomic_add_fetch(&gUnlockedWrites, 1u, __ATOMIC_ACQ_REL);
+	}
+	unmarkScratch(t);
+}
+
+void clearUnlockedWrite(tgm_tiled &t)
+{
+	if (__atomic_load_n(&t.unlockedWrote, __ATOMIC_RELAXED)) {
+		__atomic_store_n(&t.unlockedWrote, 0, __ATOMIC_RELEASE);
+		__atomic_sub_fetch(&gUnlockedWrites, 1u, __ATOMIC_ACQ_REL);
+	}
+}
 
 int findView(const tgm_tiled &t, const tgm_cpu_view &v)
 {
@@ -51,19 +80,57 @@ void removeView(tgm_tiled &t, uint32_t i)
 	t.views[i] = t.views[--t.nviews];
 }
 
+void restoreView(tgm_tiled &t, const tgm_cpu_view &v, void *client, uint32_t id)
+{
+	void *own = v.memory ? v.memory : (client ? tgm_surface_memory(client, id) : nullptr);
+	const int ret = own ? tgm_cpu_view_remap(&v, own, v.offset, 0) : -2;
+	if (!v.memory)
+		tgm_memory_release(own);
+	if (ret) {
+		switch_refusal("iosurface-layout", "restore-failed",
+			       "IOSurface %u: a task's mapping could not be given its "
+			       "surface back (%d): it "
+			       "keeps the rows of its last lock",
+			       id, ret);
+		t.stranded = 1;
+	}
+}
+
+void dropUnlockedViews(tgm_tiled &t, uint32_t id)
+{
+	for (uint32_t i = 0; i < t.nviews;) {
+		if (!t.views[i].unlocked) {
+			i++;
+			continue;
+		}
+		restoreView(t, t.views[i].view, t.views[i].view.client, id);
+		if (t.unlockedViews)
+			__atomic_sub_fetch(&t.unlockedViews, 1u, __ATOMIC_RELEASE);
+		removeView(t, i);
+	}
+}
+
 // Locks held through user clients that died: their mappings died with their tasks
 void dropDead(tgm_coh *c, tgm_tiled &t, bool &released)
 {
+	const bool hadLocks = t.locks != 0u;
 	for (uint32_t i = 0; i < t.nviews;) {
 		if (tgm_cpu_view_live(&t.views[i].view)) {
 			i++;
 			continue;
 		}
-		t.locks -= t.views[i].locks < t.locks ? t.views[i].locks : t.locks;
+		if (t.views[i].unlocked) {
+			if (t.unlockedViews)
+				__atomic_sub_fetch(&t.unlockedViews, 1u, __ATOMIC_RELEASE);
+		} else {
+			t.locks -= t.views[i].locks < t.locks ? t.views[i].locks : t.locks;
+		}
 		removeView(t, i);
 	}
-	if (!t.locks && t.scratch) {
+	if (!t.locks && !t.unlockedViews && t.scratch) {
 		drain(c, t);
+		released = hadLocks;
+	} else if (hadLocks && !t.locks) {
 		released = true;
 	}
 }
@@ -107,6 +174,37 @@ void noteReused(const tgm_coh *c, bool same)
 #else
 	(void)c;
 	(void)same;
+#endif
+}
+
+// A first lock's fill, its steps' ends in ns: its scratch got, the scratch's pages cleaned from the CPU caches before
+// the copy engine writes them, the copy engine's move, and the pages cleaned again before the CPU reads them.
+struct FillTimes {
+	uint64_t began, got, cleaned, moved, done;
+};
+
+// Debug kernels: a first lock's fill past 2 ms, split into getting its scratch (one the pool lacks is made, wired and
+// pinned), the two CPU cache cleans of the scratch and the copy engine's move between them, so a slow CPU lock of a
+// block-linear surface names where it waited; once a surface
+void noteSlowFill(const tgm_coh *c, tgm_tiled &t, const FillTimes &f, bool reused)
+{
+#if TGM_STATS
+	if (f.done - f.began < 2000000 || t.slow_fill_named)
+		return;
+	t.slow_fill_named = 1;
+	char name[32];
+	proc_selfname(name, sizeof(name));
+	os_log(OS_LOG_DEFAULT,
+	       "tegra-gm20b: IOSurface %u: a CPU lock's rows took %llu us (%s[%d]): scratch %llu "
+	       "us (%s), clean %llu us, move %llu us, clean %llu us",
+	       tgm_coh_surface_id(c), (f.done - f.began) / 1000, name, proc_selfpid(),
+	       (f.got - f.began) / 1000, reused ? "its last lock's" : "the pool's",
+	       (f.cleaned - f.got) / 1000, (f.moved - f.cleaned) / 1000, (f.done - f.moved) / 1000);
+#else
+	(void)c;
+	(void)t;
+	(void)f;
+	(void)reused;
 #endif
 }
 
@@ -158,6 +256,8 @@ int fill(tgm_coh *c, tgm_tiled &t, uint32_t options)
 	tgm_relayout_writer writers[TGM_RELAYOUT_MAX_WAITS];
 	if ((options & kLockAvoidSync) && tgm_coh_writers(c, writers, TGM_RELAYOUT_MAX_WAITS))
 		return 1;
+	FillTimes times = {};
+	times.began = TGM_STATS ? tgm_timestamp_ns() : 0;
 	const uint64_t written = tgm_coh_written(c);
 	tgm_relayout_pages rows;
 	bool same = false;
@@ -167,9 +267,11 @@ int fill(tgm_coh *c, tgm_tiled &t, uint32_t options)
 		t.scratch = scratch;
 		return 0;
 	}
+	const bool reused = scratch != nullptr;
 	if (!scratch)
 		scratch = tgm_scratch_get(static_cast<uint64_t>(tgm_coh_pages(c).npages) << 12, 1,
 					  &rows);
+	times.got = TGM_STATS ? tgm_timestamp_ns() : 0;
 	if (!scratch) {
 		switch_refusal("iosurface-layout", "no-scratch",
 			       "IOSurface %u: no memory for a CPU lock's rows: the lock is refused",
@@ -177,11 +279,17 @@ int fill(tgm_coh *c, tgm_tiled &t, uint32_t options)
 		return 1;
 	}
 	tgm_cpu_clean_pages(rows.pas, rows.npages);
+	times.cleaned = TGM_STATS ? tgm_timestamp_ns() : 0;
 	if (move(c, t, rows, TGM_RELAYOUT_TO_ROWS)) {
 		tgm_scratch_put(scratch);
 		return 1;
 	}
+	times.moved = TGM_STATS ? tgm_timestamp_ns() : 0;
 	tgm_cpu_clean_pages(rows.pas, rows.npages);
+	if (TGM_STATS) {
+		times.done = tgm_timestamp_ns();
+		noteSlowFill(c, t, times, reused);
+	}
 	t.scratch = scratch;
 	return 0;
 }
@@ -220,7 +328,7 @@ bool mergeBack(tgm_coh *c, const tgm_tiled &t)
 }
 
 // The last unlock: what a writer left in the scratch back into the texels, behind the GPU's writers
-int drain(tgm_coh *c, tgm_tiled &t)
+int flushScratch(tgm_coh *c, tgm_tiled &t)
 {
 	int failed = 0;
 	if (t.wrote) {
@@ -248,10 +356,19 @@ int drain(tgm_coh *c, tgm_tiled &t)
 		tgm_scratch_put(t.base);
 		t.base = nullptr;
 	}
+	clearUnlockedWrite(t);
+	return failed;
+}
+
+int drain(tgm_coh *c, tgm_tiled &t)
+{
+	unmarkScratch(t);
+	const bool wrote = t.wrote != 0;
+	const int failed = flushScratch(c, t);
 	if (t.stranded) {
 		tgm_scratch_discard(t.scratch);
 	} else {
-		t.kept = t.wrote ? nullptr : t.scratch;
+		t.kept = wrote ? nullptr : t.scratch;
 		t.kept_handout = tgm_scratch_handout(t.scratch);
 		t.kept_written = t.filled_written;
 		tgm_scratch_put(t.scratch);
@@ -290,14 +407,16 @@ int lock(tgm_coh *c, tgm_tiled &t, void *client, uint32_t id, uint32_t options, 
 		if (const int refused = fill(c, t, options))
 			return refused;
 	}
-	if (i < 0 || !t.views[i].locks) {
+	const bool upgrading = i >= 0 && t.views[i].unlocked;
+	const bool writeLock = (options & kLockReadOnly) == 0;
+	if (i < 0 || (!t.views[i].locks && (!upgrading || writeLock))) {
 		if (const int ret = tgm_cpu_view_remap(&v, tgm_scratch_memory(t.scratch), 0, 1)) {
 			switch_refusal("iosurface-layout", "remap-failed",
 				       "IOSurface %u: a task's mapping could not show its rows "
 				       "(%d): the lock is "
 				       "refused",
 				       id, ret);
-			if (!t.locks) {
+			if (!t.locks && !t.unlockedViews) {
 				tgm_scratch_put(t.scratch);
 				t.scratch = nullptr;
 			}
@@ -305,14 +424,24 @@ int lock(tgm_coh *c, tgm_tiled &t, void *client, uint32_t id, uint32_t options, 
 		}
 	}
 	held = ((t.locks++) == 0u);
-	if ((options & kLockReadOnly) == 0)
+	if (writeLock) {
 		t.wrote = 1;
+		unmarkScratch(t);
+	}
 	noteBusy(t, id);
 	if (i < 0) {
 		i = static_cast<int>(t.nviews++);
 		t.views[i].view = v;
 		t.views[i].locks = 0;
+		t.views[i].unlocked = 0;
 		tgm_cpu_view_hold(&t.views[i].view, 1);
+	} else if (upgrading) {
+		tgm_cpu_view_hold(&t.views[i].view, 0);
+		t.views[i].view = v;
+		t.views[i].unlocked = 0;
+		tgm_cpu_view_hold(&t.views[i].view, 1);
+		if (t.unlockedViews)
+			__atomic_sub_fetch(&t.unlockedViews, 1u, __ATOMIC_RELEASE);
 	}
 	t.views[i].locks++;
 	return 0;
@@ -321,29 +450,36 @@ int lock(tgm_coh *c, tgm_tiled &t, void *client, uint32_t id, uint32_t options, 
 int unlock(tgm_coh *c, tgm_tiled &t, void *client, uint32_t id, uint32_t options, bool &released)
 {
 	tgm_cpu_view v;
-	if (!t.locks || tgm_cpu_view_of(client, id, &v) <= 0)
+	if ((!t.locks && !t.unlockedViews) || tgm_cpu_view_of(client, id, &v) <= 0)
+		return 0;
+	const int i = findView(t, v);
+	if (i >= 0 && t.views[i].unlocked && !t.views[i].locks) {
+		if (!(options & kLockReadOnly))
+			t.wrote = 1;
+		restoreView(t, t.views[i].view, client, id);
+		if (t.unlockedViews)
+			__atomic_sub_fetch(&t.unlockedViews, 1u, __ATOMIC_RELEASE);
+		removeView(t, static_cast<uint32_t>(i));
+		return !t.locks && !t.unlockedViews && t.scratch ? drain(c, t) : 0;
+	}
+	if (!t.locks)
 		return 0;
 	if (!(options & kLockReadOnly))
 		t.wrote = 1;
-	const int i = findView(t, v);
 	if (i >= 0 && !--t.views[i].locks) {
-		void *own = tgm_surface_memory(client, id);
-		const int ret = own ? tgm_cpu_view_remap(&v, own, v.offset, 0) : -2;
-		tgm_memory_release(own);
-		if (ret) {
-			switch_refusal("iosurface-layout", "restore-failed",
-				       "IOSurface %u: a task's mapping could not be given its "
-				       "surface back (%d): it "
-				       "keeps the rows of its last lock",
-				       id, ret);
-			t.stranded = 1;
-		}
+		restoreView(t, v, client, id);
 		removeView(t, static_cast<uint32_t>(i));
 	}
 	int failed = 0;
 	if (!--t.locks) {
-		if (t.scratch)
-			failed = drain(c, t);
+		if (t.scratch) {
+			if (!t.unlockedViews) {
+				failed = drain(c, t);
+			} else {
+				failed = flushScratch(c, t);
+				t.wrote = 0;
+			}
+		}
 		released = true;
 	}
 	return failed;
@@ -416,49 +552,218 @@ extern "C" int tgm_views_trap(void *client, uint32_t index, uint32_t id, uint32_
 extern "C" void tgm_views_gpu_writes(struct tgm_coh *c)
 {
 	const tgm_tiled *seen = c ? __atomic_load_n(tgm_coh_tiled(c), __ATOMIC_ACQUIRE) : nullptr;
-	if (!seen || !__atomic_load_n(&seen->locks, __ATOMIC_ACQUIRE) ||
-	    !__atomic_load_n(&seen->wrote, __ATOMIC_ACQUIRE))
+	if (!seen || (!__atomic_load_n(&seen->locks, __ATOMIC_ACQUIRE) &&
+		      !__atomic_load_n(&seen->unlockedViews, __ATOMIC_ACQUIRE)))
 		return;
+	bool released = false;
 	tgm_coh_lock(c);
 	tgm_tiled *t = __atomic_load_n(tgm_coh_tiled(c), __ATOMIC_ACQUIRE);
-	if (t && t->tiled && t->locks && t->wrote && t->scratch && !t->base) {
-		tgm_relayout_pages rows;
-		tgm_scratch *base = tgm_scratch_get(
-			static_cast<uint64_t>(tgm_coh_pages(c).npages) << 12, 0, &rows);
-		if (base) {
-			tgm_cpu_clean_pages(rows.pas, rows.npages);
-			if (move(c, *t, rows, TGM_RELAYOUT_TO_ROWS)) {
-				tgm_scratch_put(base);
-				tgm_coh_unlock(c);
-				return;
+	if (t && t->tiled) {
+		const bool wasHeld = t->locks != 0u;
+		dropDead(c, *t, released);
+		released = released && wasHeld;
+		if (t->unlockedViews) {
+			dropUnlockedViews(*t, tgm_coh_surface_id(c));
+			if (!t->locks && t->scratch)
+				drain(c, *t);
+		}
+		if (t->locks && t->wrote && t->scratch && !t->base) {
+			tgm_relayout_pages rows;
+			tgm_scratch *base = tgm_scratch_get(
+				static_cast<uint64_t>(tgm_coh_pages(c).npages) << 12, 0, &rows);
+			if (base) {
+				tgm_cpu_clean_pages(rows.pas, rows.npages);
+				if (move(c, *t, rows, TGM_RELAYOUT_TO_ROWS)) {
+					tgm_scratch_put(base);
+					tgm_coh_unlock(c);
+					if (released)
+						tgm_coherency_put(c);
+					return;
+				}
+				tgm_cpu_clean_pages(rows.pas, rows.npages);
+				t->base = base;
+				if (!t->merged) {
+					t->merged = 1;
+					char name[32];
+					proc_selfname(name, sizeof(name));
+					os_log(OS_LOG_DEFAULT,
+					       "tegra-gm20b: IOSurface %u written on the GPU by %s "
+					       "while a CPU write lock holds it: its unlock keeps "
+					       "both writers' bytes",
+					       tgm_coh_surface_id(c), name);
+				}
+			} else {
+				switch_refusal(
+					"iosurface-layout", "no-merge-scratch",
+					"IOSurface %u: no memory to keep a CPU lock's rows beside "
+					"a GPU write: its unlock writes the rows over it",
+					tgm_coh_surface_id(c));
 			}
-			tgm_cpu_clean_pages(rows.pas, rows.npages);
-			t->base = base;
-			if (!t->merged) {
-				t->merged = 1;
-				char name[32];
-				proc_selfname(name, sizeof(name));
-				os_log(OS_LOG_DEFAULT,
-				       "tegra-gm20b: IOSurface %u written on the GPU by %s while a "
-				       "CPU "
-				       "write lock holds it: its unlock keeps both writers' bytes",
-				       tgm_coh_surface_id(c), name);
-			}
-		} else {
-			switch_refusal(
-				"iosurface-layout", "no-merge-scratch",
-				"IOSurface %u: no memory to keep a CPU lock's rows beside a GPU "
-				"write: its unlock writes the rows over it",
-				tgm_coh_surface_id(c));
 		}
 	}
 	tgm_coh_unlock(c);
+	if (released)
+		tgm_coherency_put(c);
 }
+
+namespace
+{
+void flushUnlockedWrite(tgm_coh *c)
+{
+	bool released = false;
+	tgm_coh_lock(c);
+	tgm_tiled *t = __atomic_load_n(tgm_coh_tiled(c), __ATOMIC_ACQUIRE);
+	if (t && t->tiled && t->unlockedWrote) {
+		const bool wasHeld = t->locks != 0u;
+		dropDead(c, *t, released);
+		released = released && wasHeld;
+		if (t->unlockedWrote && t->scratch) {
+			dropUnlockedViews(*t, tgm_coh_surface_id(c));
+			if (!t->locks)
+				drain(c, *t);
+			else
+				flushScratch(c, *t);
+		}
+	}
+	tgm_coh_unlock(c);
+	if (released)
+		tgm_coherency_put(c);
+}
+}  // namespace
 
 extern "C" void tgm_views_job_writes(struct tgm_coh *const *written, uint32_t count)
 {
+	if (__builtin_expect(__atomic_load_n(&gUnlockedWrites, __ATOMIC_ACQUIRE) != 0u, 0))
+		tgm_coh_for_each_unlocked_write(flushUnlockedWrite);
 	for (uint32_t i = 0; i < count; ++i)
 		tgm_views_gpu_writes(written[i]);
+}
+
+extern "C" int tgm_views_untile_prepare(struct tgm_coh *c, struct tgm_tiled *t)
+{
+	if (!t || !t->unlockedViews)
+		return 0;
+	bool ignored = false;
+	dropDead(c, *t, ignored);
+	if (!t->unlockedViews || !t->scratch || !t->wrote)
+		return 0;
+	const int ret = flushScratch(c, *t);
+	if (!ret)
+		t->wrote = 0;
+	return ret;
+}
+
+extern "C" void tgm_views_untile_finish(struct tgm_coh *c, struct tgm_tiled *t)
+{
+	if (!t || (!t->unlockedViews && !t->scratch))
+		return;
+	dropUnlockedViews(*t, tgm_coh_surface_id(c));
+	if (t->scratch) {
+		unmarkScratch(*t);
+		clearUnlockedWrite(*t);
+		if (t->stranded)
+			tgm_scratch_discard(t->scratch);
+		else
+			tgm_scratch_put(t->scratch);
+		t->scratch = nullptr;
+		t->wrote = t->stranded = 0;
+	}
+}
+
+extern "C" int tegra_gm20b_tiled_cpu_fault(void *task, uint64_t vaddr, uint64_t pa, uint32_t prot)
+{
+	if (!tgm_tiled_any())
+		return 0;
+	uint64_t offset = 0;
+	tgm_coh *c = tgm_coh_find_tiled_pa(pa, &offset);
+	if (c) {
+		if (tgm_coh_is_deferred(c)) {
+			if (!tgm_tiled_untile_deferred(c)) {
+				tgm_coh_undefer(c);
+				tgm_coherency_put(c);
+				return 1;
+			}
+		}
+		int result = 1;
+		bool released = false;
+		tgm_coh_lock(c);
+		tgm_tiled *t = __atomic_load_n(tgm_coh_tiled(c), __ATOMIC_ACQUIRE);
+		if (t && t->tiled) {
+			const bool wasHeld = t->locks != 0u;
+			dropDead(c, *t, released);
+			released = released && wasHeld;
+			tgm_cpu_view v = {};
+			if (tgm_cpu_view_at(task, c, vaddr, offset, &v) <= 0) {
+				result = -1;
+			} else {
+				int i = findView(*t, v);
+				if (i < 0) {
+					if (t->nviews == TGM_VIEWS || (!t->scratch && fill(c, *t, 0))) {
+						tgm_memory_release(v.memory);
+						result = -1;
+					} else if (tgm_cpu_view_remap(&v, tgm_scratch_memory(t->scratch), 0, 1)) {
+						tgm_memory_release(v.memory);
+						if (!t->locks && !t->unlockedViews) {
+							tgm_scratch_put(t->scratch);
+							t->scratch = nullptr;
+						}
+						result = -1;
+					} else {
+						i = static_cast<int>(t->nviews++);
+						t->views[i].view = v;
+						t->views[i].locks = 0;
+						t->views[i].unlocked = 1;
+						tgm_cpu_view_hold(&t->views[i].view, 1);
+						__atomic_add_fetch(&t->unlockedViews, 1u, __ATOMIC_RELEASE);
+						if (prot & kProtWrite) {
+							markUnlockedWrite(*t);
+						} else if (!t->wrote) {
+							if (!t->scratchMarked) {
+								tgm_relayout_pages rows;
+								tgm_scratch_pages(t->scratch, &rows);
+								tgm_tiled_mark_pages(rows.pas, rows.npages);
+								__atomic_store_n(&t->scratchMarked, 1,
+										 __ATOMIC_RELEASE);
+							}
+							tgm_cpu_view_protect_ro(&t->views[i].view);
+							result = 2;
+						}
+					}
+				} else {
+					tgm_memory_release(v.memory);
+					if ((prot & kProtWrite) && t->views[i].unlocked)
+						markUnlockedWrite(*t);
+					else if (!(prot & kProtWrite) && !t->wrote && t->views[i].unlocked)
+						result = 2;
+				}
+			}
+		}
+		tgm_coh_unlock(c);
+		if (released)
+			tgm_coherency_put(c);
+		tgm_coherency_put(c);
+		return result;
+	}
+	if (!(prot & kProtWrite))
+		return 0;
+	c = tgm_coh_find_tiled_scratch_pa(pa);
+	if (!c)
+		return 0;
+	tgm_coh_lock(c);
+	tgm_tiled *t = __atomic_load_n(tgm_coh_tiled(c), __ATOMIC_ACQUIRE);
+	if (t && t->tiled && t->scratch) {
+		for (uint32_t i = 0; i < t->nviews; i++) {
+			const tgm_cpu_view &v = t->views[i].view;
+			if (t->views[i].unlocked && v.task == task && vaddr >= v.address &&
+			    vaddr < v.address + v.length) {
+				markUnlockedWrite(*t);
+				break;
+			}
+		}
+	}
+	tgm_coh_unlock(c);
+	tgm_coherency_put(c);
+	return 0;
 }
 
 extern "C" int tegra_gm20b_iosurface_view(void *client, uint32_t index, uint32_t surface_id,
@@ -514,7 +819,7 @@ extern "C" void tgm_views_sweep(struct tgm_coh *c)
 	bool released = false;
 	tgm_coh_lock(c);
 	tgm_tiled *t = __atomic_load_n(tgm_coh_tiled(c), __ATOMIC_ACQUIRE);
-	if (t && t->tiled && t->locks)
+	if (t && t->tiled && (t->locks || t->unlockedViews))
 		dropDead(c, *t, released);
 	tgm_coh_unlock(c);
 	if (released)

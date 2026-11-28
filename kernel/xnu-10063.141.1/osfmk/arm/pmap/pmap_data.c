@@ -54,6 +54,10 @@
  */
 SECURITY_READ_ONLY_LATE(volatile pp_attr_t*) pp_attr_table = (volatile pp_attr_t*)NULL;
 
+#if !__ARM_IC_NOALIAS_ICACHE__
+SECURITY_READ_ONLY_LATE(uint32_t *) pp_icache_gen = NULL;
+#endif
+
 /**
  * Physical to Virtual Table.
  *
@@ -662,7 +666,13 @@ pmap_data_bootstrap(void)
 	const pmap_paddr_t pmap_struct_start = avail_start;
 
 	pp_attr_table = (pp_attr_t *)phystokv(avail_start);
+#if !__ARM_IC_NOALIAS_ICACHE__
+	avail_start = PMAP_ALIGN(avail_start + pp_attr_table_size, __alignof(uint32_t));
+	pp_icache_gen = (uint32_t *)phystokv(avail_start);
+	avail_start = PMAP_ALIGN(avail_start + (vm_size_t)npages * sizeof(uint32_t), __alignof(pmap_io_range_t));
+#else
 	avail_start = PMAP_ALIGN(avail_start + pp_attr_table_size, __alignof(pmap_io_range_t));
+#endif
 
 	io_attr_table = (pmap_io_range_t *)phystokv(avail_start);
 

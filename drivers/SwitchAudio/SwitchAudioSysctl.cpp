@@ -80,7 +80,7 @@ void SwitchAudio::formatSysctl(char *buf, size_t len)
         s->hwSample = __atomic_load_n(&self->control->hw_sample_time, __ATOMIC_ACQUIRE);
         s->underruns = self->statUnderruns;
         // Touch AHUB MMIO only while apeHeld pins the engine gate powered and active.
-        if (self->tegra && !self->hardwareLost && __atomic_load_n(&self->apeHeld, __ATOMIC_ACQUIRE) &&
+        if (self->tegra && !self->hardwareLost && !self->hwBusy && __atomic_load_n(&self->apeHeld, __ATOMIC_ACQUIRE) &&
             self->apeGate.powered() && self->ahubActive) {
             using namespace switch_audio_ahub;
             s->sfc1En = switch_mmio_read32(self->ahub, kSfc1Base + kSfcEnable) & 1u;

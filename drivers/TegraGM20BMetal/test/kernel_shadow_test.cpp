@@ -257,6 +257,34 @@ TEST(KernelShadow, AStandInIsDrawnAgainAfterADispatchWroteItsTexelsInTheSameEnco
     refillsTheStandIn(true);
 }
 
+// A two-plane RGB10A8_2P_XR10 texture whose word and alpha planes lie in pools apart (xr_pools.h), with a buffer between
+// them: a use a plane. A buffer store over the alpha pool alone leaves the texture's images stale and its stand-in too;
+// one over the bytes between the pools leaves neither.
+TEST(KernelShadow, ATwoPlaneTextureIsTrackedOverEachOfItsPools)
+{
+    int texture = 0, between = 0, alpha = 0;
+    const gm20b::ByteSpan words{0x40000000, 0x4000}, gap{0x40004000, 0x4000}, alphas{0x40008000, 0x1000};
+    const gm20b::KernelUse reads[] = {{&texture, words, true, false, true}, {&texture, alphas, true, false, true}};
+    const gm20b::KernelUse storeBetween = {&between, gap, false, true}, storeAlpha = {&alpha, alphas, false, true};
+    gm20b::KernelShadows plan;
+    plan.begin(reads, 2);
+    EXPECT_TRUE(plan.before(reads, 2).empty()) << "filled and drawn as the encoder began";
+    plan.after(reads, 2);
+    EXPECT_TRUE(plan.before(&storeBetween, 1).empty());
+    plan.after(&storeBetween, 1);
+    EXPECT_TRUE(plan.before(reads, 2).empty()) << "a store between the pools reaches neither";
+    plan.after(reads, 2);
+    EXPECT_TRUE(plan.before(&storeAlpha, 1).empty());
+    plan.after(&storeAlpha, 1);
+    const auto &next = plan.before(reads, 2);
+    ASSERT_EQ(next.fill.size(), 1u) << "a store over the alpha pool alone fills the texture's images again";
+    EXPECT_EQ(next.fill[0], &texture);
+    ASSERT_EQ(next.redraw.size(), 1u) << "and draws its stand-in again, once";
+    EXPECT_EQ(next.redraw[0], &texture);
+    plan.after(reads, 2);
+    EXPECT_TRUE(plan.before(reads, 2).empty());
+}
+
 TEST(KernelShadow, AStandInItsOwnDispatchWroteIsDrawnAgainBeforeItIsRead)
 {
     Refill r(false);

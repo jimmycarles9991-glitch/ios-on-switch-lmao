@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <map>
 #include <utility>
@@ -179,23 +180,86 @@ TEST(Host1xPush, EverySlotIsAGatherAndTheRingWrapsBeforeItsRestart)
 TEST(Host1xGatherStats, OneLineAWindowWithGathersCopiesAndTheArenaHighWaterMark)
 {
     SwitchHost1xGatherStats stats = {};
-    char line[200];
-    EXPECT_FALSE(stats.line(1000000, line, sizeof(line)));
+    char line[320];
+    EXPECT_FALSE(stats.line(1000000, nullptr, line, sizeof(line)));
     stats.submitted(0, false, 300);
     stats.submitted(0, false, 1200);
     stats.submitted(0, true, 3);
     stats.submitted(3, false, 34);
     stats.submitted(4, false, 17);
     stats.waited(1);
-    EXPECT_FALSE(stats.line(5999999, line, sizeof(line)));
-    ASSERT_TRUE(stats.line(6000000, line, sizeof(line)));
+    EXPECT_FALSE(stats.line(5999999, nullptr, line, sizeof(line)));
+    ASSERT_TRUE(stats.line(6000000, nullptr, line, sizeof(line)));
     EXPECT_STREQ(line, "TegraHost1x: 5s NVDEC/VIC/NVENC/NVJPG/DC gathered=2/0/0/1/1 copied=1/0/0/0/0 "
-                       "arena_high=5/0/0/1/1KB room_waits=0/1/0/0/0");
+                       "arena_high=5/0/0/1/1KB room_waits=0/1/0/0/0 counters=off");
     stats.submitted(2, false, 10);
-    EXPECT_FALSE(stats.line(10999999, line, sizeof(line)));
-    ASSERT_TRUE(stats.line(11000000, line, sizeof(line)));
+    EXPECT_FALSE(stats.line(10999999, nullptr, line, sizeof(line)));
+    ASSERT_TRUE(stats.line(11000000, nullptr, line, sizeof(line)));
     EXPECT_STREQ(line, "TegraHost1x: 5s NVDEC/VIC/NVENC/NVJPG/DC gathered=0/0/1/0/0 copied=0/0/0/0/0 "
-                       "arena_high=0/0/1/0/0KB room_waits=0/0/0/0/0");
+                       "arena_high=0/0/1/0/0KB room_waits=0/0/0/0/0 counters=off");
+}
+
+// The Maps window could not tell VIC waiting on the frame it rotates from VIC running: the channel's stall counter
+// says how much of host1x's clocked time each channel spent waiting on a syncpoint.
+TEST(Host1xGatherStats, EachWindowGivesEveryChannelsClockedAndStalledTimeSinceTheLastLine)
+{
+    SwitchHost1xGatherStats stats = {};
+    stats.restarted(163200);
+    char line[320];
+    SwitchHost1xChannelCounters counters[SwitchHost1xGatherStats::kChannels] = {};
+    for (auto &c : counters)
+        c.ticks = 816000000;
+    counters[1].stalled = 163200000;
+    counters[4].stalled = 652800000;
+    EXPECT_FALSE(stats.line(1000000, counters, line, sizeof(line)));
+    stats.submitted(1, false, 40);
+    ASSERT_TRUE(stats.line(6000000, counters, line, sizeof(line)));
+    EXPECT_STREQ(line, "TegraHost1x: 5s NVDEC/VIC/NVENC/NVJPG/DC gathered=0/1/0/0/0 copied=0/0/0/0/0 "
+                       "arena_high=0/1/0/0/0KB room_waits=0/0/0/0/0 clocked=5000000/5000000/5000000/5000000/5000000us "
+                       "stalled=0/1000000/0/0/4000000us");
+    for (auto &c : counters)
+        c.ticks += 1632000000;
+    counters[1].stalled += 16320;
+    ASSERT_TRUE(stats.line(16000000, counters, line, sizeof(line)));
+    EXPECT_THAT(line, testing::EndsWith(" clocked=10000000/10000000/10000000/10000000/10000000us "
+                                        "stalled=0/100/0/0/0us"));
+}
+
+// Resume zeroes the counters and restarts the stats' bases with them; a counter found below its base counted from 0.
+TEST(Host1xGatherStats, ARestartOrAStoppedHost1xNeverGivesAWrappedOrInventedDelta)
+{
+    SwitchHost1xGatherStats stats = {};
+    stats.restarted(163200);
+    char line[320];
+    SwitchHost1xChannelCounters counters[SwitchHost1xGatherStats::kChannels] = {};
+    for (auto &c : counters)
+        c = {1632ULL * 900000, 1632ULL * 200000};
+    EXPECT_FALSE(stats.line(1000000, counters, line, sizeof(line)));
+    ASSERT_TRUE(stats.line(10000000, counters, line, sizeof(line)));
+    ASSERT_TRUE(stats.line(20000000, nullptr, line, sizeof(line)));
+    EXPECT_THAT(line, testing::EndsWith(" counters=off"));
+    stats.restarted(163200);
+    for (auto &c : counters)
+        c = {1632ULL * 400000, 1632ULL * 100};
+    ASSERT_TRUE(stats.line(30000000, counters, line, sizeof(line)));
+    EXPECT_THAT(line, testing::EndsWith(" clocked=4000000/4000000/4000000/4000000/4000000us "
+                                        "stalled=1000/1000/1000/1000/1000us"));
+    for (auto &c : counters)
+        c = {1632ULL * 300000, 0};
+    ASSERT_TRUE(stats.line(40000000, counters, line, sizeof(line)));
+    EXPECT_THAT(line, testing::EndsWith(" clocked=3000000/3000000/3000000/3000000/3000000us stalled=0/0/0/0/0us"));
+}
+
+TEST(Host1xGatherStats, AnUnknownClockLeavesTheCountersOff)
+{
+    SwitchHost1xGatherStats stats = {};
+    stats.restarted(0);
+    char line[320];
+    const SwitchHost1xChannelCounters counters[SwitchHost1xGatherStats::kChannels] = {
+        {1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}};
+    EXPECT_FALSE(stats.line(1000000, counters, line, sizeof(line)));
+    ASSERT_TRUE(stats.line(6000000, counters, line, sizeof(line)));
+    EXPECT_THAT(line, testing::EndsWith(" counters=off"));
 }
 
 }  // namespace

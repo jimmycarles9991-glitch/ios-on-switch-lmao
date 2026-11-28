@@ -35,10 +35,11 @@ enum PackSectionId {
     PackComputeStates,
     PackReflections,
     PackFastKeys,
+    PackSegments,
     PackSectionCount
 };
 
-constexpr uint32_t kPackVersion = 33;
+constexpr uint32_t kPackVersion = 37;
 
 // What a record or a program variant (PackVariant) assumes, as bits of a mask: a draw takes a variant only where all of them
 // hold. Bits 0-15 are facts of the draw's bindings, bit 16 of its pipeline, bit 26 of its pass, bits 17-25 of the chip
@@ -58,8 +59,8 @@ enum PackAssumption : uint32_t {
     AssumeRopZeroOneFactors = 1u << 20,  // a factor of zero drops its term (an infinity or NaN too), one passes it
     // a normalized source clamped to [0, 1] (NaN 0), the store rounding to the nearest code
     AssumeRopUnormStore = 1u << 21,
-    AssumeRopHalfStore = 1u << 22,     // a half store rounding to nearest even
-    AssumeRopSrgbTables = 1u << 23,    // sRGB decoded and encoded by Metal's tables
+    AssumeRopHalfStore = 1u << 22,   // a half store rounding to nearest even, a packed float one as the storage write's
+    AssumeRopSrgbTables = 1u << 23,  // sRGB decoded and encoded by Metal's tables
     AssumeRopMinMaxNumber = 1u << 24,  // Min and Max answer the operand that is not a NaN
     AssumeRopDenormals = 1u << 25,     // f32 denormals flushed to zero
     // The pass draws into a turned plane (rotation.h): the fragment program reads the frame through the root table's turn
@@ -87,8 +88,11 @@ struct PackHeader {
     uint64_t stack;  // the build's stack key (build-tegra-gm20b-metal.py: the plugin is compiled with the same one)
     // the chip facts (kChipAssumptions) the pack's builder took as proven on the device: a draw's facts always hold them
     uint32_t chipFacts;
-    uint32_t reserved;
+    uint32_t tier0SlmPerWarp;          // v34: max slmPerWarpOfHeader across tier-0 graphics programs
     uint64_t tier0[PackSectionCount];  // v33
+    // v37: the identity of the rules a device-made record is made by (PackRules::of), which the pack's writer names
+    // (packfile.py rules_identity) and the shader compiler names its store by
+    uint8_t rules[16];
 };
 
 constexpr uint64_t kPackTierAlign = 128 << 10;
@@ -122,11 +126,20 @@ struct PackProgram {
     // v27. Its uniform buffers past set-0 byte 496 (cbufType CbufUbo, bits 3-7 zero): the blob section's dword + 1 of its far
     // table, kProgramCbufs uint16_t of each slot's set-0 byte / 16 (0: none); 0: it has none (programFarUbos)
     uint8_t farUbos[3];
-    uint32_t facts;  // v33. PackProgramFact bits, found in its code when it was made
+    uint32_t facts;  // v33. PackProgramFact bits, found in its code (v35: and its header) when it was made
 };
 
+// v35: the header bits a state's creation needs are facts of the program record, so no creation reads a program's slot
+// out of the pack's heap pages, which no process keeps resident (record_parts.cpp programFacts)
 enum PackProgramFact : uint32_t {
     kProgramWritesMemory = 1u << 0,  // its code stores to memory (program_stores.h programWritesMemory)
+    kProgramGlobalStore = 1u << 1,   // SPH DOES_GLOBAL_STORE
+    kProgramWritesViewportIndex = 1u << 2,
+    kProgramWritesLayer = 1u << 3,
+    kProgramPrimitiveId = 1u << 4,       // SPH IMAP_PRIMITIVE_ID
+    kProgramKillsPixels = 1u << 5,       // SPH KILLS_PIXELS
+    kProgramWritesDepth = 1u << 6,       // SPH OMAP_DEPTH
+    kProgramWritesSampleMask = 1u << 7,  // SPH OMAP_SAMPLE_MASK
 };
 
 // One of a stage's programs compiled under assumptions about its draws (PackAssumption). A stage's variants are tried in order
@@ -136,6 +149,8 @@ enum PackProgramFact : uint32_t {
 struct PackVariant {
     uint32_t assume;
     uint32_t program;
+    // v35: the record's first 32 set-0 entries this program reads from the set's upload (set_reads.h placedSetReads)
+    uint32_t memoryEntries;
 };
 
 // A binary archive the IPSW's frameworks ship that declares states for the identity's GPU (pack/archives.py), so a creation
@@ -214,6 +229,31 @@ struct PackFastKey {
     uint32_t first, records;
 };
 
+// Pre-built GM20B state segment living inside tier 0 of PackHeap at TGM_PACK_WINDOW_VA + heapOffset (v34).
+// PackSegments layout: PackSegmentTable, PackSegment base[pipelineCount], uint32_t variantBase[pipelineCount]
+// (~0u: no variant table), PackSegment variantCombos[variantComboCount]. v35: every segment's words lie in one block of
+// PackHeap, [wordsOffset, wordsOffset + wordsBytes), which the render server wires with the pack's tier-0 tables
+// (pack_window.h), so the CPU reads a segment's words (a copied bind, the zcull check) without an SD page-in.
+enum PackSegmentFlag : uint16_t {
+    kPackSegmentKeptAcrossPasses = 1u << 0,
+    kPackSegmentReselectRoot = 1u << 1,
+    // v37: the segment's last SET_ITERATED_BLEND_OPTIMIZATION is NOOP_SOURCE_RGBA_0000 (blend_kill.h), which a state's
+    // creation reads here, in the wired segment table, instead of in the segment's heap words
+    kPackSegmentBlendKill = 1u << 2,
+};
+
+struct PackSegment {
+    uint32_t heapOffset;
+    uint16_t words;
+    uint16_t flags;
+};
+
+struct PackSegmentTable {
+    uint32_t pipelineCount;
+    uint32_t variantComboCount;
+    uint32_t wordsOffset, wordsBytes;  // v35
+};
+
 // The bytes of a uniform buffer entry a pipeline's programs read: from its bind offset, in 16-byte units
 struct PackUniformRange {
     uint8_t entry;       // PackPipeline::entry index; kNoUniform: none
@@ -286,12 +326,18 @@ inline uint32_t handleStage(const PackEntry &e)
     return e.stage == 1 ? 0 : 1;
 }
 
-// PackEntry::pad of a handle whose sampler slot the state samples by comparison: the sampler's compare header goes there
+// PackEntry::pad of a handle: bit 0 samples by comparison; bit 1 binds a 2D-array view (m2v cube_as_array).
 constexpr uint8_t kEntryCompares = 1;
+constexpr uint8_t kEntryArrayView = 2;
 
 inline bool entryCompares(const PackEntry &e)
 {
     return e.kind != EntryUbo && e.samplerKind == SamplerSlot && (e.pad & kEntryCompares);
+}
+
+inline bool entryArrayView(const PackEntry &e)
+{
+    return e.kind == EntryTexture && (e.pad & kEntryArrayView);
 }
 
 // A buffer entry: storage, else uniform (NVK rounds its range up to the 256-byte cbuf alignment)
@@ -418,6 +464,9 @@ struct PackHeapArray {
 };
 
 constexpr uint32_t kPackHeapArrays = 8;
+// PackPipeline::guestBaseWord's length, and the fragment stage's bit in guestBaseSlot
+constexpr uint32_t kPackGuestBases = 4;
+constexpr uint8_t kGuestBaseFragment = 0x80;
 // Every heap array's elements: the texture header pool's (Device kTicCount), which the sampler header pool's fits
 constexpr uint32_t kPackHeapElements = 8192;
 
@@ -515,6 +564,11 @@ struct PackPipeline {
     // blob section from restoreAt
     uint16_t restoreDwords;
     uint32_t restoreAt;
+    // v36. m2v's SlotGuestBase fields (pipeline.h Pipeline::GuestBase): a buffer slot whose Metal address its programs read
+    // (a pointer compare, ptrtoint or a stored pointer), as the push word + 1 each draw writes that address to (0: no more)
+    // and the slot's Metal buffer index, kGuestBaseFragment set for the fragment stage's. A set*Bytes binding's address is
+    // its upload copy's.
+    uint8_t guestBaseWord[kPackGuestBases], guestBaseSlot[kPackGuestBases];
 };
 
 // PackPipeline::arrayLengthWord of a record of one layer whose vertex function chooses its slice
@@ -575,10 +629,37 @@ struct PackKernelEntry {
     uint16_t offset;
     uint8_t kind;  // PackKernelEntryKind
     uint8_t slot;
-    // buffers: kernelBufferWindow, kernelResidualWord; textures: the header's word 0 m2v bound (format, swizzle);
-    // samplers: kernelSamplerPairs (v26)
+    // buffers: kernelBufferWindow, kernelResidualWord; textures: header word 0 (bits 0-30) and kKernelWindowSrgb
+    // (bit 31: m2v's view format is sRGB); samplers: kernelSamplerPairs (v26)
     uint32_t window;
 };
+
+// Texture entries use slots 0-30, so bit 7 marks a 2D-array view (m2v cube_as_array).
+constexpr uint8_t kKernelTextureArray = 0x80;
+
+inline uint8_t kernelTextureSlot(const PackKernelEntry &e)
+{
+    return e.slot & ~kKernelTextureArray;
+}
+
+inline bool kernelTextureArray(const PackKernelEntry &e)
+{
+    return (e.slot & kKernelTextureArray) != 0;
+}
+
+// TEXHEAD_BL word 0 leaves bit 31 unused; texture entries store whether m2v's VkImageView is sRGB there so
+// RawTexture UNORM reads of sRGB textures do not collide with sRGB sampled reads.
+constexpr uint32_t kKernelWindowSrgb = 1u << 31;
+
+inline uint32_t kernelTextureWord0(uint32_t window)
+{
+    return window & ~kKernelWindowSrgb;
+}
+
+inline bool kernelTextureSrgb(uint32_t window)
+{
+    return (window & kKernelWindowSrgb) != 0;
+}
 
 // A sampler entry's window: bit 31 set where the record holds the texture slots whose reads the sampler samples, bits
 // 0-30 (none: it samples only images at no slot, or none); clear where it does not know them
@@ -707,8 +788,8 @@ struct InitAddresses {
 
 uint32_t relocated(const PackInitMethod &m, const InitAddresses &a);
 static_assert(sizeof(PackShaderTests) == 16, "shader test layout");
-static_assert(sizeof(PackPipeline) ==
-                  40 + kPackEntries * 8 + 4 + 32 * 4 + 4 + 36 + 16 + 56 + 4 + 92 + 32 + 2 * kWrittenSlots + 4 + 24,
+static_assert(sizeof(PackPipeline) == 40 + kPackEntries * 8 + 4 + 32 * 4 + 4 + 36 + 16 + 56 + 4 + 92 + 32 +
+                                          2 * kWrittenSlots + 4 + 24 + 2 * kPackGuestBases,
               "pack layout");
 static_assert(offsetof(PackPipeline, storageBlendMask) == 490 && offsetof(PackPipeline, fetchRung) == 528,
               "pack layout: packfile.py PIPELINE_V15");
@@ -723,16 +804,19 @@ static_assert(offsetof(PackPipeline, writtenFormat) == 668 && offsetof(PackPipel
 static_assert(offsetof(PackPipeline, tessPrograms) == 704 && offsetof(PackPipeline, strideTwin) == 712 &&
                   offsetof(PackPipeline, restoreAt) == 724,
               "pack layout: packfile.py PIPELINE_V24");
+static_assert(offsetof(PackPipeline, guestBaseWord) == 728 && offsetof(PackPipeline, guestBaseSlot) == 732,
+              "pack layout: packfile.py PIPELINE_V36");
 static_assert(offsetof(PackPipeline, entriesHigh) == 31 && offsetof(PackPipeline, farEntriesAt) == 557 &&
                   offsetof(PackPipeline, spillEntryHigh) == 702,
               "pack layout: packfile.py PIPELINE_V27");
 static_assert(sizeof(PackProgram) == 48 && offsetof(PackProgram, farUbos) == 41, "pack layout");
-static_assert(sizeof(PackVariant) == 8, "pack layout");
+static_assert(sizeof(PackVariant) == 12, "pack layout: packfile.py VARIANT_STRUCT");
 static_assert(sizeof(PackArchive) == 16, "pack layout");
 static_assert(sizeof(PackComputeFacts) == 24, "pack layout: packfile.py compute_facts_bytes");
 static_assert(sizeof(PackReflection) == 16, "pack layout: packfile.py reflection_bytes");
 static_assert(sizeof(PackFastKey) == 16, "pack layout: packfile.py fast_key_bytes");
-static_assert(sizeof(PackHeader) == 24 + 16 * PackSectionCount + 16 + 8 * PackSectionCount,
+static_assert(sizeof(PackSegment) == 8 && sizeof(PackSegmentTable) == 16, "pack layout: segments.py _SEGMENT_TABLE");
+static_assert(sizeof(PackHeader) == 24 + 16 * PackSectionCount + 16 + 8 * PackSectionCount + 16,
               "pack layout: packfile.py pack_bytes header_size");
 static_assert(sizeof(PackKernel) == 18 + 256 + 14 + 128 + 8 * kKernelEntries + 84 + 12, "pack layout");
 static_assert(offsetof(PackKernel, stageInRegionWord) == 1012, "pack layout: packfile.py KERNEL_V21");
@@ -754,6 +838,12 @@ public:
     const PackHeader *header() const
     {
         return hdr_;
+    }
+
+    // The mapping's bytes: the whole file
+    size_t size() const
+    {
+        return size_;
     }
 
     template <class T> const T *section(PackSectionId s) const
@@ -805,6 +895,10 @@ public:
     // The reflection blob of the render state (or, with `compute`, the compute state) of `keyHash`, its `length`;
     // nullptr: the pack holds none
     const uint8_t *reflection(uint64_t keyHash, bool compute, uint32_t &length) const;
+    const PackSegment *pipelineSegment(uint32_t recIndex) const;
+    const PackSegment *variantSegment(uint32_t recIndex, uint32_t comboIndex) const;
+    // The PackHeap block every segment's words lie in; false: the pack has no segments
+    bool segmentWords(uint32_t &heapOffset, uint32_t &bytes) const;
 
     const char *string(uint32_t off) const
     {

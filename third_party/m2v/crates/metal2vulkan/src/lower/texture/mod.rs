@@ -3091,7 +3091,12 @@ fn select_image(
         let whole = texel
             .is_none_or(|(f, _)| matches!(f.conv, TexelConv::F32 | TexelConv::F16) && f.lanes == 4);
         let other_buffer = shape.dim == ImageDim::Buffer
-            && !matches!(form, crate::metal::format::ExtendedRange::Planes { .. });
+            && !matches!(
+                form,
+                crate::metal::format::ExtendedRange::Planes { .. }
+                    | crate::metal::format::ExtendedRange::Bgr10 { .. }
+                    | crate::metal::format::ExtendedRange::Bgra10 { .. }
+            );
         if !whole || other_buffer || matches!(t.op, TexOp::Atomic(_)) {
             return Err(Unsupported::not_implemented(Feature::Format).into());
         }

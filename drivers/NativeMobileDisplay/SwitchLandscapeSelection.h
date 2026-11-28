@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // planeDecide's landscape composition (SwitchLandscape.h), in the class body after SwitchNativePlaneDisplay.h: a lone
-// detached layer whose destination TegraVIC recorded as the decoder's picture turned (SwitchVICTurn.h) is scanned by
-// window A turned, behind the UI on B (V3 passed: SwitchDisplayTraits columnScanYuv). Window A reads through
-// the display's SMMU domain, so direct scanout's attach is required. A failed change is one line; the next candidate
+// detached layer whose destination TegraVIC recorded as the decoder's picture turned (SwitchVICTurn.h), or the
+// decoder's picture with a quarter turn in the swap itself, is scanned by window A turned, behind the UI on B (V3
+// passed: SwitchDisplayTraits columnScanYuv). Window A reads through the display's SMMU domain, so direct scanout's
+// attach is required. A failed change is one line; the next candidate
 // tries again.
 
 bool planeLandscapeCandidate(const native_planes::Roles &roles) const
@@ -27,12 +28,15 @@ int planeLandscapeSlotFor(OSObject *surface, const native_planes::Layer &layer, 
     SwitchNativeScanout scanout = {};
     int error = switch_native_scanout_acquire(surface, &scanout, true);
     const auto &view = scanout.view;
+    // TegraVIC's record of Core Animation's turn, or the swap's own word on the decoder's picture.
     if (!error &&
-        (!view.turn.transform ||
-         !switch_landscape::turnedVideoImage(
-             layer, view.layout, view.crop.x, view.crop.y, view.crop.width, view.crop.height, view.turn.transform,
-             {int32_t(view.turn.x), int32_t(view.turn.y), int32_t(view.turn.width), int32_t(view.turn.height)}, width,
-             height, image)))
+        (view.turn.transform
+             ? !switch_landscape::turnedVideoImage(
+                   layer, view.layout, view.crop.x, view.crop.y, view.crop.width, view.crop.height, view.turn.transform,
+                   {int32_t(view.turn.x), int32_t(view.turn.y), int32_t(view.turn.width), int32_t(view.turn.height)},
+                   width, height, image)
+             : !switch_landscape::swapTurnedVideoImage(layer, view.layout, view.crop.x, view.crop.y, view.crop.width,
+                                                       view.crop.height, width, height, image)))
         error = -95;
     // Window A's CSC is live while it scans a video: another matrix waits for the next entry.
     if (!error && landscapeOn() &&

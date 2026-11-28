@@ -56,6 +56,23 @@ public enum GM20BFacade {
         return profile.mapValues(\.doubleValue)
     }
 
+    /// The app's trip to the background as the driver hears it (GpuMemoryRelease.h): UIKit's did-enter-background
+    /// notification, which gives the device's idle GPU memory back before the post returns, then its will-enter-
+    /// foreground one. The driver keeps no idle timer, so a test of the give-back makes this trip.
+    public static func tripToBackground() async {
+        // on the main thread, as UIKit posts them: the app's other observers expect it
+        await MainActor.run {
+            NotificationCenter.default.post(
+                name: Notification.Name("UIApplicationDidEnterBackgroundNotification"),
+                object: nil
+            )
+            NotificationCenter.default.post(
+                name: Notification.Name("UIApplicationWillEnterForegroundNotification"),
+                object: nil
+            )
+        }
+    }
+
     /// The bytes the facade's raw device holds now (empty off the facade): "pool" (its pool, block-linear and depth
     /// chunks), "wc" (write-combined chunks), "heap" (the shader heap's bound parts) and "headers_left" (texture
     /// headers not held).
@@ -127,7 +144,18 @@ public enum GM20BFacade {
         (ask(buffer, "switchMetalInlineStates") as? NSNumber)?.boolValue ?? false
     }
 
-    static func ask(_ object: Any, _ name: String) -> Any? {
+    /// Forces the facade's fetch rung for `body` on debug builds; nil where it has no probe channel.
+    public static func forcingFetchRung<T>(
+        _ rung: Int, on device: MTLDevice, _ body: () async throws -> T
+    ) async rethrows -> T? {
+        let force = NSSelectorFromString("switchMetalProbeFetchRung:")
+        guard let facade = device as? NSObject, facade.responds(to: force) else { return nil }
+        _ = facade.perform(force, with: NSNumber(value: rung))
+        defer { _ = facade.perform(force, with: NSNumber(value: 0)) }
+        return try await body()
+    }
+
+    public static func ask(_ object: Any, _ name: String) -> Any? {
         let selector = NSSelectorFromString(name)
         guard let object = object as? NSObject, object.responds(to: selector) else { return nil }
         return object.perform(selector)?.takeUnretainedValue()

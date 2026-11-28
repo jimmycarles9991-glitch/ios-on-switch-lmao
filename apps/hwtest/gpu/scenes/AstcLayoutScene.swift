@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// One 128x128 ASTC 4x4 image (every block a void-extent block of its own colour, AstcBlockGrid) put into a texture

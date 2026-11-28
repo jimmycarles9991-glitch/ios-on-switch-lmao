@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// COMPILER.md E3, METALMAP d23, LIMITS G3: GM20B's float conversions against Metal's. m2v rounds every unblended

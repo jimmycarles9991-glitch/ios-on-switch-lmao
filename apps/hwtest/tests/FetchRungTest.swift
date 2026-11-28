@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
+import HWTestKit
 import Metal
 
 /// Fetch rungs 2 and 3 (drivers/TegraGM20BMetal/fetch_free.h) on the chip: Core Animation states that

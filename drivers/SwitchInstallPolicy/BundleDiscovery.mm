@@ -16,12 +16,22 @@
 
 static const void *switch_plugin_discovery_key = &switch_plugin_discovery_key;
 static const void *switch_extension_discovery_key = &switch_extension_discovery_key;
+static const void *switch_discovery_scan_key = &switch_discovery_scan_key;
 
 static BOOL switch_discovery_error(NSError **error, int code)
 {
     if (error)
         *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:code userInfo:nil];
     return NO;
+}
+
+static void switch_record_extension(NSMutableDictionary<NSString *, NSMutableSet<NSString *> *> *groups,
+                                    NSString *relative, NSString *name)
+{
+    NSMutableSet<NSString *> *names = groups[relative];
+    if (!names)
+        groups[relative] = names = [NSMutableSet set];
+    [names addObject:name];
 }
 
 static NSDictionary *switch_extension_metadata(int directory, NSError **error)
@@ -59,9 +69,10 @@ static NSDictionary *switch_extension_metadata(int directory, NSError **error)
     return [dictionary isKindOfClass:NSDictionary.class] ? dictionary : nil;
 }
 
-static BOOL switch_collect_extensions(int directory, NSString *relative, BOOL extensionKit,
-                                     NSMutableDictionary<NSString *, NSMutableSet<NSString *> *> *groups,
-                                     NSUInteger depth, NSUInteger *entries, NSError **error)
+static BOOL switch_collect_extensions(int directory, NSString *parentRelative, NSString *selfName,
+                                      NSMutableDictionary<NSString *, NSMutableSet<NSString *> *> *pluginGroups,
+                                      NSMutableDictionary<NSString *, NSMutableSet<NSString *> *> *extensionGroups,
+                                      NSUInteger depth, NSUInteger *entries, NSError **error)
 {
     if (depth > 128)
         return switch_discovery_error(error, E2BIG);
@@ -73,6 +84,9 @@ static BOOL switch_collect_extensions(int directory, NSString *relative, BOOL ex
         close(enumeration);
         return switch_discovery_error(error, errno);
     }
+    NSString *currentRelative =
+        selfName ? (parentRelative.length ? [parentRelative stringByAppendingPathComponent:selfName] : selfName) : @"";
+    BOOL hasInfoPlist = NO;
     BOOL success = YES;
     errno = 0;
     while (struct dirent *entry = readdir(stream)) {
@@ -82,6 +96,13 @@ static BOOL switch_collect_extensions(int directory, NSString *relative, BOOL ex
             success = switch_discovery_error(error, E2BIG);
             break;
         }
+        if (selfName && !strcmp(entry->d_name, "Info.plist") &&
+            (entry->d_type == DT_REG || entry->d_type == DT_UNKNOWN)) {
+            hasInfoPlist = YES;
+            continue;
+        }
+        if (entry->d_type != DT_DIR && entry->d_type != DT_UNKNOWN)
+            continue;
         int child = openat(directory, entry->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (child < 0) {
             if (errno != ENOTDIR && errno != ELOOP && errno != ENOENT) {
@@ -93,25 +114,9 @@ static BOOL switch_collect_extensions(int directory, NSString *relative, BOOL ex
         }
         NSString *name = [[NSFileManager defaultManager] stringWithFileSystemRepresentation:entry->d_name
                                                                                    length:strlen(entry->d_name)];
-        NSString *path = relative.length ? [relative stringByAppendingPathComponent:name] : name;
-        NSError *metadataError = nil;
-        BOOL modern = NO, legacy = NO;
-        @autoreleasepool {
-            NSDictionary *metadata = switch_extension_metadata(child, &metadataError);
-            modern = [metadata[@"EXAppExtensionAttributes"] isKindOfClass:NSDictionary.class];
-            legacy = [metadata[@"NSExtension"] isKindOfClass:NSDictionary.class];
-        }
-        if ((extensionKit && modern) || (!extensionKit && legacy && !modern)) {
-            NSMutableSet *names = groups[relative];
-            if (!names)
-                groups[relative] = names = [NSMutableSet set];
-            [names addObject:name];
-        }
-        success = !metadataError && switch_collect_extensions(child, path, extensionKit, groups,
-                                                              depth + 1, entries, error);
+        success = switch_collect_extensions(child, currentRelative, name, pluginGroups, extensionGroups, depth + 1,
+                                            entries, error);
         close(child);
-        if (metadataError && error)
-            *error = metadataError;
         if (!success)
             break;
         errno = 0;
@@ -119,7 +124,47 @@ static BOOL switch_collect_extensions(int directory, NSString *relative, BOOL ex
     if (success && errno)
         success = switch_discovery_error(error, errno);
     closedir(stream);
+    if (success && hasInfoPlist) {
+        NSError *metadataError = nil;
+        BOOL modern = NO, legacy = NO;
+        @autoreleasepool {
+            NSDictionary *metadata = switch_extension_metadata(directory, &metadataError);
+            modern = [metadata[@"EXAppExtensionAttributes"] isKindOfClass:NSDictionary.class];
+            legacy = [metadata[@"NSExtension"] isKindOfClass:NSDictionary.class];
+        }
+        if (metadataError) {
+            if (error)
+                *error = metadataError;
+            return NO;
+        }
+        if (modern)
+            switch_record_extension(extensionGroups, parentRelative, selfName);
+        else if (legacy)
+            switch_record_extension(pluginGroups, parentRelative, selfName);
+    }
     return success;
+}
+
+static NSArray<NSDictionary *> *switch_scan_extensions(id parent, NSURL *root, NSError **error)
+{
+    NSArray<NSDictionary *> *scan = objc_getAssociatedObject(parent, switch_discovery_scan_key);
+    if (scan)
+        return scan;
+    int directory = root.isFileURL ? open(root.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    if (directory < 0) {
+        switch_discovery_error(error, root.isFileURL ? errno : EINVAL);
+        return nil;
+    }
+    NSMutableDictionary *pluginGroups = [NSMutableDictionary dictionary];
+    NSMutableDictionary *extensionGroups = [NSMutableDictionary dictionary];
+    NSUInteger entries = 0;
+    BOOL success = switch_collect_extensions(directory, @"", nil, pluginGroups, extensionGroups, 0, &entries, error);
+    close(directory);
+    if (!success)
+        return nil;
+    scan = @[ pluginGroups, extensionGroups ];
+    objc_setAssociatedObject(parent, switch_discovery_scan_key, scan, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return scan;
 }
 
 NSArray *switch_discover_extensions(id parent, Class nativeClass, BOOL extensionKit,
@@ -137,17 +182,10 @@ NSArray *switch_discover_extensions(id parent, Class nativeClass, BOOL extension
         return nil;
     }
     NSURL *root = [parent bundleURL].URLByResolvingSymlinksInPath;
-    int directory = root.isFileURL ? open(root.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
-    if (directory < 0) {
-        switch_discovery_error(error, root.isFileURL ? errno : EINVAL);
+    NSArray<NSDictionary *> *scan = switch_scan_extensions(parent, root, error);
+    if (!scan)
         return nil;
-    }
-    NSMutableDictionary *groups = [NSMutableDictionary dictionary];
-    NSUInteger entries = 0;
-    BOOL success = switch_collect_extensions(directory, @"", extensionKit, groups, 0, &entries, error);
-    close(directory);
-    if (!success)
-        return nil;
+    NSDictionary *groups = scan[extensionKit ? 1 : 0];
     NSMutableDictionary *byPath = [NSMutableDictionary dictionary];
     for (id<SwitchDiscoveryBundle> bundle in known) {
         NSString *path = bundle.bundleURL.URLByResolvingSymlinksInPath.path;

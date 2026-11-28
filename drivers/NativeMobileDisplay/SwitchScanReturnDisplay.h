@@ -8,7 +8,7 @@
 // swap and what it showed. While a colour blank is on screen (SwitchColourBlank.h) window A shows nothing of the page it
 // fetches. Included in the class body after SwitchDirectSlots.h and SwitchCompletionFlipDisplay.h; under the gate.
 
-#if SWITCH_FRAME_TIMELINE
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
 static constexpr unsigned kScanTotals = 3, kScanOverlapLines = 16;
 static inline uint32_t scanTotals[kScanTotals] = {};  // checks, handed back, overlaps
 static inline struct sysctl_oid scanTotalOids[kScanTotals] = {};

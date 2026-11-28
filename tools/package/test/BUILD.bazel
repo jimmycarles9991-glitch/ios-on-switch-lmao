@@ -50,6 +50,7 @@ py_test(
         "//tools/package:adt_edit.py",
     ],
     deps = [
+        "//tools/install:overlay_index",
         "//tools/package:boot_config",
         "//tools/package:loader_abi",
         "//tools/package:native_oled_adt",

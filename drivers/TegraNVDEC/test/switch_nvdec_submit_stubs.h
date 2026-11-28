@@ -11,6 +11,8 @@
 #include <stdexcept>
 
 inline bool switch_test_queue_locked = false;
+inline uint32_t switch_test_queue_locks = 0;
+inline uint32_t switch_test_ionew_zero_calls = 0;
 
 struct IOLock {
     bool locked = false;
@@ -32,8 +34,10 @@ inline void IOLockLock(IOLock *lock)
 {
     EXPECT_FALSE(lock->locked);
     lock->locked = true;
-    if (lock == switch_test_queue_lock)
+    if (lock == switch_test_queue_lock) {
         switch_test_queue_locked = true;
+        ++switch_test_queue_locks;
+    }
 }
 
 inline void IOLockUnlock(IOLock *lock)
@@ -61,8 +65,8 @@ inline void IOLockSleep(IOLock *lock, void *, int)
 inline void IOLockWakeup(IOLock *, void *, bool)
 {}
 
-#define IONew(type, count)             static_cast<type *>(std::malloc(sizeof(type) * (count)))
-#define IONewZero(type, count)         static_cast<type *>(std::calloc((count), sizeof(type)))
+#define IONew(type, count)     static_cast<type *>(std::malloc(sizeof(type) * (count)))
+#define IONewZero(type, count) (++switch_test_ionew_zero_calls, static_cast<type *>(std::calloc((count), sizeof(type))))
 #define IODelete(pointer, type, count) ((void)(count), std::free(pointer))
 
 class IOMemoryDescriptor {};

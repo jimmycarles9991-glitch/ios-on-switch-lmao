@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A rotation asked of a texture over no surface plane, private or over a buffer. Metal makes none (an M4 Max: its

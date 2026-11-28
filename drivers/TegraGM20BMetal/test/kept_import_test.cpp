@@ -18,6 +18,7 @@ namespace {
 
 constexpr uint32_t kRGBA8 = 70, kWidth = 256, kHeight = 64, kPitch = kWidth * 4;
 constexpr uint64_t kBytes = 1 << 20;
+constexpr uint32_t kKept = 32;  // Device::kKeptImports
 
 class KeptImport : public harness::DeviceTest {
 protected:
@@ -32,7 +33,7 @@ protected:
     void SetUp() override
     {
         DeviceTest::SetUp();
-        for (uint32_t i = 0; i < 10; i++) {
+        for (uint32_t i = 0; i < kKept + 2; i++) {
             Surface s;
             ASSERT_EQ(posix_memalign(&s.pages, size_t(getpagesize()), kBytes), 0);
             s.owner = CFDataCreate(nullptr, nullptr, 0);
@@ -79,21 +80,21 @@ TEST_F(KeptImport, ASurfacesTextureEveryFrameTakesOneImport)
     EXPECT_EQ(kernel_model::model.freed.size(), freed);
 }
 
-TEST_F(KeptImport, EightAreKeptAndTrimGivesThemBack)
+TEST_F(KeptImport, ThirtyTwoAreKeptAndTrimGivesThemBack)
 {
     std::vector<uint64_t> handles;
     for (const Surface &s : surfaces)
         handles.push_back(frame(s));
-    // ten surfaces released in order: the two oldest given back, eight kept
+    // the surfaces released in order: the two oldest given back, the rest kept
     const std::vector<uint64_t> &freed = kernel_model::model.freed;
     ASSERT_EQ(freed.size(), 2u);
     EXPECT_EQ(freed[0], handles[0]);
     EXPECT_EQ(freed[1], handles[1]);
-    EXPECT_EQ(frame(surfaces[9]), handles[9]);
+    EXPECT_EQ(frame(surfaces[kKept + 1]), handles[kKept + 1]);
     const gm20b::Device::Trimmed trimmed = dev.trim();
-    EXPECT_EQ(freed.size(), 10u);
-    EXPECT_EQ(trimmed.keptImports, 8u);
-    EXPECT_EQ(trimmed.keptImportBytes, 8 * kBytes);
+    EXPECT_EQ(freed.size(), kKept + 2u);
+    EXPECT_EQ(trimmed.keptImports, kKept);
+    EXPECT_EQ(trimmed.keptImportBytes, kKept * kBytes);
     EXPECT_EQ(dev.trim().keptImports, 0u) << "trim gave every one back";
 }
 
@@ -163,18 +164,19 @@ TEST_F(KeptImport, TeardownFreesWithTheDeviceLockLetGoAndAccurateHeld)
     EXPECT_EQ(FreeWatch::underLock.load(), 0) << "kept-import eviction ran BoFree under Device::lock_";
     EXPECT_EQ(FreeWatch::heldOk.load(), 2);
     for (const gm20b::Device::Held &h : FreeWatch::heldSamples)
-        EXPECT_GE(h.kept, 9 * kBytes) << "Device::held() dropped evicted kept import bytes before BoFree finished";
+        EXPECT_GE(h.kept, (kKept + 1) * kBytes)
+            << "Device::held() dropped evicted kept import bytes before BoFree finished";
 
     watch.reset();
     const gm20b::Device::Trimmed trimmed = dev.trim();
-    EXPECT_EQ(trimmed.keptImports, 8u);
-    EXPECT_EQ(FreeWatch::frees.load(), 8);
+    EXPECT_EQ(trimmed.keptImports, kKept);
+    EXPECT_EQ(FreeWatch::frees.load(), int(kKept));
     EXPECT_EQ(FreeWatch::underLock.load(), 0) << "trim() ran BoFree under Device::lock_";
-    EXPECT_EQ(FreeWatch::heldOk.load(), 8);
-    ASSERT_EQ(FreeWatch::heldSamples.size(), 8u);
-    EXPECT_EQ(FreeWatch::heldSamples.front().kept, 8 * kBytes);
+    EXPECT_EQ(FreeWatch::heldOk.load(), int(kKept));
+    ASSERT_EQ(FreeWatch::heldSamples.size(), size_t(kKept));
+    EXPECT_EQ(FreeWatch::heldSamples.front().kept, kKept * kBytes);
     EXPECT_EQ(FreeWatch::heldSamples.back().kept, kBytes);
-    EXPECT_EQ(kernel_model::model.freed.size(), 10u) << "trim() returned before freeing every BO";
+    EXPECT_EQ(kernel_model::model.freed.size(), kKept + 2u) << "trim() returned before freeing every BO";
     gm20b::Device::Held after = {};
     ASSERT_TRUE(dev.held(after, false));
     EXPECT_EQ(after.kept, 0u);

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from tools.perf import cpu, dumps, gpu, ips, ktrace, pacing, symbols, vm, work
+from tools.perf import cpu, dumps, gpu, host1x, ips, ktrace, pacing, recfile, session, symbols, vm, work
 from tools.perf.session import Session, dossier, families, lost, pacing_row, slows_in
 from tools.perf.windows import BOOTSTRAPPED, Window
 
@@ -46,8 +47,9 @@ LIMITS = (
         '"dropped" counts on those lines say how many a window lost.'
     ),
     (
-        'Without --//kernel:recorder or --//kernel:kprof, no line names the user functions a thread ran over a window; '
-        'pass --dsc (or extract tables under ~/Library/Application Support/switch-ios/symbols/<build>/) to symbolize.'
+        'Without --//kernel:kprof, no line names the user functions a thread ran over a window, except in the first '
+        'four minutes of a --//kernel:recorder boot and inside its dumps; pass --dsc (or extract tables under '
+        '~/Library/Application Support/switch-ios/symbols/<build>/) to symbolize.'
     ),
     (
         'HangTracer measures every main-thread hang but writes no report with stacks on this device, and tailspin is '
@@ -81,6 +83,7 @@ def head(s: Session, pulled: Pulled) -> list[str]:
     fam = families(s)
     state, _ = cpu.kprof(s.recs)
     sym_state = 'loaded' if pulled.syms.active else 'none (pass --dsc for shared-cache symbols)'
+    gaps = session.holes(s.recs)
     return [
         (
             f'# Boot {s.boot}: {first:%Y-%m-%d %H:%M:%S} to {last:%H:%M:%S} UTC '
@@ -88,25 +91,86 @@ def head(s: Session, pulled: Pulled) -> list[str]:
         ),
         'lines read: ' + ', '.join(f'{k} {n}' for k, n in fam.most_common()),
         (
-            f'kprof: {state}; probes-kernel tasks lines: {fam["SwitchSched tasks"]}; '
-            f'marks: {len(s.windows["mark"])}; symbols: {sym_state}'
+            f'kprof: {state}; probes-kernel tasks lines: {fam["SwitchSched tasks"]}; owner presses: '
+            f'{len(s.windows["press"])}; HW Test marks: {len(s.windows["mark"])}; recorder captures: '
+            f'{sum(1 for r in s.recs if recfile.CAPTURE.search(r.msg))}; symbols: {sym_state}'
         ),
         'windows: ' + ', '.join(f'{k} {len(v)}' for k, v in s.windows.items()),
+        *(
+            [
+                "log holes (no record at all; pull again from the last pull's end): "
+                + ', '.join(f'{a:%H:%M:%S}-{b:%H:%M:%S} ({(b - a).total_seconds() / 60:.1f} min)' for a, b in gaps)
+            ]
+            if gaps
+            else []
+        ),
+    ]
+
+
+PRESS_AFTER_S = 6  # a hang starting this soon after a press may be the press's own cost
+
+
+LABEL = re.compile(r'SwitchLabels: icon label image (?P<n>\d+) set')
+HOME_VISIBLE = 'from hidden to visible'
+
+
+def labels_row(s: Session) -> list[str]:
+    """Return when the Home Screen's icon labels got their images against when the Home Screen became visible."""
+    shown = next((r.time for r in s.recs if r.proc == 'SpringBoard' and HOME_VISIBLE in r.msg), None)
+    sets = [r.time for r in s.recs if LABEL.search(r.msg)]
+    if not sets:
+        missing = next((r.msg for r in s.recs if r.msg.startswith('SwitchLabels: no ')), '')
+        return [f'label set vs Home Screen visible: no label lines{": " + missing if missing else ""}']
+    if shown is None:
+        return [f'label set vs Home Screen visible: {len(sets)} label images, no Home Screen line']
+    nth = sets[min(len(sets), 20) - 1]
+    return [
+        f'label set vs Home Screen visible ({shown:%H:%M:%S.%f}'[:-3]
+        + f'): first label image {(sets[0] - shown).total_seconds():+.1f} s, the {min(len(sets), 20)}th '
+        f'{(nth - shown).total_seconds():+.1f} s, {len(sets)} logged'
     ]
 
 
 def window_rows(s: Session, kind: str, ws: list[Window]) -> list[str]:
     out = []
     for w in ws:
-        out.append(f'{kind} {w.name} {w.start:%H:%M:%S} ({w.ms / 1000:.1f} s): {pacing_row(s, w)}')
-        if cycle := pacing.periodic(slows_in(s, w)):
+        note = f' [{w.note}]' if kind == 'press' and w.note else ''
+        out.append(
+            f'{kind} {w.name} {w.end:%H:%M:%S}{note} ({w.ms / 1000:.1f} s before): {pacing_row(s, w)}'
+            if kind == 'press'
+            else f'{kind} {w.name} {w.start:%H:%M:%S} ({w.ms / 1000:.1f} s): {pacing_row(s, w)}'
+        )
+        if kind == 'press' and (after := hangs_after(s, w)):
+            out.append('    hangs starting within 6 s after it: ' + after)
+        inside = slows_in(s, w)
+        if cycle := pacing.periodic(inside):
             out.append('    ' + cycle)
+        if w.ms >= 15000:
+            w_recs = [r for r in s.recs if w.holds(r.time)]
+            out += ['    ' + line for line in pacing.periodic_correlations(inside, w_recs)]
     return out
 
 
+def hangs_after(s: Session, w: Window) -> str:
+    """Return the hangs starting soon after a press, each with the recorder's own work it overlapped, if any."""
+    work = recfile.busy(s.recs)
+    out = []
+    for h in s.windows['hang']:
+        if 0 <= (h.start - w.end).total_seconds() <= PRESS_AFTER_S:
+            during = [label for a, b, label in work if a <= h.end and h.start <= b]
+            out.append(
+                f'{h.proc} {h.name} at +{(h.start - w.end).total_seconds():.1f} s'
+                + (f' (during {", ".join(during)})' if during else ' (no recorder work)' if work else '')
+            )
+    return ', '.join(out)
+
+
 def pacing_section(s: Session) -> list[str]:
-    out = ['', '## Frame pacing by scenario', 'whole boot: ' + pacing_row(s, whole(s))]
-    for kind in ('mark', 'launch', 'touch'):
+    out = ['', '## Frame pacing by scenario', 'whole boot: ' + pacing_row(s, whole(s)), *labels_row(s)]
+    if cycle := pacing.periodic(s.slows):
+        out.append('whole boot cycle: ' + cycle)
+    out += ['periodic correlation: ' + line for line in pacing.periodic_correlations(s.slows, s.recs)]
+    for kind in ('press', 'mark', 'launch', 'touch'):
         out += window_rows(s, kind, s.windows[kind])
     tests = s.windows['test']
     by_lost = sorted(tests, key=lambda w: -sum(x.frame.frames - 1 for x in lost(slows_in(s, w))))
@@ -117,16 +181,24 @@ def pacing_section(s: Session) -> list[str]:
 def slow_section(s: Session, syms: symbols.Symbols) -> list[str]:
     stages: Counter[str] = Counter()
     periods: Counter[str] = Counter()
+    before: Counter[str] = Counter()
     for x in s.slows:
         stages[x.stage] += 1
-        periods[x.stage] += x.frame.frames - 1
+        periods[x.stage] += x.chain_periods
+        before[x.stage] += x.frame.frames - 1 - x.chain_periods
     joined = sum(1 for x in s.slows if x.render)
+    windowed = sum(1 for x in s.slows if x.window)
     out = [
         '',
         '## Slow presents: the stage that lost the period',
-        f'{len(s.slows)} slow presents, {joined} joined with their render thread line',
+        f'{len(s.slows)} slow presents, {joined} joined with their render thread line, {windowed} carry its window',
+        "periods: those lost in the present's own chain; before its vsync: the rest of its interval",
     ]
-    out += [f'  {stage}: {n} presents, {periods[stage]} periods' for stage, n in stages.most_common()]
+    out += [
+        f'  {stage}: {n} presents, {periods[stage]} periods'
+        + (f', {before[stage]} before its vsync' if before[stage] else '')
+        for stage, n in stages.most_common()
+    ]
     sites = Counter(x.render.longest for x in s.slows if x.stage == pacing.WAITED and x.render)
     out += [
         f'  the render thread waited at {syms.resolve_where(site)}: {n} presents' for site, n in sites.most_common(4)
@@ -152,6 +224,10 @@ def cpu_section(s: Session, syms: symbols.Symbols) -> list[str]:
         if top
         else 'processes by CPU: not in this kernel (probes-kernel 1 adds SwitchSched tasks)'
     )
+    out += cpu.interrupt_summary(s.irqs, s.busy)
+    out += cpu.systime_summary(s.systime)
+    out += cpu.callout_summary(s.callouts, syms)
+    out += cpu.pinned_summary(cpu.CpuWindows(s.busy, s.tasks, s.kprof, s.irqs, s.systime, s.callouts), syms)
     out += cpu.cpu_floor(s.busy, s.tasks, s.kprof, syms)
     waits = cpu.core_waits(s.recs)
     named = [n for n in FRAME_THREADS if n in waits]
@@ -162,10 +238,17 @@ def cpu_section(s: Session, syms: symbols.Symbols) -> list[str]:
         w = waits[name]
         out.append(
             f'runnable to running: {name} {w.runs} runs, worst p99 {w.worst_p99} us, max {w.worst_us} us'
-            + (f' (window ending {w.when:%H:%M:%S}{", still booting" if w.booting else ""})' if w.when else '')
+            + (
+                f' (window ending {w.when:%H:%M:%S}'
+                + (f', began {w.began_before_ms / 1000:.1f} s before it' if w.began_before_ms else '')
+                + f'{", still booting" if w.booting else ""})'
+                if w.when
+                else ''
+            )
         )
     state, lines = cpu.kprof(s.recs)
     out.append(f'kprof: {state}')
+    out += cpu.kprof_summary(s.kprof, syms)
     out += [f'  {r.time:%H:%M:%S} {r.msg[:300]}' for r in lines[-12:]]
     return out
 
@@ -268,14 +351,22 @@ def launch_section(s: Session, syms: symbols.Symbols) -> list[str]:
     return out
 
 
-def dump_section(s: Session, pulled: Pulled) -> list[str]:
+def of_boot(s: Session, ring: str) -> bool:
+    """Whether a dump is this boot's: a .rec file's header names its boot; an older pair is placed by its write time."""
+    if ring.endswith('.rec'):
+        return recfile.read_head(ring).get('boot', '').upper() == s.boot.upper()
     first, last = s.recs[0].time.timestamp(), s.recs[-1].time.timestamp()
-    mine = [(r, k) for r, k in pulled.dumps if first - DUMP_SLACK_S <= ktrace.tod(r) <= last + DUMP_SLACK_S]
+    return first - DUMP_SLACK_S <= ktrace.tod(ring) <= last + DUMP_SLACK_S
+
+
+def dump_section(s: Session, pulled: Pulled) -> list[str]:
+    mine = [(r, k) for r, k in pulled.dumps if of_boot(s, r)]
     lines = [r for r in s.recs if r.msg.startswith('SwitchRecorder')]
     out = [
         '',
         '## Flight recorder dumps',
         f'{len(lines)} recorder lines in the log, {len(mine)} dumps of this boot pulled',
+        *recfile.recorder_lines(s.recs),
     ]
     out += [f'  {r.time:%H:%M:%S} {r.msg[:200]}' for r in lines[-8:]]
     for ring, shot in mine:
@@ -292,6 +383,7 @@ def render(s: Session, pulled: Pulled) -> str:
     out += slow_section(s, pulled.syms)
     out += cpu_section(s, pulled.syms)
     out += ['', '## GPU', *gpu.lines(gpu.read(s.recs))]
+    out += ['', '## host1x channels', *host1x.lines(host1x.read(s.recs))]
     out += work_section(s)
     out += vm_section(s, pulled.syms)
     out += hang_section(s, pulled)

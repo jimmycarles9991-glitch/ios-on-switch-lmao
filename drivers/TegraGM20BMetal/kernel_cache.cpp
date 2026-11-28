@@ -22,11 +22,10 @@ std::string encodeKernelEntry(const CacheKey &k, const ComputeRecord *record, co
     } else {
         w.text(refusal);
     }
-    w.value(Pack::fnv(w.out.data(), w.out.size()));
     return w.out;
 }
 
-RecordCache::Found decodeKernelEntry(const std::string &bytes, const CacheKey &k, ComputeRecord &record,
+RecordCache::Found decodeKernelEntry(std::string_view bytes, const CacheKey &k, ComputeRecord &record,
                                      std::string &refusal)
 {
     Reader r(bytes);
@@ -35,7 +34,7 @@ RecordCache::Found decodeKernelEntry(const std::string &bytes, const CacheKey &k
         return RecordCache::Found::None;
     if (kind == kKindKernelRefusal) {
         refusal = r.text();
-        return r.ok() && r.at() == bytes.size() - 8 ? RecordCache::Found::Refusal : RecordCache::Found::None;
+        return r.ok() && r.at() == bytes.size() ? RecordCache::Found::Refusal : RecordCache::Found::None;
     }
     if (kind != kKindKernel)
         return RecordCache::Found::None;
@@ -48,7 +47,7 @@ RecordCache::Found decodeKernelEntry(const std::string &bytes, const CacheKey &k
     rec.cbufs = r.value<uint8_t>();
     rec.samplers = r.list<std::array<uint32_t, 8>>();
     rec.spill = r.list<uint32_t>();
-    if (!r.ok() || r.at() != bytes.size() - 8 || rec.cbufs > sizeof rec.cbufType ||
+    if (!r.ok() || r.at() != bytes.size() || rec.cbufs > sizeof rec.cbufType ||
         rec.spill.size() != rec.kernel.spillWords ||
         rec.kernel.entries > sizeof rec.kernel.entry / sizeof rec.kernel.entry[0])
         return RecordCache::Found::None;

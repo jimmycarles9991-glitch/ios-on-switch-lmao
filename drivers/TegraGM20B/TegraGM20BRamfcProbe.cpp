@@ -10,7 +10,7 @@
 #include "../../kits/SwitchSysctl/SwitchSysctl.h"
 #include "TegraGM20BGpu.h"
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 namespace
 {
 struct sysctl_oid gOid;

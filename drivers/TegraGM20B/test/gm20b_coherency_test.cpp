@@ -262,15 +262,60 @@ extern "C" int tgm_cpu_view_of(void *client, uint32_t id, struct tgm_cpu_view *o
 	return 1;
 }
 
+extern "C" int tgm_cpu_view_at(void *task, struct tgm_coh *c, uint64_t fault_va,
+			       uint64_t page_offset, struct tgm_cpu_view *out)
+{
+	const uint32_t id = tgm_coh_surface_id(c);
+	for (const auto &entry : gViews.mappings) {
+		const tgm_cpu_view &v = entry.second;
+		if (entry.first.second == id && v.task == task && fault_va >= v.address &&
+		    fault_va < v.address + v.length) {
+			const uint64_t base = (fault_va & ~0xfffULL) - (page_offset & ~0xfffULL);
+			if (base != v.address)
+				return 0;
+			*out = {nullptr, task, v.address, v.length, v.offset, v.options,
+				ViewModel::surface(id)};
+			return 1;
+		}
+	}
+	return 0;
+}
+
+extern "C" void tgm_tiled_mark_pages(const uint64_t *pas, uint32_t npages)
+{
+	for (uint32_t i = 0; i < npages; i++)
+		gViews.markedPages[pas[i] & ~0xfffULL]++;
+}
+
+extern "C" void tgm_tiled_unmark_pages(const uint64_t *pas, uint32_t npages)
+{
+	for (uint32_t i = 0; i < npages; i++) {
+		auto it = gViews.markedPages.find(pas[i] & ~0xfffULL);
+		if (it != gViews.markedPages.end() && --it->second <= 0)
+			gViews.markedPages.erase(it);
+	}
+}
+
+extern "C" void tgm_cpu_disconnect_pages(const uint64_t *, uint32_t)
+{
+	gViews.disconnectedCalls++;
+}
+
+extern "C" void tgm_cpu_view_protect_ro(const struct tgm_cpu_view *view)
+{
+	gViews.readOnly.insert({view->task, view->address});
+}
+
 extern "C" int tgm_cpu_view_remap(const struct tgm_cpu_view *view, void *memory, uint64_t, int)
 {
 	const bool restore = uintptr_t(memory) & 1;  // ViewModel::surface
-	if ((restore && gViews.restoreFails.count(view->client)) ||
+	if ((restore && gViews.restoreFails.count(view->client ? view->client : view->task)) ||
 	    (!restore && gViews.remapFails > 0)) {
 		gViews.remapFails -= !restore;
 		return -12;
 	}
 	gViews.mapped[{view->task, view->address}] = memory;
+	gViews.readOnly.erase({view->task, view->address});
 	gViews.remaps++;
 	return 0;
 }
@@ -286,12 +331,14 @@ extern "C" void tgm_memory_release(void *)
 
 extern "C" int tgm_cpu_view_live(const struct tgm_cpu_view *view)
 {
-	return !gViews.dead.count(view->client);
+	void *key = view->client ? view->client : view->task;
+	return !gViews.dead.count(key);
 }
 
 extern "C" void tgm_cpu_view_hold(struct tgm_cpu_view *view, int hold)
 {
-	gViews.holds[view->client] += hold ? 1 : -1;
+	void *key = view->client ? view->client : view->task;
+	gViews.holds[key] += hold ? 1 : -1;
 }
 
 extern "C" uint64_t tgm_timestamp_ns(void)
@@ -875,7 +922,7 @@ TEST_F(Coherency, CompressedNonScanoutSurfaceKeepsKindAndRefusesCpuFallback)
 	gCpuMoves = 0;
 	void *client = reinterpret_cast<void *>(0x1008);
 	void *task = reinterpret_cast<void *>(0x2000);
-	gViews.mappings[{client, 76}] = {client, task, 0x100000, 16 * 4096, 0, 0};
+	gViews.mappings[{client, 76}] = {client, task, 0x100000, 16 * 4096, 0, 0, nullptr};
 	EXPECT_NE(tegra_gm20b_iosurface_view(client, kLock, 76, kReadOnly), 0);
 	EXPECT_EQ(gCpuMoves, 0);
 	void *rows = nullptr, *memory = nullptr;

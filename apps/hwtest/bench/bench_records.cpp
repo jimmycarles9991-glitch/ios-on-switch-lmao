@@ -94,9 +94,11 @@ template <typename Visit> void fetchWords(std::vector<uint8_t> &code, Visit visi
 bool plainState(const gm20b::PackPipeline &p, const char *key)
 {
     Color c0;
-    return !strncmp(key, "samples=1 ", 10) && strstr(key, " ds=0/0 ") && color(key, 0, c0) && c0.mask == 15 &&
-           !c0.blend &&
-           !(p.flags & (gm20b::PipelineFetches | gm20b::PipelineBarrierForm | gm20b::PipelineStorageMetadata)) &&
+    return !strncmp(key, "samples=1 ", 10) && strstr(key, " topo=0 ") && strstr(key, " ds=0/0 ") &&
+           !strstr(key, " | l ") && !strstr(key, " rast=0 ") && !strstr(key, " alphacov=1 ") && !strstr(key, " amp=") &&
+           !strstr(key, " t=") && color(key, 0, c0) && c0.mask == 15 && !c0.blend &&
+           !(p.flags & (gm20b::PipelineFetches | gm20b::PipelineBarrierForm | gm20b::PipelineStorageMetadata |
+                        gm20b::PipelineFetchFreeForm | gm20b::PipelineVariantRecord)) &&
            !p.storageMask && !p.shaderTests.flags && !p.halfBlendColorWord && p.vertexSlot != gm20b::kNoSlot &&
            p.vertexStride >= 16 && plainEntries(p) && positionFirst(p, key);
 }

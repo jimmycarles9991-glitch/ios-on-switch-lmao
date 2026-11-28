@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// A Core Animation state that fetches its own colour, drawn by the facade with the route a debug build's probe

@@ -35,6 +35,7 @@
 #include <arm/trap_internal.h> /* for IS_ARM_GDB_TRAP() et al */
 #include <arm64/proc_reg.h>
 #include <switch/a64x_trap.h>
+#include <switch/sched.h>
 #include <arm64/machine_machdep.h>
 #include <kern/cpc.h>
 #include <arm64/instructions.h>
@@ -65,6 +66,8 @@
 #include <vm/vm_fault.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_map_xnu.h>
+#include <vm/vm_shared_region.h>
+#include <vm/vm_shared_region_xnu.h>
 
 #include <sys/errno.h>
 #include <sys/kdebug.h>
@@ -841,6 +844,7 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
 		}
 
 		thread->machine.exception_trace_code = (uint16_t)(ARM64_KDBG_CODE_USER | class);
+		switch_systime_entered(thread);
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
 		    MACHDBG_CODE(DBG_MACH_EXCP_SYNC_ARM, thread->machine.exception_trace_code) | DBG_FUNC_START,
 		    esr, far, get_saved_state_pc(state), 0, 0);
@@ -1462,11 +1466,15 @@ brk_out:
 #undef MSG_FMT
 }
 
+#if DEVELOPMENT || DEBUG
 extern void switch_kprof_user_trap(arm_saved_state_t *state, uint32_t esr);
+#endif
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
 /* osfmk/kern/switch_kprof.c (r17-faults): a fault arm_fast_fault resolved, for the kprof faults lines */
 extern void switch_kprof_fast_fault(bool access_flag);
 #define SWITCH_FSC_ACCESS_FLAG(fc) \
 	((fc) == FSC_ACCESS_FLAG_FAULT_L1 || (fc) == FSC_ACCESS_FLAG_FAULT_L2 || (fc) == FSC_ACCESS_FLAG_FAULT_L3)
+#endif
 
 /*
  * Similar in spirit to kernel_brk_descriptor, but with less flexible semantics:
@@ -1521,9 +1529,11 @@ handle_user_breakpoint(arm_saved_state_t *state, uint64_t esr __unused)
 	mach_exception_data_type_t codes[2]  = {EXC_ARM_BREAKPOINT};
 	mach_msg_type_number_t     numcodes  = 2;
 
+#if DEVELOPMENT || DEBUG
 	if (PSR64_IS_USER(get_saved_state_cpsr(state))) {
 		switch_kprof_user_trap(state, esr);
 	}
+#endif
 	if (ESR_EC(esr) == ESR_EC_BRK_AARCH64) {
 		/*
 		 * Consult the trap labels we know about to decide whether userspace
@@ -1975,9 +1985,11 @@ handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr
 			result = arm_fast_fault(pmap,
 			    vm_fault_addr,
 			    fault_type, (fault_code == FSC_ACCESS_FLAG_FAULT_L3), TRUE);
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
 			if (result == KERN_SUCCESS) {
 				switch_kprof_fast_fault(SWITCH_FSC_ACCESS_FLAG(fault_code));
 			}
+#endif
 		}
 		if (result != KERN_SUCCESS) {
 
@@ -2669,7 +2681,9 @@ handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_ad
 			    fault_addr,
 			    fault_type, (fault_code == FSC_ACCESS_FLAG_FAULT_L3), FALSE);
 			if (result == KERN_SUCCESS) {
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
 				switch_kprof_fast_fault(SWITCH_FSC_ACCESS_FLAG(fault_code));
+#endif
 				return;
 			}
 		}
@@ -2863,6 +2877,9 @@ static const uint32_t switch_sys_icache_invalidate_loop[] = {
 
 /* One kernel log line the first time each path runs, so a boot log shows the JIT publishes being completed. */
 static bool switch_ucm_noted_loop, switch_ucm_noted_single;
+/* Verified _sys_icache_invalidate PC inside the persistent primary shared region (pinned ref prevents pointer reuse). */
+static vm_shared_region_t switch_icache_loop_sr;
+static user_addr_t        switch_icache_loop_pc;
 
 static void
 switch_ucm_note(bool *noted, const char *what, arm_saved_state_t *state, uint64_t detail)
@@ -2878,15 +2895,42 @@ switch_ucm_note(bool *noted, const char *what, arm_saved_state_t *state, uint64_
 static bool
 switch_user_icache_loop(arm_saved_state_t *state)
 {
-	uint32_t       code[sizeof(switch_sys_icache_invalidate_loop) / sizeof(uint32_t)];
-	const int64_t  left = (int64_t)get_saved_state_reg(state, 10);
-	const uint64_t line = (uint64_t)get_saved_state_reg(state, 9);
-	uint64_t       lines;
+	uint32_t           code[sizeof(switch_sys_icache_invalidate_loop) / sizeof(uint32_t)];
+	const int64_t      left = (int64_t)get_saved_state_reg(state, 10);
+	const uint64_t     line = (uint64_t)get_saved_state_reg(state, 9);
+	const user_addr_t  pc   = get_saved_state_pc(state);
+	task_t             task = current_task();
+	vm_shared_region_t cached_sr;
+	uint64_t           lines;
 
-	if (left >= 0 || (get_saved_state_cpsr(state) & PSR64_SS) ||
-	    copyin(get_saved_state_pc(state), (char *)code, sizeof(code)) != 0 ||
-	    memcmp(code, switch_sys_icache_invalidate_loop, sizeof(code)) != 0) {
+	if (left >= 0 || (get_saved_state_cpsr(state) & PSR64_SS)) {
 		return false;
+	}
+	cached_sr = os_atomic_load(&switch_icache_loop_sr, acquire);
+	if (cached_sr == NULL || os_atomic_load(&switch_icache_loop_pc, relaxed) != pc ||
+	    os_atomic_load(&task->shared_region, relaxed) != cached_sr) {
+		if (copyin(pc, (char *)code, sizeof(code)) != 0 ||
+		    memcmp(code, switch_sys_icache_invalidate_loop, sizeof(code)) != 0) {
+			return false;
+		}
+		if (cached_sr == NULL) {
+			vm_shared_region_t sr = vm_shared_region_get(task);
+			if (sr != NULL) {
+				if (sr == primary_system_shared_region && sr->sr_persists && !sr->sr_stale &&
+				    sr->sr_mapping_in_progress == THREAD_NULL &&
+				    sr->sr_slide_in_progress == THREAD_NULL &&
+				    sr->sr_size >= sizeof(code) && pc != 0 && pc >= sr->sr_base_address &&
+				    (pc - sr->sr_base_address) <= (sr->sr_size - sizeof(code))) {
+					if (os_atomic_cmpxchg(&switch_icache_loop_pc, 0, pc, relaxed)) {
+						os_atomic_store(&switch_icache_loop_sr, sr, release);
+						sr = NULL;
+					}
+				}
+				if (sr != NULL) {
+					vm_shared_region_deallocate(sr);
+				}
+			}
+		}
 	}
 	lines = MIN((uint64_t)0 - (uint64_t)left, (uint64_t)SWITCH_ICACHE_LOOP_CHUNK);
 	if (switch_user_cache_maintenance(line, lines * SWITCH_ICACHE_LOOP_LINE, SWITCH_UCM_SYNC_I) != 0) {

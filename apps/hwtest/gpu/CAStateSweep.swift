@@ -163,7 +163,7 @@ public enum CAStateSweep {
     /// What the readback buffer holds before the blit: bytes a blit must leave alone (550's pad) still read as it.
     public static let sentinel: UInt8 = 0xA5
 
-    static func readBack(_ texture: MTLTexture, bytesPerPixel: Int, gpu: GPU) async throws -> [UInt8] {
+    public static func readBack(_ texture: MTLTexture, bytesPerPixel: Int, gpu: GPU) async throws -> [UInt8] {
         let rowBytes = texture.width * bytesPerPixel
         let out = try gpu.buffer([UInt8](repeating: sentinel, count: rowBytes * texture.height))
         try await gpu.run { commands in
@@ -178,21 +178,21 @@ public enum CAStateSweep {
         return [UInt8](UnsafeRawBufferPointer(start: out.contents(), count: rowBytes * texture.height))
     }
 
-    static let clear = MTLClearColor(red: 0.25, green: 0.5, blue: 0.75, alpha: 0.625)
-    static let premultipliedClear = MTLClearColor(red: 0.125, green: 0.25, blue: 0.375, alpha: 0.625)
+    public static let clear = MTLClearColor(red: 0.25, green: 0.5, blue: 0.75, alpha: 0.625)
+    public static let premultipliedClear = MTLClearColor(red: 0.125, green: 0.25, blue: 0.375, alpha: 0.625)
 
-    static func premultiply(_ v: CAState.Vertex) -> CAState.Vertex {
+    public static func premultiply(_ v: CAState.Vertex) -> CAState.Vertex {
         var out = v
         out.color = SIMD4(v.color.x * v.color.w, v.color.y * v.color.w, v.color.z * v.color.w, v.color.w)
         return out
     }
 
-    static func rectangle() -> [CAState.Vertex] {
+    public static func rectangle() -> [CAState.Vertex] {
         CAState.rectangle(x0: 0.4, y0: -0.9, x1: 0.85, y1: -0.3, color: SIMD4(0.9, 0.2, 0.6, 0.5))
     }
 
     /// A quad slanted across the target, its colours and texture coordinates varying per corner.
-    static func strip() -> [CAState.Vertex] {
+    public static func strip() -> [CAState.Vertex] {
         [
             CAState.Vertex(-0.95, -0.6, u: 0, v: 1, color: SIMD4(1, 0.5, 0, 0.75)),
             CAState.Vertex(0.3, -0.95, u: 1, v: 1, color: SIMD4(0, 1, 0.25, 1)),
@@ -204,7 +204,7 @@ public enum CAStateSweep {
     /// CA's bindings and every other slot its functions read: the transform at vertex buffer 2 (identity, then the
     /// pattern), patterned payloads at vertex 0 and 3 to 5 and fragment 0 to 7, the texture at fragment slots 0 to 15
     /// and the sampler at 0 to 3.
-    static func bind(_ encoder: MTLRenderCommandEncoder, source: MTLTexture, sampler: MTLSamplerState) {
+    public static func bind(_ encoder: MTLRenderCommandEncoder, source: MTLTexture, sampler: MTLSamplerState) {
         var transform = payload(seed: 2)
         let identity = matrix_identity_float4x4
         withUnsafeBytes(of: identity) { transform.replaceSubrange(0 ..< 64, with: $0) }
@@ -222,7 +222,7 @@ public enum CAStateSweep {
     }
 
     /// 256 bytes of halves in [0, 1): finite read as half or as float, never a NaN or an infinity.
-    static func payload(seed: UInt32) -> [UInt8] {
+    public static func payload(seed: UInt32) -> [UInt8] {
         var state = seed &* 2_654_435_761 &+ 1
         return (0 ..< 128).flatMap { _ -> [UInt8] in
             state = state &* 1_664_525 &+ 1_013_904_223
@@ -231,7 +231,7 @@ public enum CAStateSweep {
         }
     }
 
-    static func patternTexture(_ gpu: GPU, premultiplied: Bool = false) throws -> MTLTexture {
+    public static func patternTexture(_ gpu: GPU, premultiplied: Bool = false) throws -> MTLTexture {
         let size = 32
         let texture = try gpu.texture(.bgra8Unorm, size, size, usage: [.shaderRead], storage: .shared)
         let texels = (0 ..< (size * size)).flatMap { i -> [UInt8] in
@@ -246,7 +246,7 @@ public enum CAStateSweep {
         return texture
     }
 
-    static func linearSampler(_ device: MTLDevice) throws -> MTLSamplerState {
+    public static func linearSampler(_ device: MTLDevice) throws -> MTLSamplerState {
         let descriptor = MTLSamplerDescriptor()
         descriptor.minFilter = .linear
         descriptor.magFilter = .linear

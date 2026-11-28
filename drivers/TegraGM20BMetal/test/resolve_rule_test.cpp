@@ -136,15 +136,17 @@ TEST(ResolveRule, RGBA16FloatTakesTheEngineEverywhereAt2xAndScreenBoundAt4x)
     EXPECT_TRUE(gm20b::twodResolveComplementShape(ask(80, 2, true)));
 }
 
-// gpu.gm20b.resolve_twod bgra8srgb_<n>x and rgba8srgb_<n>x (near)
+// gpu.gm20b.resolve_twod bgra8srgb_<n>x and rgba8srgb_<n>x (near at 2x; 4x exceeds one code and takes the pass)
 TEST(ResolveRule, SRGBResolvesTakeTheEngineScreenBound)
 {
-    for (uint16_t format : {71, 81})
-        for (uint8_t samples : {2, 4}) {
-            EXPECT_EQ(gm20b::resolveRoute(ask(format, samples, false)), gm20b::ResolveByTwod);
-            EXPECT_EQ(gm20b::resolveRoute(ask(format, samples, true)), gm20b::ResolveByPass);
-            EXPECT_FALSE(gm20b::twodResolveComplementShape(ask(format, samples, false)));
-        }
+    for (uint16_t format : {71, 81}) {
+        EXPECT_EQ(gm20b::resolveRoute(ask(format, 2, false)), gm20b::ResolveByTwod);
+        EXPECT_EQ(gm20b::resolveRoute(ask(format, 2, true)), gm20b::ResolveByPass);
+        EXPECT_EQ(gm20b::resolveRoute(ask(format, 4, false)), gm20b::ResolveByPass);
+        EXPECT_EQ(gm20b::resolveRoute(ask(format, 4, true)), gm20b::ResolveByPass);
+        EXPECT_FALSE(gm20b::twodResolveComplementShape(ask(format, 2, false)));
+        EXPECT_FALSE(gm20b::twodResolveComplementShape(ask(format, 4, false)));
+    }
 }
 
 // gpu.gm20b.resolve_twod rgb10a2_<n>x (near)

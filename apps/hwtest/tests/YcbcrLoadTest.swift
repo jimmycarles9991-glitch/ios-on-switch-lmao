@@ -2,6 +2,7 @@ import CoreVideo
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import IOSurface
 import Metal
 
@@ -12,25 +13,34 @@ import Metal
 /// byte of the untouched tiles changes (untouched_changed), a loaded pass without a draw changes nothing
 /// (undrawn_changed), and every command buffer is raw. 500_p3 is the '420f' surface under the P3_D65 matrix, its hash
 /// this scene's own on an M4 Max (the oracle's golden cases hold no P3 one).
-struct YcbcrLoadTest: HWTest {
-    let id = "gpu.gm20b.ycbcr_load"
-    let name = "Loaded passes into two-plane YCbCr targets store the tiles their draws reach, as Metal does, on raw"
-    let subsystem = Subsystem.metal
-    var timeout: TimeInterval { 60 }
+public struct YcbcrLoadTest: HWTest {
+    public let id = "gpu.gm20b.ycbcr_load"
+    public let name = "Loaded passes into two-plane YCbCr targets store the tiles their draws reach, as Metal does, on raw"
+    public let subsystem = Subsystem.metal
+    public var timeout: TimeInterval { 60 }
 
-    struct Case {
-        let format: UInt
-        let fourcc: OSType
-        let matrix: CFString?
-        let metal: UInt64
+    public init() {}
 
-        var key: String { matrix.map { $0 as String } == "P3_D65" ? "\(format)_p3" : "\(format)" }
-        var tenBit: Bool { [505, 506, 507, 525, 526, 527, 543, 544, 545].contains(format) }
-        var across: Bool { ![503, 507, 523, 527, 542, 545].contains(format) }
-        var down: Bool { [500, 505, 520, 525, 540, 543].contains(format) }
+    public struct Case {
+        public let format: UInt
+        public let fourcc: OSType
+        public let matrix: CFString?
+        public let metal: UInt64
+
+        public init(format: UInt, fourcc: OSType, matrix: CFString?, metal: UInt64) {
+            self.format = format
+            self.fourcc = fourcc
+            self.matrix = matrix
+            self.metal = metal
+        }
+
+        public var key: String { matrix.map { $0 as String } == "P3_D65" ? "\(format)_p3" : "\(format)" }
+        public var tenBit: Bool { [505, 506, 507, 525, 526, 527, 543, 544, 545].contains(format) }
+        public var across: Bool { ![503, 507, 523, 527, 542, 545].contains(format) }
+        public var down: Bool { [500, 505, 520, 525, 540, 543].contains(format) }
     }
 
-    static let cases = [
+    public static let cases = [
         Case(
             format: 540, fourcc: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, matrix: nil,
             metal: 0x11ba_a8cf_6c3e_05b9
@@ -76,16 +86,16 @@ struct YcbcrLoadTest: HWTest {
             matrix: "P3_D65" as CFString, metal: 0x9a23_3bc3_a4df_4bdd
         ),
     ]
-    static let width = 64, height = 48
-    static let rect = MTLScissorRect(x: 13, y: 9, width: 30, height: 20)
+    public static let width = 64, height = 48
+    public static let rect = MTLScissorRect(x: 13, y: 9, width: 30, height: 20)
 
-    struct Result {
-        var hashOk = false
-        var untouched = 0
-        var undrawn = 0
+    public struct Result {
+        public var hashOk = false
+        public var untouched = 0
+        public var undrawn = 0
     }
 
-    func run(_ context: TestContext) async throws -> Outcome {
+    public func run(_ context: TestContext) async throws -> Outcome {
         let probe = try GPU.make()
         guard GM20BFacade.kind(of: probe.device) == "gm20b" else {
             return .skip("the default device is not the facade (\(GM20BFacade.kind(of: probe.device)))")
@@ -173,13 +183,13 @@ struct YcbcrLoadTest: HWTest {
     }
 
     /// Each plane's row bytes and rows: a luma code a texel, a Cb, Cr pair a chroma texel, two bytes a 10-bit code.
-    static func rows(_ c: Case) -> [(bytes: Int, count: Int)] {
+    public static func rows(_ c: Case) -> [(bytes: Int, count: Int)] {
         let code = c.tenBit ? 2 : 1
         let pairs = c.across ? width / 2 : width
         return [(width * code, height), (2 * pairs * code, c.down ? (height + 1) / 2 : height)]
     }
 
-    static func splitmix(_ s: inout UInt64) -> UInt64 {
+    public static func splitmix(_ s: inout UInt64) -> UInt64 {
         s = s &+ 0x9e37_79b9_7f4a_7c15
         var z = s
         z = (z ^ (z >> 30)) &* 0xbf58_476d_1ce4_e5b9
@@ -188,7 +198,7 @@ struct YcbcrLoadTest: HWTest {
     }
 
     /// ycbcr_load_cases.h randomPlanes: the planes' row bytes from one generator, plane 0 first.
-    static func fill(_ buffer: CVPixelBuffer, _ rows: [(bytes: Int, count: Int)], seed: UInt64) -> [[UInt8]] {
+    public static func fill(_ buffer: CVPixelBuffer, _ rows: [(bytes: Int, count: Int)], seed: UInt64) -> [[UInt8]] {
         var state = seed
         let planes = rows
             .map { r in (0 ..< r.bytes * r.count).map { _ in UInt8(truncatingIfNeeded: splitmix(&state)) } }
@@ -206,7 +216,7 @@ struct YcbcrLoadTest: HWTest {
         return planes
     }
 
-    static func read(_ buffer: CVPixelBuffer, _ rows: [(bytes: Int, count: Int)]) -> [[UInt8]] {
+    public static func read(_ buffer: CVPixelBuffer, _ rows: [(bytes: Int, count: Int)]) -> [[UInt8]] {
         CVPixelBufferLockBaseAddress(buffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
         return rows.enumerated().map { plane, r in
@@ -218,14 +228,19 @@ struct YcbcrLoadTest: HWTest {
         }
     }
 
-    static func hash(_ planes: [[UInt8]]) -> UInt64 {
+    public static func hash(_ planes: [[UInt8]]) -> UInt64 {
         var h: UInt64 = 0xcbf2_9ce4_8422_2325
         for b in planes.joined() { h = (h ^ UInt64(b)) &* 0x100_0000_01b3 }
         return h
     }
 
     /// Bytes changed in the tiles the rectangle does not touch (a chroma block in its first luma texel's tile).
-    static func untouchedChanged(_ c: Case, _ rows: [(bytes: Int, count: Int)], _ a: [[UInt8]], _ b: [[UInt8]]) -> Int {
+    public static func untouchedChanged(
+        _ c: Case,
+        _ rows: [(bytes: Int, count: Int)],
+        _ a: [[UInt8]],
+        _ b: [[UInt8]]
+    ) -> Int {
         func reached(_ x: Int, _ y: Int) -> Bool {
             let (tx, ty) = (x / 32 * 32, y / 32 * 32)
             return tx < rect.x + rect.width && rect.x < tx + 32 && ty < rect.y + rect.height && rect.y < ty + 32
@@ -243,7 +258,7 @@ struct YcbcrLoadTest: HWTest {
     }
 
     /// ycbcr_load_cases.h drawnValues: floats beside the grids' midpoints and half midpoints, and across [-0.05, 1.05].
-    static func values(_ count: Int, seed: UInt64) -> [SIMD4<Float>] {
+    public static func values(_ count: Int, seed: UInt64) -> [SIMD4<Float>] {
         var state = seed
         let grids: [UInt64] = [255, 1023, 2048, 8192]
         func value() -> Float {

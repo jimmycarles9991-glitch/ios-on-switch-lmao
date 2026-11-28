@@ -64,6 +64,7 @@ struct switch_battery_gauge {
 };
 
 int switch_battery_gauge_sample(struct switch_battery_gauge *sample);
+int switch_battery_gauge_cached(struct switch_battery_gauge *sample);
 
 #ifdef __cplusplus
 }

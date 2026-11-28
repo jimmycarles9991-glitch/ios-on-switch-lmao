@@ -210,20 +210,23 @@ def main():
             assign(a, n, "vnodeop_desc")
     kvm, kfo = kc.entry["com.apple.kernel"]
     ktext_vm = kc.entry_segs(kfo)[0]["va"]
-    fstarts = []
-    for cmd, p, size in kc.entry_cmds(kfo):
-        if cmd == 0x26:
-            off, sz = struct.unpack_from("<II", kc.d, p + 8); q = off; a0 = ktext_vm
-            while q < off + sz:
-                v = 0; sh = 0
-                while True:
-                    byte = kc.d[q]; q += 1; v |= (byte & 0x7F) << sh; sh += 7
-                    if not byte & 0x80: break
-                if not v: break
-                a0 += v; fstarts.append(a0)
-    fstarts.sort()
+    def function_starts(d, cmds, text_vm):
+        out = []
+        for cmd, p, size in cmds:
+            if cmd == 0x26:
+                off, sz = struct.unpack_from("<II", d, p + 8); q = off; a0 = text_vm
+                while q < off + sz:
+                    v = 0; sh = 0
+                    while True:
+                        byte = d[q]; q += 1; v |= (byte & 0x7F) << sh; sh += 7
+                        if not byte & 0x80: break
+                    if not v: break
+                    a0 += v; out.append(a0)
+        return out
+    fstarts = sorted(function_starts(kc.d, kc.entry_cmds(kfo), ktext_vm))
     fset = set(fstarts)
-    our_starts = sorted(set(x for x, n in osorted if ofunc(x)))
+    ours_text_vm = next(s["va"] for s in ours.segs if s["name"] == "__TEXT")
+    our_starts = sorted({x for x, n in osorted if ofunc(x)} | set(function_starts(ours.d, ours.entry_cmds(0), ours_text_vm)))
     for a, n in vnodeops.name(kc, fix, in_kernel, fstarts, names, ours, oname, oaddr, our_starts).items():
         assign(a, n, "vnodeop vector")
     sysctl_names = sysctls.name(kc, fix, in_kernel, fset.__contains__)

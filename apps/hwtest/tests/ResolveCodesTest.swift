@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// The resolve of the six signed normalized formats and BGR10_XR, which the driver runs on the 2D engine's signed and

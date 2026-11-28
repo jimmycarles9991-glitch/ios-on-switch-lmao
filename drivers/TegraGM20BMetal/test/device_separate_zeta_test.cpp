@@ -27,11 +27,18 @@ struct Event {
     uint64_t from, to;
 };
 
+struct ClearEvent {
+    uint64_t zeta = 0;
+    uint32_t h = 0, v = 0, surface = 0;
+};
+
 struct Submitted {
     std::vector<Event> events;
     // SET_DEPTH_BIAS_CONTROL, SET_DEPTH_BIAS, SET_SLOPE_SCALE_DEPTH_BIAS and SET_DEPTH_BIAS_CLAMP writes (method,
     // value) and draws (kMacroCalls, 0), in order
     std::vector<std::pair<uint32_t, uint32_t>> bias;
+    std::vector<ClearEvent> clears;
+    uint32_t depthTest = ~0u, depthWrite = ~0u;
     uint64_t zeta = 0;
     uint32_t zetaFormat = 0;
 };
@@ -40,6 +47,7 @@ Submitted read(size_t first)
 {
     Submitted out;
     uint64_t in = 0, outVa = 0, zt = 0;
+    uint32_t clearH = 0, clearV = 0;
     auto method = [&](uint32_t subc, uint32_t m, uint32_t v) {
         if (subc == gm20b::SUBC_COPY) {
             if (m == kCeInUpper)
@@ -62,6 +70,16 @@ Submitted read(size_t first)
             out.zeta = zt | v;
         else if (m == kZtFormat)
             out.zetaFormat = v;
+        else if (m == gm20b::kDepthStencilMethods[0])
+            out.depthTest = v;
+        else if (m == gm20b::kDepthStencilMethods[1])
+            out.depthWrite = v;
+        else if (m == NVB197_SET_CLEAR_RECT_HORIZONTAL)
+            clearH = v;
+        else if (m == NVB197_SET_CLEAR_RECT_VERTICAL)
+            clearV = v;
+        else if (m == NVB197_CLEAR_SURFACE)
+            out.clears.push_back({out.zeta, clearH, clearV, v});
         else if (m == kDepthBiasControl || m == kDepthBias || m == kSlopeScaleDepthBias || m == kDepthBiasClamp ||
                  m == kClipMinZ || m == kClipMaxZ)
             out.bias.push_back({m, v});
@@ -145,7 +163,7 @@ protected:
         pass.separate = {depthFrom, stencilFrom, loadDepth, loadStencil, storeDepth, storeStencil};
         pass.layers = layers;
         pass.biasDepthBits = biasDepthBits;
-        pass.metalDepth = true;
+        pass.metalDraws = true;
         gm20b::RenderEncoder *e = cb->render(pass);
         if (!e) {
             cb->abandon();
@@ -384,10 +402,11 @@ TEST_F(DeviceSeparateZeta, AnInfiniteSlopeIsASaturatingBiasInForcedUnormUnits)
         memcpy(&u, &f, 4);
         return u;
     };
+    uint32_t minZ = 0, maxZ = 0;
     for (const uint8_t depthBits : {uint8_t(0), uint8_t(16)}) {
         Submitted s;
         ASSERT_EQ(draw(true, true, true, true, s, 1, depthBits, 1.0f, -INFINITY, 0.125f), "");
-        uint32_t controls = 0, constants = 0, minZ = 0, maxZ = 0;
+        uint32_t controls = 0, constants = 0;
         bool drawn = false;
         for (const auto &[m, v] : s.bias) {
             if (m == kMacroCalls && !drawn) {
@@ -413,6 +432,68 @@ TEST_F(DeviceSeparateZeta, AnInfiniteSlopeIsASaturatingBiasInForcedUnormUnits)
         EXPECT_EQ(constants, 1u) << int(depthBits);
         EXPECT_EQ(controls, 2u) << int(depthBits);
     }
+}
+
+TEST_F(DeviceSeparateZeta, DepthDisabledSuppressesDepthTestAndWrite)
+{
+    gm20b::CommandBuffer *cb = dev.begin();
+    ASSERT_NE(cb, nullptr);
+    const size_t first = kernel_model::model.jobs.size();
+    gm20b::PassDesc pass;
+    pass.color[0].texture = &target;
+    pass.count = 1;
+    pass.depthStencil.texture = &depth;
+    pass.depthStencil.clearDepth = false;
+    pass.depthStencil.clearStencil = true;
+    pass.depthStencil.depthEnabled = false;
+    pass.depthStencil.stencilEnabled = true;
+    pass.separate = {&depth, &stencil, false, false, false, true};
+    gm20b::RenderEncoder *e = cb->render(pass);
+    ASSERT_NE(e, nullptr);
+    gm20b::DepthStencilDesc d;
+    d.depthCompare = 1;
+    d.depthWrite = true;
+    d.front.compare = d.back.compare = 7;
+    d.front.pass = d.back.pass = 2;
+    const gm20b::DepthStencilState state(d);
+    e->setPipeline(pl);
+    e->setDepthStencil(&state);
+    const char *why = nullptr;
+    ASSERT_TRUE(e->draw(kTriangle, 0, 3, 1, 0, &why)) << (why ? why : "");
+    e->end();
+    uint32_t seqno = 0;
+    ASSERT_TRUE(cb->commit(seqno));
+    const Submitted s = read(first);
+    EXPECT_NE(s.depthTest, 1u);
+    EXPECT_NE(s.depthWrite, 1u);
+}
+
+TEST_F(DeviceSeparateZeta, ClearOnlySeparatePairClearsFullDepthBeyondArea)
+{
+    dev.destroyTexture(target);
+    dev.destroyTexture(stencil);
+    ASSERT_TRUE(dev.createTexture(32, 32, kRGBA8, target));
+    ASSERT_TRUE(dev.createOwnedZeta(32, 32, kStencil8, 1, false, stencil));
+    gm20b::CommandBuffer *cb = dev.begin();
+    ASSERT_NE(cb, nullptr);
+    const size_t first = kernel_model::model.jobs.size();
+    gm20b::PassDesc pass;
+    pass.color[0].texture = &target;
+    pass.count = 1;
+    pass.depthStencil.texture = &depth;
+    pass.depthStencil.clearDepth = true;
+    pass.depthStencil.clearStencil = true;
+    pass.separate = {&depth, &stencil, false, false, true, true};
+    gm20b::RenderEncoder *e = cb->render(pass);
+    ASSERT_NE(e, nullptr);
+    e->end();
+    uint32_t seqno = 0;
+    ASSERT_TRUE(cb->commit(seqno));
+    const Submitted s = read(first);
+    const bool fullDepthClear = std::any_of(s.clears.begin(), s.clears.end(), [&](const ClearEvent &c) {
+        return c.zeta == depth.va && (c.surface & 1u) != 0 && c.h == (64u << 16) && c.v == (64u << 16);
+    });
+    EXPECT_TRUE(fullDepthClear);
 }
 
 }  // namespace

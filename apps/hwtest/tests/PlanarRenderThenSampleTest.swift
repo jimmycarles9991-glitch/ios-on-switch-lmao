@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A two-plane YCbCr texture written and sampled in one command buffer gives exactly the texels the same work split
@@ -50,7 +51,10 @@ struct PlanarRenderThenSampleTest: HWTest {
                     do {
                         let r = try await Cases.exercise(gpu, states, f, arm)
                         sameCb += r.off
-                        if r.off != 0 { metrics.set("\(f.key)_\(arm.key)_off", r.off) }
+                        if r.off != 0 {
+                            metrics.set("\(f.key)_\(arm.key)_off", r.off)
+                            metrics.set("\(f.key)_\(arm.key)_first", r.first)
+                        }
                         if r.unseen { unseen.append(arm.key) }
                         if let off = r.spotOff { spotOff = off }
                     } catch {

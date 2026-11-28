@@ -7,7 +7,7 @@
 // meanwhile are stale).
 #include "TegraGM20BReadback.h"
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLib.h>
 #include <sys/errno.h>

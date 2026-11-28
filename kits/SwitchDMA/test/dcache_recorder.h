@@ -24,5 +24,6 @@ void switch_dcache_forget(void);
 
 #define SWITCH_DCACHE_OP(op, address) switch_dcache_record(op, (uintptr_t)(address))
 #define SWITCH_DCACHE_BARRIER()       switch_dcache_record("dsb", 0)
+#define SWITCH_DMA_ORDER(kind)        switch_dcache_record(kind, 0)
 
 #endif

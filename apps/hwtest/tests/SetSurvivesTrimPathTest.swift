@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// The device's resource set (drivers/TegraGM20BMetal/resource_set.h) across boot 18's
@@ -8,13 +10,13 @@ import Metal
 /// empty; shared buffers (write-combined on the facade) made until the device holds one write-combined chunk more,
 /// then freed newest first, leave that chunk the device's empty spare, a member the kernel took out of its set at the
 /// buffers' CPU leases; the bench's raw device opens and closes in this process on a connection of its own; nothing
-/// completes for longer than the idle give-back's second (GpuMemoryRelease.h), which frees the empty chunks; then a
+/// the app's trip to the background gives back (GpuMemoryRelease.h), which frees the empty chunks; then a
 /// buffer of a chunk of its own makes the set again and command buffers fill and copy it. Every command buffer stays
 /// raw with the right bytes and the kernel refuses no registration of the set (set_refusals; a refusal names its
 /// member).
 struct SetSurvivesTrimPathTest: GPUPathTest {
     let id = "gpu.path.set_survives_trim"
-    let name = "The resource set outlives the idle give-back after a second raw device's life"
+    let name = "The resource set outlives the give-back after a second raw device's life"
     let counters: [String] = []
     static let small = 4096, pooled = 64 * 1024, own = 1 << 20, rounds = 8, mostShared = 2048
 
@@ -37,7 +39,7 @@ struct SetSurvivesTrimPathTest: GPUPathTest {
         metrics.set("shared_buffers", made)
         while !shared.isEmpty { shared.removeLast() }
         _ = try BenchRunner.open()
-        try await Task.sleep(nanoseconds: 2_000_000_000)
+        await GM20BFacade.tripToBackground()
         let trimmed = GM20BFacade.memory(of: gpu.device)
         metrics.set("wc_peak_kb", wcPeak >> 10)
         metrics.set("wc_after_kb", (trimmed["wc"] ?? 0) >> 10)

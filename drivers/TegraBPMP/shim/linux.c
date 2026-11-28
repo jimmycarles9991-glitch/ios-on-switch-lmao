@@ -14,37 +14,55 @@ void init_completion(struct completion *c)
 {
 	spin_lock_init(&c->lock);
 	c->done = 0;
+	c->waiters = 0;
 }
 
 void complete(struct completion *c)
 {
 	unsigned long flags = 0;
+	bool wake = false;
 	spin_lock_irqsave(&c->lock, flags);
 	c->done++;
+	wake = c->waiters > 0;
 	spin_unlock_irqrestore(&c->lock, flags);
-	switch_linux_wakeup_one(c);
+	if (wake)
+		switch_linux_wakeup_one(c);
 }
 
 /* Linux returns 0 on timeout, else the jiffies left (at least 1). */
 unsigned long wait_for_completion_timeout(struct completion *c, unsigned long timeout)
 {
-	const unsigned long long deadline =
-		switch_linux_nanotime() + (unsigned long long)timeout * 1000000ULL;
+	unsigned long long deadline = 0;
+	bool have_deadline = false;
+	bool waiting = false;
 	for (;;) {
 		unsigned long flags = 0;
 		spin_lock_irqsave(&c->lock, flags);
+		if (waiting) {
+			c->waiters--;
+			waiting = false;
+		}
 		if (c->done) {
-			unsigned long long now = switch_linux_nanotime();
-			unsigned long left =
-				now < deadline ? (unsigned long)((deadline - now) / 1000000ULL) : 0;
 			c->done--;
 			spin_unlock_irqrestore(&c->lock, flags);
+			if (!have_deadline)
+				return timeout ? timeout : 1;
+			const unsigned long long now = switch_linux_nanotime();
+			const unsigned long left =
+				now < deadline ? (unsigned long)((deadline - now) / 1000000ULL) : 0;
 			return left ? left : 1;
 		}
-		if (switch_linux_nanotime() >= deadline) {
+		const unsigned long long now = switch_linux_nanotime();
+		if (!have_deadline) {
+			deadline = now + (unsigned long long)timeout * 1000000ULL;
+			have_deadline = true;
+		}
+		if (now >= deadline) {
 			spin_unlock_irqrestore(&c->lock, flags);
 			return 0;
 		}
+		c->waiters++;
+		waiting = true;
 		switch_linux_wait_prepare(c, deadline);
 		spin_unlock_irqrestore(&c->lock, flags);
 		(void)switch_linux_wait_block();
@@ -55,25 +73,38 @@ void sema_init(struct semaphore *s, int count)
 {
 	spin_lock_init(&s->lock);
 	s->count = count;
+	s->waiters = 0;
 }
 
 /* Linux returns 0 when it got the semaphore, -ETIME(DOUT) when the timeout (jiffies) ran out. */
 int down_timeout(struct semaphore *s, long timeout)
 {
-	const unsigned long long deadline =
-		switch_linux_nanotime() + (unsigned long long)timeout * 1000000ULL;
+	unsigned long long deadline = 0;
+	bool have_deadline = false;
+	bool waiting = false;
 	for (;;) {
 		unsigned long flags = 0;
 		spin_lock_irqsave(&s->lock, flags);
+		if (waiting) {
+			s->waiters--;
+			waiting = false;
+		}
 		if (s->count > 0) {
 			s->count--;
 			spin_unlock_irqrestore(&s->lock, flags);
 			return 0;
 		}
-		if (switch_linux_nanotime() >= deadline) {
+		const unsigned long long now = switch_linux_nanotime();
+		if (!have_deadline) {
+			deadline = now + (unsigned long long)timeout * 1000000ULL;
+			have_deadline = true;
+		}
+		if (now >= deadline) {
 			spin_unlock_irqrestore(&s->lock, flags);
 			return -ETIMEDOUT;
 		}
+		s->waiters++;
+		waiting = true;
 		switch_linux_wait_prepare(s, deadline);
 		spin_unlock_irqrestore(&s->lock, flags);
 		(void)switch_linux_wait_block();
@@ -83,10 +114,13 @@ int down_timeout(struct semaphore *s, long timeout)
 void up(struct semaphore *s)
 {
 	unsigned long flags = 0;
+	bool wake = false;
 	spin_lock_irqsave(&s->lock, flags);
 	s->count++;
+	wake = s->waiters > 0;
 	spin_unlock_irqrestore(&s->lock, flags);
-	switch_linux_wakeup_one(s);
+	if (wake)
+		switch_linux_wakeup_one(s);
 }
 
 void memcpy_toio(volatile void *dst, const void *src, size_t n)

@@ -29,7 +29,7 @@ public:
 		}
 		if (!free)
 			return false;
-		*free = {pid, 1};
+		*free = {pid, 1, 0};
 		++held_;
 		return true;
 	}
@@ -38,16 +38,38 @@ public:
 	{
 		for (auto &entry : entries_)
 			if (entry.count && entry.pid == pid) {
-				--entry.count;
+				if (--entry.count == 0)
+					entry.role = 0;
 				--held_;
 				return;
 			}
+	}
+
+	bool setRole(int pid, uint32_t role)
+	{
+		for (auto &entry : entries_)
+			if (entry.count && entry.pid == pid) {
+				entry.role = role;
+				return true;
+			}
+		return false;
+	}
+
+	bool getRole(int pid, uint32_t *role) const
+	{
+		for (const auto &entry : entries_)
+			if (entry.count && entry.pid == pid) {
+				*role = entry.role;
+				return true;
+			}
+		return false;
 	}
 
 private:
 	struct Entry {
 		int pid;
 		uint32_t count;
+		uint32_t role;
 	} entries_[kTasks] = {};
 
 	uint32_t held_ = 0;

@@ -52,11 +52,14 @@ public:
     }
 };
 
+inline unsigned mapCalls, hwPageCleanCalls, hwPageCleanPages, dcacheSyncCalls;
+
 // A surface's pages: contiguous from pa, or a hole (no physical address) at the page `hole`.
 class IOMemoryDescriptor : public OSObject {
 public:
     unsigned completes = 0, prepares = 0;
-    uint64_t pa = 0x90000000ULL, length = 0;
+    mutable unsigned segmentCalls = 0;
+    uint64_t pa = 0x90000000ULL, length = 0, segmentStep = 4096;
     int64_t hole = -1;
 
     const void *metaCast(const char *) const
@@ -83,12 +86,23 @@ public:
     addr64_t getPhysicalSegment(uint64_t offset, IOByteCount *bytes, int) const
     {
         EXPECT_GT(prepares, completes) << "IOGMD: getPhysicalSegment requires a prepared descriptor";
-        *bytes = 4096;
-        return int64_t(offset / 4096) == hole ? 0 : pa + offset;
+        ++segmentCalls;
+        if (int64_t(offset / 4096) == hole) {
+            *bytes = 0;
+            return 0;
+        }
+        uint64_t avail = segmentStep;
+        if (length > offset && avail > length - offset)
+            avail = length - offset;
+        if (hole >= 0 && uint64_t(hole) * 4096 > offset && avail > uint64_t(hole) * 4096 - offset)
+            avail = uint64_t(hole) * 4096 - offset;
+        *bytes = avail;
+        return pa + offset;
     }
 
     static IOMemoryMap *map(int)
     {
+        ++mapCalls;
         return nullptr;
     }
 };
@@ -161,8 +175,26 @@ extern "C" void switch_gpu_backing_scanout(struct switch_gpu_backing *backing, i
     }
 }
 
+enum switch_dcache_op {
+    SWITCH_DCACHE_CLEAN,
+    SWITCH_DCACHE_CLEAN_INVALIDATE,
+    SWITCH_DCACHE_INVALIDATE,
+};
+
 inline void switch_dcache_clean_invalidate(const void *, uint64_t)
 {}
+
+inline void switch_dcache_hw_pages(switch_dcache_op op, const uint64_t *, size_t count)
+{
+    EXPECT_EQ(op, SWITCH_DCACHE_CLEAN_INVALIDATE);
+    ++hwPageCleanCalls;
+    hwPageCleanPages += unsigned(count);
+}
+
+inline void switch_dcache_sync()
+{
+    ++dcacheSyncCalls;
+}
 
 #include "../SwitchPlaneSlot.h"
 #include "../SwitchNativePlane.h"
@@ -242,7 +274,7 @@ struct Display {
         return windowIdle;
     }
 
-    static const tgm_layout *surfaceLayout(OSObject *, tgm_layout &)
+    static const tgm_layout *surfaceLayout(OSObject *, tgm_layout &, const SwitchNativeScanout * = nullptr)
     {
         return nullptr;
     }
@@ -384,6 +416,7 @@ protected:
     {
         leases = acquisitions = pitchAcquisitions = deliveries = 0;
         unholds = 0;
+        mapCalls = hwPageCleanCalls = hwPageCleanPages = dcacheSyncCalls = 0;
         nextSurfaceHoldPtr = nullptr;
         nextSurfaceHoldTiled = 0;
         surfaceCompressedFlag = false;

@@ -84,7 +84,8 @@ void gm20bMoveWanting()
     if (gMoving.empty())
         return;
     // a move's job is a command buffer of its own: an encode ahead holding the device's goes back first
-    gm20bPipelineYield(nil, SIZE_MAX, false);
+    if (gm20bPipelineOpen())
+        gm20bPipelineYield(nil, SIZE_MAX, false);
     for (SwitchMetalTexture *t : gMoving)
         d.compressedFromPlain(t->_raw);
     gMoving.clear();

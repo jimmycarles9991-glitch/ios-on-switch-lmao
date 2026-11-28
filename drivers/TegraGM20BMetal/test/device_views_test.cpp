@@ -52,6 +52,27 @@ TEST_F(DeviceViews, ACubeOfAMipmappedArraysLayersStartsAtItsFirstFace)
     EXPECT_FALSE(dev.createPartView(array, kRGBA8, gm20b::fx::kTexCube, 0, 3, 7, 6, past)) << "past the last layer";
 }
 
+TEST_F(DeviceViews, ArrayViewTicReinterpretsCubeViewAsSixLayerTwoDArrayAndFreesWithIt)
+{
+    gm20b::Texture array, cube;
+    ASSERT_TRUE(dev.createArray(32, 32, 12, kRGBA8, gm20b::fx::kTexTwoDArray, array, 3));
+    ASSERT_TRUE(dev.createPartView(array, kRGBA8, gm20b::fx::kTexCube, 1, 2, 6, 6, cube));
+    const uint32_t tic = dev.arrayViewTic(cube);
+    ASSERT_NE(tic, 0u);
+    EXPECT_NE(tic, cube.tic);
+    EXPECT_EQ(dev.arrayViewTic(cube), tic);
+    const auto w = gm20b::DeviceHarness::header(dev, tic);
+    const auto own = header(cube);
+    EXPECT_EQ(address(w), address(own));
+    EXPECT_EQ(textureType(w), gm20b::fx::kTexTwoDArray);
+    EXPECT_EQ(depthMinusOne(w), 5u);
+    EXPECT_EQ(minLevel(w), 1u);
+    EXPECT_EQ(maxLevel(w), 2u);
+    dev.destroyTexture(cube);
+    EXPECT_EQ(gm20b::DeviceHarness::header(dev, tic), gm20b::DeviceHarness::header(dev, 0));
+    dev.destroyTexture(array);
+}
+
 TEST_F(DeviceViews, ALevelRangeOfAVolumeIsAThreeDHeader)
 {
     gm20b::Texture volume, view;

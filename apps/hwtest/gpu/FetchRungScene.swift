@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// A Core Animation state that blends by fetching its colour, drawn by the facade with the fetch rung a debug
@@ -14,11 +15,7 @@ public enum FetchRungScene {
 
     /// The facade takes the forced rung for the closure's command buffers; false where it has no probe channel.
     public static func forcing<T>(_ rung: Int, _ device: MTLDevice, _ body: () async throws -> T) async rethrows -> T? {
-        let force = NSSelectorFromString("switchMetalProbeFetchRung:")
-        guard let facade = device as? NSObject, facade.responds(to: force) else { return nil }
-        _ = facade.perform(force, with: NSNumber(value: rung))
-        defer { _ = facade.perform(force, with: NSNumber(value: 0)) }
-        return try await body()
+        try await GM20BFacade.forcingFetchRung(rung, on: device, body)
     }
 
     /// The first attachment's bytes after CAStateSweep's two draws, and the path the facade drew them on.

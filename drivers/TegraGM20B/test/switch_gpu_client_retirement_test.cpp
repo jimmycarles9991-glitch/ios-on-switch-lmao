@@ -15,6 +15,7 @@ protected:
 		gpuMemory = {};
 		unmapped.clear();
 		onUnmap = {};
+		onChanDel = {};
 		onCallEnter = {};
 		installError = 0;
 		unmapFlushes = 0;
@@ -26,6 +27,7 @@ protected:
 	{
 		onBindPublished = {};
 		onUnmap = {};
+		onChanDel = {};
 		onCallEnter = {};
 		client.onRelease = {};
 		client.drainResources();
@@ -805,4 +807,73 @@ TEST_F(ClientRetirement, FreeDrainsSubmissionsForBindingsOrSetMembership)
 	EXPECT_EQ(client.submitGate_.mutations, 2u);
 	EXPECT_FALSE(client.submitGate_.mutating());
 	setMembers.clear();
+}
+
+TEST_F(ClientRetirement, RetiringChannelHoldsBindingsUntilBackgroundDeleteCompletes)
+{
+	client.add(80, 0x40000, 4096);
+	chan.submitted = 5;
+	chan.completed = 4;
+	switch_gpu_backing_token tok = {};
+	switch_gpu_chan_next_token(&chan, &tok);
+	IOLockLock(client.lock_);
+	client.chans_[0] = nullptr;
+	client.retiringChans_[0] = {&chan, tok.queue, tok.reset_generation, true};
+	EXPECT_TRUE(client.workQueued(0x40000, 4096));
+	IOLockUnlock(client.lock_);
+
+	free(80);
+	client.retireBatch();
+	EXPECT_TRUE(unmapped.empty());
+	EXPECT_EQ(client.releases.load(), 0u);
+
+	bool deletedOffLock = false;
+	onChanDel = [&](tgm_chan *c) {
+		EXPECT_EQ(c, &chan);
+		EXPECT_TRUE(IOLockTryLock(client.lock_));
+		IOLockUnlock(client.lock_);
+		deletedOffLock = true;
+	};
+	client.retireChannels();
+	EXPECT_TRUE(deletedOffLock);
+	EXPECT_FALSE(client.retiringChans_[0].active);
+
+	client.retireBatch();
+	EXPECT_EQ(unmapped, (std::vector<unsigned>{80}));
+	EXPECT_EQ(client.releases.load(), 1u);
+}
+
+TEST_F(ClientRetirement, CloseDrainsPendingBackgroundChannelRetirement)
+{
+	tgm_chan extra;
+	extra.queue = 2;
+	IOLockLock(client.lock_);
+	client.chans_[0] = nullptr;
+	client.retiringChans_[0] = {&extra, extra.queue, extra.generation, true};
+	IOLockUnlock(client.lock_);
+
+	unsigned deleted = 0;
+	onChanDel = [&](tgm_chan *c) {
+		if (c == &extra)
+			++deleted;
+	};
+	client.drainResources();
+	EXPECT_TRUE(client.chanRetireStorage.cancelled);
+	EXPECT_EQ(deleted, 1u);
+	EXPECT_FALSE(client.retiringChans_[0].active);
+}
+
+TEST_F(ClientRetirement, PureUnmapDefersL2AndTlbTeardownToRetireBatch)
+{
+	client.add(90, 0x50000, 4096);
+	client.add(91, 0x60000, 4096);
+	chan.completed = chan.submitted;
+	chan.visible = 0;
+	ASSERT_EQ(client.bind(0x50000, 4096, nullptr), kIOReturnSuccess);
+	ASSERT_EQ(client.bind(0x60000, 4096, nullptr), kIOReturnSuccess);
+	EXPECT_TRUE(unmapped.empty());
+	EXPECT_EQ(unmapFlushes, 0u);
+	client.retireBatch();
+	EXPECT_EQ(unmapped.size(), 2u);
+	EXPECT_EQ(unmapFlushes, 1u);
 }

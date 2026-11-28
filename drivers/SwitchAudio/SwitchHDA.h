@@ -6,11 +6,14 @@
 #include "../TegraSMMU/TegraSMMUDomain.h"
 #include <IOKit/IOCommandGate.h>
 #include <IOKit/IOInterruptEventSource.h>
+#include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
 
 class SwitchHDA {
     volatile uint8_t *registers = nullptr;
+    IOWorkLoop *workLoop = nullptr;
     IOCommandGate *gate = nullptr;
+    IOTimerEventSource *powerOffTimer = nullptr;
     SwitchAudioControl *control = nullptr;
     IOBufferMemoryDescriptor *output = nullptr;
     switch_dma_buffer commands = {}, tables = {};
@@ -22,9 +25,11 @@ class SwitchHDA {
 #endif
     uint32_t corbMask = 0, rirbMask = 0, corbWrite = 0, rirbRead = 0;
     uint32_t response = 0;
+    uint32_t stateGen = 0;
+    uint32_t waitToken = 0;
     uint64_t hostHz = 0;
     bool pending = false, responseValid = false, ready = false, attached = false, mapped = false, prepared = false,
-         powered = false;
+         powered = false, starting = false, powerOffPending = false;
     bool ringEmpty = true;
     uint32_t read(uint32_t offset) const;
     void write(uint32_t offset, uint32_t value);
@@ -33,7 +38,10 @@ class SwitchHDA {
     void field(uint32_t offset, uint32_t mask, uint32_t value);
     bool prepareHardware();
     bool stopCommands();
+    void finishPowerOff();
     void power(bool on);
+    bool waitCoreBit(uint32_t offset, uint32_t mask, uint32_t value, uint32_t timeoutUs, uint32_t gen);
+    bool sleepOnGateUs(uint32_t us, uint32_t gen);
     bool reset();
     bool verb(uint32_t node, uint32_t operation, uint32_t payload, uint32_t *value = nullptr);
     bool discover(uint32_t formats);
@@ -41,10 +49,12 @@ class SwitchHDA {
     void setClock(uint32_t rate);
 
 public:
-    bool initialize(IOCommandGate *commandGate, SwitchAudioControl *page, uint64_t hostHz);
+    bool initialize(IOWorkLoop *loop, IOCommandGate *commandGate, IOTimerEventSource *offTimer,
+                    SwitchAudioControl *page, uint64_t hostHz);
     bool prepare(IOBufferMemoryDescriptor *ring);
     void release();
     void interrupt();
+    void powerOffTimerFired();
     void disconnect();
     bool connect(uint32_t formats);
     IOReturn start();

@@ -7,7 +7,7 @@
 #include "TegraGM20BCopyResetABI.h"
 #include "TegraGM20BRecover.h"
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 #define COPY_RESET_LOOKING \
 	100 /* internal: a work item is looking at the copy engine; answered as InFlight */
 

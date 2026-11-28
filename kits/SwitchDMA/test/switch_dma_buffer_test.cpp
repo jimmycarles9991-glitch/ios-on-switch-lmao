@@ -51,6 +51,10 @@ TEST_F(SwitchDMABuffer, PassesExtraOptionsAndMask)
     ASSERT_TRUE(switch_dma_alloc(&buffer, 4096, 0xffff0000ull, kIOMapWriteCombineCache));
     EXPECT_EQ(gDma.options & kIOMapWriteCombineCache, kIOMapWriteCombineCache);
     EXPECT_EQ(gDma.mask, 0xffff0000ull);
+    const switch_dcache_event *events;
+    const size_t count = switch_dcache_recorded(&events);
+    ASSERT_EQ(count, 1u);
+    EXPECT_STREQ(events[0].op, "oshst");
     switch_dma_free(&buffer);
 }
 

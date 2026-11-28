@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestScenes
 import Metal
 
 /// The GPU's time per full-screen draw that fetches the colour it blends into (fetch_blend_fragment under One/One

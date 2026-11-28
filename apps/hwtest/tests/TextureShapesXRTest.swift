@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Extended-range textures past one-level 2D, raw's with a stand-in of their shape (xr_parts.h): a BGR10_XR cube's

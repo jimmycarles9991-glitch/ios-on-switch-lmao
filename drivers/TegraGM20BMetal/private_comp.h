@@ -76,6 +76,12 @@ inline uint32_t privateCompressedKind(const PrivateTextureFacts &f)
     if (!privateShapeCompresses(f) || !f.plainColour)
         return 0;
     const uint32_t kind = compressedKind(f.bpp, 0, std::max(f.samples, 1u));
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    // gpu.perf.nvn's cbr arm binds NVN's 2CBR kinds, which no probe has shown the copy engine reads, only while its
+    // probe is on: the arm clears its target every pass and judges the resolve alone
+    if (probeMs4Cbr.load(std::memory_order_relaxed) && (kind == 0xe2 || kind == 0xf0))
+        return kind == 0xe2 ? 0xe0 : 0xee;
+#endif
     return copyEngineReadsCompressed(kind) ? kind : 0;
 }
 

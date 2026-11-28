@@ -59,13 +59,34 @@ inline uint32_t texelBytes(uint32_t word0)
     }
 }
 
-// The header m2v binds at a slot of word 0 `window` (0: the record names none), for a texture of `bytes` a texel
-// or block whose format's word 0 is `tic0` and whose own header's is `own` (tic0 under the texture's swizzle)
-inline SlotView slotView(uint32_t window, uint32_t tic0, uint32_t own, uint32_t bytes, bool blocks)
+// Matches pack.h kKernelWindowSrgb (bit 31 is unused in TEXHEAD_BL word 0).
+constexpr uint32_t kSlotViewSrgb = 1u << 31;
+
+// The header m2v binds at a slot of `window` (0: the record names none; bits 0-30 word 0, bit 31 sRGB view), for a
+// texture of `bytes` a texel or block whose format's word 0 is `tic0` and whose own header's is `own` (tic0 under the
+// texture's swizzle)
+inline SlotView slotView(uint32_t window, uint32_t tic0, uint32_t own, uint32_t bytes, bool blocks, bool srgb = false)
 {
-    if (!window || window == tic0 || window == own)
+    if (!window)
         return SlotView::Own;
-    return !blocks && texelBytes(window) == bytes ? SlotView::View : SlotView::None;
+    const uint32_t word0 = window & ~kSlotViewSrgb;
+    const bool wantSrgb = (window & kSlotViewSrgb) != 0;
+    if ((word0 == tic0 || word0 == own) && wantSrgb == srgb)
+        return SlotView::Own;
+    if (wantSrgb)
+        return SlotView::None;
+    return !blocks && texelBytes(word0) == bytes ? SlotView::View : SlotView::None;
+}
+
+// Reinterprets a cube or cube-array header as a 2D array of its 6 * cubes faces (TEXTURE_TYPE = TWO_D_ARRAY,
+// DEPTH_MINUS_ONE = 6 * cubes - 1), preserving format, swizzle, base VA, mip range and S_R_G_B_CONVERSION.
+inline void arrayViewHeader(const uint32_t own[8], uint32_t out[8])
+{
+    for (int i = 0; i < 8; i++)
+        out[i] = own[i];
+    const uint32_t cubes = ((own[5] >> 16) & 0x3fffu) + 1u;
+    out[4] = (out[4] & ~(0xfu << 23)) | (5u << 23);
+    out[5] = (out[5] & ~(0x3fffu << 16)) | ((cubes * 6u - 1u) << 16);
 }
 
 // The header of the texture headed by `own` viewed as word 0 `word0`. No sRGB conversion: m2v reads and writes an
@@ -77,10 +98,15 @@ inline SlotView slotView(uint32_t window, uint32_t tic0, uint32_t own, uint32_t 
 // MULTI_SAMPLE_COUNT and bounds each load and store by WIDTH and HEIGHT alone, while NAK addresses each sample at its
 // place in the grid (nak_nir_lower_tex.c lower_msaa_image_access, which reads MULTI_SAMPLE_COUNT through TXQ). At the
 // pixel extent every surface op outside the grid's top-left width x height is dropped.
-inline void viewHeader(const uint32_t own[8], uint32_t word0, uint32_t out[8], uint8_t sxLog2 = 0, uint8_t syLog2 = 0)
+inline void viewHeader(const uint32_t own[8], uint32_t word0, uint32_t out[8], uint8_t sxLog2 = 0, uint8_t syLog2 = 0,
+                       bool asArray = false)
 {
-    for (int i = 0; i < 8; i++)
-        out[i] = own[i];
+    if (asArray) {
+        arrayViewHeader(own, out);
+    } else {
+        for (int i = 0; i < 8; i++)
+            out[i] = own[i];
+    }
     out[0] = word0;
     out[4] &= ~(1u << 22);                                                     // S_R_G_B_CONVERSION (bit 150)
     out[4] = (out[4] & ~0xffffu) | ((((out[4] & 0xffff) + 1) << sxLog2) - 1);  // WIDTH_MINUS_ONE (143:128)

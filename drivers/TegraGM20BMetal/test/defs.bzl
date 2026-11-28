@@ -14,6 +14,7 @@ METAL_HOST_HEADERS = [
     "//drivers/TegraGM20B:TegraGM20BJobABI.h",
     "//drivers/TegraGM20B:TegraGM20BLayout.h",
     "//drivers/TegraGM20B:TegraGM20BPathsABI.h",
+    "//drivers/TegraGM20B:TegraGM20BSchedABI.h",
     "//drivers/TegraGM20B:TegraGM20BSchedPolicy.h",
     "//drivers/TegraGM20B:TegraGM20BVolatileABI.h",
     "//drivers/TegraGM20B:TegraGM20BZcullABI.h",
@@ -40,6 +41,8 @@ METAL_HOST_COPTS = [
     "-Wno-deprecated-declarations",
     # the plugin's key (gpu/defs.bzl): any, as a host test's pack takes
     "-DTEGRA_STACK_KEY=0ull",
+    "-DSWITCH_STATS_GPU=1",
+    "-DSWITCH_PROF_GPU=1",
 ]
 
 METAL_HOST_DEPS = [
@@ -54,6 +57,8 @@ METAL_HOST_DEPS = [
 METAL_DEVICE_COPTS = [
     "-Idrivers/TegraGM20B",
     "-DSWITCH_METAL_HARNESS_MARKS",
+    "-DSWITCH_STATS_GPU=1",
+    "-DSWITCH_PROF_GPU=1",
 ]
 
 FACADE_LINKOPTS = [
@@ -108,6 +113,7 @@ def facade_test(name, srcs, plugin = "_host", copts = [], linkopts = [], data = 
             "made_metallib.h",
             "facade_harness.h",
             "job_methods.h",
+            "request_store_key.h",
             "translate_absent.cpp",
             "kernel_model.h",
         ] + METAL_HOST_HEADERS,

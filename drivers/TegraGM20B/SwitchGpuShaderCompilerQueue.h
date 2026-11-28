@@ -30,11 +30,26 @@ struct Request {
 	switch_user_turnstile turnstile;
 	TegraGM20BAbiCompileTimes times;  // the compiler's, at its Complete
 	OSAsyncReference64 reference;
+	TegraGM20BAbiCompilerScope
+		scope;  // the asking process's, read in its own context at Compile
 };
 
 struct Client {
 	const void *owner;
 	uint64_t id;
+};
+
+struct ClientLibrary {
+	ClientLibrary *next;
+	const void *owner;
+	uint64_t client, id, bytes;
+	IOMemoryDescriptor *memory;
+};
+
+struct CompilerLibraryMap {
+	CompilerLibraryMap *next;
+	uint64_t client, id, bytes;
+	IOMemoryMap *map;
 };
 
 struct Broker {
@@ -43,14 +58,16 @@ struct Broker {
 	thread_t taker;
 	thread_t workers[TegraGM20BCompilerMaxWorkers];
 	IOMemoryDescriptor *store;
-	uint64_t storeBytes, stack, nextId, nextClient;
+	uint64_t storeBytes, stack, nextId, nextClient, nextLibraryId;
 	uint32_t generation, pending, losses;
 	// SwitchGpuShaderCompilerPolicy.h: the losses since the last registration
 	uint32_t lossesInARow;
 	int32_t compilerPid;  // debug kernels' kern.switch_shader_compiler (SWITCH_GPU_COMPILER_LINE)
-	uint64_t queuedBytes;
+	uint64_t queuedBytes, libraryBytesTotal;
 	bool declined, restarts;
 	Request *requests;  // queued and taken, oldest first
+	ClientLibrary *libraries;
+	CompilerLibraryMap *libraryMaps;
 	Client clients[kClients];
 };
 
@@ -71,5 +88,15 @@ void unreserve(uint64_t size);
 bool entitled(task_t task);
 bool copyTask(task_t task, uint64_t address, uint64_t bytes, IOBufferMemoryDescriptor *buffer,
 	      bool intoBuffer);
+IOReturn registerLibrary(const void *owner, task_t task,
+			 const TegraGM20BAbiCompilerRegisterLibrary *in,
+			 TegraGM20BAbiCompilerRegisterLibraryReply *out);
+IOReturn mapLibrary(const void *owner, task_t task, const TegraGM20BAbiCompilerMapLibrary *in,
+		    TegraGM20BAbiCompilerMapLibraryReply *out);
+IOReturn unmapLibrary(const void *owner, const TegraGM20BAbiCompilerUnmapLibrary *in);
+ClientLibrary *takeLibraries(const void *owner);
+CompilerLibraryMap *takeLibraryMaps();
+void dropLibraries(ClientLibrary *list);
+void dropLibraryMaps(CompilerLibraryMap *list);
 
 }  // namespace switch_gpu_compiler

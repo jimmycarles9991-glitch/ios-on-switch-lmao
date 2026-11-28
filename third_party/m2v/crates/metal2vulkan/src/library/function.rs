@@ -15,7 +15,8 @@
 
 use std::collections::BTreeMap;
 use std::ops::{Deref, Range};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crate::air::abi::Stage as AbiStage;
 use crate::air::container::{self, ContainerConstant, Library as Container, LibraryFunction};
@@ -62,14 +63,15 @@ impl Deref for LibraryBytes {
 #[derive(Debug)]
 struct LibraryInner {
     bytes: LibraryBytes,
-    /// Made at its first use: only a dynamic library's key reads it (`pipeline::compile`).
-    content_hash: OnceLock<Hash256>,
+    /// 0: read from a sealed system volume, so any compile may share what is kept of its functions' compiles
+    /// (`pipeline::compile::kept`); otherwise an id this library alone has, assigned once, which keeps that to
+    /// compiles of its own functions: its `HASH` tags are taken as stated, and another library could state them too.
+    scope: u64,
     functions: Vec<FunctionEntry>,
     /// What a metallib says of dynamic libraries; a bare module says nothing.
     dynamic: Dynamic,
 }
 
-// The content hash is a function of the bytes, made or not
 impl PartialEq for LibraryInner {
     fn eq(&self, other: &Self) -> bool {
         *self.bytes == *other.bytes && self.functions == other.functions && self.dynamic == other.dynamic
@@ -154,7 +156,9 @@ impl Library {
     /// decoded once to enumerate its entry points, as [`Library::from_air`].
     pub fn parse(bytes: &[u8]) -> Result<Library, Error> {
         crate::pipeline::compile::guarded(|| match container::parse(bytes)? {
-            Container::Metallib(ml) => from_metallib(bytes, &ml, LibraryBytes::Owned(bytes.into())),
+            Container::Metallib(ml) => {
+                from_metallib(bytes, &ml, LibraryBytes::Owned(bytes.into()), own_scope())
+            }
             Container::Module(module) => from_module(bytes, module.hash),
         })
     }
@@ -182,7 +186,9 @@ impl Library {
     /// metallib; [`Library::parse`] and [`Library::from_air`] take it.
     pub fn from_metallib(bytes: &[u8]) -> Result<Library, Error> {
         crate::pipeline::compile::guarded(|| match container::parse(bytes)? {
-            Container::Metallib(ml) => from_metallib(bytes, &ml, LibraryBytes::Owned(bytes.into())),
+            Container::Metallib(ml) => {
+                from_metallib(bytes, &ml, LibraryBytes::Owned(bytes.into()), own_scope())
+            }
             Container::Module(_) => Err(InputError::new(
                 InputErrorKind::Container(ContainerError::BadMagic),
                 Location::container(0),
@@ -191,11 +197,33 @@ impl Library {
         })
     }
 
-    /// A metallib its caller holds (`held`) as a library, with no copy. `sealed`: read from a
-    /// sealed system volume, whose functions' `HASH` tags are taken as stated
-    /// (`container::parse_sealed`), so only the function list is read until a function is
-    /// compiled; otherwise every tag is verified, as [`Library::from_metallib`] verifies it.
+    /// A metallib its caller holds (`held`) as a library, with no copy. Its functions' `HASH` tags
+    /// are taken as stated, so only the function list is read until a function is compiled.
+    /// `sealed`: read from a sealed system volume (`container::parse_sealed`), else a library of its
+    /// own scope.
     pub fn from_held_metallib(held: Arc<dyn HeldBytes>, sealed: bool) -> Result<Library, Error> {
+        let scope = if sealed { 0 } else { own_scope() };
+        Library::held_in(held, sealed, scope)
+    }
+
+    /// [`Library::from_held_metallib`] of an unsealed library in `scope` from [`Library::new_scope`].
+    /// Libraries read in the same scope share kept translations ([`Library::scope`]).
+    pub fn from_held_metallib_in(held: Arc<dyn HeldBytes>, scope: u64) -> Result<Library, Error> {
+        if scope == 0 {
+            return Err(Error::Internal(InternalError::new(
+                InternalKind::Invariant,
+                "a library that is not sealed, in the sealed scope".to_owned(),
+            )));
+        }
+        Library::held_in(held, false, scope)
+    }
+
+    /// A fresh non-zero scope for [`Library::from_held_metallib_in`].
+    pub fn new_scope() -> u64 {
+        own_scope()
+    }
+
+    fn held_in(held: Arc<dyn HeldBytes>, sealed: bool, scope: u64) -> Result<Library, Error> {
         crate::pipeline::compile::guarded(|| {
             let bytes = held.bytes();
             let parsed = if sealed {
@@ -212,7 +240,7 @@ impl Library {
                     }
                 }
             };
-            from_metallib(bytes, &parsed, LibraryBytes::Held(Arc::clone(&held)))
+            from_metallib(bytes, &parsed, LibraryBytes::Held(Arc::clone(&held)), scope)
         })
     }
 
@@ -221,11 +249,17 @@ impl Library {
         &self.0.bytes
     }
 
-    /// SHA-256 of the whole container.
-    pub fn content_hash(&self) -> &Hash256 {
-        self.0
-            .content_hash
-            .get_or_init(|| container::sha256(&self.0.bytes))
+    /// 0 for a library read from a sealed system volume, else an id of its own (`LibraryInner::scope`).
+    pub fn scope(&self) -> u64 {
+        self.0.scope
+    }
+
+    /// What a compile that links this library reads of its code: its functions' content key. A dynamic library's
+    /// functions all list its one module, whose SHA-256 the toolchain states as each one's `HASH` (taken as stated, as
+    /// every tag is); zero for a library with no function.
+    pub fn code_identity(&self) -> &Hash256 {
+        const NONE: Hash256 = [0; 32];
+        self.0.functions.first().map_or(&NONE, |f| &f.air_hash)
     }
 
     /// The number of functions in the table.
@@ -339,7 +373,12 @@ fn range_in(whole: &[u8], part: &[u8]) -> Result<Range<usize>, Error> {
 }
 
 /// `keep`: `bytes` as the library keeps them (a copy, or the caller's held bytes)
-fn from_metallib(bytes: &[u8], ml: &container::Metallib<'_>, keep: LibraryBytes) -> Result<Library, Error> {
+fn from_metallib(
+    bytes: &[u8],
+    ml: &container::Metallib<'_>,
+    keep: LibraryBytes,
+    scope: u64,
+) -> Result<Library, Error> {
     let mut functions = Vec::with_capacity(ml.functions.len());
     for f in &ml.functions {
         let cnst = &f.public.constants;
@@ -403,10 +442,15 @@ fn from_metallib(bytes: &[u8], ml: &container::Metallib<'_>, keep: LibraryBytes)
     };
     Ok(Library(Arc::new(LibraryInner {
         bytes: keep,
-        content_hash: OnceLock::new(),
+        scope,
         functions,
         dynamic,
     })))
+}
+
+fn own_scope() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 fn from_module(bytes: &[u8], hash: Hash256) -> Result<Library, Error> {
@@ -460,7 +504,7 @@ fn from_module(bytes: &[u8], hash: Hash256) -> Result<Library, Error> {
     }
     Ok(Library(Arc::new(LibraryInner {
         bytes: LibraryBytes::Owned(bytes.into()),
-        content_hash: OnceLock::from(hash),
+        scope: own_scope(),
         functions,
         dynamic: Dynamic::none(),
     })))
@@ -869,19 +913,17 @@ mod held_tests {
         let bytes = held(false);
         let library = Library::from_held_metallib(Arc::clone(&bytes), false).expect("library");
         assert_eq!(library.bytes().as_ptr(), bytes.bytes().as_ptr());
-        assert_eq!(library.content_hash(), &container::sha256(bytes.bytes()));
+        assert_eq!(library.code_identity(), &container::sha256(BITCODE), "its function's stated HASH");
     }
 
     #[test]
-    fn a_sealed_librarys_hashes_are_taken_as_its_tags_state_them() {
-        assert!(matches!(
-            Library::from_held_metallib(held(true), false),
-            Err(Error::InvalidInput(e)) if matches!(e.kind, InputErrorKind::Container(ContainerError::HashMismatch))
-        ));
-        let sealed = Library::from_held_metallib(held(true), true).expect("library");
-        assert_eq!(
-            sealed.function("k").expect("k").info().air_hash,
-            container::sha256(BITCODE)
-        );
+    fn a_librarys_hashes_are_taken_as_its_tags_state_them() {
+        for sealed in [true, false] {
+            let library = Library::from_held_metallib(held(true), sealed).expect("library");
+            assert_eq!(
+                library.function("k").expect("k").info().air_hash,
+                container::sha256(BITCODE)
+            );
+        }
     }
 }

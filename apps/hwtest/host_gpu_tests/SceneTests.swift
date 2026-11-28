@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestScenes
 import Metal
 import XCTest
 
@@ -60,7 +61,7 @@ final class SceneTests: XCTestCase {
         let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.gm20b.framebuffer_fetch" })
         let result = try await scene.run(makeGPU())
         XCTAssertTrue(result.passed, result.reasons(limit: 8).joined(separator: "; "))
-        XCTAssertEqual(result.checks.count, 56)
+        XCTAssertEqual(result.checks.count, 4 * 7 * 2 * 2, "4 formats, 7 modes, interlocked and default, 2 reads")
     }
 
     func testFramebufferFetchDepthOnThisMac() async throws {
@@ -89,7 +90,7 @@ final class SceneTests: XCTestCase {
         let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.gm20b.interlock_spin" })
         let result = try await scene.run(makeGPU())
         XCTAssertTrue(result.passed, result.reasons(limit: 8).joined(separator: "; "))
-        XCTAssertEqual(result.checks.count, 2 * 3 * 5)
+        XCTAssertEqual(result.checks.count, 3 * 3 * 5, "plain, interlock and default arms, 3 layer counts, 5 runs")
     }
 
     func testArchiveMissOnThisMac() async throws {

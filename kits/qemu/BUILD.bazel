@@ -78,7 +78,6 @@ kernel_driver(
     srcs = [
         "LegacyDisplayProbe.cpp",
         "KeyStoreProbe.cpp",
-        "HidInputProbe.cpp",
         "TouchState.cpp",
     ],
     abi = ["IOMobileFramebufferLegacy"],

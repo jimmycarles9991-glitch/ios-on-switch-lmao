@@ -120,7 +120,7 @@ struct SwitchSdIo {
     SwitchSdHistogram command[2][kSwitchSdSizes];  // [write][size]
     SwitchSdFineHistogram roundTrip[kSwitchSdRtPhases];
     uint64_t asked[kSwitchSdClasses];  // requests by the class their client gave
-    uint64_t chosen;                   // of them, queued in another class by the driver (the boot prefetch)
+    uint64_t chosen;                   // of them, the boot replay's reads (queued below tier 0, SwitchSdPick.h)
     uint64_t depthNs;                  // the queue's length integrated over time (requests x ns)
     uint64_t depthAtNs;                // when it last changed (under queueLock)
     uint64_t depthMax;                 // the longest since the last line

@@ -13,6 +13,12 @@ The kernel trusts the image's translated binaries through the boot package's tru
 pinned (ipsw/pretranslated/<kind>). So the tool refuses unless the translation matches those pins and the card's
 boot entry (what //deploy:sd writes on the FAT: switchroot/ios/bl31.bin, bl33.bin, bootloader/ini/ios.ini) is this
 build's, byte for byte. It also refuses iOS 17, whose cryptexes are Apple's own images, unchanged since the install.
+//deploy:sd plans the same write in its check and makes it just before it writes the boot entry, so a deploy never
+leaves the card's cryptex behind its boot package; this tool is for the cryptex alone.
+
+Beside the image goes its record (tools/install/cryptex_record.py), which the install and every write keep: the image
+counts as this build's only while its record says so. Without a record that still names the file, the image is written,
+never read back to compare.
 """
 
 import argparse
@@ -26,7 +32,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(os.path.abspath(__file__)).parents[2]))
 from tools.common import files, hashing, paths
 from tools.deploy import deploy, pull_logs
-from tools.install import card as cards, host, progress, renamed
+from tools.install import card as cards, cryptex_record, host, progress, renamed
 
 ROLE = 'system_cryptex'
 # What the boot package carries of the System cryptex's translation (pretranslate.KEPT).
@@ -45,7 +51,7 @@ class Image:
 
 @dataclass
 class Update:
-    """The one write: the staged image on Preboot, and what the card holds there now."""
+    """The one write: the staged image on Preboot, what the card holds there now, and whether its record names it."""
 
     relative: str
     size: int
@@ -75,29 +81,42 @@ def check_boot_entry(fat_root: Path, package: Path, log: host.Log) -> None:
         )
 
 
-def plan(preboot_root: Path, spec: dict, image: Image, free_bytes: int, log: host.Log) -> Update:
-    """Decide the write: the System cryptex's staged path, and whether the card already holds this image."""
+def plan(preboot_root: Path, spec: dict, image: Image, free_bytes: int, folder: str | None = None) -> Update:
+    """Decide the write: the System cryptex's staged path, and whether the card's record names this image.
+
+    `folder` is the image's folder on the card while a rename to the spec's is still to come (renamed.migrate_preboot).
+    A partial image a stopped write left beside it counts as free, by the blocks it holds (the copy sizes it first, so
+    a stopped one is mostly holes): the write replaces it first.
+    """
     path = next(c['path'] for c in spec['cryptexes'] if c['member'] == ROLE)
     relative = path[len(renamed.PREBOOT) :]
     if Path(relative).name != image.path.name:
         raise cards.RefusedError(f'the kernel opens {path}, this build made {image.path.name}')
-    target = Path(preboot_root) / relative
-    if not target.is_file():
+    current = Path(preboot_root) / (str(Path(folder) / image.path.name) if folder else relative)
+    if not current.is_file():
         raise cards.RefusedError(f'Preboot has no {path}: install the image first')
-    size, card_size = image.path.stat().st_size, target.stat().st_size
-    same = size == card_size
-    if same:
-        with progress.step(f'preboot: comparing {relative} with this build', size):
-            same = hashing.sha256_file(target, progress.advance) == image.sha256
-    needed = size + SPARE_BYTES
-    if not same and free_bytes < needed:
+    size, card_size = image.path.stat().st_size, current.stat().st_size
+    same = cryptex_record.read(current) == image.sha256
+    room = free_bytes + allocated(files.partial(current))
+    if not same and room < size + SPARE_BYTES:
         raise cards.RefusedError(
-            f'the card has {progress.size(free_bytes)} free, the new image needs {progress.size(needed)} beside the '
-            'old one until it replaces it'
+            f'the card has {progress.size(room)} free, the new image needs {progress.size(size + SPARE_BYTES)} beside '
+            'the old one until it replaces it'
         )
-    state = 'unchanged' if same else 'to replace'
-    log(f'preboot: {relative} {state} (this build {size} bytes, the card {card_size} bytes)')
     return Update(relative, size, card_size, same)
+
+
+def allocated(path: Path) -> int:
+    """Return the bytes a file holds on its volume (0: none there): a sparse file's holes hold none."""
+    try:
+        return path.stat().st_blocks * 512
+    except FileNotFoundError:
+        return 0
+
+
+def described(update: Update) -> str:
+    state = 'unchanged' if update.same else 'to replace'
+    return f'preboot: {update.relative} {state} (this build {update.size} bytes, the card {update.card_size} bytes)'
 
 
 def write(preboot_root: Path, update: Update, image: Image, log: host.Log) -> None:
@@ -109,7 +128,38 @@ def write(preboot_root: Path, update: Update, image: Image, log: host.Log) -> No
     ):
         host.copy_file_parallel(image.path, partial)
         partial.chmod(0o644)
+    cryptex_record.write(target, image.sha256)
     log(f'preboot: {update.relative} replaced ({update.size} bytes)')
+
+
+def planned_on_card(card: cards.Card, spec: dict, image: Image, target: object, log: host.Log) -> Update:
+    """//deploy:sd's check: the System cryptex's write planned with Preboot read-only, so it refuses before writing."""
+    preboot = pull_logs.data_volume(card, spec['volumes']['preboot']['uuid'])
+    if not preboot:
+        raise cards.RefusedError(f'{card.disk}: no iPad Preboot volume, so the System cryptex cannot follow this build')
+    with cards.mounted(preboot, log, read_only=True) as preboot_root:
+        moved = renamed.migrate_preboot(preboot_root, spec, log, dry_run=True)
+        update = plan(preboot_root, spec, image, free_bytes(target), folder=moved[0] if moved else None)
+    log(described(update))
+    return update
+
+
+def write_on_card(preboot: str, update: Update, image: Image, target: object, log: host.Log) -> None:
+    """//deploy:sd's write of what planned_on_card decided, once the room is still there.
+
+    Data shares the container, and the deploy's Data writes come between the plan and this, so the room is measured
+    again here, before anything of the image is written.
+    """
+    if update.same:
+        return
+    with cards.mounted(preboot, log) as preboot_root:
+        room = free_bytes(target) + allocated(files.partial(Path(preboot_root) / update.relative))
+        if room < update.size + SPARE_BYTES:
+            raise host.HostError(
+                f'the card has {progress.size(room)} free after the Data writes, the new System cryptex needs '
+                f'{progress.size(update.size + SPARE_BYTES)}: neither it nor the boot entry was written'
+            )
+        write(preboot_root, update, image, log)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -152,7 +202,7 @@ def _checked_card(args: argparse.Namespace, spec: dict) -> tuple[cards.Card, obj
     return card, fat, target, preboot
 
 
-def _free_bytes(target: object) -> int:
+def free_bytes(target: object) -> int:
     container = host.container_on(target.identifier) or {}
     return int(container.get('CapacityFree', 0))
 
@@ -180,7 +230,8 @@ def main(argv: list[str] | None = None) -> int:
         with cards.mounted(fat.identifier, log, read_only=True) as fat_root:
             check_boot_entry(fat_root, Path(args.boot_package), log)
         with cards.mounted(preboot, log, read_only=not args.yes) as preboot_root:
-            update = plan(preboot_root, spec, image, _free_bytes(target), log)
+            update = plan(preboot_root, spec, image, free_bytes(target))
+            log(described(update))
             if update.same:
                 log("nothing to write: the card holds this build's System cryptex")
             elif not args.yes:

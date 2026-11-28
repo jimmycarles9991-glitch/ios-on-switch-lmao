@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// fillTexture: (SPI) shapes that went to m2v, each now raw's (FillShapeCases.swift, every case's bytes as an M4 Max

@@ -930,6 +930,7 @@ pub fn srgb_raw(pf: PixelFormat) -> bool {
         pf,
         P::RGBA8UnormSRGB
             | P::BGRA8UnormSRGB
+            | P::ARGB8UnormSRGB
             | P::R8UnormSRGB
             | P::RG8UnormSRGB
             | P::RGBX8UnormSRGB

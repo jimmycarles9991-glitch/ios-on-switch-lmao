@@ -1,6 +1,9 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
+import HWTestKit
+import HWTestShared
 import Metal
 
 /// Core Animation's zoom window target of an app opening and closing (boot 21: 1792x1472 BGRA8, cleared and redrawn

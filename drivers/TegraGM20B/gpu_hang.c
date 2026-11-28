@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Channel progress, hang detection, client fault isolation and recovery.
 #include "gpu_internal.h"
+#include "SwitchGpuBridge.h"
 #include "../../kits/SwitchLinux/SwitchLinux.h"
 
 /* The rule's bookkeeping at a check, every TGM_HANG_NS: the next check's interval, and in *stalled the time the channel
@@ -9,6 +10,7 @@
 static u64 progress_step(struct tgm_chan *chan, u64 *stalled)
 {
 	u32 done = tgm_chan_completed(chan);
+	u32 pword = chan->progress_cpu ? READ_ONCE(*chan->progress_cpu) : 0;
 	u64 now = nvxnu_nanotime();
 	u64 since = READ_ONCE(chan->stall_ns);
 	u64 held = tgm_hold_held_ns(chan->chid, now);
@@ -19,8 +21,10 @@ static u64 progress_step(struct tgm_chan *chan, u64 *stalled)
 		WRITE_ONCE(chan->stall_ns, 0);
 		return 0;
 	}
-	if (!since || READ_ONCE(chan->stall_done) != done) {
+	if (!since || READ_ONCE(chan->stall_done) != done ||
+	    READ_ONCE(chan->stall_progress_word) != pword) {
 		WRITE_ONCE(chan->stall_done, done);
+		WRITE_ONCE(chan->stall_progress_word, pword);
 		WRITE_ONCE(chan->stall_held, held);
 		WRITE_ONCE(chan->stall_ns, now);
 		return TGM_HANG_NS;
@@ -53,6 +57,48 @@ uint64_t tgm_chan_check_progress_locked(struct tgm_chan *chan, const char *who, 
 		tgm_chan_hung(chan, who, seqno, stalled);
 	return next;
 }
+
+uint64_t tgm_writer_check_progress(uint32_t uid, uint32_t seqno, const char *who)
+{
+	struct tgm_chan *chan = NULL;
+	u64 next = 0;
+
+	if (tgm_gpu.stage < 3)
+		return TGM_HANG_NS;
+	mutex_lock(&tgm_live_lock);
+	chan = live_by_uid(uid);
+	if (chan && !chan->error && (s32)(tgm_chan_completed(chan) - seqno) < 0)
+		next = tgm_chan_check_progress_locked(chan, who, seqno);
+	mutex_unlock(&tgm_live_lock);
+	return next;
+}
+
+#if TGM_DEBUG_PROBES
+void tgm_chan_note_jobless(uint32_t uid)
+{
+	struct tgm_chan *chan = NULL;
+
+	mutex_lock(&tgm_live_lock);
+	chan = live_by_uid(uid);
+	if (chan)
+		chan->stat_jobless++;
+	mutex_unlock(&tgm_live_lock);
+}
+
+uint64_t tgm_chan_jobless(const char *owner)
+{
+	struct tgm_chan *chan = NULL;
+	u64 jobless = 0;
+
+	mutex_lock(&tgm_live_lock);
+	list_for_each_entry(chan, &tgm_live_chans,
+			    live) if (!strncmp(chan->owner, owner, sizeof(chan->owner) - 1))
+		jobless += chan->stat_jobless;
+	jobless += tgm_chan_jobless_gone_locked(owner);
+	mutex_unlock(&tgm_live_lock);
+	return jobless;
+}
+#endif
 
 int tgm_all_clients(void)
 {
@@ -95,15 +141,17 @@ int tgm_chan_killed(struct nvif_event *event, void *repv, u32 repc)
 	}
 	/* ERRORED is delivered after runlist recovery quiesces the channel. Publish
 	 * its failure before advancing abandoned fences or releasing memory leases. */
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 	WRITE_ONCE(chan->killed_ns, nvxnu_nanotime());
 #endif
 	if (fault_code(report) == 1)
 		WRITE_ONCE(chan->fault_va, tgm_fault_va(report, (int)chan->chid));
-	WRITE_ONCE(chan->error, fault_code(report));
 	first = tgm_kill_first(chan->faulted, chan->fault_seqno, READ_ONCE(*chan->fence_cpu));
 	switch_gpu_timeline_failed(chan->timeline, first - 1, chan->critical);
+	__atomic_store_n(&chan->error, fault_code(report), __ATOMIC_RELEASE);
 	tgm_fence_kill_record(chan->fence_cpu, first, chan->submitted, chan->error);
+	/* Timeline reads failed: close the bridge gate before raising fence_cpu so no bridge job passes over the cut writes. */
+	switch_gpu_bridge_gate_close();
 	__atomic_store_n(chan->fence_cpu, chan->submitted, __ATOMIC_RELEASE);
 	__asm__ volatile("dsb sy" ::: "memory");
 	present_watch_fenced(chan, 1);
@@ -296,8 +344,12 @@ void tgm_iso_deadline(void *arg)
 static u64 chan_progress_ns(struct tgm_chan *chan, u64 now)
 {
 	const u32 done = tgm_chan_completed(chan);
+	int moved = tgm_progress_seen(done, READ_ONCE(chan->progress_done), &chan->seen_done);
 
-	if (tgm_progress_seen(done, READ_ONCE(chan->progress_done), &chan->seen_done)) {
+	if (chan->progress_cpu &&
+	    tgm_progress_word_seen(READ_ONCE(*chan->progress_cpu), &chan->progress_word_seen))
+		moved = 1;
+	if (moved) {
 		WRITE_ONCE(chan->progress_held, tgm_hold_held_ns(chan->chid, now));
 		WRITE_ONCE(chan->progress_ns, now);
 	}
@@ -347,7 +399,7 @@ static int chan_moving(struct tgm_chan *chan, u64 now)
  * PBDMAs are on (a context switch that does not finish blames the context nvkm's own recovery would), the channel
  * `late` still waits on, and `late`. A client's is killed as a faulting client's is, a kernel channel's engines are
  * reset (tgm_kernel_hang_locked), and the waits it held up go on. tgm_live_lock held. */
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 /* tgm_live_lock held: the blamed channel's and the late one's progress, as a line of its own
  * (TegraGM20BHangDecode.h tgm_hang_detail) */
 static void hang_detail(struct tgm_chan *blame, struct tgm_chan *late, u64 now)
@@ -461,9 +513,6 @@ enum tgm_hang tgm_hang_recover(struct tgm_chan *late, const char *who, u32 seqno
 		kind = candidate_wait(&waits, chans[i], &source);
 		c[i].victim = kind == TGM_WAITS_VICTIM || kind == TGM_WAITS_UNREAD;
 		tgm_acquire_unfired(chans[i], now);
-#if TGM_STATS
-		tgm_acquire_probe_look(chans[i], now);
-#endif
 		for (j = 0; source && j <= n; j++)
 			if (j != i && chans[j] == source)
 				c[i].waits = (u8)(j + 1);
@@ -509,7 +558,7 @@ enum tgm_hang tgm_hang_recover(struct tgm_chan *late, const char *who, u32 seqno
 		"tegra-gm20b: GPU hang, recovering %s (channel %u): %s waited %llu ms for %s fence "
 		"%u; %s\n",
 		blame->owner, blame->chid, who, waited_ns / 1000000, late->owner, seqno, state);
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 	hang_detail(blame, late, now);
 #endif
 	tgm_chan_isolate(blame, report, now);

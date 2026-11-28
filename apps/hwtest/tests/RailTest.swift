@@ -2,6 +2,8 @@ import Darwin
 import Foundation
 import GameController
 import HWTestCore
+import HWTestKit
+import HWTestShared
 
 /// The Joy-Con rails' transport for a few seconds with nobody touching anything, from the rail driver's counters
 /// (kern.switch_joycon, debug kernels). Each running rail asks its Joy-Con for a report every 15 or 30 ms

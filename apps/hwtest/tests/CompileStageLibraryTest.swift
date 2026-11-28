@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import MachO
 import Metal
 

@@ -41,6 +41,7 @@ bool Device::gpuStartUnits(uint32_t stamp, uint64_t &units) const
     return true;
 }
 
+#if SWITCH_METAL_PROF
 std::vector<StateSpan> Device::longSpans(uint32_t stamp)
 {
     if (!spans_.on() || !stamp)
@@ -84,6 +85,7 @@ void RenderEncoder::markSpan(Push &p, uint32_t index, SpanKind kind)
     label.samples = samples_;
     dev_->spans_.markAt(p, index, label);
 }
+#endif
 #endif
 
 }  // namespace gm20b

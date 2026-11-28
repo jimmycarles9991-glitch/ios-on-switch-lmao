@@ -14,12 +14,14 @@
 //            check answers e00002bc, which securityd turns into "can't be decrypted on this device, ever"
 //   14       aks_get_system                         out [system keybag handle 0] (keybagd then needs no systembag.kb); the
 //            first answer is the bag's first unlock: messageClients(e3ffd00f, &handle, 4), once per boot
-//   17, 35   aks_get_(extended_)device_state        struct out: DER SET{ SEQUENCE{ UTF8String key, INTEGER value } ... }
+//   17, 35, 142 aks_get_(extended_|internal_)device_state: struct out: DER SET{ SEQUENCE{ UTF8String key, INTEGER value } ... }
 //            keys ss sls sb sfa sgs sas sgpe srcd sms bh; ss = 4, sls = lock state: 3 = MobileKeyBag's "no passcode" (default;
 //            lockdownd and SpringBoard read "has passcode" as sls != 3), sheng-aks-sls=<n> overrides (KeyStoreProbe.cpp)
+//   2, 43    aks_create_bag / __aks_operation (SEP bags and ref/system keys): e00002d8 not ready (no SEP), mapped cleanly
+//            by MobileKeyBag and securityd without logging "Unexpected AppleKeyStore error"
 //   23       aks_get_bag_uuid(bag)                  in [bag]; struct out 16-byte UUID, stable per keybag on this console
-//   31, 139  aks_get_configuration / aks_memento_get_state: e00002f0 not found (no configuration, no recovery passcode), which
-//            MobileKeyBag maps instead of logging "Unexpected AppleKeyStore error"
+//   31, 57, 135, 139 aks_get_configuration / aks_remote_peer_get_state / aks_bak_get_beacon / aks_memento_get_state:
+//            e00002f0 not found (no configuration, remote peer, BAK beacon, or recovery passcode)
 // Malformed requests answer e00002c2, a keybag other than 0 e00002f0; every other selector e00002c7 and one console line.
 // aks_register_for_notifications (IOConnectSetNotificationPort, keybagd at start) is accepted.
 #include <IOKit/IOService.h>
@@ -33,8 +35,6 @@
 extern "C" void native_keyevents_open_refused(void);
 extern "C" bool native_aks_state_enabled(void);
 extern "C" uint32_t native_aks_lock_state(void);
-extern "C" void native_aks_call(uint32_t selector, int32_t result);
-extern "C" void native_aks_opened(void);
 extern "C" void native_aks_device_key_start(void);
 extern "C" IOReturn native_aks_wrap(uint32_t keybag, uint32_t keyClass, const uint8_t *key, size_t length, uint8_t *out,
                                     size_t capacity, size_t *written);
@@ -44,9 +44,10 @@ extern "C" IOReturn native_aks_bag_uuid(uint32_t keybag, uint8_t uuid[16]);
 extern "C" void native_aks_unsupported(uint32_t selector);
 
 namespace {
-constexpr uint32_t kSelLockState = 7, kSelWrapKey = 10, kSelUnwrapKey = 11, kSelGetSystem = 14, kSelDeviceState = 17,
-                   kSelGetBagUUID = 23, kSelGetConfiguration = 31, kSelExtendedDeviceState = 35,
-                   kSelSeSupportInRecovery = 107, kSelMementoState = 139;
+constexpr uint32_t kSelCreateBag = 2, kSelLockState = 7, kSelWrapKey = 10, kSelUnwrapKey = 11, kSelGetSystem = 14,
+                   kSelDeviceState = 17, kSelGetBagUUID = 23, kSelGetConfiguration = 31, kSelExtendedDeviceState = 35,
+                   kSelOperation = 43, kSelRemotePeerState = 57, kSelSeSupportInRecovery = 107, kSelBakGetBeacon = 135,
+                   kSelMementoState = 139, kSelInternalState = 142;
 constexpr uint64_t kUnlockedSinceBoot = 4;
 #if DEVELOPMENT || DEBUG
 constexpr uint64_t kSlowCallNs = 20000000;
@@ -61,6 +62,7 @@ constexpr IOReturn kAksError =
     static_cast<IOReturn>(aks::kReturnError);  // also what libaks reports itself when the connection is missing
 constexpr IOReturn kAksBadArgument = static_cast<IOReturn>(aks::kReturnBadArgument);
 constexpr IOReturn kAksUnsupported = static_cast<IOReturn>(aks::kReturnUnsupported);
+constexpr IOReturn kAksNotReady = static_cast<IOReturn>(aks::kReturnNotReady);
 constexpr IOReturn kAksNotFound = static_cast<IOReturn>(aks::kReturnNotFound);
 
 struct DerWriter {
@@ -289,8 +291,14 @@ OSDeclareDefaultStructors(AppleKeyStoreUserClient) public : IOReturn clientClose
                 if (rc == kIOReturnSuccess)
                     args->scalarOutput[0] = kUnlockedSinceBoot;
                 break;
+            case kSelCreateBag:
+                rc = (args->scalarInputCount == 7 && args->scalarOutputCount == 1 && args->scalarOutput)
+                         ? kAksNotReady
+                         : kAksBadArgument;
+                break;
             case kSelDeviceState:
-            case kSelExtendedDeviceState: {
+            case kSelExtendedDeviceState:
+            case kSelInternalState: {
                 if (args->scalarInputCount > 1 || args->scalarOutputCount != 0) {
                     rc = kIOReturnBadArgument;
                     break;
@@ -300,6 +308,9 @@ OSDeclareDefaultStructors(AppleKeyStoreUserClient) public : IOReturn clientClose
                 rc = n ? writeStructure(args, der, n) : kIOReturnNoSpace;
                 break;
             }
+            case kSelOperation:
+                rc = kAksNotReady;
+                break;
             case kSelWrapKey:
             case kSelUnwrapKey:
                 rc = keyOperation(selector, args);
@@ -332,12 +343,15 @@ OSDeclareDefaultStructors(AppleKeyStoreUserClient) public : IOReturn clientClose
             case kSelMementoState:
                 rc = (args->scalarInputCount == 1 && args->scalarOutputCount == 0) ? kAksNotFound : kAksBadArgument;
                 break;
+            case kSelRemotePeerState:
+            case kSelBakGetBeacon:
+                rc = (args->scalarInputCount == 2 && args->scalarOutputCount == 0) ? kAksNotFound : kAksBadArgument;
+                break;
             default:
                 native_aks_unsupported(selector);
                 break;
             }
         }
-        native_aks_call(selector, static_cast<int32_t>(rc));
 #if DEVELOPMENT || DEBUG
         uint64_t ns = 0;
         absolutetime_to_nanoseconds(mach_absolute_time() - began, &ns);
@@ -380,7 +394,6 @@ OSDefineMetaClassAndStructors(AppleKeyStoreUserClient, IOUserClient)
             client->release();
             return kIOReturnError;
         }
-        native_aks_opened();
         *out = client;
         return kIOReturnSuccess;
     }

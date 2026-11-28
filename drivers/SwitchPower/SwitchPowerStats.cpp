@@ -6,7 +6,7 @@
 // second line names the INTIDs that took the most SPIs in the same window.
 #include "SwitchPowerStats.h"
 
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_POWER
 #include <IOKit/IOLib.h>
 #include <kern/clock.h>
 #include <os/log.h>
@@ -108,7 +108,7 @@ void logSources(uint64_t ms, bool log)
 size_t appendBattery(char *line, size_t size, size_t n)
 {
     switch_battery_gauge gauge = {};
-    if (n >= size || switch_battery_gauge_sample(&gauge))
+    if (n >= size || switch_battery_gauge_cached(&gauge))
         return n;
     const long mw = static_cast<long>(gauge.avg_ma) * static_cast<long>(gauge.mv) / 1000;
     return n + static_cast<size_t>(

@@ -408,6 +408,7 @@ public:
     void setAlarmEnable(IOOptionBits message) override;
     IOReturn getMonotonicClockAndTimestamp(uint64_t *usecs, uint64_t *machTime) override;
     IOReturn getMonotonicClockOffset(int64_t *usecs) override;
+    IOReturn setMonotonicClockOffset(int64_t usecs) override;
     // System sleep (SwitchSuspend): powerd's next scheduled wake as ALARM1 before SC7; after it, the wall clock is read
     // from the RTC again (mach time stood still while the SoC was off) and the alarm is turned off.
     void registerWakeSettings();
@@ -504,6 +505,12 @@ IOReturn SwitchRTC::getMonotonicClockAndTimestamp(uint64_t *usecs, uint64_t *mac
 IOReturn SwitchRTC::getMonotonicClockOffset(int64_t *usecs)
 {
     return switch_monotonic_clock_offset(usecs) ? kIOReturnSuccess : kIOReturnUnsupported;
+}
+
+IOReturn SwitchRTC::setMonotonicClockOffset(int64_t usecs)
+{
+    switch_monotonic_clock_set_offset(usecs);
+    return kIOReturnSuccess;
 }
 
 // No IORTC alarm messages: scheduled wakes come through the root domain's PM settings (registerWakeSettings), and

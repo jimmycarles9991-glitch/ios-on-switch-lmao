@@ -1775,6 +1775,7 @@ fn test_op_ldsm() {
     });
     b.push_op(OpMemBar {
         scope: MemScope::CTA,
+        vc: false,
     });
 
     let res = b.alloc_ssa_vec(RegFile::GPR, 4);

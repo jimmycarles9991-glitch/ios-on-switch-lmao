@@ -78,16 +78,17 @@ uint32_t collect_read_promises(const switch_gpu_backing_transaction &transaction
 
 void unlock_transaction(switch_gpu_backing_transaction *transaction)
 {
-	if (transaction->ordered)
-		switch_gpu_backing_order_unlock();
 	if (transaction->claimed) {
+		for (uint32_t i = 0; i < transaction->count; ++i)
+			transaction->uses[i].reserved = 0;
 		switch_gpu_backing_unclaim_uses(transaction->uses, transaction->count);
 		transaction->locked = 0;
 	}
 	for (uint32_t i = transaction->count; transaction->locked && i; --i) {
-		if (!(transaction->uses[i - 1].reserved & kUseLocked))
-			continue;
+		const uint32_t flags = transaction->uses[i - 1].reserved;
 		transaction->uses[i - 1].reserved = 0;
+		if (!(flags & kUseLocked))
+			continue;
 		IOLockUnlock(transaction->uses[i - 1].backing->lock);
 		--transaction->locked;
 	}
@@ -206,7 +207,6 @@ extern "C" int switch_gpu_backing_seal(switch_gpu_backing_transaction *transacti
 		return 0;
 	if (transaction->count != 0)
 		return -22;
-	switch_gpu_backing_order_lock();
 	transaction->ordered = 1;
 	return 0;
 }
@@ -230,7 +230,11 @@ bool publish_transaction(switch_gpu_backing_transaction *transaction)
 			backing->host_acquire_handle = transaction->handle;
 			backing->host_acquire_epoch = backing->host_epoch;
 		}
-		const uint32_t slot = access_slot(backing, transaction->completion, access);
+		const uint32_t reserved = transaction->uses[i].reserved;
+		const uint32_t slot =
+			(reserved & kUseHasSlot)
+				? (reserved >> kUseSlotShift)
+				: access_slot(backing, transaction->completion, access);
 		const bool write = (access & SWITCH_GPU_BACKING_WRITE) != 0;
 		const switch_gpu_backing_access *previous =
 			slot < backing->access_count ? &backing->accesses[slot] : nullptr;
@@ -269,19 +273,12 @@ bool publish_transaction(switch_gpu_backing_transaction *transaction)
 }
 }  // namespace
 
+// Per-backing locks stay held across publication until switch_gpu_backing_finish runs after
+// chan->submitted advances, preventing a contender from observing a seqno a channel kill would not
+// release.
 extern "C" void switch_gpu_backing_publish(switch_gpu_backing_transaction *transaction)
 {
-	if (!publish_transaction(transaction))
-		return;
-	if (transaction->ordered == 0)
-		return;
-	for (uint32_t i = transaction->count; transaction->locked != 0 && i != 0; --i) {
-		if ((transaction->uses[i - 1].reserved & kUseLocked) == 0)
-			continue;
-		transaction->uses[i - 1].reserved = 0;
-		IOLockUnlock(transaction->uses[i - 1].backing->lock);
-		--transaction->locked;
-	}
+	(void)publish_transaction(transaction);
 }
 
 extern "C" void switch_gpu_backing_finish(switch_gpu_backing_transaction *transaction)

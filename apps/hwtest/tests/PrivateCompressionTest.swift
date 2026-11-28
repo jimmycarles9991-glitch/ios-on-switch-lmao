@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 
 /// Private render targets on compressed memory (drivers/TegraGM20BMetal/private_comp.h): a glass-like

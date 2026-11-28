@@ -262,9 +262,12 @@ DEVELOPMENT = struct(
         "osfmk/kperf/task_samplers.c",
         "osfmk/kperf/meminfo.c",
         "osfmk/kperf/kptimer.c",
+        "osfmk/kperf/kperf_kpc.c",
         "osfmk/kperf/kdebug_trigger.c",
         "osfmk/kperf/lazy.c",
+        "osfmk/kern/kpc_thread.c",
         "osfmk/kern/kpc_common.c",
+        "osfmk/kern/cpc.c",
         "osfmk/console/serial_general.c",
         "osfmk/console/serial_console.c",
         "osfmk/console/video_scroll.c",
@@ -364,6 +367,10 @@ DEVELOPMENT = struct(
         "osfmk/arm/commpage/commpage.c",
         "osfmk/kdp/ml/arm/kdp_machdep.c",
         "osfmk/kdp/ml/arm/kdp_vm.c",
+        "osfmk/arm64/monotonic_arm64.c",
+        "osfmk/arm64/cpc_arm64.c",
+        "osfmk/arm64/cpc_arm64_events.c",
+        "osfmk/arm64/kpc.c",
         "osfmk/arm64/platform_tests.c",
         "osfmk/arm64/platform_tests_asm.s",
         "osfmk/arm64/alternate_debugger.c",
@@ -451,6 +458,9 @@ DEVELOPMENT = struct(
             "-Wno-sign-conversion",
         ],
         "osfmk/arm64/dbgwrap.c": [
+            "-Wno-sign-conversion",
+        ],
+        "osfmk/arm64/kpc.c": [
             "-Wno-sign-conversion",
         ],
         "osfmk/arm64/loose_ends.c": [
@@ -934,6 +944,9 @@ DEVELOPMENT = struct(
             "-Wno-implicit-int-conversion",
         ],
         "osfmk/kperf/kperf.c": [
+            "-Wno-sign-conversion",
+        ],
+        "osfmk/kperf/kperf_kpc.c": [
             "-Wno-sign-conversion",
         ],
         "osfmk/kperf/lazy.c": [
@@ -1478,9 +1491,12 @@ RELEASE = struct(
         "osfmk/kperf/task_samplers.c",
         "osfmk/kperf/meminfo.c",
         "osfmk/kperf/kptimer.c",
+        "osfmk/kperf/kperf_kpc.c",
         "osfmk/kperf/kdebug_trigger.c",
         "osfmk/kperf/lazy.c",
+        "osfmk/kern/kpc_thread.c",
         "osfmk/kern/kpc_common.c",
+        "osfmk/kern/cpc.c",
         "osfmk/console/serial_general.c",
         "osfmk/console/serial_console.c",
         "osfmk/console/video_scroll.c",
@@ -1580,6 +1596,10 @@ RELEASE = struct(
         "osfmk/arm/commpage/commpage.c",
         "osfmk/kdp/ml/arm/kdp_machdep.c",
         "osfmk/kdp/ml/arm/kdp_vm.c",
+        "osfmk/arm64/monotonic_arm64.c",
+        "osfmk/arm64/cpc_arm64.c",
+        "osfmk/arm64/cpc_arm64_events.c",
+        "osfmk/arm64/kpc.c",
         "osfmk/arm64/machine_remote_time.c",
         "osfmk/arm64/mte.c",
         "osfmk/arm64/vm_mte_compress.c",
@@ -1660,6 +1680,9 @@ RELEASE = struct(
             "-Wno-sign-conversion",
         ],
         "osfmk/arm64/dbgwrap.c": [
+            "-Wno-sign-conversion",
+        ],
+        "osfmk/arm64/kpc.c": [
             "-Wno-sign-conversion",
         ],
         "osfmk/arm64/loose_ends.c": [
@@ -2146,6 +2169,9 @@ RELEASE = struct(
             "-Wno-implicit-int-conversion",
         ],
         "osfmk/kperf/kperf.c": [
+            "-Wno-sign-conversion",
+        ],
+        "osfmk/kperf/kperf_kpc.c": [
             "-Wno-sign-conversion",
         ],
         "osfmk/kperf/lazy.c": [

@@ -973,6 +973,515 @@ kpc_get_pmu_version(void)
 	return KPC_PMU_ARM_APPLE;
 }
 
+#elif defined(SWITCH_ARMV8_PMUV3)
+
+#include <switch/pmuv3.h>
+
+void kpc_pmi_handler(unsigned int ctr);
+
+#define CFGWORD_EL0A32EN_MASK (0x10000)
+#define CFGWORD_EL0A64EN_MASK (0x20000)
+#define CFGWORD_EL1EN_MASK    (0x40000)
+#define CFGWORD_EL3EN_MASK    (0x80000)
+
+static uint32_t saved_evtyper[KPC_ARM64_CONFIGURABLE_COUNT];
+static uint64_t saved_counter[MAX_CPUS][KPC_MAX_COUNTERS];
+static uint64_t kpc_running_cfg_pmc_mask = 0;
+static uint32_t kpc_running_classes = 0;
+static uint32_t kpc_configured = 0;
+
+static uint32_t
+pmuv3_evtyper_from_cfgword(kpc_config_t cfgword)
+{
+	const uint16_t event = (uint16_t)(cfgword & SWITCH_PMUV3_EVENT_MASK);
+	bool count_user = (cfgword & (CFGWORD_EL0A32EN_MASK | CFGWORD_EL0A64EN_MASK)) != 0;
+	bool count_kernel = (cfgword & CFGWORD_EL1EN_MASK) != 0;
+	if (!count_user && !count_kernel && cfgword != 0) {
+		count_user = true;
+		count_kernel = true;
+	}
+	return switch_pmuv3_evtyper(event, count_user, count_kernel);
+}
+
+static kpc_config_t
+pmuv3_cfgword_from_evtyper(uint32_t typer)
+{
+	kpc_config_t config = switch_pmuv3_evtyper_event(typer);
+	if (switch_pmuv3_evtyper_counts_user(typer)) {
+		config |= CFGWORD_EL0A32EN_MASK | CFGWORD_EL0A64EN_MASK;
+	}
+	if (switch_pmuv3_evtyper_counts_kernel(typer)) {
+		config |= CFGWORD_EL1EN_MASK;
+	}
+	return config;
+}
+
+static void
+pmuv3_enable_counter(uint32_t counter)
+{
+	const uint32_t mask = switch_pmuv3_slot_hw_mask(counter);
+	if (mask != 0U) {
+		switch_pmuv3_write_pmintenset(mask);
+		switch_pmuv3_write_pmcntenset(mask);
+		__builtin_arm_isb(ISB_SY);
+	}
+}
+
+static void
+pmuv3_disable_counter(uint32_t counter)
+{
+	if (counter < KPC_ARM64_FIXED_COUNT) {
+		return;
+	}
+	const uint32_t mask = switch_pmuv3_slot_hw_mask(counter);
+	if (mask != 0U) {
+		switch_pmuv3_write_pmcntenclr(mask);
+		switch_pmuv3_write_pmintenclr(mask);
+		switch_pmuv3_clear_pmovs(mask);
+		__builtin_arm_isb(ISB_SY);
+	}
+}
+
+static void
+pmuv3_save_regs(void)
+{
+	int cpuid = cpu_number();
+	assert(ml_get_interrupts_enabled() == FALSE);
+	uint32_t ovs_slots = switch_pmuv3_hw_mask_to_slots(
+		switch_pmuv3_read_pmovs() & SWITCH_PMUV3_ALL_HW_MASK);
+	for (unsigned int i = KPC_ARM64_FIXED_COUNT; i < KPC_ARM64_PMC_COUNT; i++) {
+		uint64_t raw = switch_pmuv3_read_slot(i);
+		if ((ovs_slots & (1U << i)) != 0U) {
+			uint64_t base = FIXED_RELOAD(i) != 0 ? FIXED_RELOAD(i) : SWITCH_PMUV3_IDLE_RELOAD_32;
+			FIXED_SHADOW(i) += switch_pmuv3_delta(i, base, raw);
+			saved_counter[cpuid][i] = base;
+		} else {
+			saved_counter[cpuid][i] = raw;
+		}
+	}
+}
+
+static void
+pmuv3_restore_control_regs(void)
+{
+	for (unsigned int i = 0; i < KPC_ARM64_CONFIGURABLE_COUNT; i++) {
+		switch_pmuv3_write_evtyper(i + 1U, saved_evtyper[i]);
+	}
+	__builtin_arm_isb(ISB_SY);
+}
+
+static void
+pmuv3_restore_regs(void)
+{
+	int cpuid = cpu_number();
+	for (unsigned int i = KPC_ARM64_FIXED_COUNT; i < KPC_ARM64_PMC_COUNT; i++) {
+		uint64_t val = saved_counter[cpuid][i];
+		if (val == 0) {
+			val = FIXED_RELOAD(i) != 0 ? FIXED_RELOAD(i) : SWITCH_PMUV3_IDLE_RELOAD_32;
+		}
+		switch_pmuv3_write_slot(i, val);
+	}
+	pmuv3_restore_control_regs();
+}
+
+static bool
+kpc_cpu_callback(void * __unused param, enum cpu_event event,
+    unsigned int __unused cpu_or_cluster)
+{
+	if (!kpc_configured) {
+		return true;
+	}
+
+	switch (event) {
+	case CPU_BOOTED:
+		pmuv3_restore_regs();
+		break;
+	case CPU_DOWN:
+		pmuv3_save_regs();
+		break;
+	default:
+		break;
+	}
+	return true;
+}
+
+void
+kpc_arch_init(void)
+{
+	cpu_event_register_callback(kpc_cpu_callback, NULL);
+}
+
+boolean_t
+kpc_is_running_fixed(void)
+{
+	return (kpc_running_classes & KPC_CLASS_FIXED_MASK) == KPC_CLASS_FIXED_MASK;
+}
+
+boolean_t
+kpc_is_running_configurable(uint64_t pmc_mask)
+{
+	assert(kpc_popcount(pmc_mask) <= kpc_configurable_count());
+	return ((kpc_running_classes & KPC_CLASS_CONFIGURABLE_MASK) == KPC_CLASS_CONFIGURABLE_MASK) &&
+	       ((kpc_running_cfg_pmc_mask & pmc_mask) == pmc_mask);
+}
+
+uint32_t
+kpc_fixed_count(void)
+{
+	return KPC_ARM64_FIXED_COUNT;
+}
+
+uint32_t
+kpc_configurable_count(void)
+{
+	return KPC_ARM64_CONFIGURABLE_COUNT;
+}
+
+uint32_t
+kpc_fixed_config_count(void)
+{
+	return 0;
+}
+
+uint32_t
+kpc_configurable_config_count(uint64_t pmc_mask)
+{
+	assert(kpc_popcount(pmc_mask) <= kpc_configurable_count());
+	return kpc_popcount(pmc_mask);
+}
+
+int
+kpc_get_fixed_config(kpc_config_t *configv __unused)
+{
+	return 0;
+}
+
+uint64_t
+kpc_fixed_max(void)
+{
+	return UINT64_MAX;
+}
+
+uint64_t
+kpc_configurable_max(void)
+{
+	return UINT64_C(1) << 32;
+}
+
+uint32_t
+kpc_rawpmu_config_count(void)
+{
+	return 0;
+}
+
+int
+kpc_get_rawpmu_config(kpc_config_t *configv __unused)
+{
+	return 0;
+}
+
+uint32_t
+kpc_get_classes(void)
+{
+	return KPC_CLASS_FIXED_MASK | KPC_CLASS_CONFIGURABLE_MASK;
+}
+
+int
+kpc_get_pmu_version(void)
+{
+	return KPC_PMU_ARM_APPLE;
+}
+
+static uint32_t kpc_xcall_sync;
+static void
+kpc_set_running_xcall(void *vstate)
+{
+	struct kpc_running_remote *mp_config = (struct kpc_running_remote *)vstate;
+	assert(mp_config);
+
+	boolean_t enabled = ml_set_interrupts_enabled(FALSE);
+	const uint32_t cfg_count = kpc_configurable_count();
+	const uint32_t offset = kpc_fixed_count();
+
+	for (uint32_t i = 0; i < cfg_count; ++i) {
+		if (((1ULL << i) & mp_config->cfg_target_mask) == 0) {
+			continue;
+		}
+		if ((1ULL << i) & mp_config->cfg_state_mask) {
+			if (CONFIGURABLE_RELOAD(i) == 0) {
+				CONFIGURABLE_RELOAD(i) = SWITCH_PMUV3_IDLE_RELOAD_32;
+				switch_pmuv3_write_slot(offset + i, CONFIGURABLE_RELOAD(i));
+			}
+			pmuv3_enable_counter(offset + i);
+		} else {
+			pmuv3_disable_counter(offset + i);
+		}
+	}
+
+	ml_set_interrupts_enabled(enabled);
+
+	if (os_atomic_dec(&kpc_xcall_sync, relaxed) == 0) {
+		thread_wakeup((event_t)&kpc_xcall_sync);
+	}
+}
+
+static uint32_t kpc_xread_sync;
+static void
+kpc_get_curcpu_counters_xcall(void *args)
+{
+	struct kpc_get_counters_remote *handler = args;
+	assert(handler != NULL);
+	assert(handler->buf != NULL);
+
+	int offset = cpu_number() * handler->buf_stride;
+	int r = kpc_get_curcpu_counters(handler->classes, NULL, &handler->buf[offset]);
+	os_atomic_add(&(handler->nb_counters), r, relaxed);
+
+	if (os_atomic_dec(&kpc_xread_sync, relaxed) == 0) {
+		thread_wakeup((event_t)&kpc_xread_sync);
+	}
+}
+
+int
+kpc_get_all_cpus_counters(uint32_t classes, int *curcpu, uint64_t *buf)
+{
+	assert(buf != NULL);
+
+	int enabled = ml_set_interrupts_enabled(FALSE);
+	if (curcpu) {
+		*curcpu = cpu_number();
+	}
+
+	struct kpc_get_counters_remote hdl = {
+		.classes = classes,
+		.nb_counters = 0,
+		.buf = buf,
+		.buf_stride = kpc_get_counter_count(classes)
+	};
+
+	cpu_broadcast_xcall(&kpc_xread_sync, TRUE, kpc_get_curcpu_counters_xcall, &hdl);
+	int offset = hdl.nb_counters;
+	(void)ml_set_interrupts_enabled(enabled);
+	return offset;
+}
+
+int
+kpc_get_fixed_counters(uint64_t *counterv)
+{
+#if CONFIG_CPU_COUNTERS
+	mt_fixed_counts(counterv);
+	return 0;
+#else
+#pragma unused(counterv)
+	return ENOTSUP;
+#endif
+}
+
+int
+kpc_get_configurable_counters(uint64_t *counterv, uint64_t pmc_mask)
+{
+	const uint32_t cfg_count = kpc_configurable_count();
+	const uint32_t offset = kpc_fixed_count();
+
+	assert(counterv);
+
+	for (uint32_t i = 0; i < cfg_count; ++i) {
+		if (((1ULL << i) & pmc_mask) == 0) {
+			continue;
+		}
+		uint64_t raw = switch_pmuv3_read_slot(i + offset);
+		uint64_t base = CONFIGURABLE_RELOAD(i);
+		if (base == 0) {
+			base = SWITCH_PMUV3_IDLE_RELOAD_32;
+		}
+		*counterv++ = CONFIGURABLE_SHADOW(i) + switch_pmuv3_delta(i + offset, base, raw);
+	}
+
+	return 0;
+}
+
+int
+kpc_get_configurable_config(kpc_config_t *configv, uint64_t pmc_mask)
+{
+	const uint32_t cfg_count = kpc_configurable_count();
+	assert(configv);
+
+	for (uint32_t i = 0; i < cfg_count; ++i) {
+		if ((1ULL << i) & pmc_mask) {
+			*configv++ = pmuv3_cfgword_from_evtyper(switch_pmuv3_read_evtyper(i + 1U));
+		}
+	}
+	return 0;
+}
+
+static uint32_t kpc_config_sync;
+static void
+kpc_set_config_xcall(void *vmp_config __unused)
+{
+	boolean_t enabled = ml_set_interrupts_enabled(FALSE);
+	pmuv3_restore_control_regs();
+	ml_set_interrupts_enabled(enabled);
+
+	if (os_atomic_dec(&kpc_config_sync, relaxed) == 0) {
+		thread_wakeup((event_t)&kpc_config_sync);
+	}
+}
+
+static uint32_t kpc_reload_sync;
+static void
+kpc_set_reload_xcall(void *vmp_config)
+{
+	struct kpc_config_remote *mp_config = vmp_config;
+	const uint32_t offset = kpc_fixed_count();
+	uint64_t *new_period = mp_config->configv;
+
+	boolean_t enabled = ml_set_interrupts_enabled(FALSE);
+
+	if (mp_config->classes & KPC_CLASS_CONFIGURABLE_MASK) {
+		for (uint32_t i = 0; i < kpc_configurable_count(); ++i) {
+			if (((1ULL << i) & mp_config->pmc_mask) == 0) {
+				continue;
+			}
+			uint64_t base = CONFIGURABLE_RELOAD(i);
+			if (base == 0) {
+				base = SWITCH_PMUV3_IDLE_RELOAD_32;
+			}
+			CONFIGURABLE_SHADOW(i) += switch_pmuv3_delta(offset + i, base,
+			    switch_pmuv3_read_slot(offset + i));
+			uint64_t period = *new_period++;
+			uint64_t reload = switch_pmuv3_reload_value(offset + i, period);
+			CONFIGURABLE_RELOAD(i) = reload;
+			switch_pmuv3_write_slot(offset + i, reload);
+		}
+		__builtin_arm_isb(ISB_SY);
+	}
+
+	ml_set_interrupts_enabled(enabled);
+
+	if (os_atomic_dec(&kpc_reload_sync, relaxed) == 0) {
+		thread_wakeup((event_t)&kpc_reload_sync);
+	}
+}
+
+void
+kpc_pmi_handler(unsigned int ctr)
+{
+	assert(ctr >= KPC_ARM64_FIXED_COUNT && ctr < KPC_ARM64_PMC_COUNT);
+
+	uint64_t base = FIXED_RELOAD(ctr);
+	if (base == 0) {
+		base = SWITCH_PMUV3_IDLE_RELOAD_32;
+	}
+	uint64_t raw = switch_pmuv3_read_slot(ctr);
+	uint64_t delta = switch_pmuv3_delta(ctr, base, raw);
+
+	FIXED_SHADOW(ctr) += delta;
+	switch_pmuv3_write_slot(ctr, base);
+
+	if (FIXED_ACTIONID(ctr)) {
+		uintptr_t pc = 0;
+		bool kernel = true;
+		struct arm_saved_state *state = getCpuDatap()->cpu_int_state;
+		if (state) {
+			kernel = !PSR64_IS_USER(get_saved_state_cpsr(state));
+			pc = get_saved_state_pc(state);
+			if (kernel) {
+				pc = VM_KERNEL_UNSLIDE(pc);
+			}
+		}
+
+		uint32_t typer = switch_pmuv3_read_evtyper(ctr - 1U);
+		kperf_kpc_flags_t flags = kernel ? KPC_KERNEL_PC : 0;
+		if (switch_pmuv3_evtyper_counts_user(typer)) {
+			flags |= KPC_USER_COUNTING;
+		}
+		if (switch_pmuv3_evtyper_counts_kernel(typer)) {
+			flags |= KPC_KERNEL_COUNTING;
+		}
+		kpc_sample_kperf(FIXED_ACTIONID(ctr), ctr, switch_pmuv3_evtyper_event(typer),
+		    FIXED_SHADOW(ctr), pc, flags);
+	}
+}
+
+int
+kpc_set_running_arch(struct kpc_running_remote *mp_config)
+{
+	assert(mp_config != NULL);
+
+	cpu_broadcast_xcall(&kpc_xcall_sync, TRUE, kpc_set_running_xcall, mp_config);
+	kpc_running_cfg_pmc_mask = mp_config->cfg_state_mask;
+	kpc_running_classes = mp_config->classes;
+	kpc_configured = 1;
+	return 0;
+}
+
+int
+kpc_set_period_arch(struct kpc_config_remote *mp_config)
+{
+	assert(mp_config);
+
+	cpu_broadcast_xcall(&kpc_reload_sync, TRUE, kpc_set_reload_xcall, mp_config);
+	kpc_configured = 1;
+	return 0;
+}
+
+int
+kpc_set_config_arch(struct kpc_config_remote *mp_config)
+{
+	assert(mp_config);
+	assert(mp_config->configv);
+
+	uint64_t cfg_pmc_mask = mp_config->pmc_mask;
+	unsigned int cfg_count = kpc_configurable_count();
+	unsigned int config_index = 0;
+
+	if (mp_config->allow_list) {
+		for (uint32_t i = 0; i < cfg_count; ++i) {
+			if (((1ULL << i) & cfg_pmc_mask) == 0) {
+				continue;
+			}
+			uint64_t config_value = mp_config->configv[config_index++];
+			if (!cpc_event_allowed(CPC_HW_CPMU, config_value & SWITCH_PMUV3_EVENT_MASK)) {
+				return EPERM;
+			}
+		}
+	}
+
+	config_index = 0;
+	for (uint32_t i = 0; i < cfg_count; ++i) {
+		if (((1ULL << i) & cfg_pmc_mask) == 0) {
+			continue;
+		}
+		saved_evtyper[i] = pmuv3_evtyper_from_cfgword(mp_config->configv[config_index++]);
+	}
+
+	cpu_broadcast_xcall(&kpc_config_sync, TRUE, kpc_set_config_xcall, mp_config);
+	kpc_configured = 1;
+	return 0;
+}
+
+void
+kpc_idle(void)
+{
+	if (kpc_configured) {
+		pmuv3_save_regs();
+	}
+}
+
+void
+kpc_idle_exit(void)
+{
+	if (kpc_configured) {
+		pmuv3_restore_regs();
+	}
+}
+
+int
+kpc_set_sw_inc(uint32_t mask __unused)
+{
+	return ENOTSUP;
+}
+
 #else /* APPLE_ARM64_ARCH_FAMILY */
 
 /* We don't currently support non-Apple arm64 PMU configurations like PMUv3 */

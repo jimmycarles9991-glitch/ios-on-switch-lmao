@@ -19,7 +19,7 @@ using switch_ios::test::SourceText;
 TEST(Host1xFlipDisplay, ItIsDebugOnlyOnTheDisplaysOwnChannel)
 {
     const std::string trial = SourceText("../SwitchHost1xFlipDisplay.h");
-    const size_t gate = trial.find("#if SWITCH_FRAME_TIMELINE");
+    const size_t gate = trial.find("#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)");
     ASSERT_NE(gate, std::string::npos);
     EXPECT_LT(gate, trial.find("int host1xFlipStart("));
     EXPECT_LT(trial.find("#else"), trial.rfind("void host1xFlipAbort(const char *)\n{}"));
@@ -41,6 +41,33 @@ TEST(Host1xFlipDisplay, ItIsDebugOnlyOnTheDisplaysOwnChannel)
 
     const std::string probe = SourceText("../SwitchDcHost1xClassProbe.h");
     EXPECT_NE(probe.find("kDcClassChannel = TEGRA_HOST1X_CHANNEL_DISPLAY"), std::string::npos);
+}
+
+// The run holds the probes' shared syncpoints from its start to its end, and lets them go on a start it refuses.
+TEST(Host1xFlipDisplay, ItHoldsTheProbesSharedSyncpointsForItsRunAlone)
+{
+    const std::string trial = SourceText("../SwitchHost1xFlipDisplay.h");
+    EXPECT_EQ(CodeText(trial).count("tegra_host1x_syncpt_alloc"), 0u);
+    const CodeText start = Block(trial, "int host1xFlipStart(uint32_t request)");
+    EXPECT_TRUE(start.has("else if (switch_host1x_probe_syncpts_claim(host1xFlip.syncpts) != TEGRA_HOST1X_OK) why = "
+                          "\"syncpoints\"; else claimed = true;"));
+    EXPECT_TRUE(start.has("if (why) { if (claimed) switch_host1x_probe_syncpts_release(); "
+                          "__atomic_store_n(&dcClassBusy, false, __ATOMIC_RELEASE); return EAGAIN; }"));
+    EXPECT_EQ(start.count("switch_host1x_probe_syncpts_release()"), 1u);
+    const CodeText finished = Block(trial, "void host1xFlipFinished()");
+    EXPECT_TRUE(finished.before("switch_host1x_probe_syncpts_release();",
+                                "__atomic_store_n(&dcClassBusy, false, __ATOMIC_RELEASE);"));
+}
+
+TEST(Host1xFlipDisplay, OnlyTheProbesEntitlementStartsARun)
+{
+    const CodeText write =
+        Block(SourceText("../SwitchHost1xFlipDisplay.h"),
+              "static int host1xFlipSysctl(struct sysctl_oid *, void *, int, struct sysctl_req *req)");
+    EXPECT_TRUE(
+        write.has("if (req->newptr) { if (!switch_task_entitled(current_task(), SWITCH_GPU_PROBES_ENTITLEMENT)) "
+                  "return EPERM;"));
+    EXPECT_TRUE(write.before("SWITCH_GPU_PROBES_ENTITLEMENT", "SYSCTL_IN("));
 }
 
 TEST(Host1xFlipDisplay, NothingElseWritesWindowAOrARequestWhileItRuns)

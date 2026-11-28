@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// Turned targets over planes whose rows overlap, judged inside one 32x32 frame tile (gpu/TurnedOverlapTiles.swift),

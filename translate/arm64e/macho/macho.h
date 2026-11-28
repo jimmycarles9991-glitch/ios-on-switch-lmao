@@ -36,6 +36,10 @@ extern "C" {
 #define A64X_LC_DYLD_CHAINED_FIXUPS   (0x34u | A64X_LC_REQ_DYLD)
 #define A64X_LC_FILESET_ENTRY         (0x35u | A64X_LC_REQ_DYLD)
 #define A64X_VM_PROT_EXECUTE          4u
+#define A64X_SECTION_TYPE             0x000000FFu
+#define A64X_S_REGULAR                0x00000000u
+#define A64X_S_CSTRING_LITERALS       0x00000002u
+#define A64X_S_ATTR_DEBUG             0x02000000u
 #define A64X_S_ATTR_PURE_INSTRUCTIONS 0x80000000u
 #define A64X_S_ATTR_SOME_INSTRUCTIONS 0x00000400u
 /* The marker of an image built for the A57 (-mcpu=cortex-a57, no PAC, no LSE): mapped as is, never scanned. */

@@ -2,6 +2,7 @@ import CoreVideo
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import IOSurface
 import Metal
 
@@ -11,27 +12,34 @@ import Metal
 /// and every command buffer on the driver. The driver renders each pass into a memoryless stand-in and draws both planes from it with the
 /// pack's store states (device log: "SwitchMetal: YCbCr target stored on the GPU"). wrong_luma_ and wrong_chroma_ split each
 /// target's count by plane.
-struct YcbcrTargetTest: HWTest {
-    let id = "gpu.ycbcr_target"
-    let name = "Render passes into two-plane YCbCr surfaces"
-    let subsystem = Subsystem.metal
+public struct YcbcrTargetTest: HWTest {
+    public let id = "gpu.ycbcr_target"
+    public let name = "Render passes into two-plane YCbCr surfaces"
+    public let subsystem = Subsystem.metal
 
-    struct Target {
-        let format: UInt
-        let fourcc: OSType
+    public init() {}
 
-        var label: String {
+    public struct Target {
+        public let format: UInt
+        public let fourcc: OSType
+
+        public init(format: UInt, fourcc: OSType) {
+            self.format = format
+            self.fourcc = fourcc
+        }
+
+        public var label: String {
             let code = String(bytes: withUnsafeBytes(of: fourcc.bigEndian) { Array($0) }, encoding: .ascii) ?? "?"
             return "\(format) over '\(code)'"
         }
 
-        var bits: Int { [500, 502, 503, 520, 522, 523, 540, 541].contains(format) ? 8 : 10 }
-        var tenBit: Bool { bits == 10 }
-        var converted: Bool { (500 ... 527).contains(format) }
-        var srgb: Bool { (520 ... 527).contains(format) }
-        var halvedAcross: Bool { ![503, 507, 523, 527, 545].contains(format) }
-        var halvedDown: Bool { [500, 505, 520, 525, 540, 543].contains(format) }
-        var full: Bool {
+        public var bits: Int { [500, 502, 503, 520, 522, 523, 540, 541].contains(format) ? 8 : 10 }
+        public var tenBit: Bool { bits == 10 }
+        public var converted: Bool { (500 ... 527).contains(format) }
+        public var srgb: Bool { (520 ... 527).contains(format) }
+        public var halvedAcross: Bool { ![503, 507, 523, 527, 545].contains(format) }
+        public var halvedDown: Bool { [500, 505, 520, 525, 540, 543].contains(format) }
+        public var full: Bool {
             [
                 kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVPixelFormatType_422YpCbCr8BiPlanarFullRange,
                 kCVPixelFormatType_444YpCbCr8BiPlanarFullRange, kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
@@ -40,7 +48,7 @@ struct YcbcrTargetTest: HWTest {
         }
     }
 
-    static let targets: [Target] = [
+    public static let targets: [Target] = [
         Target(format: 540, fourcc: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
         Target(format: 540, fourcc: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
         Target(format: 541, fourcc: kCVPixelFormatType_422YpCbCr8BiPlanarVideoRange),
@@ -63,10 +71,10 @@ struct YcbcrTargetTest: HWTest {
         Target(format: 526, fourcc: kCVPixelFormatType_422YpCbCr10BiPlanarFullRange),
         Target(format: 527, fourcc: kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange),
     ]
-    static let width = 128, height = 64
-    static let clear = MTLClearColor(red: 0.70196, green: 0.501960784, blue: 0.17058829, alpha: 1)
+    public static let width = 128, height = 64
+    public static let clear = MTLClearColor(red: 0.70196, green: 0.501960784, blue: 0.17058829, alpha: 1)
 
-    func run(_ context: TestContext) async throws -> Outcome {
+    public func run(_ context: TestContext) async throws -> Outcome {
         let probe = try GPU.make()
         guard GM20BFacade.kind(of: probe.device) == "gm20b" else {
             return .skip("the default device is not the facade (\(GM20BFacade.kind(of: probe.device)))")
@@ -156,13 +164,13 @@ struct YcbcrTargetTest: HWTest {
 
     /// The planes Metal stores: plane 0's codes, then plane 1's Cb, Cr pairs, each a 10-bit target's in its word's high
     /// bits.
-    static func expected(_ target: Target, _ texels: [SIMD4<Float>], _ source: YcbcrStore.Source) -> [[UInt16]] {
+    public static func expected(_ target: Target, _ texels: [SIMD4<Float>], _ source: YcbcrStore.Source) -> [[UInt16]] {
         let shift: UInt16 = target.tenBit ? 6 : 0
         return codes(target, texels, source).map { $0.map { $0 << shift } }
     }
 
     /// The codes of the planes Metal stores.
-    static func codes(_ target: Target, _ texels: [SIMD4<Float>], _ source: YcbcrStore.Source) -> [[UInt16]] {
+    public static func codes(_ target: Target, _ texels: [SIMD4<Float>], _ source: YcbcrStore.Source) -> [[UInt16]] {
         let (luma, chroma) =
             target.converted
                 ? YcbcrStore.converted(
@@ -177,7 +185,7 @@ struct YcbcrTargetTest: HWTest {
     }
 
     /// Each plane's codes that differ from `planes`
-    static func mismatches(_ buffer: CVPixelBuffer, _ planes: [[UInt16]], wide: Bool) -> [Int] {
+    public static func mismatches(_ buffer: CVPixelBuffer, _ planes: [[UInt16]], wide: Bool) -> [Int] {
         CVPixelBufferLockBaseAddress(buffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
         var wrong = [0, 0]
@@ -205,7 +213,7 @@ struct YcbcrTargetTest: HWTest {
     }
 
     /// Bytes no pass wrote, so a store that missed a texel shows.
-    static func scribble(_ buffer: CVPixelBuffer, seed: UInt8) {
+    public static func scribble(_ buffer: CVPixelBuffer, seed: UInt8) {
         CVPixelBufferLockBaseAddress(buffer, [])
         defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
         for plane in 0 ..< CVPixelBufferGetPlaneCount(buffer) {
@@ -217,7 +225,7 @@ struct YcbcrTargetTest: HWTest {
     }
 
     /// Floats beside the half midpoints and the 1/255 and 1/1023 ties, uniform ones, out of range and not numbers.
-    static func values(_ count: Int) -> [SIMD4<Float>] {
+    public static func values(_ count: Int) -> [SIMD4<Float>] {
         var state: UInt64 = 540
         func next() -> UInt64 {
             state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407

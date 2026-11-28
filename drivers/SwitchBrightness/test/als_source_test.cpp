@@ -200,16 +200,63 @@ TEST(SwitchALSSource, WhatCoreBrightnessReads)
     EXPECT_THAT(backlight, HasSubstr("setProperty(\"new-backlight-architecture\", kOSBooleanTrue);"));
 }
 
-// CoreBrightness's ReportInterval reaches the light device's Report Interval feature: the sensor takes it as its sample
-// period, held at a whole conversion, and the device no longer refuses the report.
+// CoreBrightness's ReportInterval reaches the light device's Report Interval feature: 0 powers down the sensor,
+// nonzero runs the single-workloop state machine at the clamped interval with tightened leeway and deadband.
 TEST(SwitchALSSource, ReportIntervalPacesTheSamples)
 {
     const std::string als = SourceText("../SwitchALS.cpp");
     EXPECT_THAT(als, HasSubstr("switch_hid_set_feature_handler(hid, &SwitchALS::reportIntervalSet, this);"));
-    EXPECT_THAT(als, HasSubstr("sender->setTimeoutUS(__atomic_load_n(&self->sampleUS, __ATOMIC_RELAXED));"));
-    EXPECT_THAT(als, HasSubstr("asked > kSampleUS ? asked : kSampleUS"));
+    EXPECT_THAT(als, HasSubstr("uint32_t sampleUS = 0;"));
+    EXPECT_THAT(als, HasSubstr("sender->setTimeout(kIOTimeOptionsWithLeeway, intervalAbs, leewayAbs);"));
+    EXPECT_THAT(als, HasSubstr("leewayUS(intervalUS)"));
+    EXPECT_THAT(als, HasSubstr("shouldReport(hasDispatched, lastLevel, level)"));
+    EXPECT_THAT(als, HasSubstr("writeRegister(RegControl, 0)"));
+    EXPECT_THAT(als, HasSubstr("self->kick->interruptOccurred(nullptr, nullptr, 0);"));
+    EXPECT_THAT(Body(als, "void SwitchALS::ticked("), testing::Not(HasSubstr("__atomic_")));
     const std::string hid = SourceText("../../SwitchTouch/SwitchHIDDevice.cpp");
     EXPECT_THAT(hid, HasSubstr("switch_refusal_k(switch_refusal_key_with(switch_refusal_key(\"hid\", \"set-report\")"));
+}
+
+TEST(SwitchALSSource, CopyEventHandlerIsNonBlockingAndWired)
+{
+    const std::string als = SourceText("../SwitchALS.cpp");
+    EXPECT_THAT(als, HasSubstr("switch_hid_set_light_copy_handler(hid, &SwitchALS::copyEvent, this);"));
+    const std::string copy = Body(als, "OSObject *SwitchALS::copyEvent(");
+    ASSERT_FALSE(copy.empty());
+    for (const char *forbidden : {"tegra_i2c_", "writeRegister", "IOSleep", "IODelay", "runAction"})
+        EXPECT_THAT(copy, testing::Not(HasSubstr(forbidden))) << forbidden;
+}
+
+TEST(SwitchALSSource, SharesWorkLoopWithHidDevice)
+{
+    const std::string als = SourceText("../SwitchALS.cpp");
+    const std::string start = Body(als, "bool SwitchALS::start(");
+    ASSERT_FALSE(start.empty());
+    const size_t loopAt = start.find("loop = IOWorkLoop::workLoop();");
+    const size_t createAt = start.find("switch_hid_create(kSwitchHIDLight, loop)");
+    ASSERT_NE(loopAt, std::string::npos);
+    ASSERT_NE(createAt, std::string::npos);
+    EXPECT_EQ(Count(start, "switch_hid_create("), 1u);
+    EXPECT_GT(createAt, loopAt);
+
+    const std::string interval = Body(als, "void SwitchALS::reportIntervalSet(");
+    ASSERT_FALSE(interval.empty());
+    EXPECT_THAT(interval, HasSubstr("self->kick->interruptOccurred("));
+    for (const char *forbidden : {"tegra_i2c_", "writeRegister", "IOSleep", "IODelay", "runAction"})
+        EXPECT_THAT(interval, testing::Not(HasSubstr(forbidden))) << forbidden;
+}
+
+TEST(SwitchALSSource, BacklightUsesLockFreeSlotAndRealDeadlines)
+{
+    const std::string backlight = SourceText("../SwitchBacklight.cpp");
+    EXPECT_THAT(backlight, testing::Not(HasSubstr("requestLock")));
+    EXPECT_THAT(backlight, testing::Not(HasSubstr("setTimeoutMS(1)")));
+    EXPECT_THAT(backlight, testing::Not(HasSubstr("setTimeoutUS(1)")));
+    EXPECT_THAT(backlight, HasSubstr("kickSource->interruptOccurred("));
+    EXPECT_THAT(backlight, HasSubstr("nextRampDeadline("));
+    EXPECT_THAT(backlight, HasSubstr("!__atomic_load_n(&gSawNits, __ATOMIC_RELAXED)"));
+    EXPECT_THAT(backlight, HasSubstr("!__atomic_load_n(&gSawNitsCap, __ATOMIC_RELAXED)"));
+    EXPECT_THAT(backlight, HasSubstr("!__atomic_load_n(&gSawDisplay, __ATOMIC_RELAXED)"));
 }
 
 TEST(SwitchALSSource, DisplayCreateWithIDHasWhatItNeedsBeforeBacklightControl)

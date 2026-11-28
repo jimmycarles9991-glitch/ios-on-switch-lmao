@@ -92,6 +92,7 @@ struct Display {
     } probe, planeProbe;
 
     bool kickDeferred = false, tapeSettle = false, probeRequest = false, hwSuspended = false, scanoutStopped = false;
+    bool headHeldForTime = false;
 
     struct {
         bool wanted = false;
@@ -131,6 +132,22 @@ TEST(DisplayRetirement, DeferredSwapGoesAgainAtAnIdleFrameEndAndOnlyThere)
     display.kickAtIdleFrameEnd();
     EXPECT_EQ(display.kicks, 1u);
     EXPECT_FALSE(display.kickDeferred);
+}
+
+// A head held only for its requested presentation waits for no flip or overlay latch: its stamp names this frame end.
+TEST(DisplayRetirement, ASwapHeldForItsTimeGoesAtEveryFrameEnd)
+{
+    Display display;
+    display.kickDeferred = display.headHeldForTime = true;
+    display.ring.pending = 0;
+    display.planeLatch.armed = 1;
+    display.kickAtIdleFrameEnd();
+    EXPECT_EQ(display.kicks, 1u);
+    EXPECT_FALSE(display.kickDeferred);
+    display.kickDeferred = true;
+    display.probe.on = true;
+    display.kickAtIdleFrameEnd();
+    EXPECT_EQ(display.kicks, 1u);
 }
 
 TEST(DisplayRetirement, FirstUiLatchWaitsForPairedOverlayThenCompletesWithoutAnotherUiFrame)

@@ -285,6 +285,16 @@ public:
         return GeometryAnalysis(g, std::move(snapshot), 0);
     }
 
+    void clear()
+    {
+        for (Entry &entry : entries_) {
+            entry.revision = 0;
+            if (entry.snapshot)
+                entry.snapshot.reset();
+        }
+        next_ = 0;
+    }
+
 private:
     struct Entry {
         uint64_t revision = 0;

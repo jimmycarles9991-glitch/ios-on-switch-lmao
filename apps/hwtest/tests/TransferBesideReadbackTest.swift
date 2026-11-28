@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
+import HWTestKit
 import Metal
 
 /// Texture transfers wait for the GPU without their lock (gpu/TransferBesideReadback.swift): while another thread reads

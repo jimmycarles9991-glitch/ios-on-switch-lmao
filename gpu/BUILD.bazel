@@ -4,6 +4,7 @@
 #   bazel build //gpu:bundle        what deploy stages: base + the shader seed and the pack (//gpu/seed, which reads
 #                                   the IPSW's Metal libraries), as a manifest over their outputs in deploy's runfiles
 #   bazel build //gpu:trustcache    only the trust-cache module the boot package appends (both CDHashes)
+#   bazel build //gpu:stage_tree    //gpu:bundle's files copied out at their Data volume paths, with its gpu.stage
 #   bazel build //gpu:plugin --output_groups=debug   the plugin's dSYM
 #
 # Inputs: m2v's translator (third_party/m2v: steelbrain/metal2vulkan 720ef1ce and our patches as commits), its crates.io
@@ -184,6 +185,7 @@ PLUGIN_HDRS = [
     "//drivers/TegraGM20B:TegraGM20BGrPreemptABI.h",
     "//drivers/TegraGM20B:TegraGM20BHost.h",
     "//drivers/TegraGM20B:TegraGM20BPathsABI.h",
+    "//drivers/TegraGM20B:TegraGM20BSchedABI.h",
     "//drivers/TegraGM20B:TegraGM20BSchedPolicy.h",
     "//drivers/TegraGM20B:TegraGM20BVolatileABI.h",
     "//drivers/TegraGM20B:TegraGM20BZcullABI.h",
@@ -210,17 +212,18 @@ PLUGIN_CC_SRCS = [
     GM20B_METAL + ":device_stamps.cpp",
     GM20B_METAL + ":draw.cpp",
     GM20B_METAL + ":draw_prepare.cpp",
-    GM20B_METAL + ":draw_probes.cpp",
     GM20B_METAL + ":draw_times.cpp",
     GM20B_METAL + ":draw_inputs.cpp",
     GM20B_METAL + ":draw_shader_tests.cpp",
     GM20B_METAL + ":memory.cpp",
+    GM20B_METAL + ":scrubs.cpp",
     GM20B_METAL + ":parked_arena.cpp",
     GM20B_METAL + ":parked_chunks.cpp",
     GM20B_METAL + ":pass_backings.cpp",
     GM20B_METAL + ":pass_begin.cpp",
     GM20B_METAL + ":pass_clears.cpp",
     GM20B_METAL + ":pass_end.cpp",
+    GM20B_METAL + ":nvn_probes.cpp",
     GM20B_METAL + ":pipelines.cpp",
     GM20B_METAL + ":samplers.cpp",
     GM20B_METAL + ":sparse_window.cpp",
@@ -289,6 +292,7 @@ PLUGIN_CC_SRCS = [
     GM20B_METAL + ":semantic_resources.cpp",
     GM20B_METAL + ":semantic_setters.cpp",
     GM20B_METAL + ":compile_request.cpp",
+    GM20B_METAL + ":store_key.cpp",
     GM20B_METAL + ":remote.cpp",
     GM20B_METAL + ":compiler_cc_srcs",
 ]
@@ -365,6 +369,13 @@ gpu_stage(
     base = ":base",
     raw = "//gpu/seed:pack",
     seed = "//gpu/seed:seed",
+    tags = ["manual"],
+)
+
+filegroup(
+    name = "stage_tree",
+    srcs = [":bundle"],
+    output_group = "tree",
     tags = ["manual"],
 )
 

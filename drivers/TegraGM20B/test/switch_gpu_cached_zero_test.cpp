@@ -343,6 +343,24 @@ TEST_F(CachedZero, ExactClearBecomesReadyOnlyAfterExternalFenceAndDeferredCallba
 	}));
 }
 
+// A write-combined spare has no cacheable alias: its zero takes no CPU cache operation before the fill or at its
+// retirement (review-memory3: two DC IVAC passes over every byte, about 786k for 24 MiB, one at kernel priority)
+TEST_F(CachedZero, AZeroWithNoCacheableAliasTakesNoCacheOperation)
+{
+	Allocation a;
+	const unsigned before = cacheOps;
+	ASSERT_EQ(switch_gpu_cached_zero(a.pages.data(), uint32_t(a.pages.size()), nullptr,
+					 &a.mapping, Allocation::complete, &a),
+		  0);
+	finish();
+	EXPECT_EQ(a.callbacks, 1u);
+	EXPECT_EQ(a.result, 0);
+	EXPECT_EQ(cacheOps, before);
+	EXPECT_TRUE(std::all_of(a.bytes.begin(), a.bytes.end(), [](auto b) {
+		return b == 0;
+	}));
+}
+
 TEST_F(CachedZero, WarmReuseKeepsPhysicalMappingAndIndependentPushSlot)
 {
 	Allocation a, b;

@@ -13,7 +13,8 @@ load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//kernel/rules:inputs.bzl", "tool_output")
 load(":defs.bzl", "boot_package")
-load(":overlay.bzl", "BOOTSTRAP_PACKAGES", "OVERLAY_BINARIES")
+load(":hwtest_package_test.bzl", "hwtest_package_tests")
+load(":overlay.bzl", "BOOTSTRAP_DEVELOPMENT_PACKAGES", "BOOTSTRAP_PACKAGES", "OVERLAY_BINARIES")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -53,8 +54,8 @@ alias(
     }),
 )
 
-# fetchform and the hardware test apps are a debug build's, so never in a package composed from the release (release
-# builds), which also keeps rules_apple, Swift and the Metal toolchain out of the Xcode-free image path.
+# Debug-only tools and development packages stay out of prebuilt release packages, keeping Xcode and Swift out of the
+# Xcode-free image path.
 selects.config_setting_group(
     name = "local_debug",
     match_all = [
@@ -63,12 +64,21 @@ selects.config_setting_group(
     ],
 )
 
-# Each IPSW kind's debug image carries the hardware test app built for its iOS version (apps/hwtest/BUILD.bazel).
+# SwitchHWTest and switch-texpeer are enabled by default in local debug builds and disabled in release unless opted in
+# (--//bazel:hwtest=true or --config=hwtest).
+selects.config_setting_group(
+    name = "local_hwtest",
+    match_all = [
+        "//bazel:hwtest_on",
+        "//install:from_local",
+    ],
+)
+
 [
     selects.config_setting_group(
-        name = "local_debug_" + kind,
+        name = "local_hwtest_" + kind,
         match_all = [
-            "//bazel:debug",
+            "//bazel:hwtest_on",
             "//install:from_local",
             "//ipsw:" + kind,
         ],
@@ -208,12 +218,16 @@ boot_package(
     } | select({
         ":local_debug": {
             "//drivers/TegraGM20BMetal:fetchform": "build/switch-gpu/fetchform",
+        },
+        "//conditions:default": {},
+    }) | select({
+        ":local_hwtest": {
             "//apps/hwtest:switch-texpeer": "build/switch-hwtest/switch-texpeer",
         },
         "//conditions:default": {},
     }) | select({
-        ":local_debug_21H461": {"//apps/hwtest:SwitchHWTest17": "build/switch-hwtest/SwitchHWTest.ipa"},
-        ":local_debug_24B119": {
+        ":local_hwtest_21H461": {"//apps/hwtest:SwitchHWTest17": "build/switch-hwtest/SwitchHWTest.ipa"},
+        ":local_hwtest_24B119": {
             "//apps/hwtest:SwitchHWTest27": "build/switch-hwtest/SwitchHWTest.ipa",
             "//apps/hwtest:SwitchHWTest27e": "build/switch-hwtest/SwitchHWTest27e.ipa",
         },
@@ -230,6 +244,9 @@ boot_package(
             "//bootstrap:managed_" + package: source
             for package, source in BOOTSTRAP_PACKAGES.items()
         },
+    }) | select({
+        ":local_debug": BOOTSTRAP_DEVELOPMENT_PACKAGES,
+        "//conditions:default": {},
     }) | select({
         "//ipsw:21H461": {
             "//bazel/pinned:overlay/wallpaper-1x/21H461/7570.iPadOS_17_Flat.plist": "build/wallpaper-1x/21H461/7570.iPadOS_17_Flat.plist",
@@ -282,6 +299,13 @@ filegroup(
     output_group = "constants",
 )
 
+# The device tree the boot package hands the kernel (kits/SwitchPretranslated's test parses its /chosen update list).
+filegroup(
+    name = "package_adt",
+    srcs = [":package"],
+    output_group = "adt",
+)
+
 # The staged kernel window decodes (lz4 -d, block by block from the table the loader compiles in) to exactly the image
 # the layout made: the compression changes the staged bytes, never the kernel the loader copies into place.
 filegroup(
@@ -304,6 +328,8 @@ py_test(
     ],
     deps = ["@rules_python//python/runfiles"],
 )
+
+hwtest_package_tests(name = "hwtest_package_test")
 
 # bazel run //boot:snapshot -- <name>: this build's boot entry and Metal bundle as <state>/lkg/<name> (<state>: ~/Library/
 # Application Support/switch-ios, or $SWITCH_HOME), for rollback or to deploy exactly that build later with //deploy:sd
@@ -328,6 +354,7 @@ py_binary(
     deps = [
         "//tools/common:paths",
         "//tools/deploy:lib",
+        "//tools/gpu:stage_format",
     ],
 )
 

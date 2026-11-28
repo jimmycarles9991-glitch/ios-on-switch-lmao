@@ -112,7 +112,10 @@ bool gm20bClampCopiedTexture(gm20b::CommandBuffer *rc, gm20b::BlitEncoder *&be, 
         gm20b::Texture *scratch = scratchOf(rc, be, (__bridge const void *)owner, w, h, why);
         if (!scratch)
             return false;
-        be->copyTexels(image, x, y, z, *scratch, 0, 0, 0, w, h);
+        if (!be->copyTexels(image, x, y, z, *scratch, 0, 0, 0, w, h)) {
+            *why = "no staging memory for an overlapping texture copy";
+            return false;
+        }
         if (!drawClamped(rc, be, state, target, *scratch, x, y, w, h, why))
             return false;
     }

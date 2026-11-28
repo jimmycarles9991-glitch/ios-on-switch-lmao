@@ -4,10 +4,9 @@
  *  - a64x_rewrite1(): the 4-byte-for-4-byte rewrites. Pointer authentication is the identity (user's rule):
  *    nothing is ever signed, every authentication succeeds, PACGA yields 0.
  *  - a64x_stub(): out-of-line ARMv8.0 code for an instruction that needs more than one word (LSE atomics, far
- *    LDRA). The site becomes `B stub`; the stub ends with `B site+4`. An LSE stub is an exclusive loop with the
- *    instruction's acquire (LDAXR) and release (STLXR) bits, plus a DMB ISH where it has both (emit_full_barrier).
- *  - a64x_dead_regs(): which X registers are provably dead at a site (written before read on the straight-line
- *    path after it), so a stub can use them instead of spilling.
+ *    LDRA). The site becomes `B stub`; the stub ends with `B site+4` (or `RET` when shared). An LSE stub is an
+ *    exclusive loop with the instruction's acquire (LDAXR) and release (STLXR) bits, plus a DMB ISH where it has both
+ *    (emit_full_barrier).
  *
  * Darwin arm64 lets leaf code use 128 bytes below SP (red zone), so a stub that must spill first moves SP down by
  * 128 + 16*n and stores above that.
@@ -181,6 +180,45 @@ bool a64x_rewrite1_kernel(uint32_t w, uint32_t *out)
     return false;
 }
 
+void a64x_decode_ldra(uint32_t w, int32_t *out_imm, bool *out_wb)
+{
+    int32_t imm = (int32_t)((BIT(w, 22) << 9) | BITS(w, 20, 12));
+    if (imm & 0x200) {
+        imm -= 0x400;
+    }
+    *out_imm = imm * 8;
+    *out_wb = BIT(w, 11) != 0;
+}
+
+bool a64x_eval_jscvt(uint64_t bits, uint32_t *out_w)
+{
+    uint64_t sign = bits >> 63;
+    int32_t exp = (int32_t)((bits >> 52) & 0x7FFu) - 1023;
+    uint64_t frac = bits & ((1ull << 52) - 1);
+    if (exp < 0) {
+        *out_w = 0;
+        return bits == 0;
+    }
+    if (exp >= 84) {
+        *out_w = 0;
+        return false;
+    }
+    uint64_t mant = (1ull << 52) | frac;
+    uint32_t u;
+    bool exact;
+    if (exp < 52) {
+        int32_t rshift = 52 - exp;
+        bool has_frac = (mant & ((1ull << rshift) - 1)) != 0;
+        u = (uint32_t)(mant >> rshift);
+        exact = (exp < 31 && !has_frac) || bits == 0xC1E0000000000000ull;
+    } else {
+        u = ((uint32_t)mant) << (exp - 52);
+        exact = false;
+    }
+    *out_w = sign ? (uint32_t)(0u - u) : u;
+    return exact;
+}
+
 bool a64x_rewrite1(uint32_t w, uint32_t *out)
 {
     enum a64x_class c = a64x_classify(w);
@@ -204,12 +242,10 @@ bool a64x_rewrite1(uint32_t w, uint32_t *out)
         return true;
     case A64X_PAC_LDRA: {
         /* LDRAA/LDRAB Xt, [Xn, #simm10*8]{!}: the address is Xn + offset, unauthenticated */
-        int32_t imm = (int32_t)((BIT(w, 22) << 9) | BITS(w, 20, 12));
-        if (imm & 0x200) {
-            imm -= 0x400;
-        }
-        imm *= 8;
-        if (BIT(w, 11)) {
+        int32_t imm = 0;
+        bool wb = false;
+        a64x_decode_ldra(w, &imm, &wb);
+        if (wb) {
             if (imm >= -256 && imm <= 255) {
                 *out = 0xF8400C00u | (((uint32_t)imm & 0x1FF) << 12) | (rn << 5) | rt; /* LDR Xt, [Xn, #imm]! */
                 return true;
@@ -237,6 +273,31 @@ bool a64x_rewrite1(uint32_t w, uint32_t *out)
     case A64X_DPB:
         *out = 0xD50B7A20u | rt; /* DC CVAP -> DC CVAC */
         return true;
+    case A64X_FP16:
+        if ((w & 0x7FFFFC00u) == 0x1EE60000u) {
+            *out = 0x0E023C00u | (rn << 5) | rt;
+            return true;
+        }
+        if ((w & 0xFFFFFC00u) == 0x1EE04000u) {
+            *out = 0x5E020400u | (rn << 5) | rt;
+            return true;
+        }
+        if ((w & 0xBFFFFC00u) == 0x0EF8F800u && rt == rn) {
+            *out = 0x2F04B400u | (BIT(w, 30) << 30) | rt;
+            return true;
+        }
+        if ((w & 0xBFF8FC00u) == 0x0F00FC00u) {
+            uint32_t imm8 = (BITS(w, 18, 16) << 5) | BITS(w, 9, 5);
+            uint32_t b6 = BIT(imm8, 6);
+            uint32_t bits = (BIT(imm8, 7) << 15) | ((b6 ^ 1) << 14) | ((b6 ? 3u : 0u) << 12) |
+                            (BITS(imm8, 5, 4) << 10) | (BITS(imm8, 3, 0) << 6);
+            if ((bits & 0xFFu) == 0) {
+                uint32_t hi = bits >> 8;
+                *out = 0x0F00A400u | (BIT(w, 30) << 30) | (BITS(hi, 7, 5) << 16) | (BITS(hi, 4, 0) << 5) | rt;
+                return true;
+            }
+        }
+        return false;
     default:
         return false;
     }
@@ -408,31 +469,6 @@ uint32_t a64x_stub_gprs(uint32_t w)
 bool a64x_bl_site_ok(uint32_t orig, uint32_t site_word)
 {
     return (site_word & 0xFC000000u) != 0x94000000u || !(a64x_stub_gprs(orig) & XMASK(30));
-}
-
-uint32_t a64x_dead_regs(const uint32_t *next, int n)
-{
-    uint32_t dead = 0, read = 0;
-    for (int i = 0; i < n; i++) {
-        uint32_t w = next[i], r, wr, c;
-        /* calls: x16/x17 can be clobbered by any stub or veneer the call goes through */
-        if ((w & 0xFC000000u) == 0x94000000u || (w & 0xFFFFFC1Fu) == 0xD63F0000u ||
-            (a64x_rewrite1(w, &c) && (c & 0xFFFFFC1Fu) == 0xD63F0000u)) {
-            dead |= (XMASK(16) | XMASK(17)) & ~read;
-            break;
-        }
-        /* returns: x16/x17 are scratch across the boundary. (BR may be a jump table inside the function: stop.) */
-        if (w == RET || (a64x_rewrite1(w, &c) && c == RET)) {
-            dead |= (XMASK(16) | XMASK(17)) & ~read;
-            break;
-        }
-        if (!a64x_regs(w, &r, &wr)) {
-            break;
-        }
-        read |= r;
-        dead |= wr & ~read;
-    }
-    return dead & ~XMASK(18) & ~XMASK(29) & ~XMASK(30); /* never x18 (platform), fp, lr */
 }
 
 /*
@@ -860,7 +896,13 @@ static void emit_full_barrier(struct emit *e, bool acq, bool rel)
     }
 }
 
-static int stub_ldop_swp(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t dead, uint32_t *out, int max)
+static inline void emit_ret(struct emit *e, bool shared, uint64_t ret_pc)
+{
+    put(e, shared ? RET : enc_b(here(e), ret_pc));
+}
+
+static int stub_ldop_swp(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t dead, bool shared, uint32_t *out,
+                         int max)
 {
     uint32_t size = BITS(w, 31, 30), rs = BITS(w, 20, 16), rn = BITS(w, 9, 5), rt = BITS(w, 4, 0);
     bool x = size == 3, acq = BIT(w, 23), rel = BIT(w, 22);
@@ -868,10 +910,11 @@ static int stub_ldop_swp(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t
     uint32_t opc = BITS(w, 14, 12);
     bool minmax = !swp && opc >= 4;
     bool narrow_minmax = minmax && size < 2;
-    /* old value goes straight to Rt unless Rt is XZR or aliases Rs/Rn */
+    /* old value goes straight to Rt unless Rt is XZR or aliases Rs/Rn; with XZR reuse nw (or st for SWP) */
     bool direct = rt != 31 && rt != rs && rt != rn;
-    int need = 1 /* status */ + (swp ? 0 : 1) /* new */ + (direct ? 0 : 1) /* old */ + (minmax ? 1 : 0) /* nzcv */ +
-               (narrow_minmax ? 1 : 0) /* extended Rs */;
+    bool reuse_old = rt == 31 && !narrow_minmax;
+    int need = 1 /* status */ + (swp ? 0 : 1) /* new */ + ((direct || reuse_old) ? 0 : 1) /* old */ +
+               (minmax ? 1 : 0) /* nzcv */ + (narrow_minmax ? 1 : 0) /* extended Rs */;
     uint32_t avoid = XMASK(rs) | XMASK(rn) | XMASK(rt) | XMASK(18) | XMASK(29) | XMASK(30);
     uint32_t sc[8], spill, adr;
     if (pick_regs(dead, avoid, need, rn == 31, sc, &adr, &spill) < 0) {
@@ -880,7 +923,7 @@ static int stub_ldop_swp(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t
     int k = 0;
     uint32_t st = sc[k++];
     uint32_t nw = swp ? rs : sc[k++];
-    uint32_t old = direct ? rt : sc[k++];
+    uint32_t old = direct ? rt : (reuse_old ? (swp ? st : nw) : sc[k++]);
     uint32_t nz = minmax ? sc[k++] : 0;
     uint32_t xs = narrow_minmax ? sc[k++] : rs;
     uint32_t frame_regs = spill;
@@ -936,11 +979,11 @@ static int stub_ldop_swp(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t
         put(&e, enc_mov(x, rt, old)); /* B/H: LDXRB/H already zero-extended */
     }
     emit_spill(&e, frame_regs, false);
-    put(&e, enc_b(here(&e), ret_pc));
+    emit_ret(&e, shared, ret_pc);
     return e.n;
 }
 
-static int stub_cas(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t dead, uint32_t *out, int max)
+static int stub_cas(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t dead, bool shared, uint32_t *out, int max)
 {
     uint32_t size = BITS(w, 31, 30), rs = BITS(w, 20, 16), rn = BITS(w, 9, 5), rt = BITS(w, 4, 0);
     bool x = size == 3, acq = BIT(w, 22), rel = BIT(w, 15);
@@ -955,17 +998,6 @@ static int stub_cas(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t dead
     struct emit e = {out, 0, max, stub_pc};
     emit_spill(&e, frame_regs, true);
     uint32_t base = emit_base(&e, rn, frame, adr);
-    /*
-	 *  loop: ldaxr old, [base]
-	 *        eor   tmp, old, Rs        ; (and tmp, tmp, #0xff/#0xffff for B/H)
-	 *        cbnz  tmp, fail
-	 *        stlxr tmp, Rt, [base]
-	 *        cbnz  tmp, loop
-	 *        dmb   ish             ; CASAL only
-	 *        b     done
-	 *  fail: clrex
-	 *  done: mov   Rs, old
-	 */
     uint64_t loop = here(&e);
     put(&e, enc_ldxr(size, acq, old, base));
     put(&e, enc_log(x, LOG_EOR, tmp, old, rs));
@@ -973,25 +1005,29 @@ static int stub_cas(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t dead
         put(&e, enc_and_mask(size, tmp, tmp));
     }
     int fail_br = e.n;
-    put(&e, 0); /* cbnz tmp, fail (patched) */
+    put(&e, 0);
     put(&e, enc_stxr(size, rel, tmp, rt, base));
     put(&e, enc_cbnz(false, tmp, (int64_t)(loop - here(&e))));
     emit_full_barrier(&e, acq, rel);
-    put(&e, 0x14000002u); /* b done (skip clrex) */
+    if (!x && rs != 31) {
+        put(&e, enc_mov(false, rs, old)); /* zero-extend upper bits of Xrs */
+    }
+    emit_spill(&e, frame_regs, false);
+    emit_ret(&e, shared, ret_pc);
     uint64_t fail = here(&e);
-    put(&e, CLREX);
     if (fail_br < max) {
         out[fail_br] = enc_cbnz(x, tmp, (int64_t)(fail - (stub_pc + 4 * (uint64_t)fail_br)));
     }
+    put(&e, CLREX);
     if (rs != 31) {
         put(&e, enc_mov(x, rs, old));
     }
     emit_spill(&e, frame_regs, false);
-    put(&e, enc_b(here(&e), ret_pc));
+    emit_ret(&e, shared, ret_pc);
     return e.n;
 }
 
-static int stub_casp(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t dead, uint32_t *out, int max)
+static int stub_casp(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t dead, bool shared, uint32_t *out, int max)
 {
     uint32_t rs = BITS(w, 20, 16), rn = BITS(w, 9, 5), rt = BITS(w, 4, 0);
     bool x = BIT(w, 30), acq = BIT(w, 22), rel = BIT(w, 15);
@@ -1000,49 +1036,51 @@ static int stub_casp(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t dea
     }
     uint32_t avoid =
         XMASK(rs) | XMASK(rs + 1) | XMASK(rn) | XMASK(rt) | XMASK(rt + 1) | XMASK(18) | XMASK(29) | XMASK(30);
-    uint32_t sc[5], spill, adr;
-    if (pick_regs(dead, avoid, 4, rn == 31, sc, &adr, &spill) < 0) {
+    uint32_t sc[4], spill, adr;
+    if (pick_regs(dead, avoid, 3, rn == 31, sc, &adr, &spill) < 0) {
         return -1;
     }
-    uint32_t o1 = sc[0], o2 = sc[1], t1 = sc[2], t2 = sc[3];
+    uint32_t o1 = sc[0], o2 = sc[1], t1 = sc[2];
     uint32_t frame_regs = spill;
     uint32_t frame = (uint32_t)spill_bytes(frame_regs);
     struct emit e = {out, 0, max, stub_pc};
     emit_spill(&e, frame_regs, true);
     uint32_t base = emit_base(&e, rn, frame, adr);
-    /*
-	 *  loop: ldaxp o1, o2, [base]
-	 *        eor t1, o1, Rs ; eor t2, o2, Rs+1 ; orr t1, t1, t2
-	 *        cbnz t1, fail
-	 *        stlxp t1, Rt, Rt+1, [base] ; cbnz t1, loop ; dmb ish (CASPAL only) ; b done
-	 *  fail: stlxp t1, o1, o2, [base] ; cbnz t1, loop     (store back: the pair read is only atomic if a store succeeds)
-	 *  done: mov Rs, o1 ; mov Rs+1, o2
-	 */
     uint64_t loop = here(&e);
     put(&e, enc_ldxp(x, acq, o1, o2, base));
     put(&e, enc_log(x, LOG_EOR, t1, o1, rs));
-    put(&e, enc_log(x, LOG_EOR, t2, o2, rs + 1));
-    put(&e, enc_log(x, LOG_ORR, t1, t1, t2));
-    int fail_br = e.n;
+    int fail_br1 = e.n;
+    put(&e, 0);
+    put(&e, enc_log(x, LOG_EOR, t1, o2, rs + 1));
+    int fail_br2 = e.n;
     put(&e, 0);
     put(&e, enc_stxp(x, rel, t1, rt, rt + 1, base));
     put(&e, enc_cbnz(false, t1, (int64_t)(loop - here(&e))));
     emit_full_barrier(&e, acq, rel);
-    put(&e, 0x14000003u); /* b done */
+    if (!x) {
+        put(&e, enc_mov(false, rs, o1));
+        put(&e, enc_mov(false, rs + 1, o2));
+    }
+    emit_spill(&e, frame_regs, false);
+    emit_ret(&e, shared, ret_pc);
     uint64_t fail = here(&e);
+    if (fail_br1 < max) {
+        out[fail_br1] = enc_cbnz(x, t1, (int64_t)(fail - (stub_pc + 4 * (uint64_t)fail_br1)));
+    }
+    if (fail_br2 < max) {
+        out[fail_br2] = enc_cbnz(x, t1, (int64_t)(fail - (stub_pc + 4 * (uint64_t)fail_br2)));
+    }
+    /* store back: the pair read is only atomic if a store succeeds */
     put(&e, enc_stxp(x, rel, t1, o1, o2, base));
     put(&e, enc_cbnz(false, t1, (int64_t)(loop - here(&e))));
-    if (fail_br < max) {
-        out[fail_br] = enc_cbnz(x, t1, (int64_t)(fail - (stub_pc + 4 * (uint64_t)fail_br)));
-    }
     put(&e, enc_mov(x, rs, o1));
     put(&e, enc_mov(x, rs + 1, o2));
     emit_spill(&e, frame_regs, false);
-    put(&e, enc_b(here(&e), ret_pc));
+    emit_ret(&e, shared, ret_pc);
     return e.n;
 }
 
-static int stub_ldra(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t *out, int max)
+static int stub_ldra(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, bool shared, uint32_t *out, int max)
 {
     uint32_t rn = BITS(w, 9, 5), rt = BITS(w, 4, 0);
     int32_t imm = (int32_t)((BIT(w, 22) << 9) | BITS(w, 20, 12));
@@ -1064,7 +1102,7 @@ static int stub_ldra(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t *ou
     }
     put(&e, imm < 0 ? enc_subi(true, dst, rn, imm12, lsl12) : enc_addi(true, dst, rn, imm12, lsl12));
     put(&e, 0xF9400000u | (dst << 5) | rt); /* LDR Xt, [dst] */
-    put(&e, enc_b(here(&e), ret_pc));
+    emit_ret(&e, shared, ret_pc);
     return e.n;
 }
 
@@ -1109,7 +1147,7 @@ static inline uint32_t enc_ccmn_zero(uint32_t cond)
  * integer in [-2^31, 2^31-1] other than -0.0; N = C = V = 0. Scratch: two X registers. The common case (1 <= |x| < 2^31)
  * is ten instructions; FPSR cumulative flags are not reproduced exactly.
  */
-static int stub_jscvt(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t dead, uint32_t *out, int max)
+static int stub_jscvt(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t dead, bool shared, uint32_t *out, int max)
 {
     uint32_t rd = BITS(w, 4, 0), dn = BITS(w, 9, 5);
     uint32_t avoid = XMASK(rd) | XMASK(18) | XMASK(29) | XMASK(30);
@@ -1178,7 +1216,7 @@ static int stub_jscvt(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t de
         put(&e, enc_mov(false, rd, c));
     }
     emit_spill(&e, spill, false);
-    put(&e, enc_b(here(&e), ret_pc));
+    emit_ret(&e, shared, ret_pc);
     fix_imm19(&e, j_slow, slow);
     fix_imm19(&e, j_small, small);
     fix_imm19(&e, j_huge, huge);
@@ -1312,7 +1350,7 @@ static void cx_rot_m(struct emit *e, bool q, bool dbl, bool r270, uint32_t t, ui
  * FCADD / FCMLA (vector and by element), single and double precision: lane-for-lane FADD/FMLA on permuted operands,
  * so every lane is the same fused operation on the same values (NaN signs included) as the original.
  */
-static int stub_fcma(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t vdead, uint32_t *out, int max)
+static int stub_fcma(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t vdead, bool shared, uint32_t *out, int max)
 {
     bool q = BIT(w, 30);
     uint32_t size = BITS(w, 23, 22), d = BITS(w, 4, 0), n = BITS(w, 9, 5), m;
@@ -1376,7 +1414,7 @@ static int stub_fcma(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t vde
         put(&e, v_fmla(q, dbl, d, u, t));
     }
     emit_vspill(&e, vs, nvs, false);
-    put(&e, enc_b(here(&e), ret_pc));
+    emit_ret(&e, shared, ret_pc);
     return e.n;
 }
 
@@ -1384,41 +1422,41 @@ static int stub_fcma(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t vde
 
 int a64x_stub(uint32_t w, uint64_t site_pc, uint64_t stub_pc, uint32_t dead, uint32_t *out, int max)
 {
-    return a64x_stub_v(w, site_pc, stub_pc, dead, 0, out, max);
+    return a64x_stub_v(w, site_pc, stub_pc, dead, 0, false, out, max);
 }
 
-int a64x_stub_v(uint32_t w, uint64_t site_pc, uint64_t stub_pc, uint32_t dead, uint32_t vdead, uint32_t *out, int max)
+int a64x_stub_v(uint32_t w, uint64_t site_pc, uint64_t stub_pc, uint32_t dead, uint32_t vdead, bool shared,
+                uint32_t *out, int max)
 {
     uint64_t ret_pc = site_pc + 4;
     switch (a64x_classify(w)) {
     case A64X_LSE_LDOP:
     case A64X_LSE_SWP:
-        return stub_ldop_swp(w, stub_pc, ret_pc, dead, out, max);
+        return stub_ldop_swp(w, stub_pc, ret_pc, dead, shared, out, max);
     case A64X_LSE_CAS:
-        return stub_cas(w, stub_pc, ret_pc, dead, out, max);
+        return stub_cas(w, stub_pc, ret_pc, dead, shared, out, max);
     case A64X_LSE_CASP:
-        return stub_casp(w, stub_pc, ret_pc, dead, out, max);
+        return stub_casp(w, stub_pc, ret_pc, dead, shared, out, max);
     case A64X_PAC_LDRA: {
         uint32_t one;
         if (a64x_rewrite1(w, &one)) {
             return -1;
         }
-        return stub_ldra(w, stub_pc, ret_pc, out, max);
+        return stub_ldra(w, stub_pc, ret_pc, shared, out, max);
     }
     case A64X_JSCVT:
-        return stub_jscvt(w, stub_pc, ret_pc, dead, out, max);
+        return stub_jscvt(w, stub_pc, ret_pc, dead, shared, out, max);
     case A64X_FCMA:
-        return stub_fcma(w, stub_pc, ret_pc, vdead, out, max);
+        return stub_fcma(w, stub_pc, ret_pc, vdead, shared, out, max);
     case A64X_FP16:
-        return stub_fp16(w, stub_pc, ret_pc, dead, vdead, out, max);
+        return stub_fp16(w, stub_pc, ret_pc, dead, vdead, shared, out, max);
     case A64X_RDM:
-        return stub_rdm(w, stub_pc, ret_pc, dead, vdead, out, max);
+        return stub_rdm(w, stub_pc, ret_pc, dead, vdead, shared, out, max);
     case A64X_SB: {
-        /* SB: the speculation barrier's ARMv8.0 equivalent */
         struct emit e = {out, 0, max, stub_pc};
-        put(&e, 0xD5033F9Fu); /* dsb sy */
+        put(&e, 0xD503379Fu); /* dsb nsh */
         put(&e, 0xD5033FDFu); /* isb */
-        put(&e, enc_b(here(&e), ret_pc));
+        emit_ret(&e, shared, ret_pc);
         return e.n;
     }
     default:

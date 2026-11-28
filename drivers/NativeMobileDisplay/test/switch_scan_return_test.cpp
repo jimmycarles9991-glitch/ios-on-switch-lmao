@@ -170,7 +170,7 @@ TEST(ScanReturnSource, AColourBlankSwapRetiresOnceItsBlackIsOnScreen)
     const CodeText frameEnd = Block(source, "void colourBlankFrameEnd()");
     EXPECT_TRUE(frameEnd.has("color->settledThrough(colourBlankSwap.generation())"));
     EXPECT_TRUE(frameEnd.has("retireThrough(seq,"));
-    EXPECT_TRUE(Block(source, "bool frameEndNeeded()").has("colourBlankSwap.waiting()"));
+    EXPECT_TRUE(Block(source, "switch_frame_end::Holder frameEndHolder()").has("colourBlankSwap.waiting()"));
     EXPECT_TRUE(Block(source, "void kickSwapQueue() override").before("kickUnmaskFrameEnd();", "kickOnce();"))
         << "a blank kicked under a blank already shown publishes no colour change: the kick itself routes FRAME_END";
     EXPECT_TRUE(Block(source, "void flipLatched()").has("colourBlankSwap.ended();"));

@@ -22,6 +22,8 @@ struct ColorAttachment {
     } load = DontCare;
 
     bool store = true;  // Store or StoreAndMultisampleResolve
+    // nothing reads it after the pass: not stored and not resolved (gpu.perf.nvn's discard probe)
+    bool discard = false;
     float clear[4] = {};
 };
 
@@ -32,7 +34,7 @@ struct DepthStencilAttachment {
     float depth = 1;
     uint32_t stencil = 0;
     bool loaded = true, stored = true;  // an aspect is loaded, or stored: its contents outside the pass matter
-    bool loadedLater = false;           // a later pass of the command buffer loads this depth
+    bool depthEnabled = true, stencilEnabled = true;
 };
 
 // A pass whose depth and stencil attachments are two textures, a Depth32Float and a Stencil8 of one extent and sample count:
@@ -71,9 +73,12 @@ struct PassDesc {
     // a pass of another one's clears alone: its Clear loads reach past the render area as that pass's do, which has a draw
     // call (turned_pass.cpp)
     bool drawn = false;
-    // a pass of Metal's draws: each depth they store is bounded as Metal bounds it (depth_bounds.h); the device's own
-    // passes store depth unbounded, as they copy it
-    bool metalDepth = false;
+    // the pass of Metal's draws: each depth they store is bounded as Metal bounds it (depth_bounds.h), and its scratch
+    // colour targets take kTransientColorTag's tags (attachment_lifetime.h); the device's own passes store depth unbounded,
+    // as they copy it, and take kDriverPassColorTag's
+    bool metalDraws = false;
+    // Set false only when every pipeline in the pass has been checked to have fetchBits == 0.
+    bool mayFetch = true;
 
     // RGB10A8_2P_XR10 textures held in their two planes that the pass's draws store into, each through an RG32Uint image of
     // its texels (pack/xr.metal xr_planes_merge_frag before the pass, xr_planes_split_frag after it)

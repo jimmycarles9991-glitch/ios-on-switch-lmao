@@ -1,6 +1,7 @@
 import Foundation
 
-/// One run's JSON report, Documents/hwtest/<boot uuid>-<stamp>.json once the run ends; while it runs, its journal
+/// One run's JSON report, Library/Application Support/hwtest/<boot uuid>-<stamp>.json (AppFiles.working) once the run
+/// ends; while it runs, its journal
 /// (RunJournal) holds it, so a run that the app or the OS did not survive still holds every finished result and the
 /// test that was running (`run.current`). tools/hwtest reads both on the Mac.
 public struct Report: Codable, Equatable {

@@ -19,12 +19,14 @@
 #define pinctrl_lookup_state tdfll_pinctrl_lookup_state
 #define pinctrl_select_state tdfll_pinctrl_select_state
 #define init_timer tdfll_init_timer
+#define init_timer_deferrable tdfll_init_timer_deferrable
 #define mod_timer tdfll_mod_timer
 #define del_timer tdfll_del_timer
 #define del_timer_sync tdfll_del_timer_sync
 #define hrtimer_init tdfll_hrtimer_init
 #define hrtimer_start tdfll_hrtimer_start
 #define hrtimer_cancel tdfll_hrtimer_cancel
+#define hrtimer_try_to_cancel tdfll_hrtimer_try_to_cancel
 #define of_property_read_u32 tdfll_of_property_read_u32
 #define of_property_read_string tdfll_of_property_read_string
 #define of_property_read_bool tdfll_of_property_read_bool

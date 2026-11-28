@@ -4,6 +4,7 @@
 #include "TegraGM20BClockABI.h"
 #include "TegraGM20BGrPreemptABI.h"
 #include "TegraGM20BZcullABI.h"
+#include "../TegraHost1x/TegraHost1x.h"
 
 static IOReturn zbcAdd(const TegraGM20BAbiZbc *in, TegraGM20BAbiZbcReply *out)
 {
@@ -18,16 +19,47 @@ static IOReturn zbcAdd(const TegraGM20BAbiZbc *in, TegraGM20BAbiZbcReply *out)
 	return kIOReturnSuccess;
 }
 
+#if TGM_DEBUG_PROBES
+// HW Test probes' syncpoints (TegraGM20BPathsOpProbeSyncpts), taken from host1x's own once: the first ask takes all three,
+// and an ask while it does answers ids of 0 rather than take more
+static void probeSyncptsLine(char *line, size_t size)
+{
+	static uint32_t ids[3];
+	static uint32_t taking;
+	uint32_t none = 0;
+	if (__atomic_compare_exchange_n(&taking, &none, 1u, false, __ATOMIC_ACQ_REL,
+					__ATOMIC_ACQUIRE) &&
+	    tegra_host1x_start() == TEGRA_HOST1X_OK)
+		for (uint32_t &id : ids) {
+			uint32_t made = 0;
+			if (tegra_host1x_syncpt_alloc(&made) == TEGRA_HOST1X_OK)
+				__atomic_store_n(&id, made, __ATOMIC_RELEASE);
+		}
+	snprintf(line, size, "ids=%u,%u,%u values=%u,%u,%u", ids[0], ids[1], ids[2],
+		 ids[0] ? tegra_host1x_syncpt_read(ids[0]) : 0,
+		 ids[1] ? tegra_host1x_syncpt_read(ids[1]) : 0,
+		 ids[2] ? tegra_host1x_syncpt_read(ids[2]) : 0);
+}
+#endif
+
 // IOGPUFamily's for a queue's MTLGPUPriorityRealTime (the same string in 21H461's and 24B119's)
 static constexpr char kRealTimeEntitlement[] = "com.apple.private.agx.rt-priority-spi";
 
-// lock_ held. Method 18: the asked priority schedules the connection's channels as IOGPUFamily's setter would; the
-// compositor is the one at the top that also holds the UI-critical marker (applyLevel).
-IOReturn AGXDeviceUserClient::setPriority(const TegraGM20BAbiPriority &asked)
+// Method 18: updates connection priority under lock_, then updates each live channel off lock_
+// and without closing submitGate_.
+IOReturn AGXDeviceUserClient::setPriority(const TegraGM20BAbiPriority &asked,
+					  TegraGM20BAbiPriorityReply *reply)
 {
 	const int granted = tgm_priority_granted(asked.priority);
 	if (granted < 0)
 		return kIOReturnBadArgument;
+	uint32_t liveSlots = 0;
+	bool criticalChanged = false;
+	IOLockLock(lock_);
+	if (submitGate_.closed()) {
+		IOLockUnlock(lock_);
+		return kIOReturnNotOpen;
+	}
 	if (!entitlementsRead_) {
 		entitlementsRead_ = true;
 		realTimeEntitled_ = switch_gpu_task_entitled(task_, kRealTimeEntitlement);
@@ -41,13 +73,45 @@ IOReturn AGXDeviceUserClient::setPriority(const TegraGM20BAbiPriority &asked)
 	}
 	if (granted == 0 && !restartNoKill_ && !highLogged_) {
 		highLogged_ = true;
-		IOLog("tegra-gm20b: %s[%d] asked for GPU priority 0: scheduled high, not the "
+		IOLog("tegra-gm20b: %s[%d] asked for GPU priority 0: scheduled app-high, not the "
 		      "compositor\n",
 		      owner_, ownerPid_);
 	}
+	const bool wasCritical = critical_;
 	priority_ = uint32_t(granted);
 	backgroundPriority_ = asked.background_priority;
+	roleGen_ = __atomic_load_n(&tgm_uc::appRoleGen, __ATOMIC_ACQUIRE);
+	backgroundRole_ =
+		clientHasPrivilege(task_, kIOClientPrivilegeForeground) != kIOReturnSuccess;
 	applyLevel();
+	criticalChanged = critical_ != wasCritical;
+	for (uint32_t i = 0; i < kMaxChannels; ++i)
+		if (chans_[i])
+			liveSlots |= 1u << i;
+	if (reply) {
+		reply->flags = critical_ ? TegraGM20BPriorityCritical : 0u;
+		reply->reserved = 0;
+	}
+	IOLockUnlock(lock_);
+	while (liveSlots) {
+		const uint32_t slot = uint32_t(__builtin_ctz(liveSlots));
+		liveSlots &= liveSlots - 1;
+		IOLockLock(submitLocks_[slot]);
+		bool admitted = submitGate_.enterFast(slot);
+		if (!admitted) {
+			IOLockLock(lock_);
+			admitted = submitGate_.enterSlow(slot, lock_);
+			IOLockUnlock(lock_);
+		}
+		if (admitted) {
+			if (chans_[slot])
+				syncChannelLevel(slot, chans_[slot], criticalChanged);
+			submitGate_.leaveFast(slot, lock_);
+		}
+		IOLockUnlock(submitLocks_[slot]);
+		if (!admitted)
+			break;
+	}
 	return kIOReturnSuccess;
 }
 
@@ -98,6 +162,9 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 		break;
 	case TegraGM20BMethodBoPark:
 		wantIn = sizeof(TegraGM20BAbiBoPark);
+		break;
+	case TegraGM20BMethodSparesGiveBack:
+		wantIn = sizeof(TegraGM20BAbiSparesGiveBack);
 		break;
 	case TegraGM20BMethodBoUnpark:
 		wantIn = sizeof(TegraGM20BAbiBoUnpark);
@@ -151,6 +218,10 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 		wantIn = sizeof(TegraGM20BAbiChannel);
 		wantOut = sizeof(TegraGM20BAbiStatus);
 		break;
+	case TegraGM20BMethodChannelProgress:
+		wantIn = sizeof(TegraGM20BAbiChannel);
+		wantOut = sizeof(TegraGM20BAbiChannelProgressReply);
+		break;
 	case TegraGM20BMethodMap:
 		wantIn = sizeof(TegraGM20BAbiMap);
 		wantOut = sizeof(TegraGM20BAbiMapReply);
@@ -175,6 +246,9 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 		break;
 	case TegraGM20BMethodPriority:
 		wantIn = sizeof(TegraGM20BAbiPriority);
+		wantOut = *outSize == sizeof(TegraGM20BAbiPriorityReply)
+				  ? sizeof(TegraGM20BAbiPriorityReply)
+				  : 0;
 		break;
 	case TegraGM20BMethodZbc:
 		wantIn = sizeof(TegraGM20BAbiZbc);
@@ -190,7 +264,7 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 		wantIn = sizeof(TegraGM20BAbiPackImageMap);
 		wantOut = sizeof(TegraGM20BAbiPackImageMapReply);
 		break;
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 	case TegraGM20BMethodReadback:
 		wantIn = sizeof(TegraGM20BAbiReadback);
 		wantOut = sizeof(TegraGM20BAbiReadbackReply);
@@ -207,8 +281,6 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 		wantIn = sizeof(TegraGM20BAbiGrPreempt);
 		wantOut = sizeof(TegraGM20BAbiGrPreemptReply);
 		break;
-#endif
-#if SWITCH_GPU_PATH_STATS
 	case TegraGM20BMethodPaths:
 		wantIn = inSize == sizeof(TegraGM20BAbiPathsSpan) ? sizeof(TegraGM20BAbiPathsSpan)
 								  : sizeof(TegraGM20BAbiPaths);
@@ -250,6 +322,10 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 		    static_cast<const TegraGM20BAbiBoUnpark *>(in)->flags)
 			return kIOReturnBadArgument;
 		break;
+	case TegraGM20BMethodSparesGiveBack:
+		if (!reservedZero(static_cast<const TegraGM20BAbiSparesGiveBack *>(in)->reserved))
+			return kIOReturnBadArgument;
+		break;
 	case TegraGM20BMethodSurfaceWrites:
 		if (!reservedZero(static_cast<const TegraGM20BAbiSurfaceWrites *>(in)->reserved))
 			return kIOReturnBadArgument;
@@ -271,6 +347,7 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 		break;
 	case TegraGM20BMethodChannelDestroy:
 	case TegraGM20BMethodGetStatus:
+	case TegraGM20BMethodChannelProgress:
 		if (!reservedZero(static_cast<const TegraGM20BAbiChannel *>(in)->reserved))
 			return kIOReturnBadArgument;
 		break;
@@ -349,6 +426,10 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 	if (method == TegraGM20BMethodBoImport)
 		return boImport(static_cast<const TegraGM20BAbiBoImport *>(in),
 				static_cast<TegraGM20BAbiBoAllocReply *>(out));
+	if (method == TegraGM20BMethodSparesGiveBack) {
+		sparesPressureLook();
+		return kIOReturnSuccess;
+	}
 	if (method == TegraGM20BMethodBoPark)
 		return boPark(static_cast<const TegraGM20BAbiBoPark *>(in));
 	if (method == TegraGM20BMethodBoUnpark)
@@ -356,6 +437,15 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 				static_cast<TegraGM20BAbiBoUnparkReply *>(out));
 	if (method == TegraGM20BMethodBoFree)
 		return boFreeMethod(static_cast<const TegraGM20BAbiBoFree *>(in));
+	if (method == TegraGM20BMethodChannelCreate)
+		return channelCreate(static_cast<const TegraGM20BAbiChannelCreate *>(in),
+				     static_cast<TegraGM20BAbiChannelCreateReply *>(out));
+	if (method == TegraGM20BMethodChannelDestroy)
+		return channelDestroy(static_cast<const TegraGM20BAbiChannel *>(in));
+	if (method == TegraGM20BMethodPriority)
+		return setPriority(*static_cast<const TegraGM20BAbiPriority *>(in),
+				   wantOut ? static_cast<TegraGM20BAbiPriorityReply *>(out)
+					   : nullptr);
 	if (method == TegraGM20BMethodMap) {
 		return mapToken(static_cast<const TegraGM20BAbiMap *>(in),
 				static_cast<TegraGM20BAbiMapReply *>(out));
@@ -378,7 +468,7 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 		return tgm_zcull_info(static_cast<TegraGM20BAbiZcullInfo *>(out))
 			       ? kIOReturnUnsupported
 			       : kIOReturnSuccess;
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 	if (method == TegraGM20BMethodReadback) {
 		return tgm_readback_call(this, static_cast<const TegraGM20BAbiReadback *>(in),
 					 static_cast<TegraGM20BAbiReadbackReply *>(out));
@@ -397,31 +487,54 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 			return kIOReturnNoMemory;
 		return ret ? kIOReturnBadArgument : kIOReturnSuccess;
 	}
-#endif
-#if SWITCH_GPU_PATH_STATS
 	if (method == TegraGM20BMethodPaths) {
 		const uint32_t op = static_cast<const TegraGM20BAbiPaths *>(in)->op;
 		auto *reply = static_cast<TegraGM20BAbiPathsReply *>(out);
 		if ((op == TegraGM20BPathsOpNoteSpan) != (inSize == sizeof(TegraGM20BAbiPathsSpan)))
 			return kIOReturnBadArgument;
 		if (op == TegraGM20BPathsOpNoteSpan) {
+#if SWITCH_GPU_PATH_STATS
 			TegraGM20BAbiPathsSpan note =
 				*static_cast<const TegraGM20BAbiPathsSpan *>(in);
 			note.text[sizeof(note.text) - 1] = 0;
 			switch_gpu_span_note(owner_, note.text);
+#else
+			return kIOReturnUnsupported;
+#endif
 		} else if (op == TegraGM20BPathsOpSpans) {
+#if SWITCH_GPU_PATH_STATS
 			switch_gpu_span_line(reply->line, sizeof(reply->line));
-		} else if (op == TegraGM20BPathsOpCounts)
+#else
+			return kIOReturnUnsupported;
+#endif
+		} else if (op == TegraGM20BPathsOpCounts) {
+#if SWITCH_GPU_PATH_STATS
 			switch_gpu_path_line(reply->line, sizeof(reply->line));
-		else if (op == TegraGM20BPathsOpPool)
+#else
+			return kIOReturnUnsupported;
+#endif
+		} else if (op == TegraGM20BPathsOpPool)
 			poolLine(reply->line, sizeof(reply->line));
 		else if (op == TegraGM20BPathsOpRefusals)
 			snprintf(reply->line, sizeof(reply->line), "lines=%u",
 				 __atomic_load_n(&refusalLines_, __ATOMIC_RELAXED));
-#if TGM_STATS
-		else if (op == TegraGM20BPathsOpTargetPeaks)
+		else if (op == TegraGM20BPathsOpTargetPeaks) {
+#if TGM_PROF
 			tgm_target_peaks_line(reply->line, sizeof(reply->line));
-		else if (op == TegraGM20BPathsOpForeignWaits) {
+#else
+			return kIOReturnUnsupported;
+#endif
+		} else if (op == TegraGM20BPathsOpProbeSyncpts) {
+			if (!switch_gpu_task_entitled(task_, SWITCH_GPU_PROBES_ENTITLEMENT))
+				return kIOReturnNotPrivileged;
+			probeSyncptsLine(reply->line, sizeof(reply->line));
+		} else if (op == TegraGM20BPathsOpBridge) {
+			snprintf(reply->line, sizeof(reply->line), "jobless=%llu",
+				 static_cast<unsigned long long>(tgm_chan_jobless(owner_)));
+		} else if (op == TegraGM20BPathsOpZbc) {
+			tgm_zbc_line(reply->line, sizeof(reply->line));
+		} else if (op == TegraGM20BPathsOpForeignWaits) {
+#if TGM_STATS
 			struct tgm_foreign_waits totals = {};
 			tgm_foreign_waits_totals(&totals);
 			snprintf(reply->line, sizeof(reply->line),
@@ -432,9 +545,10 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 				 static_cast<unsigned long long>(totals.promises),
 				 static_cast<unsigned long long>(totals.events),
 				 static_cast<unsigned long long>(totals.host1x));
-		}
+#else
+			return kIOReturnUnsupported;
 #endif
-		else
+		} else
 			return kIOReturnBadArgument;
 		return kIOReturnSuccess;
 	}
@@ -463,17 +577,24 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 		if (!ret)
 			ret = vmBind(static_cast<const TegraGM20BAbiVmBind *>(in), count);
 		break;
-	case TegraGM20BMethodChannelCreate:
-		ret = channelCreate(static_cast<const TegraGM20BAbiChannelCreate *>(in),
-				    static_cast<TegraGM20BAbiChannelCreateReply *>(out));
-		break;
-	case TegraGM20BMethodChannelDestroy:
-		ret = channelDestroy(static_cast<const TegraGM20BAbiChannel *>(in));
-		break;
 	case TegraGM20BMethodGetStatus:
 		ret = getStatus(static_cast<const TegraGM20BAbiChannel *>(in),
 				static_cast<TegraGM20BAbiStatus *>(out));
 		break;
+	case TegraGM20BMethodChannelProgress: {
+		const auto *input = static_cast<const TegraGM20BAbiChannel *>(in);
+		if (!input->channel || input->channel > kMaxChannels ||
+		    !chans_[input->channel - 1]) {
+			ret = kIOReturnBadArgument;
+			break;
+		}
+		const uint32_t slot = input->channel - 1;
+		*static_cast<TegraGM20BAbiChannelProgressReply *>(out) = {
+			fence_gpu_ + static_cast<uint64_t>(slot) * TegraGM20BFencePageRecordBytes +
+			TegraGM20BFencePageChannelProgressOffset};
+		ret = kIOReturnSuccess;
+		break;
+	}
 	case TegraGM20BMethodSurfaceWrites:
 		tgm_coherency_gpu_writes(
 			static_cast<const TegraGM20BAbiSurfaceWrites *>(in)->surface_id);
@@ -490,10 +611,7 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 	case TegraGM20BMethodResourceSetRelease:
 		ret = resourceSetRelease(static_cast<const TegraGM20BAbiResourceSetRelease *>(in));
 		break;
-	case TegraGM20BMethodPriority:
-		ret = setPriority(*static_cast<const TegraGM20BAbiPriority *>(in));
-		break;
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 	case TegraGM20BMethodGrPreempt: {
 		const auto *input = static_cast<const TegraGM20BAbiGrPreempt *>(in);
 		auto *reply = static_cast<TegraGM20BAbiGrPreemptReply *>(out);

@@ -37,6 +37,7 @@
 //
 // Present (TegraVICPresent.cpp): TegraNVDEC's decoders hand each decoded picture to VIC on their own thread, under the
 // same engine lock.
+#include <IOKit/IOBSD.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOService.h>
@@ -47,6 +48,7 @@
 #include <os/log.h>
 #include <string.h>
 #include "TegraVIC.h"
+#include "../../kits/SwitchEntitlement/SwitchEntitlement.h"
 #include "../../kits/SwitchRefusal/SwitchRefusal.h"
 #include "../../kits/SwitchTime/SwitchTime.h"
 #include "TegraVICBounce.h"
@@ -67,6 +69,7 @@
 #include "SwitchVICGateABI.h"
 #include "../NativeMobileDisplay/SwitchLandscapeRunABI.h"
 #include "../TegraGM20B/TegraGM20BLayout.h"
+#include "../TegraGM20B/TegraGM20BPathsABI.h"
 
 // The kernel's IOService/IOUserClient implementations, called directly (they are the defaults the vtable copies
 // keep or fall back to), and their vtables, where the slots are found.
@@ -121,16 +124,22 @@ struct Conn {
 Conn gConns[kMaxConnections];
 IOLock *gConnLock;
 
+uint32_t connBucket(const IOUserClient *client)
+{
+    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(client) >> 6) & (kMaxConnections - 1);
+}
+
 Conn *connOf(const IOUserClient *client)
 {
-    Conn *found = nullptr;
-    IOLockLock(gConnLock);
-    for (uint32_t i = 0; i < kMaxConnections && !found; i++) {
-        if (gConns[i].client == client)
-            found = &gConns[i];
+    if (!client)
+        return nullptr;
+    const uint32_t start = connBucket(client);
+    for (uint32_t i = 0; i < kMaxConnections; ++i) {
+        Conn &c = gConns[(start + i) & (kMaxConnections - 1)];
+        if (__atomic_load_n(&c.client, __ATOMIC_ACQUIRE) == client)
+            return &c;
     }
-    IOLockUnlock(gConnLock);
-    return found;
+    return nullptr;
 }
 
 // The vtable copies (their address point is index 2 of each array).
@@ -241,19 +250,20 @@ struct Job {
     SwitchVICEvents *events;
     bool eventReady, listed;
     int eventStatus;
+    const void *touched[2];  // SwitchVICRequests.h
+    bool reserving, reserveWhenRun;
     IOUserClient *client;  // retained
     struct Conn *conn;
     TegraVICSurface src, dst;
     SwitchVICWriteReservation dstReserve;
     TegraVICPlan plan;
     uint32_t chromaSite;
-    bool bounceSrc, bounceDst, mayDeferTurn;  // through the copy engine's scratch (TegraVICBounce.h)
+    bool bounceSrc, bounceDst;  // through the copy engine's scratch (TegraVICBounce.h)
     bool async, reply;
     OSAsyncReference64 ref;
     uint64_t info;
     IOReturn status;
     bool done, detached;  // detached: its synchronous caller was interrupted and finishJob frees it
-    TegraVICJob check;    // the submitting thread's check of each operation
     int caller;           // its event records are counted as this process's (switch_gpu_events_charge)
 #if TEGRA_VIC_STATS
     uint64_t submittedUs;
@@ -321,8 +331,11 @@ bool runJob(Job *job, IOReturn *status)
             switch_vic_surface_release_write(&reservation);
         }
     };
+
     WriteReservationGuard dstReserve{job->dstReserve};
     job->dstReserve = {};
+    if (job->reserveWhenRun)
+        switch_vic_surface_reserve_write(&job->dst, &dstReserve.reservation);
 #if TEGRA_VIC_STATS
     const uint64_t entered = mach_absolute_time();
     const bool eventTurn = job->events && job->plan.count == 1 && (job->plan.op[0].transform & TEGRA_VIC_ROT90);
@@ -331,8 +344,8 @@ bool runJob(Job *job, IOReturn *status)
     // A quarter turn of a decoder's picture window A scans itself: recorded on the destination, nothing to submit.
     SwitchDisplayTraits traits = switch_display_traits();
     traits.columnScanYuv = traits.columnScanYuv && switch_display_landscape_ready();
-    if (!job->bounceSrc && !job->bounceDst &&
-        switch_vic_turn_defer(&job->src, &job->dst, &job->plan, job->chromaSite, &job->events, traits)) {
+    if (!job->bounceDst && switch_vic_turn_defer(&job->src, &job->dst, &job->plan, job->chromaSite, &job->events,
+                                                 traits, &dstReserve.reservation)) {
 #if TEGRA_VIC_STATS
         switch_vic_turn_count(job->origin, false, true, eventTurn, mach_absolute_time() - entered);
 #endif
@@ -348,7 +361,11 @@ bool runJob(Job *job, IOReturn *status)
     const uint64_t addressed = tegra_vic_surface_extent(&job->dst.desc) +
                                (job->plan.readsSource ? tegra_vic_surface_extent(&job->src.desc) : 0);
 #endif
-    if (!job->bounceSrc && !job->bounceDst)
+    const TegraVICFormat *srcFormat = job->plan.readsSource ? tegra_vic_format(job->src.desc.fourcc) : nullptr;
+    const TegraVICFormat *dstFormat = tegra_vic_format(job->dst.desc.fourcc);
+    const bool tryDirect = (!job->bounceSrc || (srcFormat && srcFormat->kind != TEGRA_VIC_KIND_RGB)) &&
+                           (!job->bounceDst || (dstFormat && dstFormat->planes == 1));
+    if (tryDirect)
         submitted = switch_vic_transform(&job->src, &job->dst, &job->plan, job->chromaSite, transformed, job,
                                          job->events, nullptr, &dstReserve.reservation);
     const bool bounced = !submitted;
@@ -382,13 +399,24 @@ void statsLine()
 void eventsReady(void *context, int status)
 {
     auto *job = static_cast<Job *>(context);
-    if (!status && !job->dstReserve.lease && !job->mayDeferTurn &&
-        !__atomic_load_n(&job->conn->closing, __ATOMIC_ACQUIRE))
-        switch_vic_surface_reserve_write(&job->dst, &job->dstReserve);
     IOLockLock(gQueueLock);
+    const bool reserves = job->listed && !status && !job->eventStatus && !job->dstReserve.lease &&
+                          !__atomic_load_n(&job->conn->closing, __ATOMIC_ACQUIRE);
+    const bool reserve = reserves && gRequests.alone(job->dst.memory, job);
+    if (reserve)
+        job->reserving = true;
+    else if (reserves)
+        job->reserveWhenRun = true;
     gRequests.ready(job, status);
     IOLockWakeup(gQueueLock, &gRequests, false);
     IOLockUnlock(gQueueLock);
+    if (reserve) {
+        switch_vic_surface_reserve_write(&job->dst, &job->dstReserve);
+        IOLockLock(gQueueLock);
+        gRequests.reserved(job);
+        IOLockWakeup(gQueueLock, &gRequests, false);
+        IOLockUnlock(gQueueLock);
+    }
 }
 
 void engineThread(void *, wait_result_t)
@@ -404,6 +432,9 @@ void engineThread(void *, wait_result_t)
         switch_gpu_events_charge(job->caller);
         const bool finished = runJob(job, &status);
         switch_gpu_events_charge(0);
+        IOLockLock(gQueueLock);
+        gRequests.finished();
+        IOLockUnlock(gQueueLock);
         if (finished)
             finishJob(job, status);
     }
@@ -433,20 +464,24 @@ void finishJob(Job *job, IOReturn status)
             iouc_send_async_result64(job->ref, status, &argument, 1);
         }
         IODelete(job, Job, 1);
+        IOLockLock(conn->lock);
+        const bool wakeClose = --conn->pending == 0 && __atomic_load_n(&conn->closing, __ATOMIC_ACQUIRE);
+        if (wakeClose)
+            IOLockWakeup(conn->lock, &conn->pending, false);
+        IOLockUnlock(conn->lock);
     } else {
         IOLockLock(conn->lock);
         job->status = status;
         job->done = true;
         const bool detached = job->detached;
         IOLockWakeup(conn->lock, job, false);
+        const bool wakeClose = --conn->pending == 0 && __atomic_load_n(&conn->closing, __ATOMIC_ACQUIRE);
+        if (wakeClose)
+            IOLockWakeup(conn->lock, &conn->pending, false);
         IOLockUnlock(conn->lock);
         if (detached)
             IODelete(job, Job, 1);
     }
-    IOLockLock(conn->lock);
-    conn->pending--;
-    IOLockWakeup(conn->lock, &conn->pending, false);
-    IOLockUnlock(conn->lock);
     client->release();
 }
 
@@ -454,20 +489,34 @@ void finishJob(Job *job, IOReturn status)
 
 namespace {
 // Interruptible, so a client stalled behind its own events that never fire can still be killed; its close then fails
-// those jobs.
+// those jobs. A job without events reserves its destination for writing (so the external display does not latch it
+// before VIC writes it) from now if no other job touches it, else when it runs. The reservation is taken outside the
+// queue's lock: it can register the surface's backing.
 bool queueJob(Job *job)
 {
     IOLockLock(gQueueLock);
     bool interrupted = false;
     while (!__atomic_load_n(&job->conn->closing, __ATOMIC_ACQUIRE) && !gRequests.admits(*job) && !interrupted)
         interrupted = IOLockSleep(gQueueLock, &gRequests, THREAD_ABORTSAFE) == THREAD_INTERRUPTED;
+    bool reserve = false;
     if (!interrupted) {
         if (__atomic_load_n(&job->conn->closing, __ATOMIC_ACQUIRE))
             gRequests.fail(job, -125);
+        const bool reserves = job->eventReady && !job->eventStatus;
+        reserve = reserves && gRequests.alone(job->dst.memory);
+        job->reserving = reserve;
+        job->reserveWhenRun = reserves && !reserve;
         gRequests.push(job);
         IOLockWakeup(gQueueLock, &gRequests, false);
     }
     IOLockUnlock(gQueueLock);
+    if (reserve) {
+        switch_vic_surface_reserve_write(&job->dst, &job->dstReserve);
+        IOLockLock(gQueueLock);
+        gRequests.reserved(job);
+        IOLockWakeup(gQueueLock, &gRequests, false);
+        IOLockUnlock(gQueueLock);
+    }
     return !interrupted;
 }
 
@@ -587,8 +636,8 @@ IOReturn transform(Conn *conn, const void *in, uint32_t size)
         if (TEGRA_VIC_REQ_CHROMA_SITE(r.flags))
             dst.chromaSite = TEGRA_VIC_REQ_CHROMA_SITE(r.flags);
         for (uint32_t i = 0; !why && i < job->plan.count; i++) {
-            why = tegra_vic_build(job->plan.op[i].fill ? nullptr : &src, &dst, &job->plan.op[i], tegra_vic_traits(),
-                                  tegra_vic_config_address(), tegra_vic_filter_address(), &job->check);
+            why = tegra_vic_validate(job->plan.op[i].fill ? nullptr : &src, &dst, &job->plan.op[i], tegra_vic_traits(),
+                                     tegra_vic_config_address(), tegra_vic_filter_address());
         }
         if (why)
             ret = kIOReturnUnsupported;  // a shape VIC does not do (kTegraVICTraits)
@@ -631,11 +680,9 @@ IOReturn transform(Conn *conn, const void *in, uint32_t size)
         iouc_set_async_reference64(job->ref, port, r.cb_fn, r.cb_refcon, conn->task);
     IOLockUnlock(conn->lock);
     job->eventReady = job->events == nullptr;
+    job->touched[0] = job->dst.memory;
+    job->touched[1] = job->plan.readsSource ? job->src.memory : nullptr;
     const bool async = job->async;
-    job->mayDeferTurn = !job->bounceSrc && !job->bounceDst && job->plan.count == 1 &&
-                        (job->plan.op[0].transform & TEGRA_VIC_ROT90) != 0 && job->dst.desc.planes == 2;
-    if (!job->events && !job->mayDeferTurn)
-        switch_vic_surface_reserve_write(&job->dst, &job->dstReserve);
     switch_vic_events_arm(job->events);
     if (!queueJob(job)) {
         abandonUnqueued(job);
@@ -651,8 +698,11 @@ IOReturn transform(Conn *conn, const void *in, uint32_t size)
 // The display's window probes come through here too: the app's sandbox admits this client, not the display's.
 extern "C" IOReturn switch_display_window_probe_call(const IOExternalMethodArguments *) __attribute__((weak));
 
+// Every request writes hardware or kernel state no client's job may reach, so only HW Test may make one.
 static IOReturn kernelTest(const Conn *conn, const IOExternalMethodArguments *a)
 {
+    if (!switch_task_entitled(conn->task, SWITCH_GPU_PROBES_ENTITLEMENT))
+        return kIOReturnNotPrivileged;
     uint32_t magic = 0;
     if (a->structureInput && a->structureInputSize >= sizeof(magic))
         memcpy(&magic, a->structureInput, sizeof(magic));
@@ -662,6 +712,8 @@ static IOReturn kernelTest(const Conn *conn, const IOExternalMethodArguments *a)
         return switch_vic_gate_call(conn, a);
     if (magic == SWITCH_DISPLAY_WINDOW_PROBE_MAGIC)
         return switch_display_window_probe_call ? switch_display_window_probe_call(a) : kIOReturnUnsupported;
+    if (!switch_vic_probes_entitled(conn->task))
+        return kIOReturnNotPrivileged;
     return switch_vic_kernel_test_call(a);
 }
 #endif
@@ -736,6 +788,7 @@ IOReturn tegra_vic_client_close(IOUserClient *self)
     if (Conn *conn = connOf(self)) {
 #if TEGRA_VIC_STATS
         switch_display_traits_release(conn);
+        switch_vic_landscape_release(conn);
         switch_vic_gate_close(conn);
 #endif
         __atomic_store_n(&conn->closing, true, __ATOMIC_RELEASE);
@@ -759,6 +812,7 @@ void tegra_vic_client_free(IOUserClient *self)
             iouc_release_port(conn->port);
         IOLock *lock = conn->lock;
         IOLockLock(gConnLock);
+        __atomic_store_n(&conn->client, static_cast<IOUserClient *>(nullptr), __ATOMIC_RELEASE);
         bzero(conn, sizeof(*conn));
         conn->lock = lock;  // kept for the slot's next connection
         IOLockUnlock(gConnLock);
@@ -773,32 +827,44 @@ IOReturn tegra_vic_new_user_client(IOService *self, task_t task, void *securityI
 {
     if (!tegra_vic_ready())
         return kIOReturnNotReady;
+    const OSObject *object = OSMetaClass::allocClassWithName("IOSurfaceAcceleratorClient");
+    IOUserClient *client = OSDynamicCast(IOUserClient, object);
+    if (!client) {
+        OSSafeReleaseNULL(object);
+        return kIOReturnNoMemory;
+    }
     Conn *conn = nullptr;
+    const uint32_t start = connBucket(client);
     IOLockLock(gConnLock);
     for (uint32_t i = 0; i < kMaxConnections && !conn; i++) {
-        if (!gConns[i].client && !gConns[i].task)
-            conn = &gConns[i];
+        Conn &slot = gConns[(start + i) & (kMaxConnections - 1)];
+        if (!slot.client && !slot.task)
+            conn = &slot;
     }
     if (conn)
         conn->task = task;  // claimed
     IOLockUnlock(gConnLock);
-    if (!conn)
+    if (!conn) {
+        *reinterpret_cast<const uintptr_t **>(client) = &gClientVtable[2];
+        client->release();
         return kIOReturnNoResources;
+    }
     if (!conn->lock)
         conn->lock = IOLockAlloc();
-    const OSObject *object = OSMetaClass::allocClassWithName("IOSurfaceAcceleratorClient");
-    IOUserClient *client = OSDynamicCast(IOUserClient, object);
-    if (!conn->lock || !client) {
-        OSSafeReleaseNULL(object);
+    if (!conn->lock) {
+        IOLockLock(gConnLock);
         conn->task = nullptr;
+        IOLockUnlock(gConnLock);
+        *reinterpret_cast<const uintptr_t **>(client) = &gClientVtable[2];
+        client->release();
         return kIOReturnNoMemory;
     }
     *reinterpret_cast<const uintptr_t **>(client) =
         &gClientVtable[2];  // Apple's client, our slots (see the top of this file)
     IOLockLock(gConnLock);
-    conn->client = client;
     conn->port = MACH_PORT_NULL;
     conn->pending = 0;
+    __atomic_store_n(&conn->client, client, __ATOMIC_RELEASE);
     IOLockUnlock(gConnLock);
     if (!client->initWithTask(task, securityID, type, properties) || !client->attach(self)) {
         client->release();  // free() clears the connection

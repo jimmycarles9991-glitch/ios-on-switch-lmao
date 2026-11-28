@@ -820,59 +820,61 @@ LEXT(dtrace_nofault_copy64)
  */
 
 /*
- * x9 = op(x8 = old, zero-extended; x1 = operand), for an access of 8 << size bits (w14 = 64 - that).
- * w5: 0 add, 1 clr, 2 eor, 3 set, 4 smax, 5 smin, 6 umax, 7 umin, 8 swp. No memory access, flags clobbered.
- */
-	.text
-	.align 2
-La64x_op:
-	cmp	w5, #8
-	b.eq	9f
-	cmp	w5, #4
-	b.hs	4f
-	cmp	w5, #1
-	b.lo	0f
-	b.eq	1f
-	cmp	w5, #3
-	b.eq	3f
-	eor	x9, x8, x1
-	ret
-0:	add	x9, x8, x1
-	ret
-1:	bic	x9, x8, x1
-	ret
-3:	orr	x9, x8, x1
-	ret
-4:	/* max/min: compare in the access width */
-	lslv	x12, x8, x14
-	lslv	x13, x1, x14
-	cmp	w5, #6
-	b.hs	6f
-	asrv	x12, x12, x14
-	asrv	x13, x13, x14
-	cmp	x12, x13
-	csel	x9, x8, x1, gt
-	cmp	w5, #4
-	b.eq	8f
-	cmp	x12, x13
-	csel	x9, x8, x1, lt
-8:	ret
-6:	lsrv	x12, x12, x14
-	lsrv	x13, x13, x14
-	cmp	x12, x13
-	csel	x9, x8, x1, hi
-	cmp	w5, #6
-	b.eq	8b
-	cmp	x12, x13
-	csel	x9, x8, x1, lo
-	ret
-9:	mov	x9, x1
-	ret
-
-/*
  * int _a64x_user_rmw(user_addr_t uaddr, uint64_t operand, uint64_t *old, uint32_t size_op)
  *   size_op = size (0 byte, 1 half, 2 word, 3 double) | op << 4
+ *   op: 0 add, 1 clr, 2 eor, 3 set, 4 smax, 5 smin, 6 umax, 7 umin, 8 swp
+ * Dispatched outside the ldaxr..stlxr exclusive window so no call or branch sits inside LL/SC.
  */
+.macro A64X_RMW_LOOP label, ld, st, r8, r9, r1, op
+\label:
+1:	\ld	\r8, [x0]
+	\op	x9, x8, x1
+	\st	w10, \r9, [x0]
+	cbnz	w10, 1b
+	b	Lrmw_out
+.endm
+
+.macro A64X_RMW_SWP label, ld, st, r8, r1
+\label:
+1:	\ld	\r8, [x0]
+	\st	w10, \r1, [x0]
+	cbnz	w10, 1b
+	b	Lrmw_out
+.endm
+
+.macro A64X_RMW_MINMAX_NARROW label, ld, st, sxt, cond
+\label:
+	\sxt	x13, w1
+1:	\ld	w8, [x0]
+	\sxt	x12, w8
+	cmp	x12, x13
+	csel	w9, w8, w1, \cond
+	\st	w10, w9, [x0]
+	cbnz	w10, 1b
+	b	Lrmw_out
+.endm
+
+.macro A64X_RMW_UMINMAX_NARROW label, ld, st, mask, cond
+\label:
+	and	w13, w1, \mask
+1:	\ld	w8, [x0]
+	cmp	w8, w13
+	csel	w9, w8, w1, \cond
+	\st	w10, w9, [x0]
+	cbnz	w10, 1b
+	b	Lrmw_out
+.endm
+
+.macro A64X_RMW_MINMAX_WIDE label, ld, st, r8, r9, r1, cond
+\label:
+1:	\ld	\r8, [x0]
+	cmp	\r8, \r1
+	csel	\r9, \r8, \r1, \cond
+	\st	w10, \r9, [x0]
+	cbnz	w10, 1b
+	b	Lrmw_out
+.endm
+
 	.text
 	.align 2
 	.globl EXT(_a64x_user_rmw)
@@ -881,50 +883,103 @@ LEXT(_a64x_user_rmw)
 	PUSH_FRAME
 	and	w4, w3, #3
 	lsr	w5, w3, #4
-	mov	w14, #8
-	lslv	w14, w14, w4
-	mov	w15, #64
-	sub	w14, w15, w14
-	cmp	w4, #1
-	b.lo	Lrmw8
-	b.eq	Lrmw16
-	cmp	w4, #2
-	b.eq	Lrmw32
-	COPYIO_RECOVER_RANGE Lrmw64_done
-1:	ldaxr	x8, [x0]
-	bl	La64x_op
-	stlxr	w10, x9, [x0]
-	cbnz	w10, 1b
-Lrmw64_done:
-	b	Lrmw_out
-Lrmw32:
-	COPYIO_RECOVER_RANGE Lrmw32_done
-1:	ldaxr	w8, [x0]
-	bl	La64x_op
-	stlxr	w10, w9, [x0]
-	cbnz	w10, 1b
-Lrmw32_done:
-	b	Lrmw_out
-Lrmw16:
-	COPYIO_RECOVER_RANGE Lrmw16_done
-1:	ldaxrh	w8, [x0]
-	bl	La64x_op
-	stlxrh	w10, w9, [x0]
-	cbnz	w10, 1b
-Lrmw16_done:
-	b	Lrmw_out
-Lrmw8:
-	COPYIO_RECOVER_RANGE Lrmw8_done
-1:	ldaxrb	w8, [x0]
-	bl	La64x_op
-	stlxrb	w10, w9, [x0]
-	cbnz	w10, 1b
-Lrmw8_done:
+	cmp	w5, #8
+	b.hi	Lrmw_bad
+	add	w6, w5, w4, lsl #3
+	add	w6, w6, w4
+	adr	x11, Lrmw_tbl
+	ldr	w12, [x11, w6, uxtw #2]
+	add	x11, x11, w12, sxtw
+	br	x11
+	.align 2
+Lrmw_tbl:
+	.word	Lrmw8_0 - Lrmw_tbl
+	.word	Lrmw8_1 - Lrmw_tbl
+	.word	Lrmw8_2 - Lrmw_tbl
+	.word	Lrmw8_3 - Lrmw_tbl
+	.word	Lrmw8_4 - Lrmw_tbl
+	.word	Lrmw8_5 - Lrmw_tbl
+	.word	Lrmw8_6 - Lrmw_tbl
+	.word	Lrmw8_7 - Lrmw_tbl
+	.word	Lrmw8_8 - Lrmw_tbl
+	.word	Lrmw16_0 - Lrmw_tbl
+	.word	Lrmw16_1 - Lrmw_tbl
+	.word	Lrmw16_2 - Lrmw_tbl
+	.word	Lrmw16_3 - Lrmw_tbl
+	.word	Lrmw16_4 - Lrmw_tbl
+	.word	Lrmw16_5 - Lrmw_tbl
+	.word	Lrmw16_6 - Lrmw_tbl
+	.word	Lrmw16_7 - Lrmw_tbl
+	.word	Lrmw16_8 - Lrmw_tbl
+	.word	Lrmw32_0 - Lrmw_tbl
+	.word	Lrmw32_1 - Lrmw_tbl
+	.word	Lrmw32_2 - Lrmw_tbl
+	.word	Lrmw32_3 - Lrmw_tbl
+	.word	Lrmw32_4 - Lrmw_tbl
+	.word	Lrmw32_5 - Lrmw_tbl
+	.word	Lrmw32_6 - Lrmw_tbl
+	.word	Lrmw32_7 - Lrmw_tbl
+	.word	Lrmw32_8 - Lrmw_tbl
+	.word	Lrmw64_0 - Lrmw_tbl
+	.word	Lrmw64_1 - Lrmw_tbl
+	.word	Lrmw64_2 - Lrmw_tbl
+	.word	Lrmw64_3 - Lrmw_tbl
+	.word	Lrmw64_4 - Lrmw_tbl
+	.word	Lrmw64_5 - Lrmw_tbl
+	.word	Lrmw64_6 - Lrmw_tbl
+	.word	Lrmw64_7 - Lrmw_tbl
+	.word	Lrmw64_8 - Lrmw_tbl
+
+	COPYIO_RECOVER_RANGE Lrmw_out
+	A64X_RMW_LOOP           Lrmw8_0,  ldaxrb, stlxrb, w8, w9, w1, add
+	A64X_RMW_LOOP           Lrmw8_1,  ldaxrb, stlxrb, w8, w9, w1, bic
+	A64X_RMW_LOOP           Lrmw8_2,  ldaxrb, stlxrb, w8, w9, w1, eor
+	A64X_RMW_LOOP           Lrmw8_3,  ldaxrb, stlxrb, w8, w9, w1, orr
+	A64X_RMW_MINMAX_NARROW  Lrmw8_4,  ldaxrb, stlxrb, sxtb, gt
+	A64X_RMW_MINMAX_NARROW  Lrmw8_5,  ldaxrb, stlxrb, sxtb, lt
+	A64X_RMW_UMINMAX_NARROW Lrmw8_6,  ldaxrb, stlxrb, #0xff, hi
+	A64X_RMW_UMINMAX_NARROW Lrmw8_7,  ldaxrb, stlxrb, #0xff, lo
+	A64X_RMW_SWP            Lrmw8_8,  ldaxrb, stlxrb, w8, w1
+
+	A64X_RMW_LOOP           Lrmw16_0, ldaxrh, stlxrh, w8, w9, w1, add
+	A64X_RMW_LOOP           Lrmw16_1, ldaxrh, stlxrh, w8, w9, w1, bic
+	A64X_RMW_LOOP           Lrmw16_2, ldaxrh, stlxrh, w8, w9, w1, eor
+	A64X_RMW_LOOP           Lrmw16_3, ldaxrh, stlxrh, w8, w9, w1, orr
+	A64X_RMW_MINMAX_NARROW  Lrmw16_4, ldaxrh, stlxrh, sxth, gt
+	A64X_RMW_MINMAX_NARROW  Lrmw16_5, ldaxrh, stlxrh, sxth, lt
+	A64X_RMW_UMINMAX_NARROW Lrmw16_6, ldaxrh, stlxrh, #0xffff, hi
+	A64X_RMW_UMINMAX_NARROW Lrmw16_7, ldaxrh, stlxrh, #0xffff, lo
+	A64X_RMW_SWP            Lrmw16_8, ldaxrh, stlxrh, w8, w1
+
+	A64X_RMW_LOOP           Lrmw32_0, ldaxr,  stlxr,  w8, w9, w1, add
+	A64X_RMW_LOOP           Lrmw32_1, ldaxr,  stlxr,  w8, w9, w1, bic
+	A64X_RMW_LOOP           Lrmw32_2, ldaxr,  stlxr,  w8, w9, w1, eor
+	A64X_RMW_LOOP           Lrmw32_3, ldaxr,  stlxr,  w8, w9, w1, orr
+	A64X_RMW_MINMAX_WIDE    Lrmw32_4, ldaxr,  stlxr,  w8, w9, w1, gt
+	A64X_RMW_MINMAX_WIDE    Lrmw32_5, ldaxr,  stlxr,  w8, w9, w1, lt
+	A64X_RMW_MINMAX_WIDE    Lrmw32_6, ldaxr,  stlxr,  w8, w9, w1, hi
+	A64X_RMW_MINMAX_WIDE    Lrmw32_7, ldaxr,  stlxr,  w8, w9, w1, lo
+	A64X_RMW_SWP            Lrmw32_8, ldaxr,  stlxr,  w8, w1
+
+	A64X_RMW_LOOP           Lrmw64_0, ldaxr,  stlxr,  x8, x9, x1, add
+	A64X_RMW_LOOP           Lrmw64_1, ldaxr,  stlxr,  x8, x9, x1, bic
+	A64X_RMW_LOOP           Lrmw64_2, ldaxr,  stlxr,  x8, x9, x1, eor
+	A64X_RMW_LOOP           Lrmw64_3, ldaxr,  stlxr,  x8, x9, x1, orr
+	A64X_RMW_MINMAX_WIDE    Lrmw64_4, ldaxr,  stlxr,  x8, x9, x1, gt
+	A64X_RMW_MINMAX_WIDE    Lrmw64_5, ldaxr,  stlxr,  x8, x9, x1, lt
+	A64X_RMW_MINMAX_WIDE    Lrmw64_6, ldaxr,  stlxr,  x8, x9, x1, hi
+	A64X_RMW_MINMAX_WIDE    Lrmw64_7, ldaxr,  stlxr,  x8, x9, x1, lo
+	A64X_RMW_SWP            Lrmw64_8, ldaxr,  stlxr,  x8, x1
+
 Lrmw_out:
 	dmb	ish
 	str	x8, [x2]
 	mov	x0, #0
 	mov	x8, #0
+	POP_FRAME
+	ARM64_STACK_EPILOG EXT(_a64x_user_rmw)
+Lrmw_bad:
+	mov	x0, #22
 	POP_FRAME
 	ARM64_STACK_EPILOG EXT(_a64x_user_rmw)
 

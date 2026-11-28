@@ -23,11 +23,48 @@
  */
 #include "priv.h"
 
+#define NVKM_WAIT_SPIN_NS (10ULL * NSEC_PER_USEC)
+
+/* Spin briefly so microsecond HW completions (L2 flush, TLB invalidate, fast preempt) avoid
+ * timer wakeup latency, then sleep with progressive backoff whenever sleeping is legal. */
+static void
+nvkm_timer_wait_backoff(u64 elapsed, u64 limit)
+{
+	u64 rem_us;
+	u64 lo;
+	u64 hi;
+
+	if (limit <= NVKM_WAIT_SPIN_NS || elapsed < NVKM_WAIT_SPIN_NS || !nvxnu_can_sleep()) {
+		cpu_relax();
+		return;
+	}
+	rem_us = (limit - elapsed) / NSEC_PER_USEC;
+	if (rem_us < 20) {
+		cpu_relax();
+		return;
+	}
+	if (elapsed < 100ULL * NSEC_PER_USEC)
+		lo = 25;
+	else if (elapsed < 1000ULL * NSEC_PER_USEC)
+		lo = 100;
+	else if (elapsed < 10ULL * NSEC_PER_MSEC)
+		lo = 250;
+	else
+		lo = 1000;
+	if (lo > rem_us)
+		lo = rem_us;
+	hi = lo * 2;
+	if (hi > rem_us)
+		hi = rem_us;
+	usleep_range(lo, hi);
+}
+
 s64
 nvkm_timer_wait_test(struct nvkm_timer_wait *wait)
 {
 	struct nvkm_subdev *subdev = &wait->tmr->subdev;
 	u64 time = nvkm_timer_read(wait->tmr);
+	u64 elapsed;
 
 	if (wait->reads == 0) {
 		wait->time0 = time;
@@ -44,10 +81,16 @@ nvkm_timer_wait_test(struct nvkm_timer_wait *wait)
 		wait->reads = 1;
 	}
 
-	if (wait->time1 - wait->time0 > wait->limit)
+	elapsed = wait->time1 - wait->time0;
+	if (elapsed > wait->limit)
 		return -ETIMEDOUT;
 
-	return wait->time1 - wait->time0;
+	if (wait->reads == 1)
+		nvkm_timer_wait_backoff(elapsed, wait->limit);
+	else
+		cpu_relax();
+
+	return elapsed;
 }
 
 void

@@ -146,6 +146,38 @@ cc_test(
     deps = [":records"],
 )
 
+# The sample pack's header names the rules PackRules::of derives (packfile.py rules_identity): the shader compiler names
+# its store by those bytes
+host_test(
+    name = "pack_rules_identity_test",
+    srcs = [
+        "pack_rules_identity_test.cpp",
+        GM20B_METAL + ":descriptors.h",
+        GM20B_METAL + ":own_states.h",
+        GM20B_METAL + ":owned.h",
+        GM20B_METAL + ":pack.cpp",
+        GM20B_METAL + ":pack.h",
+        GM20B_METAL + ":pack/probe_bind.h",
+        GM20B_METAL + ":program_facts.h",
+        GM20B_METAL + ":program_stores.h",
+        GM20B_METAL + ":record.h",
+        GM20B_METAL + ":record_parts.cpp",
+        GM20B_METAL + ":record_parts.h",
+        GM20B_METAL + ":sample_shading.h",
+        GM20B_METAL + ":set_entries.h",
+        GM20B_METAL + ":set_reads.h",
+        GM20B_METAL + ":slot_mask.h",
+        GM20B_METAL + ":spill_table.h",
+        GM20B_METAL + ":storage.h",
+        GM20B_METAL + ":viewports.h",
+        GM20B_METAL + ":xr.h",
+        GM20B_METAL + ":xr_pass.h",
+    ],
+    cxx_std = "c++17",
+    data = [":sample_pack"],
+    env = {"SWITCH_SAMPLE_PACK": "$(rootpath :sample_pack)/pack.bin"},
+)
+
 # The sample pack's fetch-free and storage records hold their forms' contracts (form_contracts.cpp)
 cc_test(
     name = "form_contracts_test",

@@ -41,14 +41,11 @@ int switch_native_profile_active(void);
 #define switch_native_profile_active()          0
 #endif
 #if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD && (DEVELOPMENT || DEBUG)
-void switch_diag_user_syscall(unsigned code, int error, int pid, uint64_t pc, uint64_t cpsr, int result);
 void switch_diag_stage(const char *message);
 int switch_diag_console_active(void);
 void switch_diag_console_putc(char c);
 void switch_diag_process_event(int pid, const char *name, const char *event, int status);
 #else
-#define switch_diag_user_syscall(code, error, pid, pc, cpsr, result) \
-    ((void)sizeof((code) + (error) + (pid) + (pc) + (cpsr) + (result)))
 #define switch_diag_stage(message)   ((void)sizeof(message))
 #define switch_diag_console_active() 0
 #define switch_diag_console_putc(c)  ((void)sizeof(c))

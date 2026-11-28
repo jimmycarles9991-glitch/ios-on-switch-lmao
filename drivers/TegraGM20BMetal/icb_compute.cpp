@@ -197,6 +197,8 @@ bool ComputeEncoder::executeSlots(const IcbExecute &x, const char **why)
     if (serial_ && dispatched_)
         barrier();
     dispatched_ = true;
+    pendingUnknownRead_ = true;
+    pendingUnknownWrite_ = true;
     if (x.binds) {
         IcbBuffer inherited[31];
         std::array<uint32_t, 31> strides;

@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Two fragment uniform buffers whose set-0 descriptors lie past byte 496, after twenty storage buffers a stage: NVK reads

@@ -53,28 +53,31 @@ TEST(SwitchGpuRefusalSites, EverySiteHasItsOwnTextAndNamesWhatItPrints)
 	}
 }
 
-TEST(SwitchGpuRefusalSites, OnlyTheTwoFlowControlAnswersAreSilent)
+TEST(SwitchGpuRefusalSites, OnlyTheThreeFlowControlAnswersAreSilent)
 {
 	std::set<SwitchGpuRefusal> silent;
 	for (size_t i = 1; i < size_t(SwitchGpuRefusal::Count); ++i)
 		if (switch_gpu_refusal::kSites[i].silent)
 			silent.insert(SwitchGpuRefusal(i));
-	EXPECT_EQ(silent,
-		  (std::set<SwitchGpuRefusal>{SwitchGpuRefusal::StaleSet, SwitchGpuRefusal::Busy}));
+	EXPECT_EQ(silent, (std::set<SwitchGpuRefusal>{SwitchGpuRefusal::StaleSet,
+						      SwitchGpuRefusal::StaleUses,
+						      SwitchGpuRefusal::Busy}));
 	EXPECT_EQ(line(note(SwitchGpuRefusal::StaleSet, 1, 7), kNotReady), "(silent)");
+	EXPECT_EQ(line(note(SwitchGpuRefusal::StaleUses, 2, 3), kNotReady), "(silent)");
 	EXPECT_EQ(line(note(SwitchGpuRefusal::Busy), kCannotLock), "(silent)");
 }
 
 // The compositor's (a critical client's) refused job loses its frame, which panics at the refusal: every site but the
-// two the runtime resubmits, and neither Aborted (a -5 at admission) nor NotOpen (the process closing). No other
+// three the runtime resubmits, and neither Aborted (a -5 at admission) nor NotOpen (the process closing). No other
 // client's refusal does.
 TEST(SwitchGpuRefusalSites, OnlyTheCompositorsRefusalsLoseItsFrame)
 {
 	constexpr int32_t kAborted = kIOReturnAborted, kNotOpen = kIOReturnNotOpen;
 	for (size_t i = 0; i < size_t(SwitchGpuRefusal::Count); ++i) {
 		const auto site = SwitchGpuRefusal(i);
-		const bool resubmitted =
-			site == SwitchGpuRefusal::StaleSet || site == SwitchGpuRefusal::Busy;
+		const bool resubmitted = site == SwitchGpuRefusal::StaleSet ||
+					 site == SwitchGpuRefusal::StaleUses ||
+					 site == SwitchGpuRefusal::Busy;
 		for (const int32_t ret : {kBadArgument, kNotReady, kCannotLock, kNotResponding}) {
 			EXPECT_EQ(switch_gpu_refusal_loses_frame(true, site, ret), !resubmitted)
 				<< "site " << i << " ret " << std::hex << ret;
@@ -90,10 +93,12 @@ TEST(SwitchGpuRefusalSites, OnlyTheCompositorsRefusalsLoseItsFrame)
 // no frame; the compositor's, which also holds graphics-restart-no-kill, does
 TEST(SwitchGpuRefusalSites, AnAppAtTheTopPriorityLosesNoFrame)
 {
-	const enum tgm_level top = tgm_priority_level(uint32_t(tgm_priority_granted(0)), 4, 0);
-	EXPECT_FALSE(switch_gpu_refusal_loses_frame(tgm_compositor(top, 0) != 0,
+	const uint32_t top = uint32_t(tgm_priority_granted(0));
+	const enum tgm_level appLevel = tgm_priority_level(top, 4, 0, 0);
+	const enum tgm_level compLevel = tgm_priority_level(top, 4, 0, 1);
+	EXPECT_FALSE(switch_gpu_refusal_loses_frame(tgm_compositor(appLevel, 0) != 0,
 						    SwitchGpuRefusal::Push, kBadArgument));
-	EXPECT_TRUE(switch_gpu_refusal_loses_frame(tgm_compositor(top, 1) != 0,
+	EXPECT_TRUE(switch_gpu_refusal_loses_frame(tgm_compositor(compLevel, 1) != 0,
 						   SwitchGpuRefusal::Push, kBadArgument));
 }
 

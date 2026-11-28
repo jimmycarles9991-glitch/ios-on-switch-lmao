@@ -18,7 +18,7 @@ int planeNativeSlotFor(OSObject *surface, const native_planes::Layer &layer, uin
         switch_native_scanout_release(&scanout);
         error = switch_native_scanout_pitch(surface, &scanout);
         tgm_layout block = {};
-        if (!error && !native_planes::imageOf(layer, width, height, image, surfaceLayout(surface, block)))
+        if (!error && !native_planes::imageOf(layer, width, height, image, surfaceLayout(surface, block, &scanout)))
             error = -95;
         if (!error && scanout.pitchOffset) {
             const uint64_t offset = scanout.pitchOffset;
@@ -55,6 +55,24 @@ int planeMapSnapshot(SwitchNativeScanout &scanout, const native_planes::Image &i
         return -95;
     }
     switch_gpu_backing *const backing = scanout.view.native;
+    for (unsigned k = 0; k < kPlaneSlots; ++k) {
+        auto &slot = planeSlots[k];
+        if (int(k) == avoid || !slot.native || slot.mappedAllocation != allocation.allocation_id ||
+            slot.mappedGeneration != allocation.allocation_generation || slot.low != image.readLow ||
+            slot.high != image.readHigh)
+            continue;
+        if (slot.native->lease && slot.native->allocation.content_generation == allocation.content_generation &&
+            (!scanout.promiseCount || switch_native_scanout_same_promises(*slot.native, scanout)) &&
+            (!backing || slot.scanoutBacking == backing)) {
+            if (allocation.page_count && tegra_gm20b_surface_compressed(allocation.pages[0] & ~0xfffULL)) {
+                switch_native_scanout_release(&scanout);
+                return -95;
+            }
+            slot.used = ++planeSlotUses;
+            switch_native_scanout_release(&scanout);
+            return int(k);
+        }
+    }
     const auto releaseLocalBacking = [&] {
         if (!backing)
             return;
@@ -65,7 +83,6 @@ int planeMapSnapshot(SwitchNativeScanout &scanout, const native_planes::Image &i
         switch_gpu_backing_retain(backing);
         switch_gpu_backing_scanout(backing, 1);
     }
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
     if (allocation.page_count && tegra_gm20b_surface_compressed(allocation.pages[0] & ~0xfffULL)) {
         releaseLocalBacking();
         switch_native_scanout_release(&scanout);

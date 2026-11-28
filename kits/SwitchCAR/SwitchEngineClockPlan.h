@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// The rate NVDEC, NVENC and NVJPG run at on T210B01, and the PLL that gives it. L4T clocks them from shared buses with a
-// PLL each (clk-tegra210.c tegra210_clk_register_buses: c3bus on PLLC3 for NVENC and NVDEC, c2bus on PLLC2 for NVJPG,
-// VIC, SE and TSECB); PLLC4 is not in their mux (clk-tegra-periph.c mux_pllc2_c_c3_pllp_plla1_clkm: PLLC2 1, PLLC 2,
-// PLLC3 3, PLLP 4, PLLA1 6, CLK_M 7). The rate is the one L4T's core DVFS table allows at VDD_CORE's minimum, 637 mV
-// (tegra210-dvfs.c get_coreb01_sku_min_mv; tegra210b01-core-dvfs.c coreb01_dvfs_table, speedo 0, by SoC process), so
-// it needs no core voltage at all beyond the floor. Where that rate is below PLLP's 408 MHz (process 0) the engines
-// keep PLLP: 408 MHz is above process 0's 650 mV point (403.2 MHz for NVDEC), which the rail hekate leaves (1050 mV)
-// covers.
+// The rate NVDEC, NVENC, NVJPG and VIC run at on T210B01, and the PLL that gives it. L4T clocks them from shared buses
+// with a PLL each (clk-tegra210.c tegra210_clk_register_buses: c3bus on PLLC3 for NVENC and NVDEC, c2bus on PLLC2 for
+// NVJPG, VIC, SE and TSECB); PLLC4 is not in their mux (clk-tegra-periph.c mux_pllc2_c_c3_pllp_plla1_clkm: PLLC2 1,
+// PLLC 2, PLLC3 3, PLLP 4, PLLA1 6, CLK_M 7). The rate is the one L4T's core DVFS table allows at VDD_CORE's minimum,
+// 637 mV (tegra210-dvfs.c get_coreb01_sku_min_mv; tegra210b01-core-dvfs.c coreb01_dvfs_table, speedo 0, by SoC
+// process), so it needs no core voltage at all beyond the floor. Where that rate is below PLLP's 408 MHz (process 0)
+// the engines keep PLLP: 408 MHz is above process 0's 650 mV point (403.2 MHz for NVDEC), which the rail hekate leaves
+// (1050 mV) covers.
 #ifndef SWITCH_ENGINE_CLOCK_PLAN_H
 #define SWITCH_ENGINE_CLOCK_PLAN_H
 
@@ -17,7 +17,7 @@ extern "C" {
 #endif
 
 enum {
-    SWITCH_ENGINE_BUS_C2 = 2,  // NVJPG
+    SWITCH_ENGINE_BUS_C2 = 2,  // NVJPG, VIC
     SWITCH_ENGINE_BUS_C3 = 3,  // NVDEC, NVENC
 };
 
@@ -25,6 +25,17 @@ enum {
 #define SWITCH_ENGINE_SOURCE_PLLC3 (3u << 29)
 #define SWITCH_ENGINE_SOURCE_PLLP  (4u << 29)
 #define SWITCH_ENGINE_PLLP_KHZ     408000u
+
+// VIC is c2bus's other engine (coreb01_dvfs_table's "vic03" row is its "c2bus" row) with a mux of its own:
+// clk-tegra-periph.c mux_pllc_pllp_plla1_pllc2_c3_clkm_idx, PLLC 1, PLLP 2, PLLA1 3, PLLC2 4, PLLC3 5, CLK_M 6.
+#define SWITCH_ENGINE_VIC_SOURCE_PLLC2 (4u << 29)
+#define SWITCH_ENGINE_VIC_SOURCE_PLLP  (2u << 29)
+
+// CLK_SOURCE_VIC03's source for the one switch_engine_clock_source gave C2's engines.
+static inline uint32_t switch_engine_vic_source(uint32_t c2_source)
+{
+    return c2_source == SWITCH_ENGINE_SOURCE_PLLC2 ? SWITCH_ENGINE_VIC_SOURCE_PLLC2 : SWITCH_ENGINE_VIC_SOURCE_PLLP;
+}
 
 // speedo-tegra210.c soc_process_speedos, T210B01 row; -1 for an unfused speedo.
 static inline int switch_engine_soc_process(int32_t soc_speedo)
@@ -36,7 +47,7 @@ static inline int switch_engine_soc_process(int32_t soc_speedo)
     return soc_speedo < 1709 ? 1 : 2;
 }
 
-// coreb01_dvfs_table's 637 mV column: "c3bus", "nvdec", "nvenc" and "c2bus", "nvjpg" rows, processes 0-2.
+// coreb01_dvfs_table's 637 mV column: "c3bus", "nvdec", "nvenc" and "c2bus", "nvjpg", "vic03" rows, processes 0-2.
 static inline uint32_t switch_engine_vmin_khz(unsigned bus, int process)
 {
     static const uint32_t kC3[3] = {364800, 460800, 556800};

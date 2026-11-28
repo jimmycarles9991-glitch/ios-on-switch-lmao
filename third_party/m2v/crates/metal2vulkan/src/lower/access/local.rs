@@ -753,6 +753,7 @@ pub(super) fn local_ptr(cx: &SelectCx<'_>, v: Value, home: Home) -> Result<Local
     };
     let k = cx.entry.module.consts().get(c).ok_or_else(refuse)?;
     match (&k.value, home) {
+        (Const::Undef | Const::Poison, Home::Arena(_)) => Ok(LocalPtr::Offset(0)),
         (Const::GlobalAddr(g), Home::Constant(i))
             if cx
                 .memory
@@ -808,7 +809,7 @@ pub fn lowered_pointer(cx: &SelectCx<'_>, v: Value) -> Result<Option<DemoteTy>, 
     if home_of(cx, v).is_none() {
         return Ok(None);
     }
-    if super::phis::incoming(cx, v)?.is_some_and(|i| i.constant) {
+    if super::phis::incoming(cx, v)?.is_some_and(|i| i.defined_constant) {
         return Err(refuse());
     }
     Ok(Some(DemoteTy::ArenaOffset))
@@ -1489,7 +1490,10 @@ fn compare(
     let space = cx
         .value_ty(a)
         .and_then(|t| cx.entry.module.types().ptr_space(t));
-    if !matches!(space, Some(AddrSpace::Thread | AddrSpace::Threadgroup)) {
+    if !matches!(
+        space,
+        Some(AddrSpace::Thread | AddrSpace::ArrayRef | AddrSpace::Threadgroup)
+    ) {
         return Ok(None);
     }
     let null = |cx: &SelectCx<'_>, v: Value| match v {

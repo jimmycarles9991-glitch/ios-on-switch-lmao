@@ -6,6 +6,7 @@
 #include "../heap_members.h"
 #include "TegraGM20BVolatileABI.h"
 #include <algorithm>
+#include <vector>
 
 namespace {
 
@@ -75,6 +76,17 @@ TEST_F(HostWritten, AReadLeaseIsNoWrite)
         ASSERT_TRUE(dev.hostAccess(target, target.cpu, bytes(), false, lease));
     }
     EXPECT_FALSE(copy(target, other));
+}
+
+// The idle give-back's order (TegraGM20BMetal.mm): the freed Shared spans zeroed and back in their chunks, then trim, so
+// an emptied chunk parks or goes back
+void giveBack(gm20b::Device &dev)
+{
+    uint32_t seqno = 0;
+    uint64_t generation = 0;
+    ASSERT_TRUE(dev.scrubFreed(seqno, generation));
+    dev.scrubWait(seqno, generation);
+    dev.trim();
 }
 
 TEST(HostWrittenVolatileWc, VolatileWcBufferSkipsHostWrittenKeepsSetAndEmitsVolatileWrites)
@@ -422,10 +434,157 @@ TEST(HostWrittenVolatileWc, NoCopyBufferRefusesBaseAndInteriorOfVolatileAndCache
     dev.destroyBuffer(volBuf);
 }
 
-TEST(HostWrittenVolatileWc, IdleVolatileWcChunksFreeDirectlyOnTrimEvenWithBoPark)
+TEST(HostWrittenVolatileWc, IdleVolatileWcChunksParkAndUnparkResidentWithoutAliasingCachedWc)
 {
     kernel_model::model = {};
     kernel_model::model.infoFlags |= TegraGM20BInfoBoPark;
+    kernel_model::model.coherentFromPool = false;
+    std::vector<TegraGM20BAbiBindOp> bindOps;
+    kernel_model::model.bound = [&](const TegraGM20BAbiBindOp &op) {
+        bindOps.push_back(op);
+    };
+    gm20b::Device dev;
+    std::string err;
+    ASSERT_TRUE(dev.open(harness::emptyPack().c_str(), 0, err, gm20b::Device::Role::Client)) << err;
+    {
+        gm20b::CommandBuffer *cb = dev.begin();
+        ASSERT_NE(cb, nullptr);
+        uint32_t seqno = 0;
+        ASSERT_TRUE(cb->commit(seqno));
+    }
+
+    gm20b::Buffer volBuf, privBuf;
+    ASSERT_TRUE(dev.createBuffer(64 << 10, volBuf, true, true, true));
+    ASSERT_TRUE(dev.createBuffer(4096, privBuf, false, false));
+    ASSERT_TRUE(volBuf.wc && volBuf.gpuVolatile);
+    const uint64_t volVa = volBuf.span.va - volBuf.span.offset;
+    const uint64_t volHandle = kernel_model::model.resolve({volBuf.va, TegraGM20BSurfaceGpuAddress, 0});
+    ASSERT_NE(volHandle, 0u);
+    const auto firstBind = std::find_if(bindOps.begin(), bindOps.end(), [&](const TegraGM20BAbiBindOp &op) {
+        return op.va == volVa;
+    });
+    ASSERT_NE(firstBind, bindOps.end());
+    EXPECT_EQ(firstBind->op, uint32_t(TegraGM20BBindMapVolatile));
+    EXPECT_EQ(dev.wcChunksHeld(), 1u);
+    EXPECT_GT(dev.wcChunkBytesHeld(), 0u);
+
+    dev.destroyBuffer(volBuf);
+    giveBack(dev);
+    EXPECT_EQ(kernel_model::model.parkCalls, 1u);
+    ASSERT_EQ(kernel_model::model.bos.count(volHandle), 1u);
+    EXPECT_EQ(kernel_model::model.bos[volHandle].parkState, kernel_model::ParkState::Parked);
+    EXPECT_EQ(dev.wcChunksHeld(), 0u);
+    EXPECT_EQ(dev.wcChunkBytesHeld(), 0u);
+    gm20b::Device::Held h = {};
+    ASSERT_TRUE(dev.held(h, false));
+    EXPECT_EQ(h.writeCombined, 0u);
+
+    // A non-volatile WC allocation must not unpark a parked volatile chunk.
+    gm20b::Buffer cachedWc;
+    ASSERT_TRUE(dev.createBuffer(64 << 10, cachedWc, true, true, false));
+    ASSERT_TRUE(cachedWc.wc && !cachedWc.gpuVolatile);
+    const uint64_t cachedHandle = kernel_model::model.resolve({cachedWc.va, TegraGM20BSurfaceGpuAddress, 0});
+    EXPECT_NE(cachedHandle, volHandle);
+    EXPECT_EQ(kernel_model::model.unparkResident, 0u);
+    EXPECT_EQ(kernel_model::model.bos[volHandle].parkState, kernel_model::ParkState::Parked);
+    dev.destroyBuffer(cachedWc);
+
+    // Reallocating a volatile WC buffer unparks the parked VOL=1 chunk resident. It rejoins the ResourceSet at the next
+    // begin, not on the unparking thread; a command buffer already open names it per job by address until then.
+    bindOps.clear();
+    gm20b::CommandBuffer *open = dev.begin();
+    ASSERT_NE(open, nullptr);
+    ASSERT_TRUE(dev.createBuffer(64 << 10, volBuf, true, true, true));
+    ASSERT_TRUE(volBuf.wc && volBuf.gpuVolatile);
+    EXPECT_EQ(kernel_model::model.unparkResident, 1u);
+    EXPECT_EQ(kernel_model::model.resolve({volBuf.va, TegraGM20BSurfaceGpuAddress, 0}), volHandle);
+    EXPECT_TRUE(bindOps.empty());
+    EXPECT_FALSE(gm20b::DeviceHarness::setHolds(dev, volBuf.va, volBuf.length));
+    {
+        open->internalCompletion();
+        gm20b::BlitEncoder *e = open->blit();
+        ASSERT_NE(e, nullptr);
+        open->use(volBuf, false);
+        open->use(privBuf, true, false);
+        e->copyBytes(volBuf.va, privBuf.va, 4096);
+        e->end();
+        uint32_t seqno = 0;
+        ASSERT_TRUE(open->commit(seqno));
+        // The model stores each use under the BO it resolved to (kernel_model.h run)
+        const auto &uses = kernel_model::model.jobs.back().uses;
+        EXPECT_TRUE(std::any_of(uses.begin(), uses.end(), [&](const TegraGM20BAbiSurfaceUse &use) {
+            return use.handle == volHandle && (use.access & TegraGM20BSurfaceGpuAddress);
+        })) << "the open command buffer's job names the unparked chunk by its address";
+    }
+
+    {
+        gm20b::CommandBuffer *cb = dev.begin();
+        ASSERT_NE(cb, nullptr);
+        EXPECT_TRUE(gm20b::DeviceHarness::setHolds(dev, volBuf.va, volBuf.length));
+        cb->internalCompletion();
+        gm20b::BlitEncoder *e = cb->blit();
+        ASSERT_NE(e, nullptr);
+        cb->use(volBuf, false);
+        cb->use(privBuf, true, false);
+        e->copyBytes(volBuf.va, privBuf.va, 4096);
+        e->end();
+        uint32_t seqno = 0;
+        ASSERT_TRUE(cb->commit(seqno));
+        EXPECT_FALSE(kernel_model::model.jobs.back().hostWritten);
+        EXPECT_EQ(kernel_model::model.jobs.back().flags & TegraGM20BJobHostWritten, 0u);
+    }
+    // unparked as it was made, a written member, so a write to it does not make the set again
+    uint32_t access = 0;
+    for (const kernel_model::SetState &set : kernel_model::model.sets)
+        for (const TegraGM20BAbiSurfaceUse &m : set.members)
+            access |= set.live && m.handle == volHandle ? m.access : 0u;
+    EXPECT_TRUE(access & TegraGM20BSurfaceWrite) << "the unparked chunk rejoined the set read";
+    const auto generations = [] {
+        std::vector<uint32_t> g;
+        for (const kernel_model::SetState &set : kernel_model::model.sets)
+            g.push_back(set.live ? set.generation : 0);
+        return g;
+    };
+    const std::vector<uint32_t> setBefore = generations();
+    {
+        gm20b::CommandBuffer *cb = dev.begin();
+        ASSERT_NE(cb, nullptr);
+        gm20b::BlitEncoder *e = cb->blit();
+        ASSERT_NE(e, nullptr);
+        cb->use(privBuf, false);
+        cb->use(volBuf, true);
+        e->copyBytes(privBuf.va, volBuf.va, 4096);
+        e->end();
+        uint32_t seqno = 0;
+        ASSERT_TRUE(cb->commit(seqno));
+    }
+    EXPECT_EQ(generations(), setBefore) << "a write to the unparked chunk made the set again";
+
+    // Reclaimed volatile WC chunks drop the dead BO and allocate a fresh VOL=1 chunk.
+    dev.destroyBuffer(volBuf);
+    giveBack(dev);
+    ASSERT_EQ(kernel_model::model.bos[volHandle].parkState, kernel_model::ParkState::Parked);
+    kernel_model::model.reclaimAllParked();
+    bindOps.clear();
+    ASSERT_TRUE(dev.createBuffer(64 << 10, volBuf, true, true, true));
+    ASSERT_TRUE(volBuf.wc && volBuf.gpuVolatile);
+    EXPECT_GE(kernel_model::model.unparkReclaimed, 1u);
+    EXPECT_EQ(kernel_model::model.bos.count(volHandle), 0u);
+    const uint64_t freshVa = volBuf.span.va - volBuf.span.offset;
+    const auto freshBind = std::find_if(bindOps.begin(), bindOps.end(), [&](const TegraGM20BAbiBindOp &op) {
+        return op.va == freshVa;
+    });
+    ASSERT_NE(freshBind, bindOps.end());
+    EXPECT_EQ(freshBind->op, uint32_t(TegraGM20BBindMapVolatile));
+
+    kernel_model::model.bound = nullptr;
+    dev.destroyBuffer(volBuf);
+    dev.destroyBuffer(privBuf);
+}
+
+TEST(HostWrittenVolatileWc, IdleVolatileWcChunksFreeDirectlyWithoutBoPark)
+{
+    kernel_model::model = {};
     kernel_model::model.coherentFromPool = false;
     gm20b::Device dev;
     std::string err;
@@ -436,11 +595,9 @@ TEST(HostWrittenVolatileWc, IdleVolatileWcChunksFreeDirectlyOnTrimEvenWithBoPark
     ASSERT_TRUE(volBuf.wc && volBuf.gpuVolatile);
     const uint64_t handle = kernel_model::model.resolve({volBuf.va, TegraGM20BSurfaceGpuAddress, 0});
     ASSERT_NE(handle, 0u);
-    EXPECT_EQ(dev.wcChunksHeld(), 1u);
-    EXPECT_GT(dev.wcChunkBytesHeld(), 0u);
 
     dev.destroyBuffer(volBuf);
-    dev.trim();
+    giveBack(dev);
     EXPECT_EQ(kernel_model::model.parkCalls, 0u);
     EXPECT_EQ(kernel_model::model.bos.count(handle), 0u);
     EXPECT_EQ(dev.wcChunksHeld(), 0u);
@@ -448,6 +605,45 @@ TEST(HostWrittenVolatileWc, IdleVolatileWcChunksFreeDirectlyOnTrimEvenWithBoPark
     gm20b::Device::Held h = {};
     ASSERT_TRUE(dev.held(h, false));
     EXPECT_EQ(h.writeCombined, 0u);
+}
+
+TEST(HostWrittenVolatileWc, CachedHostBufferOnlyInvalidatesL2WhenCpuDirty)
+{
+    kernel_model::model = {};
+    kernel_model::model.coherentFromPool = false;
+    gm20b::Device dev;
+    std::string err;
+    ASSERT_TRUE(dev.open(harness::emptyPack().c_str(), 0, err, gm20b::Device::Role::Client)) << err;
+
+    gm20b::Buffer shared, dst;
+    ASSERT_TRUE(dev.createBuffer(4096, shared, false, true, false));
+    ASSERT_TRUE(dev.createBuffer(4096, dst, false, false, false));
+    ASSERT_TRUE(shared.hostVisible && !shared.gpuVolatile);
+
+    auto copyOnce = [&]() -> bool {
+        gm20b::CommandBuffer *cb = dev.begin();
+        gm20b::BlitEncoder *e = cb ? cb->blit() : nullptr;
+        if (!e) {
+            ADD_FAILURE() << "no blit encoder";
+            return false;
+        }
+        cb->use(shared, false);
+        cb->use(dst, true);
+        e->copyBytes(shared.va, dst.va, 256);
+        e->end();
+        uint32_t seqno = 0;
+        EXPECT_TRUE(cb->commit(seqno));
+        return !kernel_model::model.jobs.empty() && kernel_model::model.jobs.back().hostWritten;
+    };
+
+    EXPECT_TRUE(copyOnce()) << "first GPU read of a new cached-host buffer must invalidate L2";
+    EXPECT_FALSE(copyOnce()) << "steady read of an unmodified cached-host buffer skips L2 invalidate";
+    shared.markCpuDirty();
+    EXPECT_TRUE(copyOnce()) << "CPU modification re-arms L2 invalidate once";
+    EXPECT_FALSE(copyOnce()) << "subsequent steady read skips L2 invalidate again";
+
+    dev.destroyBuffer(shared);
+    dev.destroyBuffer(dst);
 }
 
 }  // namespace

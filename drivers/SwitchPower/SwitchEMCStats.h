@@ -2,7 +2,7 @@
 // SwitchEMC's part of the power stats line (debug kernels; included by SwitchEMC.cpp): rate changes, the share of time
 // at each rate, hints' raises, the CPUs' busy time at each rate, the windows of work that found the EMC not held at its
 // top rate, and the moves the BPMP or the display memory plan refused.
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_POWER
 // The tick, one CPU at a time: its own counters, stored as they grow for the loop to read.
 void SwitchEMC::noteWindow(uint64_t busy, bool topHeld)
 {

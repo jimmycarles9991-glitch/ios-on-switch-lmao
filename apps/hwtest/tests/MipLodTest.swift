@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUModels
+import HWTestKit
 import Metal
 
 /// The level of detail a minified mipmapped texture is sampled at, against Metal's formula (HWTestGPU MipLod): `lod=`

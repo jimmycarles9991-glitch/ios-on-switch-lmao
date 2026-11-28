@@ -196,7 +196,11 @@ inline Assignment assign(const Overlay wanted[2], const WindowState current[2])
             const auto &window = current[candidate.window[p]];
             const auto &image = wanted[p].image;
             const bool cscMatches = window.matrix == int(image.matrix) && window.fullRange == int(image.fullRange);
-            if (image.convert || (image.yuv && window.live && !cscMatches)) {
+            // Only window B's turned scans are probed on the device (V6, V7, V8): on window C the conversion job
+            // turns the layer.
+            const bool turned = (image.options & (native_planes::kScanColumn | native_planes::kHDirection |
+                                                  native_planes::kVDirection)) != 0u;
+            if (image.convert || (turned && candidate.window[p] == 1) || (image.yuv && window.live && !cscMatches)) {
                 candidate.convert |= 1u << p;
                 cost += 16;
             }

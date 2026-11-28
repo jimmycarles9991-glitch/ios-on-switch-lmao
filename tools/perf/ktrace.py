@@ -26,6 +26,8 @@ def code(cls: int, sub: int, number: int) -> int:
 # bsd/sys/kdebug.h, osfmk/kperf/buffer.h, kernel/switch/include/switch/recorder.h and
 # TegraDisplayFlip/SwitchFrameTimeline.h
 MACH_SCHED = code(1, 0x40, 0)
+MACH_STACK_HANDOFF = code(1, 0x40, 2)  # a context switch that hands the kernel stack over: thread_invoke's fast path
+SWITCHES = {MACH_SCHED, MACH_STACK_HANDOFF}
 MACH_MAKE_RUNNABLE = code(1, 0x40, 6)
 VM_PMAP_UNNEST = code(1, 0x30, 0x161)
 SHARED_CACHE_LAYOUT = code(1, 0xA8, 0)
@@ -40,10 +42,30 @@ DKIO_READ = 0x02
 DKIO_ASYNC = 0x04
 DKIO_META = 0x08
 DKIO_PAGING = 0x10
+DKIO_PASSIVE = 0x40
+DKIO_TIER_MASK, DKIO_TIER_SHIFT = 0xF00, 8
+TRACE_NEWTHREAD, TRACE_NEWTHREAD_NAME = code(7, 0, 1), code(7, 1, 1)  # new tid, pid; its process's name
+TRACE_EXEC, TRACE_EXEC_NAME = code(7, 0, 2), code(7, 1, 2)  # pid; the name it execs as
+TRACE_THREADNAME = code(7, 1, 4)  # a thread's own name, as it sets it
+VM_FAULT = code(1, 0x30, 2)  # vm_fault_internal: START, END with its result and the fault's type
+FAULT_KINDS = {
+    1: 'zero fill',
+    2: 'page-in',
+    3: 'copy',
+    4: 'cache hit',
+    7: 'page-in',
+    8: 'page-in',
+    9: 'compressor',
+    10: 'swap-in',
+}
 PERF_TI_DATA = code(37, 1, 1)
 PERF_CS_KDATA, PERF_CS_UDATA = code(37, 2, 3), code(37, 2, 4)
 PERF_CS_KHDR, PERF_CS_UHDR = code(37, 2, 5), code(37, 2, 6)
-TRIGGER, DUMP, GPU_JOB = code(6, 18, 0x3E0), code(6, 18, 0x3E1), code(6, 18, 0x3E8)
+TRIGGER, DUMP, GPU_JOB, GPU_WAIT = code(6, 18, 0x3E0), code(6, 18, 0x3E1), code(6, 18, 0x3E8), code(6, 18, 0x3E9)
+SD_PICK = code(6, 18, 0x3D8)  # NativeSwitchBlock's queue picks
+GPU_ROOM, GPU_ROOM_DONE = code(6, 18, 0x3EA), code(6, 18, 0x3EB)  # a submission waiting for room in its channel
+SD_CLASSES = ('high', 'default', 'low', 'background')
+ENGINES = {1: 'GM20B', 2: 'copy engine', 3: 'VIC', 4: 'NVDEC', 5: 'display', 6: 'NVENC', 7: 'promise', 8: 'NVJPG'}
 SUBMIT = code(6, 18, 0x3F1)
 FRAME_POINTS = {
     code(6, 18, 0x3F0 + i): name
@@ -52,6 +74,9 @@ FRAME_POINTS = {
     )
 }
 REASONS = ('none', 'late frame', 'hang', 'slow work', 'mark')
+# The GPU's stamps are PTIMER units: its 19.2 MHz source with a 32 ns step meant for 31.25 MHz runs at 0.6144 times real
+# time (drivers/TegraGM20B/gpu_stats_tick.c).
+PTIMER_PER_NS = 0.6144
 BSD_SYSCALLS = {
     73: 'munmap',
     74: 'mprotect',
@@ -111,6 +136,36 @@ class Job:
 
 
 @dataclass(frozen=True)
+class Submission:
+    """One user submission on the GPU: from its first batch's start stamp to its last seqno's end stamp."""
+
+    channel: int
+    first: int
+    last: int
+    start: int  # PTIMER units
+    end: int
+    ts: int  # when the interrupt pass saw its last seqno done
+    tid: int  # the thread that kicked it
+    compositor: bool
+    bounded: bool = False  # its start stamp was stale: it runs from its channel's previous end, an upper bound
+
+    @property
+    def ms(self) -> float:
+        return (self.end - self.start) / PTIMER_PER_NS / 1e6
+
+
+@dataclass(frozen=True)
+class GpuWait:
+    """A compositor job kicked behind an unsettled dependency (drivers/TegraGM20B/SwitchGpuJobRing.h)."""
+
+    ts: int
+    channel: int
+    engine: str
+    source: int  # the GM20B channel it waits on, 0 for another engine
+    value: int
+
+
+@dataclass(frozen=True)
 class DiskIO:
     ts: int
     tid: int
@@ -121,6 +176,16 @@ class DiskIO:
     read: bool
     paging: bool
     meta: bool
+    tier: int = 0  # the I/O throttle tier it went out at (0: none)
+    passive: bool = False
+
+
+@dataclass(frozen=True)
+class Fault:
+    tid: int
+    start: int
+    end: int
+    kind: str
 
 
 @dataclass(frozen=True)
@@ -193,12 +258,12 @@ def read(path: str) -> Ring:
 
 
 def runs(events: list[Event]) -> dict[int, list[tuple[int, int, int]]]:
-    """Return each thread's stretches on a core, (start, end, cpu), from the context switches."""
+    """Return each thread's stretches on a core, (start, end, cpu), from the context switches of either kind."""
     on: dict[int, tuple[int, int]] = {}  # cpu: (thread, since)
     out: dict[int, list[tuple[int, int, int]]] = defaultdict(list)
     first = events[0].ts if events else 0
     for e in events:
-        if e.id != MACH_SCHED:
+        if e.id not in SWITCHES:
             continue
         old_tid, since = on.get(e.cpu, (e.tid, first))
         out[old_tid].append((since, e.ts, e.cpu))
@@ -265,6 +330,113 @@ def jobs(events: list[Event]) -> tuple[list[Job], dict[int, int]]:
     return out, submitter
 
 
+def submissions(events: list[Event]) -> list[Submission]:
+    """Return each channel's submissions as their jobs pair up.
+
+    A submission of several batches has several seqnos: the first batch's job carries the start stamp, and the last
+    seqno, the one its SWITCH_KDBG_SUBMIT names, carries the end. A job between them carries neither.
+    """
+    kicked = {(e.args[0], e.args[1]): e.tid for e in events if e.id == SUBMIT}
+    started: dict[int, Job] = {}
+    ended: dict[int, int] = {}  # channel: its last submission's end
+    out = []
+    for j in jobs(events)[0]:
+        if j.start_ns:
+            started[j.channel] = j
+        if (j.channel, j.seqno) not in kicked:
+            continue
+        first = started.pop(j.channel, None)
+        before = ended.get(j.channel, 0)
+        if first and j.end_ns >= first.start_ns:
+            tid = kicked[(j.channel, j.seqno)]
+            # A channel's jobs run in order, each after the one before it ended: a start before that is a stale stamp.
+            stale = before and first.start_ns < before <= j.end_ns
+            start = before if stale else first.start_ns
+            out.append(Submission(j.channel, first.seqno, j.seqno, start, j.end_ns, j.ts, tid, j.compositor, stale))
+        if j.end_ns:
+            ended[j.channel] = j.end_ns
+    return out
+
+
+@dataclass(frozen=True)
+class SdPick:
+    ts: int
+    lba: int
+    sectors: int
+    requests: int
+    klass: int
+    passed: bool
+    write: bool
+    queued: int
+    head_waited_us: int
+
+
+def sd_picks(events: list[Event]) -> list[SdPick]:
+    out = []
+    for e in events:
+        if e.id == SD_PICK:
+            a2, a3 = e.args[1], e.args[2]
+            out.append(
+                SdPick(
+                    e.ts,
+                    e.args[0],
+                    a2 & 0xFFFFFFFF,
+                    a2 >> 32,
+                    a3 & 0xFF,
+                    bool(a3 & 0x100),
+                    bool(a3 & 0x200),
+                    a3 >> 16,
+                    e.args[3],
+                )
+            )
+    return out
+
+
+@dataclass(frozen=True)
+class RoomWait:
+    tid: int
+    channel: int
+    start: int
+    end: int
+    get: int
+    put: int
+    unfinished: int  # the channel's jobs submitted and not done when the wait began
+    timed_out: bool
+
+
+def room_waits(events: list[Event]) -> list[RoomWait]:
+    """Return each submission's wait for room in its channel's ring, from its start to its end on the same thread."""
+    began: dict[int, Event] = {}
+    out = []
+    for e in events:
+        if e.id == GPU_ROOM:
+            began[e.tid] = e
+        elif e.id == GPU_ROOM_DONE and (b := began.pop(e.tid, None)) is not None:
+            submitted, done = b.args[2] >> 32, b.args[2] & 0xFFFFFFFF
+            out.append(
+                RoomWait(
+                    e.tid,
+                    b.args[0],
+                    b.ts,
+                    e.ts,
+                    b.args[1] >> 32,
+                    b.args[1] & 0xFFFFFFFF,
+                    (submitted - done) & 0xFFFFFFFF,
+                    (e.args[2] & 0xFFFFFFFF) != 0,
+                )
+            )
+    return out
+
+
+def gpu_waits(events: list[Event]) -> list[GpuWait]:
+    out = []
+    for e in events:
+        if e.id == GPU_WAIT:
+            a = e.args[0]
+            out.append(GpuWait(e.ts, a & 0xFFFF, ENGINES.get((a >> 16) & 0xFFFF, '?'), a >> 32, e.args[1]))
+    return out
+
+
 def _words_to_bytes(words: tuple[int, ...]) -> bytes:
     return b''.join(struct.pack('<Q', w) for w in words)
 
@@ -298,7 +470,7 @@ def vnode_paths(events: list[Event]) -> dict[int, str]:
 def pageins(events: list[Event]) -> tuple[list[DiskIO], list[PageIn]]:
     """Decode DKRW disk I/O (with vnode paths from VFS_LOOKUP) and FSRW cluster_pagein requests."""
     paths = vnode_paths(events)
-    inflight: dict[int, tuple[int, int, int]] = {}  # bp_id: (start_ts, tid, nbytes)
+    inflight: dict[int, tuple[int, int, int, int]] = {}  # bp_id: (start_ts, tid, nbytes, the issue's code)
     disk_ios: list[DiskIO] = []
     fs_pageins: list[PageIn] = []
     for e in events:
@@ -312,6 +484,7 @@ def pageins(events: list[Event]) -> tuple[list[DiskIO], list[PageIn]]:
         if dkcode & DKIO_DONE:
             start = inflight.pop(bp, None)
             vnode = e.args[1]
+            issued = start[3] if start else dkcode
             disk_ios.append(
                 DiskIO(
                     ts=e.ts,
@@ -323,11 +496,73 @@ def pageins(events: list[Event]) -> tuple[list[DiskIO], list[PageIn]]:
                     read=bool(dkcode & DKIO_READ),
                     paging=bool(dkcode & DKIO_PAGING),
                     meta=bool(dkcode & DKIO_META),
+                    tier=(issued & DKIO_TIER_MASK) >> DKIO_TIER_SHIFT,
+                    passive=bool(issued & DKIO_PASSIVE),
                 )
             )
         else:
-            inflight[bp] = (e.ts, e.tid, e.args[3])
+            inflight[bp] = (e.ts, e.tid, e.args[3], dkcode)
     return disk_ios, fs_pageins
+
+
+def _strings(events: list[Event], ids: set[int]) -> list[tuple[Event, str]]:
+    """Return each string kernel_debug_string_simple wrote (a START...END run per thread) with its first event."""
+    pending: dict[tuple[int, int], tuple[Event, bytearray]] = {}
+    out = []
+    for e in events:
+        if e.id not in ids:
+            continue
+        key = (e.tid, e.id)
+        if e.func & FUNC_START:
+            pending[key] = (e, bytearray())
+        if key not in pending:
+            continue
+        first, buf = pending[key]
+        buf += _words_to_bytes(e.args)
+        if e.func & FUNC_END or not e.func:
+            del pending[key]
+            out.append((first, bytes(buf).split(b'\0', 1)[0].decode('utf-8', 'replace')))
+    return out
+
+
+def thread_names(events: list[Event]) -> dict[int, tuple[int, str, str]]:
+    """Return the ring's own names of its threads: tid: (pid, process, thread name).
+
+    They come from the new threads, the execs and the names threads gave themselves while the ring recorded.
+    """
+    pid_of: dict[int, int] = {}
+    proc_of: dict[int, str] = {}
+    made_by: dict[int, int] = {}  # creator: the thread it made last
+    for e in events:
+        if e.id == TRACE_NEWTHREAD:
+            pid_of[e.args[0]] = e.args[1]
+            made_by[e.tid] = e.args[0]
+    exec_pid: dict[int, int] = {e.tid: e.args[0] for e in events if e.id == TRACE_EXEC}
+    for first, text in _strings(events, {TRACE_NEWTHREAD_NAME, TRACE_EXEC_NAME}):
+        if first.id == TRACE_NEWTHREAD_NAME and first.tid in made_by:
+            proc_of.setdefault(made_by[first.tid], text)
+        elif first.id == TRACE_EXEC_NAME:
+            proc_of[first.tid] = text
+            pid_of.setdefault(first.tid, exec_pid.get(first.tid, 0))
+    names = {first.tid: text for first, text in _strings(events, {TRACE_THREADNAME})}
+    return {
+        tid: (pid_of.get(tid, 0), proc_of.get(tid, '?'), names.get(tid, ''))
+        for tid in set(pid_of) | set(proc_of) | set(names)
+    }
+
+
+def faults(events: list[Event]) -> list[Fault]:
+    """Return each thread's VM faults, their start to their end, and the kind its end names."""
+    open_at: dict[int, int] = {}
+    out = []
+    for e in events:
+        if e.id != VM_FAULT:
+            continue
+        if e.func == FUNC_START:
+            open_at[e.tid] = e.ts
+        elif e.func == FUNC_END and (began := open_at.pop(e.tid, None)) is not None:
+            out.append(Fault(e.tid, began, e.ts, FAULT_KINDS.get(e.args[3] & 0xFF, 'other')))
+    return out
 
 
 def _syscall_name(debugid: int) -> str | None:

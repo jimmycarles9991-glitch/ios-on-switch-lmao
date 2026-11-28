@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 
 /// What a render state the pack holds costs to make: 300 of Core Animation's states (the last of ca_asked.log, which
@@ -114,7 +116,10 @@ struct PackHitCostTest: HWTest {
         var rounds: [Round] = []
         for _ in Self.rounds {
             guard let round = Self.make(lines, library, gpu.device) else {
-                return .skip(GM20BFacade.missing("switchMetalLastCreation", on: gpu.device))
+                let why = KernelSysctl.isReleaseKernel()
+                    ? GM20BFacade.missing("switchMetalLastCreation", on: gpu.device)
+                    : "no creation profile (build with --//bazel:prof_gpu)"
+                return .skip(why)
             }
             rounds.append(round)
         }

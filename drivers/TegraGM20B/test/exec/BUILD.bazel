@@ -20,7 +20,11 @@ GPU_HOST_COPTS_BASE = [flag.replace("{tree}/", "") for flag in GPU_C_FLAGS] + [
     "drivers/TegraGM20B",
 ]
 
-GPU_HOST_COPTS = GPU_HOST_COPTS_BASE + ["-DDEVELOPMENT=1"]
+GPU_HOST_COPTS = GPU_HOST_COPTS_BASE + [
+    "-DDEVELOPMENT=1",
+    "-DSWITCH_STATS_GPU=1",
+    "-DSWITCH_PROF_GPU=1",
+]
 
 GPU_HOST_RELEASE_COPTS = GPU_HOST_COPTS_BASE + [
     "-UDEVELOPMENT",
@@ -47,6 +51,7 @@ host_library(
     ] + GPU_HEADERS,
     c_std = "gnu11",
     copts = GPU_HOST_COPTS + LINUX_RELAXATIONS,
+    tags = ["no-lint"],
 )
 
 genrule(
@@ -152,8 +157,9 @@ host_test(
     ],
 )
 
-# The same test against gpu_exec.c with its commit moved (switch_gpu_exec_mutant.py): each of these is expected to
-# FAIL, which shows what the test catches. Manual: never part of //...
+# The same test against gpu_exec.c with its commit moved (switch_gpu_exec_mutant.py): each passes when the commit test
+# fails against its mutant, and fails when every commit test passes, the mutation no longer caught
+# (switch_gpu_exec_mutant_main.cpp).
 MUTANTS = [
     "after_first_kick",
     "after_doorbell",
@@ -189,9 +195,9 @@ py_binary(
 ) for mutant in MUTANTS]
 
 [host_test(
-    name = "switch_gpu_exec_commit_%s_test" % mutant,
-    srcs = EXEC_TEST_SRCS,
-    tags = ["manual"],
+    name = "switch_gpu_exec_commit_catches_%s_test" % mutant,
+    srcs = EXEC_TEST_SRCS + ["switch_gpu_exec_mutant_main.cpp"],
+    gtest_main = False,
     deps = [":gpu_exec_%s" % mutant] + EXEC_TEST_DEPS,
 ) for mutant in MUTANTS]
 

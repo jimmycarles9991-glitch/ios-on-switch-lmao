@@ -1,5 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
+import HWTestKit
+import HWTestShared
 import QuartzCore
 import SwiftUI
 import UIKit

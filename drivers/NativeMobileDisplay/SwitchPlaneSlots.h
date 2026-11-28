@@ -144,8 +144,12 @@ int planeSlotFor(IOMemoryDescriptor *memory, uint64_t low, uint64_t high, bool c
     for (unsigned k = 0; k < kPlaneSlots; ++k) {
         if (planeSlots[k].memory == memory && planeSlots[k].low == low && planeSlots[k].high == end &&
             planeSlots[k].tiled == tiled) {
-            IOByteCount length = 0;
-            const addr64_t first = memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
+            addr64_t first = planeSlots[k].firstPa;
+            if (!first) {
+                IOByteCount length = 0;
+                first = memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
+                planeSlots[k].firstPa = first;
+            }
             if (first && !planeSlots[k].scanoutBacking) {
                 if (auto *backing = switch_gpu_backing_find_pa(first & ~0xfffULL)) {
                     planeHoldScanoutBacking(k, backing);
@@ -161,7 +165,6 @@ int planeSlotFor(IOMemoryDescriptor *memory, uint64_t low, uint64_t high, bool c
                     return -1;
                 }
             }
-            __atomic_thread_fence(__ATOMIC_SEQ_CST);
             if (first && tegra_gm20b_surface_compressed(first & ~0xfffULL) != 0) {
                 if (!planeSlotBusy(int(k)))
                     planeDropSlot(k);
@@ -181,46 +184,55 @@ int planeSlotFor(IOMemoryDescriptor *memory, uint64_t low, uint64_t high, bool c
     }
     uint64_t batch[64];
     bool ok = true;
+    addr64_t first = 0;
+    uint64_t segPa = 0;
+    uint64_t segRem = 0;
     for (uint64_t at = low; ok && at < end;) {
         uint32_t n = 0;
         const uint64_t from = at;
         while (n < 64 && at < end) {
-            IOByteCount length = 0;
-            const uint64_t pa = memory->getPhysicalSegment(at, &length, kIOMemoryMapperNone);
-            if (!pa || (pa & 4095)) {
-                ok = false;
-                break;
+            if (!segRem) {
+                IOByteCount length = 0;
+                const uint64_t pa = memory->getPhysicalSegment(at, &length, kIOMemoryMapperNone);
+                if (!pa || (pa & 4095)) {
+                    ok = false;
+                    break;
+                }
+                if (at == 0)
+                    first = pa;
+                segPa = pa;
+                segRem = length >= 4096 ? (length & ~4095ULL) : 4096ULL;
             }
-            batch[n++] = pa;
+            batch[n++] = segPa;
+            segPa += 4096;
+            segRem -= 4096;
             at += 4096;
         }
         ok = ok && probeDomain.map(slot.iova + (from - low), batch, n, false);
+        if (ok && clean && n)
+            switch_dcache_hw_pages(SWITCH_DCACHE_CLEAN_INVALIDATE, batch, n);
     }
     if (!ok) {
         planeDropSlot(static_cast<unsigned>(k));
         memory->complete(kIODirectionOut);
         return -1;
     }
-    if (clean) {
-        if (IOMemoryMap *view = memory->map(kIOMapAnywhere | kIOMapReadOnly)) {
-            if (view->getVirtualAddress() && view->getLength() >= end) {
-                switch_dcache_clean_invalidate(reinterpret_cast<const void *>(view->getVirtualAddress() + low),
-                                               end - low);
-            }
-            view->release();
-        }
+    if (clean)
+        switch_dcache_sync();
+    if (!first) {
+        IOByteCount length = 0;
+        first = memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
     }
     memory->retain();
     if (surface)
         surface->retain();
     slot.memory = memory;
     slot.surface = surface;
+    slot.firstPa = first;
     slot.used = ++planeSlotUses;
     slot.tiled = tiled;
     cleanDomain();
     int held = 0;
-    IOByteCount length = 0;
-    const addr64_t first = memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
     if (first) {
         if (auto *backing = switch_gpu_backing_find_pa(first & ~0xfffULL)) {
             planeHoldScanoutBacking(static_cast<unsigned>(k), backing);
@@ -228,7 +240,6 @@ int planeSlotFor(IOMemoryDescriptor *memory, uint64_t low, uint64_t high, bool c
         }
     }
     slot.layout = first ? tegra_gm20b_surface_hold(first & ~0xfffULL, &held) : nullptr;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
     const bool compressed = first && tegra_gm20b_surface_compressed(first & ~0xfffULL) != 0;
     if ((slot.layout && (held != 0) != tiled) || compressed) {
         planeDropSlot(static_cast<unsigned>(k));

@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Depth/stencil textures past stored render targets that gpu.gm20b.texture_shapes_depth does not reach, each raw's own

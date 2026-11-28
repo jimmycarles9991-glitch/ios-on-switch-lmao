@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import HWTestCore
+import HWTestKit
 import SwitchCPUClock
 
 /// Every core's clock at once: each thread runs dependent ADDs (cpu/switch_cpu_clock.c) and divides the cycles by

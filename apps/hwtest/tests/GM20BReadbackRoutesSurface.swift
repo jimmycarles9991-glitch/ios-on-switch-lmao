@@ -1,6 +1,9 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestShared
 import IOSurface
 import Metal
 

@@ -3153,6 +3153,9 @@ intrinsic("bar_sync_nv", src_comp=[1, 1])
 # Stall until the given SSA value is available
 intrinsic("ssa_bar_nv", src_comp=[1])
 
+# Maxwell's MEMBAR.VC: the SM's earlier memory requests reach L2 before its later ones
+barrier("membar_vc_nv")
+
 # NVIDIA-specific muladd intrinsics.
 # src[] = { a, b, c}
 intrinsic("cmat_muladd_nv", src_comp=[-1, -1, -1], dest_comp=0, bit_sizes=src2,

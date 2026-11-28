@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A texture buffer as a colour target: a 256-texel RGBA8Unorm texture buffer of RenderTarget and ShaderRead usage over

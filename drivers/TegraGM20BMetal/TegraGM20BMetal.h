@@ -25,7 +25,9 @@ void metal_prepare_split(uint64_t *open_ns, uint64_t *warm_ns, uint64_t *waited_
 // Turns on the runtime's completion of the Core Animation states the pack lacks (TegraGM20BMetalComplete.h): their records made off the render
 // thread and kept under `cacheDir`, the process's own shader cache directory (null: in memory only), the installed native records
 // under `nativeSeed` read first (RecordCache::attachSeed; null: none). After metal_device_open.
+typedef bool (*switch_cache_dir_fn)(char *out, size_t size);
 void metal_complete_states(const char *cacheDir, const char *nativeSeed = nullptr);
+void metal_complete_states_lazy(switch_cache_dir_fn resolveCacheDir, const char *nativeSeed = nullptr);
 // The pack key of a render pipeline descriptor whose functions are this facade's (the frontend journal's R-line fields but the label,
 // then " | l <framework>" for functions of a framework's default library other than QuartzCore's).
 NSString *metal_pipeline_key(MTLRenderPipelineDescriptor *descriptor);

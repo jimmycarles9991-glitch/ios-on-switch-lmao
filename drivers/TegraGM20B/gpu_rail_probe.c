@@ -4,7 +4,7 @@
 #include "gpu_internal.h"
 #include "TegraGM20BNapll.h"
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 static u32 wake_coeff, wake_off_rate;
 
 /* wake_clock, after the relock and before the idle clock's rate is put back (tgm_clock_ceiling_restore) or repaired

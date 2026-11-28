@@ -22,17 +22,23 @@ from pathlib import Path
 
 from tools.common import paths
 from tools.deploy import deployed
+from tools.gpu import stage_format
 
 
 def materialize(manifest: Path, out: Path) -> None:
-    """Copy what //gpu:bundle's manifest names (tools/gpu/stage_manifest.py) below `out`, as the stager lays it out."""
+    """Copy what //gpu:bundle's manifest names below `out`, as the stager lays it out, with its records in gpu.stage.
+
+    `out` is then a stage tree (tools/gpu/stage_format.py) the stager reads as a directory.
+    """
     lines = manifest.read_text().splitlines()
     root = str(manifest)[: -len(lines[0].split(' ')[-1])]
-    for line in lines[1:]:
-        path, _, _, _, source = line.split('\t')
+    for path, _, source in stage_format.files(lines):
         if not (out / path).exists():
             (out / path).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(root + source, out / path)
+    # //gpu:base's own gpu.stage, copied in read-only, lists only the bundle
+    (out / stage_format.TREE_MANIFEST).unlink(missing_ok=True)
+    (out / stage_format.TREE_MANIFEST).write_text(''.join(line + '\n' for line in stage_format.as_tree(lines)))
 
 
 def main() -> None:

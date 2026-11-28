@@ -2,8 +2,8 @@
 /*
  * Switch frame stalls (debug kernels): when the display finds the screen stopped in the middle of an animation (no
  * present for a few refresh periods after presents every frame), one os_log line per thread a frame depends on, as it
- * is at that frame end: Core Animation's render-server thread in backboardd, SpringBoard's main thread and the focal
- * app's. Each says whether the thread is on a core, on a run queue (with what the other cores run) or blocked, and
+ * is at that frame end: Core Animation's render-server thread in backboardd, SpringBoard's main thread and every focal
+ * app's (<switch/focal.h>). Each says whether the thread is on a core, on a run queue (with what the other cores run) or blocked, and
  * then on what and behind whom (stall_snapshot.h).
  *
  * The threads are those sched/stats.c learns: backboardd naming its render-server thread, RunningBoard giving a task
@@ -11,6 +11,7 @@
  * display's work loop at the frame end; the lines are written on a thread call.
  */
 
+#include <switch/focal.h>
 #include <switch/stall.h>
 #include <switch/xnu.h>
 
@@ -27,16 +28,20 @@
 #include <os/log.h>
 #include <string.h>
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && \
+    ((defined(SWITCH_STATS_FRAME) && SWITCH_STATS_FRAME) || (defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED))
 
 enum frame_thread {
     FRAME_RENDER_SERVER,
     FRAME_SPRINGBOARD,
-    FRAME_APP,
-    FRAME_THREADS,
+    FRAME_APP, /* the first of SWITCH_FOCAL_PLACES, one per focal app */
+    FRAME_THREADS = FRAME_APP + SWITCH_FOCAL_PLACES,
 };
 
-static const char *const frame_labels[FRAME_THREADS] = {"render-server", "main", "main"};
+static const char *frame_label(unsigned int i)
+{
+    return i == FRAME_RENDER_SERVER ? "render-server" : "main";
+}
 
 struct frame_report {
     uint64_t last_present;
@@ -48,26 +53,31 @@ struct frame_report {
 
 static SIMPLE_LOCK_DECLARE(frame_lock, 0);
 static thread_t frame_watched[FRAME_THREADS]; /* +1 each */
+static struct switch_focal frame_focal;       /* the tasks of the app places, under frame_lock */
 static thread_call_t frame_call;
 static bool frame_busy; /* a report taken and not yet written */
 static struct frame_report frame_pending;
 
 static void frame_write(thread_call_param_t p0, thread_call_param_t p1);
 
-/* Consumes the reference on thread (THREAD_NULL: stop watching). */
-static void frame_watch(enum frame_thread which, thread_t thread)
+/* Consumes the reference on thread (THREAD_NULL: stop watching). `task`: a focal app's, for its own place. */
+static void frame_watch(unsigned int which, thread_t thread, task_t task)
 {
+    uint64_t evicted = 0;
     thread_t old;
 
     if (os_atomic_load(&frame_call, acquire) == NULL) {
         thread_call_t call =
-            thread_call_allocate_with_options(frame_write, NULL, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+            thread_call_allocate_with_options(frame_write, NULL, THREAD_CALL_PRIORITY_USER, THREAD_CALL_OPTIONS_ONCE);
 
         if (call != NULL && !os_atomic_cmpxchg(&frame_call, NULL, call, release)) {
             thread_call_free(call);
         }
     }
     simple_lock(&frame_lock, LCK_GRP_NULL);
+    if (task != TASK_NULL) {
+        which = FRAME_APP + switch_focal_enter(&frame_focal, (uint64_t)(uintptr_t)task, mach_absolute_time(), &evicted);
+    }
     old = frame_watched[which];
     frame_watched[which] = thread;
     simple_unlock(&frame_lock);
@@ -93,19 +103,24 @@ void switch_stall_frame_role(task_t task, int role)
 {
     char name[32];
     thread_t thread, gone = THREAD_NULL;
+    unsigned place = SWITCH_FOCAL_PLACES;
 
     if (role == TASK_FOREGROUND_APPLICATION) {
         if ((thread = main_thread(task)) == THREAD_NULL) {
             return;
         }
         switch_task_name(task, name, sizeof(name));
-        frame_watch(strcmp(name, "SpringBoard") == 0 ? FRAME_SPRINGBOARD : FRAME_APP, thread);
+        if (strcmp(name, "SpringBoard") == 0) {
+            frame_watch(FRAME_SPRINGBOARD, thread, TASK_NULL);
+        } else {
+            frame_watch(FRAME_APP, thread, task);
+        }
         return;
     }
     simple_lock(&frame_lock, LCK_GRP_NULL);
-    if (frame_watched[FRAME_APP] != THREAD_NULL && get_threadtask(frame_watched[FRAME_APP]) == task) {
-        gone = frame_watched[FRAME_APP];
-        frame_watched[FRAME_APP] = THREAD_NULL;
+    if ((place = switch_focal_leave(&frame_focal, (uint64_t)(uintptr_t)task)) < SWITCH_FOCAL_PLACES) {
+        gone = frame_watched[FRAME_APP + place];
+        frame_watched[FRAME_APP + place] = THREAD_NULL;
     }
     simple_unlock(&frame_lock);
     if (gone != THREAD_NULL) {
@@ -116,7 +131,7 @@ void switch_stall_frame_role(task_t task, int role)
 void switch_stall_frame_render_server(thread_t thread)
 {
     thread_reference(thread);
-    frame_watch(FRAME_RENDER_SERVER, thread);
+    frame_watch(FRAME_RENDER_SERVER, thread, TASK_NULL);
 }
 
 /* The display's work loop, at a frame end. */
@@ -182,7 +197,7 @@ static void frame_write_one(const struct frame_report *r, unsigned int i, const 
 
     switch_task_name(ss->task, process, sizeof(process));
     switch_stall_put(&l, "frame: no present for %llu ms: %s[%d] %s thread 0x%llx",
-                     ms_between(r->last_present, ss->taken), process, task_pid(ss->task), frame_labels[i], ss->tid);
+                     ms_between(r->last_present, ss->taken), process, task_pid(ss->task), frame_label(i), ss->tid);
     if (r->on_core[i]) {
         switch_stall_put(&l, " on core (pri %d)", ss->wait.sched_pri);
     } else if (switch_stall_off_core_waiting(ss->wait.state)) {

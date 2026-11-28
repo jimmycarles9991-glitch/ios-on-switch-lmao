@@ -11,18 +11,6 @@ NSUInteger descriptorRotation(MTLTextureDescriptor *d)
     return [d respondsToSelector:rotation] ? ((NSUInteger (*)(id, SEL))objc_msgSend)(d, rotation) : 0;
 }
 
-static void reportFirst(const SwitchMetalTexture *t, MTLTextureDescriptor *d)
-{
-    static std::atomic<bool> said{false};
-    if (said.exchange(true))
-        return;
-    os_log(gm20bLog(),
-           "SwitchMetal: renders into a turned plane (first: rotation %u, frame %lux%lu over plane %ux%u, %{public}s)",
-           unsigned(t->_raw.rotation), (unsigned long)d.width, (unsigned long)d.height, t->_raw.width, t->_raw.height,
-           t->_raw.renderable ? (t->_raw.blockLinear ? "block-linear target" : "pitch target")
-                              : "through a block-linear shadow");
-}
-
 // An M4 Max's Metal answers such a descriptor with its validation's "a non-zero rotation set but is not marked as
 // framebufferOnly", and with framebufferOnly set its driver's "Buffer texture has invalid rotation"
 bool refuseTurnedOffSurface(MTLTextureDescriptor *d)
@@ -137,7 +125,6 @@ bool createRotated(SwitchMetalTexture *t, MTLTextureDescriptor *d, IOSurfaceRef 
     if (!made)
         return false;
     t->_raw.rotation = r.turn;
-    reportFirst(t, d);
     return true;
 }
 

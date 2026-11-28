@@ -23,10 +23,11 @@ use crate::pipeline::testing::{llvm_assemble, AssembleError};
 use crate::pipeline::{FunctionDescriptor, RenderPipelineDescriptor, StageSource};
 use crate::Budget;
 
-/// `slice_vertex` writes its vertex id as `[[render_target_array_index]]`; `slice_reader` returns
-/// the slice it reads, `layered_fetch` adds its position to the color 0 it reads, and
-/// `layered_fetch_discard` does so where that color's red is not negative and discards elsewhere;
-/// `layered_stencil` returns its position and the stencil reference 7.
+/// `slice_vertex` writes its vertex id as `[[render_target_array_index]]` and `plain_vertex` its
+/// position alone; `slice_reader` returns the slice it reads, `plain_color` its position as color
+/// 0, `layered_fetch` adds its position to the color 0 it reads, and `layered_fetch_discard` does so
+/// where that color's red is not negative and discards elsewhere; `layered_stencil` returns its
+/// position and the stencil reference 7.
 const MODULE: &str = r#"target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32"
 target triple = "air64_v28-apple-macosx26.0.0"
 
@@ -39,11 +40,23 @@ entry:
   ret <{ <4 x float>, i32 }> %r1
 }
 
+define <4 x float> @plain_vertex(i32 noundef %vid) {
+entry:
+  %f = uitofp i32 %vid to float
+  %p = insertelement <4 x float> <float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00>, float %f, i32 0
+  ret <4 x float> %p
+}
+
 define <4 x float> @slice_reader(<4 x float> %pos, i32 %layer) {
 entry:
   %f = uitofp i32 %layer to float
   %v = insertelement <4 x float> %pos, float %f, i32 2
   ret <4 x float> %v
+}
+
+define <4 x float> @plain_color(<4 x float> %pos) {
+entry:
+  ret <4 x float> %pos
 }
 
 define <4 x float> @layered_fetch(<4 x float> %pos, <4 x float> %previous) {
@@ -74,8 +87,11 @@ keep:
   ret <4 x float> %v
 }
 
-!air.vertex = !{!0}
-!air.fragment = !{!10, !20, !40, !50}
+!air.vertex = !{!0, !60}
+!air.fragment = !{!10, !20, !40, !50, !62}
+!62 = !{ptr @plain_color, !11, !53}
+!60 = !{ptr @plain_vertex, !61, !4}
+!61 = !{!2}
 !0 = !{ptr @slice_vertex, !1, !4}
 !1 = !{!2, !3}
 !2 = !{!"air.position", !"air.arg_type_name", !"float4", !"air.arg_name", !"position"}
@@ -106,7 +122,7 @@ keep:
 
 /// [`MODULE`] assembled by `llvm-as` through a scratch file removed at once, or `None` (skipped
 /// visibly) without it
-fn module() -> Option<Vec<u8>> {
+pub(super) fn module() -> Option<Vec<u8>> {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
         "m2v-layered-storage-link-{}-{}.ll",
@@ -129,7 +145,7 @@ fn module() -> Option<Vec<u8>> {
 /// A device of the raw GM20B path's shape (no committed profile is vendored): every format the
 /// translator asks about supports everything, framebuffer fetch is the pixel interlock, and a
 /// vertex function may write `Layer`
-fn device() -> Device {
+pub(super) fn device() -> Device {
     use crate::device::description::FormatProperties;
     use crate::device::profile::Limits;
     use crate::device::requirements::{ApiVersion, VkExtension, VkFeature};
@@ -169,6 +185,7 @@ fn device() -> Device {
         min_uniform_buffer_offset_alignment: 16,
         framebuffer_color_sample_counts: vk::SampleCountFlags::COUNT_1,
         framebuffer_depth_sample_counts: vk::SampleCountFlags::COUNT_1,
+        max_multiview_view_count: 32,
         ..Limits::default()
     };
     for &f in crate::device::description::FormatSupport::queries() {
@@ -186,6 +203,7 @@ fn device() -> Device {
         VkFeature::IndependentBlend,
         VkFeature::ShaderOutputLayer,
         VkFeature::FragmentShaderPixelInterlock,
+        VkFeature::Multiview,
     ]);
     desc.extensions
         .insert(VkExtension::ExtFragmentShaderInterlock);
@@ -202,7 +220,7 @@ fn render(lib: &Library, fragment: StageSource) -> RenderPipelineDescriptor {
     d
 }
 
-fn function(lib: &Library, name: &str) -> StageSource {
+pub(super) fn function(lib: &Library, name: &str) -> StageSource {
     StageSource::Function(FunctionDescriptor::new(
         lib.function(name).unwrap_or_else(|e| panic!("{name}: {e}")),
     ))
@@ -282,10 +300,10 @@ fn storage_images(words: &[u32], format: u32) -> Vec<bool> {
 }
 
 /// The SPIR-V image formats of the stand-ins: `R32f` (depth) and `R8ui` (stencil)
-const R32F: u32 = 3;
+pub(super) const R32F: u32 = 3;
 const R8UI: u32 = 39;
 
-fn stand_ins(stages: &[crate::pipeline::artifact::StageModule], format: u32) -> Vec<bool> {
+pub(super) fn stand_ins(stages: &[crate::pipeline::artifact::StageModule], format: u32) -> Vec<bool> {
     stages
         .iter()
         .flat_map(|m| storage_images(&m.spirv, format))

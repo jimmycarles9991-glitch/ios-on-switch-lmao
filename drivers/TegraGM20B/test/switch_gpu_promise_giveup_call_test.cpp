@@ -347,7 +347,16 @@ TEST_P(Call, AReaderParkedAfterTheKeepFindsTheJob)
 	EXPECT_TRUE(lines.empty()) << "deferred behind the job ahead";
 }
 
-// The call takes tgm_live_lock, a sleeping lock: it may never run where interrupts are off (a filter, under a simple
+// Parking a GPU reader on an unkept promise serializes under giveup_table_lock, never tgm_live_lock.
+TEST_P(Call, ParkingOnAnUnkeptPromiseTakesNoLiveLock)
+{
+	const unsigned takes = tgm_live_takes;
+	readerSubmits();
+	EXPECT_EQ(tgm_live_takes, takes);
+	EXPECT_TRUE(fake::call.pending);
+}
+
+// The call takes a sleeping lock: it may never run where interrupts are off (a filter, under a simple
 // lock). It runs in thread context, the raise its only window with interrupts off, and its line logged outside it.
 TEST_P(Call, TheCallRunsInThreadContextAndOnlyTheRaiseHasInterruptsOff)
 {

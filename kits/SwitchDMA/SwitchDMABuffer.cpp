@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #include "SwitchDMABuffer.h"
+#include "SwitchDMAOrder.h"
 #include "SwitchDcache.h"
 
 // There is no system IOMapper on this platform: with kIOMemoryMapperNone the descriptor's physical segment is the
@@ -30,7 +31,13 @@ bool switch_dma_alloc(switch_dma_buffer *out, size_t size, uint64_t physicalMask
         return false;
     }
     bzero(va, size);
-    switch_dcache_clean_invalidate(va, size);
+    const IOOptionBits cacheMode = extraOptions & static_cast<IOOptionBits>(kIOMapCacheMask);
+    if (cacheMode == static_cast<IOOptionBits>(kIOMapWriteCombineCache) ||
+        cacheMode == static_cast<IOOptionBits>(kIOMapInhibitCache)) {
+        switch_dma_publish();
+    } else {
+        switch_dcache_clean_invalidate(va, size);
+    }
     *out = {memory, va, pa, size};
     return true;
 }

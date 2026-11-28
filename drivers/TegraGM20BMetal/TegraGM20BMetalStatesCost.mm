@@ -2,13 +2,96 @@
 #import "TegraGM20BMetalInternal.h"
 #import "TegraGM20BMetalStatesCost.h"
 
-#if SWITCH_METAL_DIAGNOSTICS
+#if SWITCH_METAL_PROF || SWITCH_METAL_STATS
 #include <mach/mach.h>
+#include <mutex>
+#include <unistd.h>
+#import "TegraGM20BMetalStatesKey.h"
 #include "ca_catch_all.h"
 
+#if SWITCH_METAL_STATS
+namespace {
+std::atomic<uint64_t> gPackHits{0}, gPackMisses{0}, gPackCold{0}, gPackCard{0};
+}  // namespace
+
+bool gm20bPackIsTier1(const gm20b::Pack &pack, const gm20b::PackRun &run)
+{
+    if (!pack.header() || !run.records)
+        return false;
+    const gm20b::PackPipeline *tier1 = pack.section<gm20b::PackPipeline>(gm20b::PackPipelines) +
+                                       pack.tier0Entries(gm20b::PackPipelines, sizeof(gm20b::PackPipeline));
+    return run.first >= tier1;
+}
+
+// Its records and programs may be tier 1's, whose pages are on the card: read on a utility thread, not the one that made
+// the state, whose creation line would otherwise count them
+void gm20bPackNoteTier1Use(const gm20b::Pack &pack, const gm20b::PackRun &run, uint64_t fast, uint64_t name,
+                           SwitchMetalPipeline *p, NSString *label, const std::string &ownKey)
+{
+    static std::mutex seenLock;
+    static std::set<uint64_t> seenStates;
+    {
+        std::lock_guard<std::mutex> hold(seenLock);
+        if (!seenStates.insert(name).second)
+            return;
+    }
+    static dispatch_queue_t notes =
+        dispatch_queue_create_with_target("com.brunostjohn.switch.gm20b.tier1-notes", DISPATCH_QUEUE_SERIAL,
+                                          dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    const gm20b::Pack *packed = &pack;
+    const gm20b::PackRun records = run;
+    const std::string key = ownKey;
+    NSString *named = [label copy];
+    dispatch_async(notes, ^{
+        const gm20b::PackHeader *hdr = packed->header();
+        const gm20b::PackProgram *programs = packed->section<gm20b::PackProgram>(gm20b::PackPrograms);
+        std::set<uint32_t> programIds;
+        const auto collect = [&](uint32_t idx) {
+            if (idx < hdr->programs)
+                programIds.insert(idx);
+        };
+        for (const gm20b::PackPipeline *rec = records.first; rec != records.first + records.records; ++rec) {
+            collect(rec->vs);
+            if (gm20b::pixelStage(*rec))
+                collect(rec->fs);
+            if (gm20b::tessellates(*rec)) {
+                collect(rec->tessPrograms[0]);
+                collect(rec->tessPrograms[1]);
+            }
+            for (uint32_t stage = 0; stage < 2; ++stage) {
+                uint32_t count = 0;
+                if (const gm20b::PackVariant *vars = packed->variants(*rec, stage, count))
+                    for (uint32_t i = 0; i < count; ++i)
+                        collect(vars[i].program);
+            }
+        }
+        uint32_t pieces = 0;
+        for (const uint32_t idx : programIds)
+            pieces += uint64_t(programs[idx].heapOffset) + programs[idx].bytes > hdr->tier0[gm20b::PackHeap];
+        gPackCold.fetch_add(1, std::memory_order_relaxed);
+        os_log(gm20bLog(), "SwitchMetal: tier-1 pack state %016llx %016llx in %{public}s: %u pieces, card=0",
+               (unsigned long long)fast, (unsigned long long)name, getprogname(), pieces);
+        gm20b::logHarvestParts(name, named, p->_packable ? gm20bStateKey(p) : key);
+    });
+}
+
+void gm20bNotePackCreation(bool packed)
+{
+    (packed ? gPackHits : gPackMisses).fetch_add(1, std::memory_order_relaxed);
+}
+
+void gm20bPackCreations(uint64_t &hits, uint64_t &misses, uint64_t &cold, uint64_t &card)
+{
+    hits = gPackHits.load(std::memory_order_relaxed);
+    misses = gPackMisses.load(std::memory_order_relaxed);
+    cold = gPackCold.load(std::memory_order_relaxed);
+    card = gPackCard.load(std::memory_order_relaxed);
+}
+#endif
+
+#if SWITCH_METAL_PROF
 namespace {
 
-std::atomic<uint64_t> gPackHits{0}, gPackMisses{0};
 thread_local gm20b::CreationCost tLastCreation;
 
 void taskEvents(uint64_t &faults, uint64_t &pageins)
@@ -75,12 +158,6 @@ void logCreation(const gm20b::CreationCost &c, SwitchMetalPipeline *p, MTLRender
 
 }  // namespace
 
-void gm20bPackCreations(uint64_t &hits, uint64_t &misses)
-{
-    hits = gPackHits.load(std::memory_order_relaxed);
-    misses = gPackMisses.load(std::memory_order_relaxed);
-}
-
 // No thread CPU clock or thread_info: backboardd's sandbox kills on thread_selfusage (syscall 482) and some refuse thread_info.
 SwitchMetalCreationMeter::SwitchMetalCreationMeter() : work_(gm20b::tCreationWork), saved_(gm20b::tEncodeProfile)
 {
@@ -117,7 +194,9 @@ void SwitchMetalCreationMeter::finish(SwitchMetalPipeline *p, MTLRenderPipelineD
     c.kernelCalls = profile_.calls[size_t(gm20b::EncodePart::Kernel)];
     c.kernelUs = double(profile_.ticks[size_t(gm20b::EncodePart::Kernel)]) / gm20b::encodeTicksPerUs();
     c.probeTicks = probe_ + (mach_absolute_time() - ended);
-    (p && p->_packed ? gPackHits : gPackMisses).fetch_add(1, std::memory_order_relaxed);
+#if SWITCH_METAL_STATS
+    gm20bNotePackCreation(p && p->_packed);
+#endif
     tLastCreation = c;
     const uint64_t wallUs = ticksUs(c.wallTicks);
     gm20b::noteRenderSyncCreation(wallUs);
@@ -167,4 +246,5 @@ void SwitchMetalCreationMeter::finish(SwitchMetalPipeline *p, MTLRenderPipelineD
 }
 
 @end
+#endif
 #endif

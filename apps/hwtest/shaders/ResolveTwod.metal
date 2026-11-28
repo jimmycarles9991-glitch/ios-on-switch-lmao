@@ -21,3 +21,11 @@ fragment float4 resolve_twod_sample_fragment(float4 position [[position]], const
     h ^= h >> 15;
     return float4(float3(uint3(h, h >> 8, h >> 16) & 255u), float((h >> 24) & 255u)) * (1.0f / 255.0f);
 }
+
+// The sample this invocation shades of a multisampled texture, as linear light where the texture is sRGB: the samples
+// of an sRGB grid carried into a float grid of the same count (ResolveEngineArms.swift's linear-intermediate arm)
+fragment float4 resolve_twod_linear_sample(float4 position [[position]], uint sample [[sample_id]],
+                                           texture2d_ms<float> grid [[texture(0)]])
+{
+    return grid.read(uint2(position.xy), sample);
+}

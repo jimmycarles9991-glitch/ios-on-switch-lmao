@@ -18,7 +18,7 @@
 #include <sys/event_private.h>
 #include <sys/proc.h>
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_DIAG_WORKLOOP) && SWITCH_DIAG_WORKLOOP
 
 #define WL_PROCESSES     32
 #define WL_LINES_PER_PID 4

@@ -10,6 +10,9 @@
 struct switch_gpu_event_waits {
 	unsigned refs = 1;
 	int result = 0;
+	int (*onCachedStatus)(switch_gpu_event_waits *) = nullptr;
+	int (*onWait)(switch_gpu_event_waits *) = nullptr;
+	unsigned waitCalls = 0;
 };
 
 namespace
@@ -66,25 +69,31 @@ extern "C" int switch_gpu_backing_register_failure(uint32_t engine, switch_gpu_b
 
 extern "C" void switch_gpu_event_waits_retain(switch_gpu_event_waits *batch)
 {
-	++batch->refs;
+	__atomic_add_fetch(&batch->refs, 1u, __ATOMIC_RELAXED);
 }
 
 extern "C" void switch_gpu_event_waits_release(switch_gpu_event_waits **batch)
 {
 	if (*batch) {
-		--(*batch)->refs;
+		__atomic_sub_fetch(&(*batch)->refs, 1u, __ATOMIC_ACQ_REL);
 		*batch = nullptr;
 	}
 }
 
 extern "C" int switch_gpu_event_waits_cached_status(const switch_gpu_event_waits *batch)
 {
-	return batch->result;
+	auto *mutableBatch = const_cast<switch_gpu_event_waits *>(batch);
+	if (mutableBatch->onCachedStatus)
+		return mutableBatch->onCachedStatus(mutableBatch);
+	return __atomic_load_n(&batch->result, __ATOMIC_ACQUIRE);
 }
 
 extern "C" int switch_gpu_event_waits_wait(switch_gpu_event_waits *batch, uint64_t)
 {
-	return batch->result;
+	__atomic_add_fetch(&batch->waitCalls, 1u, __ATOMIC_RELAXED);
+	if (batch->onWait)
+		return batch->onWait(batch);
+	return __atomic_load_n(&batch->result, __ATOMIC_ACQUIRE);
 }
 
 extern "C" int switch_gpu_bridge_wait_external(const switch_gpu_backing_token *token)
@@ -535,4 +544,270 @@ TEST_F(Timeline, SuccessfulAuthorityWakeDoesNotRequireItsDeferredCallbackToRunFi
 	switch_gpu_timeline_semantic_finish(&node, 0);
 	EXPECT_EQ(operations.status(&current), 1);
 	switch_gpu_timeline_close(timeline);
+}
+
+TEST_F(Timeline, WaitLoopsWhenSemanticWaitFinishesBetweenStatusAndSnapshot)
+{
+	volatile uint32_t fence = 5;
+	auto *timeline = switch_gpu_timeline_create(++nextId, &fence);
+	const auto current = token(timeline, 5);
+	switch_gpu_event_waits authority;
+	authority.onCachedStatus = [](switch_gpu_event_waits *batch) {
+		if (__atomic_load_n(&batch->result, __ATOMIC_ACQUIRE) == 0) {
+			__atomic_store_n(&batch->result, 1, __ATOMIC_RELEASE);
+			return 0;
+		}
+		return 1;
+	};
+	switch_gpu_timeline_semantic *node = nullptr;
+	ASSERT_EQ(switch_gpu_timeline_semantic_reserve(&current, &authority, &node), 0);
+	EXPECT_EQ(operations.wait(&current), 1);
+	EXPECT_EQ(authority.waitCalls, 0u);
+	switch_gpu_timeline_semantic_finish(&node, 0);
+	switch_gpu_timeline_close(timeline);
+}
+
+TEST_F(Timeline, WaitLoopsWhenSemanticNodeUnlinksConcurrently)
+{
+	for (unsigned round = 0; round < 500; ++round) {
+		volatile uint32_t fence = 5;
+		auto *timeline = switch_gpu_timeline_create(++nextId, &fence);
+		const auto current = token(timeline, 5);
+		switch_gpu_event_waits authority;
+		authority.onWait = [](switch_gpu_event_waits *batch) {
+			int r = 0;
+			while ((r = __atomic_load_n(&batch->result, __ATOMIC_ACQUIRE)) == 0)
+				std::this_thread::yield();
+			return r;
+		};
+		switch_gpu_timeline_semantic *node = nullptr;
+		ASSERT_EQ(switch_gpu_timeline_semantic_reserve(&current, &authority, &node), 0);
+		std::atomic<bool> start{false};
+		std::thread finisher([&] {
+			while (!start.load(std::memory_order_acquire))
+				std::this_thread::yield();
+			__atomic_store_n(&authority.result, 1, __ATOMIC_RELEASE);
+			switch_gpu_timeline_semantic_finish(&node, 0);
+		});
+		start.store(true, std::memory_order_release);
+		EXPECT_EQ(operations.wait(&current), 1);
+		finisher.join();
+		switch_gpu_timeline_close(timeline);
+	}
+}
+
+TEST_F(Timeline, WaitDrainsMultiplePendingSemanticNodesBeforePromoting)
+{
+	volatile uint32_t fence = 6;
+	auto *timeline = switch_gpu_timeline_create(++nextId, &fence);
+	const auto fifth = token(timeline, 5), sixth = token(timeline, 6);
+	switch_gpu_event_waits first, second;
+	auto succeedOnWait = [](switch_gpu_event_waits *batch) {
+		__atomic_store_n(&batch->result, 1, __ATOMIC_RELEASE);
+		return 1;
+	};
+	first.onWait = succeedOnWait;
+	second.onWait = succeedOnWait;
+	switch_gpu_timeline_semantic *a = nullptr, *b = nullptr;
+	ASSERT_EQ(switch_gpu_timeline_semantic_reserve(&fifth, &first, &a), 0);
+	ASSERT_EQ(switch_gpu_timeline_semantic_reserve(&sixth, &second, &b), 0);
+	EXPECT_EQ(operations.wait(&sixth), 1);
+	EXPECT_EQ(first.waitCalls, 1u);
+	EXPECT_EQ(second.waitCalls, 1u);
+	EXPECT_EQ(switch_gpu_timeline_promote(&sixth), 1);
+	switch_gpu_timeline_semantic_finish(&a, 0);
+	switch_gpu_timeline_semantic_finish(&b, 0);
+	switch_gpu_timeline_close(timeline);
+}
+
+TEST_F(Timeline, WaitOnLaterSeqnoSucceedsWhenEarlierSemanticWaitFails)
+{
+	volatile uint32_t fence = 6;
+	auto *timeline = switch_gpu_timeline_create(++nextId, &fence);
+	const auto fifth = token(timeline, 5), sixth = token(timeline, 6);
+	switch_gpu_event_waits earlier, later;
+	earlier.onWait = [](switch_gpu_event_waits *batch) {
+		__atomic_store_n(&batch->result, -5, __ATOMIC_RELEASE);
+		return -5;
+	};
+	later.onWait = [](switch_gpu_event_waits *batch) {
+		__atomic_store_n(&batch->result, 1, __ATOMIC_RELEASE);
+		return 1;
+	};
+	switch_gpu_timeline_semantic *a = nullptr, *b = nullptr;
+	ASSERT_EQ(switch_gpu_timeline_semantic_reserve(&fifth, &earlier, &a), 0);
+	ASSERT_EQ(switch_gpu_timeline_semantic_reserve(&sixth, &later, &b), 0);
+	EXPECT_EQ(operations.wait(&sixth), 1);
+	EXPECT_EQ(earlier.waitCalls, 1u);
+	EXPECT_EQ(later.waitCalls, 1u);
+	EXPECT_EQ(switch_gpu_timeline_promote(&sixth), 1);
+	EXPECT_EQ(operations.status(&fifth), -5);
+	switch_gpu_timeline_semantic_finish(&a, -5);
+	switch_gpu_timeline_semantic_finish(&b, 0);
+	switch_gpu_timeline_close(timeline);
+}
+
+TEST_F(Timeline, WaitFailsWhenOwnSeqnoSemanticWaitFails)
+{
+	volatile uint32_t fence = 5;
+	auto *timeline = switch_gpu_timeline_create(++nextId, &fence);
+	const auto fifth = token(timeline, 5);
+	switch_gpu_event_waits own;
+	own.onWait = [](switch_gpu_event_waits *batch) {
+		__atomic_store_n(&batch->result, -5, __ATOMIC_RELEASE);
+		return -5;
+	};
+	switch_gpu_timeline_semantic *node = nullptr;
+	ASSERT_EQ(switch_gpu_timeline_semantic_reserve(&fifth, &own, &node), 0);
+	EXPECT_EQ(operations.wait(&fifth), -5);
+	EXPECT_EQ(own.waitCalls, 1u);
+	EXPECT_EQ(switch_gpu_timeline_promote(&fifth), -5);
+	switch_gpu_timeline_semantic_finish(&node, -5);
+	switch_gpu_timeline_close(timeline);
+}
+
+TEST_F(Timeline, AbortedSemanticWaitDoesNotFailBeforeUnlink)
+{
+	volatile uint32_t fence = 5;
+	auto *timeline = switch_gpu_timeline_create(++nextId, &fence);
+	const auto fifth = token(timeline, 5);
+	switch_gpu_event_waits aborted;
+	aborted.result = -125;
+	switch_gpu_timeline_semantic *node = nullptr;
+	ASSERT_EQ(switch_gpu_timeline_semantic_reserve(&fifth, &aborted, &node), 0);
+	EXPECT_EQ(operations.status(&fifth), 1);
+	EXPECT_EQ(operations.wait(&fifth), 1);
+	switch_gpu_event_waits *captured = nullptr;
+	EXPECT_EQ(switch_gpu_timeline_semantic_snapshot(&fifth, &captured), 0);
+	EXPECT_EQ(captured, nullptr);
+	switch_gpu_timeline_semantic_finish(&node, -125);
+	switch_gpu_timeline_close(timeline);
+}
+
+TEST_F(Timeline, ConcurrentSemanticFailureFinishNeverExposesFalseSuccess)
+{
+	for (unsigned round = 0; round < 500; ++round) {
+		volatile uint32_t fence = 5;
+		auto *timeline = switch_gpu_timeline_create(++nextId, &fence);
+		const auto fifth = token(timeline, 5);
+		const void *handle = nullptr;
+		ASSERT_EQ(refs.retain(&fifth, 1, &handle), 0);
+		switch_gpu_event_waits authority;
+		switch_gpu_timeline_semantic *node = nullptr;
+		ASSERT_EQ(switch_gpu_timeline_semantic_reserve(&fifth, &authority, &node), 0);
+		std::atomic<bool> start{false}, finished{false};
+		std::thread finisher([&] {
+			while (!start.load(std::memory_order_acquire))
+				std::this_thread::yield();
+			switch_gpu_timeline_semantic_finish(&node, -5);
+			finished.store(true, std::memory_order_release);
+		});
+		start.store(true, std::memory_order_release);
+		do {
+			EXPECT_NE(refs.status(handle, &fifth), 1);
+			EXPECT_TRUE(switch_gpu_timeline_has_semantics());
+		} while (!finished.load(std::memory_order_acquire));
+		finisher.join();
+		EXPECT_EQ(refs.status(handle, &fifth), -5);
+		switch_gpu_timeline_close(timeline);
+		refs.release(&fifth, 1);
+	}
+}
+
+TEST_F(Timeline, ConcurrentFailureAndVisibilityUpdateNeverRace)
+{
+	for (unsigned round = 0; round < 500; ++round) {
+		volatile uint32_t fence = 4, visible = 4;
+		auto *timeline = switch_gpu_timeline_create(++nextId, &fence);
+		const auto pending = token(timeline, 5);
+		std::atomic<bool> start{false};
+		std::thread updater([&] {
+			while (!start.load(std::memory_order_acquire))
+				std::this_thread::yield();
+			switch_gpu_timeline_visibility(timeline, &visible);
+		});
+		start.store(true, std::memory_order_release);
+		switchTimelineAtomicContext = true;
+		switch_gpu_timeline_failed(timeline, 4, 0);
+		switchTimelineAtomicContext = false;
+		updater.join();
+		EXPECT_EQ(operations.status(&pending), -5);
+		switch_gpu_timeline_close(timeline);
+	}
+}
+
+// A channel's own host1x syncpoint (SwitchGpuTimelineSyncpt.cpp): a token is answered only inside its own drained job,
+// with that job's threshold and last seqno; a token whose job did not drain would wait on a later job, which can wait on
+// work after the consumer. The covering job's state comes from the fence alone, and a syncpoint goes back with the
+// value every increment its channel pushed promised, for the bridge to make the ones that never ran.
+
+TEST_F(Timeline, ATokenIsAnsweredOnlyInsideItsOwnDrainedJob)
+{
+	uint32_t ids[SWITCH_GPU_TIMELINE_SYNCPTS] = {};
+	uint32_t promised[SWITCH_GPU_TIMELINE_SYNCPTS] = {};
+	switch_gpu_timeline_syncpt_reclaim(ids, promised, SWITCH_GPU_TIMELINE_SYNCPTS);
+	volatile uint32_t fence = 0;
+	auto *timeline = switch_gpu_timeline_create(++nextId, &fence);
+	ASSERT_NE(timeline, nullptr);
+	const auto third = token(timeline, 3);
+	const auto fifth = token(timeline, 5);
+	const auto sixth = token(timeline, 6);
+	uint32_t id = 0;
+	uint32_t threshold = 0;
+	uint32_t last = 0;
+	EXPECT_EQ(switch_gpu_timeline_syncpoint(&third, &id, &threshold, &last), -61);
+	EXPECT_EQ(switch_gpu_timeline_has_syncpt(timeline), 0);
+	EXPECT_EQ(switch_gpu_timeline_syncpt_next(timeline, 3, 4), 0u);
+	ASSERT_EQ(switch_gpu_timeline_syncpt_adopt(&third, 170, 40), 0);
+	EXPECT_EQ(switch_gpu_timeline_has_syncpt(timeline), 1);
+	EXPECT_EQ(switch_gpu_timeline_syncpt_adopt(&third, 171, 0), -16);
+
+	EXPECT_EQ(switch_gpu_timeline_syncpt_next(timeline, 3, 4), 170u);
+	EXPECT_EQ(switch_gpu_timeline_syncpt_next(timeline, 6, 6), 170u);
+	ASSERT_EQ(switch_gpu_timeline_syncpoint(&third, &id, &threshold, &last), 1);
+	EXPECT_EQ(id, 170u);
+	EXPECT_EQ(threshold, 42u);
+	EXPECT_EQ(last, 4u);
+	EXPECT_EQ(switch_gpu_timeline_syncpoint(&fifth, &id, &threshold, &last), 0)
+		<< "job 5 did not drain: job 6 would cover it, and job 6 may wait on the consumer";
+	ASSERT_EQ(switch_gpu_timeline_syncpoint(&sixth, &id, &threshold, &last), 1);
+	EXPECT_EQ(threshold, 44u);
+
+	int stopped = -1;
+	EXPECT_EQ(switch_gpu_timeline_covered(&third, 4, &stopped), 0);
+	EXPECT_EQ(stopped, 0);
+	__atomic_store_n(&fence, 4u, __ATOMIC_RELEASE);
+	EXPECT_EQ(switch_gpu_timeline_covered(&third, 4, &stopped), 1);
+	switch_gpu_timeline_failed(timeline, 4, 0);
+	EXPECT_EQ(switch_gpu_timeline_covered(&sixth, 6, &stopped), -5);
+	EXPECT_EQ(stopped, 1);
+	EXPECT_EQ(switch_gpu_timeline_syncpoint(&sixth, &id, &threshold, &last), 0);
+
+	switch_gpu_timeline_close(timeline);
+	ASSERT_EQ(switch_gpu_timeline_syncpt_reclaim(ids, promised, SWITCH_GPU_TIMELINE_SYNCPTS),
+		  1u);
+	EXPECT_EQ(ids[0], 170u);
+	EXPECT_EQ(promised[0], 44u) << "every increment the channel pushed";
+}
+
+// The syncpoint goes back only with the timeline's last reference: a consumer holding a token may still have a stream
+// waiting on it, and by then the channel is torn down, so none of its increments can land on the next owner.
+TEST_F(Timeline, ASyncpointGoesBackOnlyWithItsTimelinesLastReference)
+{
+	uint32_t ids[SWITCH_GPU_TIMELINE_SYNCPTS] = {};
+	uint32_t promised[SWITCH_GPU_TIMELINE_SYNCPTS] = {};
+	switch_gpu_timeline_syncpt_reclaim(ids, promised, SWITCH_GPU_TIMELINE_SYNCPTS);
+	volatile uint32_t fence = 0;
+	auto *timeline = switch_gpu_timeline_create(++nextId, &fence);
+	ASSERT_NE(timeline, nullptr);
+	const auto held = token(timeline, 1);
+	ASSERT_EQ(switch_gpu_timeline_syncpt_adopt(&held, 172, 0), 0);
+	ASSERT_EQ(operations.retain_token(&held), 0);
+	switch_gpu_timeline_close(timeline);
+	EXPECT_EQ(switch_gpu_timeline_syncpt_reclaim(ids, promised, SWITCH_GPU_TIMELINE_SYNCPTS),
+		  0u);
+	operations.release_token(&held);
+	ASSERT_EQ(switch_gpu_timeline_syncpt_reclaim(ids, promised, SWITCH_GPU_TIMELINE_SYNCPTS),
+		  1u);
+	EXPECT_EQ(ids[0], 172u);
 }

@@ -383,12 +383,12 @@ _validate_kpc_config(uint32_t classes, kpc_config_t *configs)
 		return EINVAL;
 	}
 
-#if __x86_64__
+#if __x86_64__ || defined(SWITCH_ARMV8_PMUV3)
 	if ((classes & KPC_CLASS_RAWPMU_MASK)) {
-		printf("kpc: kpc_set_config: power is unsupported\n");
+		printf("kpc: kpc_set_config: rawpmu is unsupported\n");
 		return ENOTSUP;
 	}
-#endif /* __x86_64__ */
+#endif /* __x86_64__ || defined(SWITCH_ARMV8_PMUV3) */
 
 	/*
 	 * Find any disallowed events to return an error here instead of set-running
@@ -440,7 +440,7 @@ _kpc_set_config_internal(uint32_t classes, kpc_config_t *configs)
 			event_index += 1;
 		}
 
-#if __arm64__
+#if __arm64__ && !defined(SWITCH_ARMV8_PMUV3)
 		if (classes & KPC_CLASS_RAWPMU_MASK) {
 			for (unsigned int i = 0; i < RAWPMU_CONFIG_COUNT; i++) {
 				struct cpc_event_select *select = &g_kpc.event_selects[event_index];

@@ -3,6 +3,7 @@
 // planes (xr_pass.h, xr_texture.cpp; the sRGB one drawn through its format stand-in, format_standin.h)
 #pragma once
 #import "TegraGM20BMetalInternal.h"
+#include "attachment_lifetime.h"
 
 // Metal reads 550 and 551 over a plane followed by another as the words of that plane and the alpha bytes of the next, and over
 // the last plane (or a surface of none) as the words alone (an M4 Max over planes 0, 1 and 2 of three and plane 0 of four, read
@@ -54,6 +55,12 @@ constexpr uint32_t xrPlanesImageTag(uint32_t k)
 {
     return k < 8 ? kXrPlanesImageTag + k : k < 24 ? 32 + (k - 8) : kXrPlanesOverflowTag + (k - 24);
 }
+
+// The images live until their split, after the pass's resolves and YCbCr stores, which read earlier passes' backings
+static_assert(kXrPlanesImageTag >= gm20b::kDriverPassColorTag + 8 &&
+                  (xrPlanesImageTag(8) >= gm20b::kDriverPassColorTag + 8 ||
+                   xrPlanesImageTag(23) < gm20b::kDriverPassColorTag),
+              "an XR plane image's tag is a driver pass's");
 
 int mergeXrPlanes(gm20b::CommandBuffer *rc, const gm20b::Texture &t, uint32_t k, gm20b::Texture *&image,
                   const char **why);

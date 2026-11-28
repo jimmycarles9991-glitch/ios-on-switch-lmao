@@ -2,6 +2,7 @@
 // The memory controller's error interrupt (Tegra X1 TRM 18.5.12, registers 18.11.1.1-4): what its filter takes and the
 // line its action prints. Register access is the caller's (Io: read(offset), write(offset, value)).
 #pragma once
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 #ifdef KERNEL
@@ -19,24 +20,90 @@ constexpr uint32_t kIntStatus = 0x0, kIntMask = 0x4, kErrStatus = 0x8, kErrAdr =
 // ARBITRATION_EMEM (9) is a performance warning that also fires while the EMC back-pressures traffic for a clock change
 // (18.5.12.2): it stays masked.
 constexpr uint32_t kErrors = 1u << 6 | 1u << 8 | 1u << 10 | 1u << 11 | 1u << 12 | 1u << 13 | 1u << 16 | 1u << 17;
+// The ones that must reach the CPU: Linux's tegra210 mc driver unmasks exactly these (tegra210.c
+// tegra210_mc_intmasks). DECERR_GENERALIZED_CARVEOUT (17) is unmasked too, but nothing says this MC implements it.
+constexpr uint32_t kRequired = kErrors & ~(1u << 17);
+// The kinds that panic: a memory client went where it may not (an SMMU page it was not given, an address with no DRAM, a
+// carveout or security region). The MC refuses the access, but the DMA that asked for it was built on a wrong address,
+// and the next one may land unchecked in another client's memory. INVALID_APB_ASID_UPDATE is a CPU's swgroup write the
+// MC dropped (a secure ASID); the writer reads its register back, so it is only logged.
+constexpr uint32_t kFatal = kErrors & ~(1u << 11);
+
+// The kinds with capture registers of their own (TRM 18.5.12.2), laid out as MC_ERR_VPR_STATUS and MC_ERR_SEC_STATUS
+// (18.11.1.92, .101): ADR_HI 21:20, RW 16, the client 7:0 (SEC's 6:0), the address's low 32 bits in the ADR register.
+// VPR's and SEC's offsets are the TRM's; MTS's and the generalized carveout's are Linux's tegra20_mc_regs, the table its
+// tegra210.c uses. Listed in the order take() prefers when several are pending.
+struct OwnCapture {
+    uint32_t bit, status, address, clientMask;
+    const char *registers;
+};
+
+constexpr OwnCapture kOwnCaptures[] = {
+    {1u << 13, 0x67c, 0x680, 0x7f, "ERR_SEC"},
+    {1u << 12, 0x654, 0x658, 0xff, "ERR_VPR"},
+    {1u << 16, 0x9b0, 0x9b4, 0xff, "ERR_MTS"},
+    {1u << 17, 0xc00, 0xc04, 0xff, "ERR_GENERALIZED_CARVEOUT"},
+};
 
 struct Error {
     uint32_t intstatus, status, address;
+    uint32_t ownBit, ownStatus, ownAddress;  // the first pending kind of kOwnCaptures and its capture; ownBit 0: none
 };
 
 // The interrupt's filter, interrupts off: the pending error bits, then the capture registers (they hold the first error
-// until its bit is cleared, 18.11.1.3), then those bits written back to clear them so the next error is captured.
-// false: no error bit is pending.
+// until its bit is cleared, 18.11.1.3), MC_ERR_STATUS's and a pending kind's own, then those bits written back to
+// clear them so the next error is captured. false: no error bit is pending.
 template <class Io> bool take(Io &io, Error *out)
 {
     const uint32_t pending = io.read(kIntStatus) & kErrors;
     if (!pending)
         return false;
-    out->intstatus = pending;
-    out->status = io.read(kErrStatus);
-    out->address = io.read(kErrAdr);
+    *out = {pending, io.read(kErrStatus), io.read(kErrAdr), 0, 0, 0};
+    for (const OwnCapture &c : kOwnCaptures) {
+        if (pending & c.bit) {
+            out->ownBit = c.bit;
+            out->ownStatus = io.read(c.status);
+            out->ownAddress = io.read(c.address);
+            break;
+        }
+    }
     io.write(kIntStatus, pending);
     return true;
+}
+
+inline const OwnCapture *ownCapture(uint32_t bit)
+{
+    for (const OwnCapture &c : kOwnCaptures) {
+        if (c.bit == bit)
+            return &c;
+    }
+    return nullptr;
+}
+
+constexpr uint32_t kDecerrEmem = 1u << 6, kInvalidSmmuPage = 1u << 10, kErrTypeInvalidSmmuPage = 6u;
+
+// A deliberate fault's error (TegraSMMU.h switch_mc_errors_expect): an SMMU fault captured for `client` at an address
+// in [low, high) below 4 GiB. On T210/T210B01 silicon, an unmapped IOVA below EMEM latches DECERR_EMEM alongside
+// INVALID_SMMU_PAGE while MC_ERR_STATUS captures INVALID_SMMU_PAGE (type 6).
+inline bool expected(const Error &e, uint32_t client, uint32_t low, uint32_t high)
+{
+    return (e.intstatus == kInvalidSmmuPage || e.intstatus == (kInvalidSmmuPage | kDecerrEmem)) &&
+           ((e.status >> 28) & 7u) == kErrTypeInvalidSmmuPage && (e.status & 0xff) == client &&
+           !((e.status >> 20) & 3) && e.address >= low && e.address < high;
+}
+
+inline void append(char *text, size_t size, size_t &used, const char *format, ...)
+    __attribute__((format(printf, 4, 5)));
+
+inline void append(char *text, size_t size, size_t &used, const char *format, ...)
+{
+    if (used >= size)
+        return;
+    va_list values;
+    va_start(values, format);
+    const int n = vsnprintf(text + used, size - used, format, values);
+    va_end(values);
+    used += n > 0 ? static_cast<size_t>(n) : 0;
 }
 
 inline const char *bitNames(uint32_t intstatus, char *text, size_t size)
@@ -64,27 +131,46 @@ inline const char *bitNames(uint32_t intstatus, char *text, size_t size)
 
 // One line: the INTSTATUS kinds, then what MC_ERR_STATUS captured: the error type, the direction, the client (ERR_ID,
 // 7:0) and the address (ERR_ADR_HI 21:20 above ERR_ADR); an SMMU fault adds the page's permissions (27:25). Only
-// DECERR_EMEM, SECURITY_VIOLATION and INVALID_SMMU_PAGE are captured there (18.5.12.2); the others have capture
-// registers of their own.
+// DECERR_EMEM, SECURITY_VIOLATION and INVALID_SMMU_PAGE are captured there (18.5.12.2); a kind with capture registers
+// of its own (kOwnCaptures) adds its direction, client and address from them.
 inline const char *describe(const Error &e, char *text, size_t size)
 {
     char kinds[96];
+    bitNames(e.intstatus, kinds, sizeof(kinds));
     constexpr uint32_t kCaptured = 1u << 6 | 1u << 8 | 1u << 10;
-    if (!(e.intstatus & kCaptured)) {
-        snprintf(text, size, "%s (not captured in MC_ERR_STATUS); INTSTATUS %#x",
-                 bitNames(e.intstatus, kinds, sizeof(kinds)), e.intstatus);
+    const OwnCapture *own = ownCapture(e.ownBit);
+    if (!(e.intstatus & kCaptured) && !own) {
+        snprintf(text, size, "%s (not captured in MC_ERR_STATUS); INTSTATUS %#x", kinds, e.intstatus);
         return text;
     }
-    const uint32_t s = e.status;
-    const uint64_t address = static_cast<uint64_t>((s >> 20) & 3) << 32 | e.address;
-    char page[64] = "";
-    if (((s >> 28) & 7) == 6) {
-        snprintf(page, sizeof(page), " (page readable %u writable %u nonsecure %u)", (s >> 27) & 1, (s >> 26) & 1,
-                 (s >> 25) & 1);
+    size_t used = 0;
+    text[0] = 0;
+    append(text, size, used, "%s: ", kinds);
+    if (e.intstatus & kCaptured) {
+        const uint32_t s = e.status;
+        const uint64_t address = static_cast<uint64_t>((s >> 20) & 3) << 32 | e.address;
+        char page[64] = "";
+        if (((s >> 28) & 7) == 6) {
+            snprintf(page, sizeof(page), " (page readable %u writable %u nonsecure %u)", (s >> 27) & 1, (s >> 26) & 1,
+                     (s >> 25) & 1);
+        }
+        append(text, size, used, "%s%s, a %s by %s (client %#x) at %#llx; ", errorType(s), page,
+               (s >> 16) & 1 ? "write" : "read", client(s & 0xff), s & 0xff, static_cast<unsigned long long>(address));
     }
-    snprintf(text, size, "%s: %s%s, a %s by %s (client %#x) at %#llx; INTSTATUS %#x ERR_STATUS %#x ERR_ADR %#x",
-             bitNames(e.intstatus, kinds, sizeof(kinds)), errorType(s), page, (s >> 16) & 1 ? "write" : "read",
-             client(s & 0xff), s & 0xff, static_cast<unsigned long long>(address), e.intstatus, s, e.address);
+    if (own) {
+        char ownKind[48];
+        const uint32_t s = e.ownStatus;
+        const uint64_t address = static_cast<uint64_t>((s >> 20) & 3) << 32 | e.ownAddress;
+        append(text, size, used, "%s: a %s by %s (client %#x) at %#llx; ", bitNames(own->bit, ownKind, sizeof(ownKind)),
+               (s >> 16) & 1 ? "write" : "read", client(s & own->clientMask), s & own->clientMask,
+               static_cast<unsigned long long>(address));
+    }
+    append(text, size, used, "INTSTATUS %#x", e.intstatus);
+    if (e.intstatus & kCaptured)
+        append(text, size, used, " ERR_STATUS %#x ERR_ADR %#x", e.status, e.address);
+    if (own)
+        append(text, size, used, " %s_STATUS %#x %s_ADR %#x", own->registers, e.ownStatus, own->registers,
+               e.ownAddress);
     return text;
 }
 
@@ -201,7 +287,7 @@ inline const char *causeName(Runs::Cause cause)
 // The count line of a run that printed only its first kFullLines errors.
 inline const char *describeRun(const Runs::Ended &run, char *text, size_t size)
 {
-    char last[256];
+    char last[384];
     describe(run.last, last, sizeof(last));
     if (run.client == Runs::kUncaptured) {
         snprintf(text, size,

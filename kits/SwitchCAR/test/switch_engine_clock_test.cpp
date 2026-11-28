@@ -1,6 +1,7 @@
 // kits/SwitchCAR/SwitchEngineClock against L4T's numbers and a model of PLLC2/PLLC3: the 637 mV rate per SoC process,
 // the BASE it takes, the bring-up order from off, and PLLP whenever the PLL is someone else's or does not lock.
 #include "kits/SwitchCAR/SwitchEngineClock.h"
+#include "bazel/testing/fresh_process.h"
 #include "switch_car_stubs.h"
 
 #include <gtest/gtest.h>
@@ -187,81 +188,117 @@ TEST(SwitchEngineClockPlan, ProcessZeroAndUnfusedKeepPllp)
     EXPECT_EQ(p1.pll_base, base(1, 48));
 }
 
+TEST(SwitchEngineClockPlan, VicTakesC2InItsOwnMux)
+{
+    EXPECT_EQ(switch_engine_vic_source(SWITCH_ENGINE_SOURCE_PLLC2), 4u << 29) << "VIC03's PLLC2";
+    EXPECT_EQ(switch_engine_vic_source(SWITCH_ENGINE_SOURCE_PLLP), 2u << 29) << "VIC03's PLLP; 1 << 29 is its PLLC";
+    EXPECT_NE(switch_engine_vic_source(SWITCH_ENGINE_SOURCE_PLLC2), SWITCH_ENGINE_SOURCE_PLLC2)
+        << "NVJPG's mux code for PLLC2 is VIC's PLLC";
+}
+
+TEST(SwitchEngineClock, VicSharesNvjpgsPllc2)
+{
+    switch_ios::test::ExpectPassesInFreshProcess([] {
+        reset(1698);
+        uint32_t nvjpg = 0, vic = 0;
+        EXPECT_EQ(switch_engine_clock_source(SWITCH_ENGINE_BUS_C2, &nvjpg), SWITCH_ENGINE_SOURCE_PLLC2);
+        const size_t broughtUp = pllWrites(kC2Base, kC2Base + 0x10).size();
+        EXPECT_EQ(switch_engine_vic_source(switch_engine_clock_source(SWITCH_ENGINE_BUS_C2, &vic)),
+                  SWITCH_ENGINE_VIC_SOURCE_PLLC2);
+        EXPECT_EQ(vic, 422400u);
+        EXPECT_EQ(vic, nvjpg);
+        EXPECT_EQ(pllWrites(kC2Base, kC2Base + 0x10).size(), broughtUp) << "the second engine finds the PLL up";
+        EXPECT_NE(lines().find("PLLC2 for NVJPG and VIC: 422400 kHz"), std::string::npos) << lines();
+    });
+}
+
 TEST(SwitchEngineClock, BringsPllc3UpInL4TsOrderOnce)
 {
-    reset(1698);
-    uint32_t khz = 0;
-    EXPECT_EQ(switch_engine_clock_source(SWITCH_ENGINE_BUS_C3, &khz), SWITCH_ENGINE_SOURCE_PLLC3);
-    EXPECT_EQ(khz, 460800u);
-    const std::vector<std::pair<uintptr_t, uint32_t>> expected = {
-        {kC3Base + 0x4, 0x40080000},  {kC3Base + 0x8, 0x08000000},     {kC3Base + 0xc, 0x1f720f05},
-        {kC3Base + 0x10, 0x000000c4}, {kC3Base, base(1, 48)},          {kC3Base + 0x8, 0x00000000},
-        {kC3Base + 0x4, 0x00080000},  {kC3Base, base(1, 48) | kEnable}};
-    EXPECT_EQ(pllWrites(kC3Base, kC3Base + 0x10), expected);
-    EXPECT_NE(lines().find("PLLC3 for NVDEC and NVENC: 460800 kHz, L4T's 637 mV point (BASE 0 as found"),
-              std::string::npos)
-        << lines();
-    EXPECT_NE(lines().find("SoC speedo 1698, process 1"), std::string::npos);
-    const auto fuseClock = pllWrites(kCar + 0x328, kCar + 0x328);
-    ASSERT_FALSE(fuseClock.empty());
-    EXPECT_EQ(fuseClock.front().second, 1u << 7);
-    const auto visible = pllWrites(kCar + 0x48, kCar + 0x48);
-    ASSERT_FALSE(visible.empty());
-    EXPECT_EQ(visible.back().second & (1u << 28), 1u << 28);
+    switch_ios::test::ExpectPassesInFreshProcess([] {
+        reset(1698);
+        uint32_t khz = 0;
+        EXPECT_EQ(switch_engine_clock_source(SWITCH_ENGINE_BUS_C3, &khz), SWITCH_ENGINE_SOURCE_PLLC3);
+        EXPECT_EQ(khz, 460800u);
+        const std::vector<std::pair<uintptr_t, uint32_t>> expected = {
+            {kC3Base + 0x4, 0x40080000},  {kC3Base + 0x8, 0x08000000},     {kC3Base + 0xc, 0x1f720f05},
+            {kC3Base + 0x10, 0x000000c4}, {kC3Base, base(1, 48)},          {kC3Base + 0x8, 0x00000000},
+            {kC3Base + 0x4, 0x00080000},  {kC3Base, base(1, 48) | kEnable}};
+        EXPECT_EQ(pllWrites(kC3Base, kC3Base + 0x10), expected);
+        EXPECT_NE(lines().find("PLLC3 for NVDEC and NVENC: 460800 kHz, L4T's 637 mV point (BASE 0 as found"),
+                  std::string::npos)
+            << lines();
+        EXPECT_NE(lines().find("SoC speedo 1698, process 1"), std::string::npos);
+        const auto fuseClock = pllWrites(kCar + 0x328, kCar + 0x328);
+        ASSERT_FALSE(fuseClock.empty());
+        EXPECT_EQ(fuseClock.front().second, 1u << 7);
+        const auto visible = pllWrites(kCar + 0x48, kCar + 0x48);
+        ASSERT_FALSE(visible.empty());
+        EXPECT_EQ(visible.back().second & (1u << 28), 1u << 28);
 
-    EXPECT_EQ(switch_engine_clock_source(SWITCH_ENGINE_BUS_C3, &khz), SWITCH_ENGINE_SOURCE_PLLC3);
-    EXPECT_EQ(khz, 460800u);
-    EXPECT_EQ(pllWrites(kC3Base, kC3Base + 0x10).size(), expected.size());
-    EXPECT_TRUE(pllWrites(kC2Base, kC2Base + 0x10).empty());
+        const size_t fuseWritesBefore = pllWrites(kCar + 0x328, kCar + 0x328).size();
+        EXPECT_EQ(switch_engine_clock_source(SWITCH_ENGINE_BUS_C3, &khz), SWITCH_ENGINE_SOURCE_PLLC3);
+        EXPECT_EQ(khz, 460800u);
+        EXPECT_EQ(pllWrites(kC3Base, kC3Base + 0x10).size(), expected.size());
+        EXPECT_EQ(pllWrites(kCar + 0x328, kCar + 0x328).size(), fuseWritesBefore) << "speedo fuse cached once";
+        EXPECT_TRUE(pllWrites(kC2Base, kC2Base + 0x10).empty());
+    });
 }
 
 TEST(SwitchEngineClock, Pllc2ForNvjpg)
 {
-    reset(1698);
-    uint32_t khz = 0;
-    EXPECT_EQ(switch_engine_clock_source(SWITCH_ENGINE_BUS_C2, &khz), SWITCH_ENGINE_SOURCE_PLLC2);
-    EXPECT_EQ(khz, 422400u);
-    EXPECT_EQ(pllWrites(kC2Base, kC2Base).back().second, base(1, 44) | kEnable);
-    EXPECT_TRUE(pllWrites(kC3Base, kC3Base + 0x10).empty());
+    switch_ios::test::ExpectPassesInFreshProcess([] {
+        reset(1698);
+        uint32_t khz = 0;
+        EXPECT_EQ(switch_engine_clock_source(SWITCH_ENGINE_BUS_C2, &khz), SWITCH_ENGINE_SOURCE_PLLC2);
+        EXPECT_EQ(khz, 422400u);
+        EXPECT_EQ(pllWrites(kC2Base, kC2Base).back().second, base(1, 44) | kEnable);
+        EXPECT_TRUE(pllWrites(kC3Base, kC3Base + 0x10).empty());
+    });
 }
 
 TEST(SwitchEngineClock, SomeoneElsesPllKeepsPllp)
 {
-    reset(1698);
-    preset(kC3Base, kEnable | base(1, 40) | kLock);
-    uint32_t khz = 0;
-    EXPECT_EQ(switch_engine_clock_source(SWITCH_ENGINE_BUS_C3, &khz), SWITCH_ENGINE_SOURCE_PLLP);
-    EXPECT_EQ(khz, SWITCH_ENGINE_PLLP_KHZ);
-    EXPECT_TRUE(pllWrites(kC3Base, kC3Base + 0x10).empty());
-    EXPECT_NE(lines().find("running with dividers that are not ours"), std::string::npos) << lines();
+    switch_ios::test::ExpectPassesInFreshProcess([] {
+        reset(1698);
+        preset(kC3Base, kEnable | base(1, 40) | kLock);
+        uint32_t khz = 0;
+        EXPECT_EQ(switch_engine_clock_source(SWITCH_ENGINE_BUS_C3, &khz), SWITCH_ENGINE_SOURCE_PLLP);
+        EXPECT_EQ(khz, SWITCH_ENGINE_PLLP_KHZ);
+        EXPECT_TRUE(pllWrites(kC3Base, kC3Base + 0x10).empty());
+        EXPECT_NE(lines().find("running with dividers that are not ours"), std::string::npos) << lines();
+    });
 }
 
 TEST(SwitchEngineClock, NoLockPutsThePllBackOff)
 {
-    reset(1698);
-    {
-        const std::lock_guard<std::mutex> hold(gModel.mutex);
-        gModel.locks = false;
-    }
-    uint32_t khz = 0;
-    EXPECT_EQ(switch_engine_clock_source(SWITCH_ENGINE_BUS_C2, &khz), SWITCH_ENGINE_SOURCE_PLLP);
-    EXPECT_EQ(khz, SWITCH_ENGINE_PLLP_KHZ);
-    const auto writes = pllWrites(kC2Base, kC2Base + 0x10);
-    ASSERT_GE(writes.size(), 3u);
-    EXPECT_EQ(writes[writes.size() - 3], std::make_pair(kC2Base, base(1, 44)));
-    EXPECT_EQ(writes[writes.size() - 2].second & kReset, kReset);
-    EXPECT_EQ(writes.back().second & kIddq, kIddq);
-    EXPECT_NE(lines().find("no lock in 600 us"), std::string::npos) << lines();
+    switch_ios::test::ExpectPassesInFreshProcess([] {
+        reset(1698);
+        {
+            const std::lock_guard<std::mutex> hold(gModel.mutex);
+            gModel.locks = false;
+        }
+        uint32_t khz = 0;
+        EXPECT_EQ(switch_engine_clock_source(SWITCH_ENGINE_BUS_C2, &khz), SWITCH_ENGINE_SOURCE_PLLP);
+        EXPECT_EQ(khz, SWITCH_ENGINE_PLLP_KHZ);
+        const auto writes = pllWrites(kC2Base, kC2Base + 0x10);
+        ASSERT_GE(writes.size(), 3u);
+        EXPECT_EQ(writes[writes.size() - 3], std::make_pair(kC2Base, base(1, 44)));
+        EXPECT_EQ(writes[writes.size() - 2].second & kReset, kReset);
+        EXPECT_EQ(writes.back().second & kIddq, kIddq);
+        EXPECT_NE(lines().find("no lock in 600 us"), std::string::npos) << lines();
+    });
 }
 
 TEST(SwitchEngineClock, ProcessZeroAndOtherChipsStayOnPllp)
 {
     for (auto [speedo, hidrev] :
          {std::pair{1500, kB01}, std::pair{1698, (0x21u << 8) | (1u << 4)}, std::pair{0, kB01}}) {
-        reset(speedo, hidrev);
-        uint32_t khz = 0;
-        EXPECT_EQ(switch_engine_clock_source(SWITCH_ENGINE_BUS_C3, &khz), SWITCH_ENGINE_SOURCE_PLLP);
-        EXPECT_EQ(khz, SWITCH_ENGINE_PLLP_KHZ);
-        EXPECT_TRUE(pllWrites(kC3Base, kC3Base + 0x10).empty());
+        switch_ios::test::ExpectPassesInFreshProcess([speedo, hidrev] {
+            reset(speedo, hidrev);
+            uint32_t khz = 0;
+            EXPECT_EQ(switch_engine_clock_source(SWITCH_ENGINE_BUS_C3, &khz), SWITCH_ENGINE_SOURCE_PLLP);
+            EXPECT_EQ(khz, SWITCH_ENGINE_PLLP_KHZ);
+            EXPECT_TRUE(pllWrites(kC3Base, kC3Base + 0x10).empty());
+        });
     }
 }

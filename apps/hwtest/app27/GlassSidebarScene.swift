@@ -1,4 +1,5 @@
 import HWTestKit
+import HWTestShared
 import UIKit
 
 /// Settings' sidebar as ui.glass_sidebar builds it: a double-column split view showing the sidebar beside the detail,

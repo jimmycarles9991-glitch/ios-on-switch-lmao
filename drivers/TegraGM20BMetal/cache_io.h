@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: MIT
 // The record cache's entry bytes (gm20b_cache.h): little-endian values, counted texts and lists, and every entry's head (its kind
-// and full key) and FNV-1a tail, read back with a bounds check on each part.
+// and full key), read back with a bounds check on each part. An entry ends where its last part does: its writer published
+// it whole (a file renamed in, or a store entry below its durable end), so nothing checks its bytes again.
 #pragma once
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
 #include "gm20b_cache.h"
 
 namespace gm20b {
 
 constexpr char kEntryMagic[8] = {'S', 'W', 'R', 'A', 'W', 'R', 'E', 'C'};
-constexpr uint32_t kEntryFormat = 19;
+constexpr uint32_t kEntryFormat = 20;
 constexpr uint32_t kKindRecord = 1, kKindRefusal = 2, kKindKernel = 3, kKindKernelRefusal = 4;
 
 class Writer {
@@ -43,7 +45,7 @@ public:
 
 class Reader {
 public:
-    explicit Reader(const std::string &in) : in_(in)
+    explicit Reader(std::string_view in) : in_(in)
     {}
 
     bool bytes(void *p, size_t n)
@@ -62,14 +64,19 @@ public:
         return v;
     }
 
-    std::string text()
+    std::string_view textView()
     {
         const uint32_t n = value<uint32_t>();
         if (!ok_ || n > in_.size() - at_)
-            return ok_ = false, std::string();
-        std::string s = in_.substr(at_, n);
+            return ok_ = false, std::string_view();
+        const std::string_view s = in_.substr(at_, n);
         at_ += n;
         return s;
+    }
+
+    std::string text()
+    {
+        return std::string(textView());
     }
 
     template <class T> std::vector<T> list()
@@ -93,13 +100,13 @@ public:
     }
 
 private:
-    const std::string &in_;
+    std::string_view in_;
     size_t at_ = 0;
     bool ok_ = true;
 };
 
 void writeEntryHead(Writer &w, const CacheKey &k, uint32_t kind);
-// False: not an entry of `k` (its tail's sum, its head or its key differ)
-bool readEntryHead(const std::string &bytes, Reader &r, const CacheKey &k, uint32_t &kind);
+// False: not an entry of `k` (its head or its key differ)
+bool readEntryHead(std::string_view bytes, Reader &r, const CacheKey &k, uint32_t &kind);
 
 }  // namespace gm20b

@@ -11,6 +11,30 @@ struct IOLock {
 	std::condition_variable changed;
 };
 
+struct IOSimpleLock {
+	std::mutex mutex;
+};
+
+using IOInterruptState = bool;
+
+inline IOSimpleLock *IOSimpleLockAlloc()
+{
+	return new IOSimpleLock;
+}
+
+inline IOInterruptState IOSimpleLockLockDisableInterrupt(IOSimpleLock *lock)
+	__attribute__((no_thread_safety_analysis))
+{
+	lock->mutex.lock();
+	return true;
+}
+
+inline void IOSimpleLockUnlockEnableInterrupt(IOSimpleLock *lock, IOInterruptState)
+	__attribute__((no_thread_safety_analysis))
+{
+	lock->mutex.unlock();
+}
+
 inline IOLock *IOLockAlloc()
 {
 	return new IOLock;
@@ -57,7 +81,7 @@ using thread_call_param_t = void *;
 struct SwitchBridgeCall {
 	void (*fn)(void *, void *);
 	void *arg;
-	bool pending;
+	std::atomic<bool> pending;
 	uint64_t deadline;
 };
 
@@ -91,9 +115,12 @@ inline bool thread_call_enter_delayed(thread_call_t call, uint64_t deadline)
 	return false;
 }
 
+inline unsigned switch_bridge_cancels;
+
 inline bool thread_call_cancel(thread_call_t call)
 {
 	call->deadline = 0;
+	++switch_bridge_cancels;
 	return true;
 }
 

@@ -31,6 +31,9 @@ enum Probe : uint32_t {
     kOverlayBlockYuv = 1,
     kColumnScanYuv = 2,
     kOffsetCrop = 3,
+    kColumnScanBgra = 7,
+    kColumnScanWords = 8,
+    kFlipWords = 9,
 };
 
 struct Plan;
@@ -46,6 +49,12 @@ inline const char *probeName(Probe p)
         return "V3";
     case kOffsetCrop:
         return "V5c";
+    case kColumnScanBgra:
+        return "V6";
+    case kColumnScanWords:
+        return "V7";
+    case kFlipWords:
+        return "V8";
     default:
         return extraProbeName(p);
     }
@@ -96,10 +105,12 @@ inline uint16_t chromaAt(uint32_t cx, uint32_t cy, uint8_t cell)
 }
 
 enum class Content : uint8_t {
-    Image,    // the base picture from its origin
-    Turned,   // the landscape picture turned by transform 7 (SCAN_COLUMN | H_DIRECTION) onto the portrait panel
-    TurnedV,  // the landscape picture turned by transform 4 (SCAN_COLUMN | V_DIRECTION)
-    Cropped,  // the base picture from (cropX, cropY), both even
+    Image,        // the base picture from its origin
+    Turned,       // the landscape picture turned by transform 7 (SCAN_COLUMN | H_DIRECTION) onto the portrait panel
+    TurnedV,      // the landscape picture turned by transform 4 (SCAN_COLUMN | V_DIRECTION)
+    TurnedPlain,  // by transform 6 (SCAN_COLUMN alone)
+    TurnedHV,     // by transform 5 (SCAN_COLUMN | H_DIRECTION | V_DIRECTION): word 6's turned half a turn
+    Cropped,      // the base picture from (cropX, cropY), both even
 };
 
 struct Surface {
@@ -171,6 +182,12 @@ inline void sourceOf(const Surface &s, uint32_t x, uint32_t y, uint32_t &bx, uin
     } else if (s.content == Content::TurnedV) {
         bx = y;
         by = kLandscapeHeight - 1 - x;
+    } else if (s.content == Content::TurnedPlain) {
+        bx = y;
+        by = x;
+    } else if (s.content == Content::TurnedHV) {
+        bx = kLandscapeWidth - 1 - y;
+        by = kLandscapeHeight - 1 - x;
     } else if (s.content == Content::Cropped) {
         bx = s.cropX + x;
         by = s.cropY + y;
@@ -187,6 +204,12 @@ inline void chromaSourceOf(const Surface &s, uint32_t cx, uint32_t cy, uint32_t 
         by = cx;
     } else if (s.content == Content::TurnedV) {
         bx = cy;
+        by = kLandscapeHeight / 2 - 1 - cx;
+    } else if (s.content == Content::TurnedPlain) {
+        bx = cy;
+        by = cx;
+    } else if (s.content == Content::TurnedHV) {
+        bx = kLandscapeWidth / 2 - 1 - cy;
         by = kLandscapeHeight / 2 - 1 - cx;
     } else if (s.content == Content::Cropped) {
         bx = s.cropX / 2 + cx;
@@ -289,6 +312,28 @@ inline Window columnWindow(const Surface &s, bool hDirection, bool vDirection = 
     w.prescaled = s.width << 16 | s.height;
     w.hOffset = hDirection ? s.width - 1 : 0;
     w.vOffset = vDirection ? s.height - 1 : 0;
+    return w;
+}
+
+// Landscape BGRA `s` column-scanned onto the panel at 1:1 by window B: as columnWindow, H counting 4 bytes a pixel.
+inline Window columnWindowBgra(const Surface &s, bool hDirection, bool vDirection = false)
+{
+    Window w = rowWindow(s);
+    w.options = native_planes::kWinEnable | native_column_scan::kScanColumn |
+                (hDirection ? native_column_scan::kHDirection : 0) | (vDirection ? native_column_scan::kVDirection : 0);
+    w.prescaled = s.width << 16 | s.height * 4;
+    w.hOffset = hDirection ? s.width * 4 - 1 : 0;
+    w.vOffset = vDirection ? s.height - 1 : 0;
+    return w;
+}
+
+// `s` row-scanned from its last byte (h) and its last row (v): transform words 1 to 3's directions.
+inline Window flipWindow(const Surface &s, bool h, bool v)
+{
+    Window w = rowWindow(s);
+    w.options |= (h ? native_column_scan::kHDirection : 0) | (v ? native_column_scan::kVDirection : 0);
+    w.hOffset = h ? s.width * 4 - 1 : 0;
+    w.vOffset = v ? s.height - 1 : 0;
     return w;
 }
 
@@ -407,6 +452,94 @@ inline Plan columnScanYuvPlan()
     return p;
 }
 
+// V6: window B column-scanning a landscape BGRA surface in the GPU's 16-GOB blocks (a Metal layer Core Animation would
+// hand the display unturned), both quarter turns, against the picture turned in memory and scanned row by row on window
+// B. The display ships these turns, so a mismatch fails. scan_b_pixel starts H_DIRECTION at the last pixel's first
+// byte instead of its last (TRM 24.11): the low two bits are unused for 32 bpp (24.11.4), so it is reported, not judged.
+inline Plan columnScanBgraPlan()
+{
+    Plan p;
+    p.probe = kColumnScanBgra;
+    const Window off;
+    const Surface land = p.surface[addSurface(p, bgra(kLandscapeWidth, kLandscapeHeight, 4))];
+    Surface turned = bgra(kPanelWidth, kPanelHeight, kPitch);
+    turned.content = Content::Turned;
+    turned = p.surface[addSurface(p, turned)];
+    Surface turnedV = bgra(kPanelWidth, kPanelHeight, kPitch);
+    turnedV.content = Content::TurnedV;
+    turnedV = p.surface[addSurface(p, turnedV)];
+    Window pixelStart = columnWindowBgra(land, true);
+    pixelStart.hOffset = (land.width - 1) * 4;
+    addStep(p, "turned_b", off, rowWindow(turned));
+    addStep(p, "scan_b", off, columnWindowBgra(land, true), kEqual, 0);
+    addStep(p, "control", off, columnWindowBgra(land, false), kDiffer, 0);
+    addStep(p, "turned_v", off, rowWindow(turnedV));
+    addStep(p, "scan_v", off, columnWindowBgra(land, false, true), kEqual, 3);
+    addStep(p, "scan_b_pixel", off, pixelStart, kReport, 0);
+    return p;
+}
+
+// V7: the column-scan words V6 leaves, and a pitch-linear flip, on window B. Transform 6 (SCAN_COLUMN alone) and 5
+// (SCAN_COLUMN | H | V) are checked against the picture turned in memory. Word 6's picture, row-scanned from its last
+// byte and row (H and V, the directions of words 1 to 3 on a pitch surface), must equal word 5's. A start one whole
+// pixel in must differ from a start at the last pixel, so the window takes ADDR_H_OFFSET at all; both cross one column
+// fewer, so neither reads outside the surface.
+inline Plan columnScanWordsPlan()
+{
+    Plan p;
+    p.probe = kColumnScanWords;
+    const Window off;
+    const Surface land = p.surface[addSurface(p, bgra(kLandscapeWidth, kLandscapeHeight, 4))];
+    const auto turnedAs = [&](Content content) {
+        Surface s = bgra(kPanelWidth, kPanelHeight, kPitch);
+        s.content = content;
+        return p.surface[addSurface(p, s)];
+    };
+    const Surface plain = turnedAs(Content::TurnedPlain);
+    const Surface half = turnedAs(Content::TurnedHV);
+    const Window flip = flipWindow(plain, true, true);
+    Window lastIn = columnWindowBgra(land, true);
+    lastIn.prescaled -= 1u << 16;
+    lastIn.size -= 1u << 16;
+    Window pixelIn = lastIn;
+    pixelIn.hOffset -= 4;
+    addStep(p, "turned_plain", off, rowWindow(plain));
+    addStep(p, "scan_plain", off, columnWindowBgra(land, false), kEqual, 0);
+    addStep(p, "turned_hv", off, rowWindow(half));
+    addStep(p, "scan_hv", off, columnWindowBgra(land, true, true), kEqual, 2);
+    addStep(p, "flip_hv", off, flip, kEqual, 2);
+    addStep(p, "last_in", off, lastIn);
+    addStep(p, "pixel_in", off, pixelIn, kDiffer, 5);
+    return p;
+}
+
+// V8: words 1 and 2 alone, the flips window B takes at 1:1 without SCAN_COLUMN, on a pitch-linear surface and in the
+// GPU's 16-GOB blocks. Row-scanned, word 6's picture mirrored across is word 4's, and mirrored down is word 7's, so
+// V6's references judge them; word 3 in blocks is checked against word 5's picture.
+inline Plan flipWordsPlan()
+{
+    Plan p;
+    p.probe = kFlipWords;
+    const Window off;
+    const auto portrait = [&](Content content, uint8_t yLog2) {
+        Surface s = bgra(kPanelWidth, kPanelHeight, yLog2);
+        s.content = content;
+        return p.surface[addSurface(p, s)];
+    };
+    const Surface plain = portrait(Content::TurnedPlain, kPitch), blocks = portrait(Content::TurnedPlain, 4);
+    const Surface across = portrait(Content::TurnedV, kPitch), down = portrait(Content::Turned, kPitch);
+    const Surface half = portrait(Content::TurnedHV, kPitch);
+    addStep(p, "turned_v", off, rowWindow(across));
+    addStep(p, "flip_h", off, flipWindow(plain, true, false), kEqual, 0);
+    addStep(p, "turned_b", off, rowWindow(down));
+    addStep(p, "flip_v", off, flipWindow(plain, false, true), kEqual, 2);
+    addStep(p, "flip_h_blocks", off, flipWindow(blocks, true, false), kEqual, 0);
+    addStep(p, "flip_v_blocks", off, flipWindow(blocks, false, true), kEqual, 2);
+    addStep(p, "turned_hv", off, rowWindow(half));
+    addStep(p, "flip_hv_blocks", off, flipWindow(blocks, true, true), kEqual, 6);
+    return p;
+}
+
 inline Plan offsetCropPlan()
 {
     Plan p;
@@ -445,6 +578,15 @@ inline bool planOf(Probe probe, Plan &plan)
         return true;
     case kOffsetCrop:
         plan = offsetCropPlan();
+        return true;
+    case kColumnScanBgra:
+        plan = columnScanBgraPlan();
+        return true;
+    case kColumnScanWords:
+        plan = columnScanWordsPlan();
+        return true;
+    case kFlipWords:
+        plan = flipWordsPlan();
         return true;
     default:
         return extraPlanOf(probe, plan);

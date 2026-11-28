@@ -424,4 +424,11 @@ inline SubmissionRead readSubmission(const switch_gpu_scan_words *push, uint32_t
 	r.c.scanned = 1;
 	return r;
 }
+
+// The submissions a connection's n-th (from 0) stands for in the push lines: each of its first `first` is read and
+// stands for itself, then one in `every` stands for itself and the `every - 1` after it; 0 for one not read.
+constexpr uint32_t scanWeight(uint32_t n, uint32_t first, uint32_t every)
+{
+	return n < first ? 1 : (n - first) % every ? 0 : every;
+}
 }  // namespace tgm_scan

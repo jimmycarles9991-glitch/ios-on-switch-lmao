@@ -428,13 +428,17 @@ TEST_F(DeviceFetch, AFetchDrawsWordsDoNotGrowWithItsPrimitives)
         k++;
         EXPECT_EQ(fetchSizes(), (std::pair<uint32_t, uint32_t>{3, 3}));
     }
-    std::multiset<uint32_t> firstOnly;
+    std::multiset<uint32_t> firstOnly, secondOnly;
     std::set_difference(methods[0].begin(), methods[0].end(), methods[1].begin(), methods[1].end(),
                         std::inserter(firstOnly, firstOnly.end()));
+    std::set_difference(methods[1].begin(), methods[1].end(), methods[0].begin(), methods[0].end(),
+                        std::inserter(secondOnly, secondOnly.end()));
     EXPECT_EQ(firstOnly, (std::multiset<uint32_t>{NVB197_SET_RT_LAYER, NVB197_SET_ANTI_ALIAS_ALPHA_CONTROL,
                                                   NVB197_SET_SAMPLE_MASK_X0_Y0, NVB197_SET_SAMPLE_MASK_X1_Y0,
-                                                  NVB197_SET_SAMPLE_MASK_X0_Y1, NVB197_SET_SAMPLE_MASK_X1_Y1}));
-    EXPECT_TRUE(std::includes(methods[0].begin(), methods[0].end(), methods[1].begin(), methods[1].end()));
+                                                  NVB197_SET_SAMPLE_MASK_X0_Y1, NVB197_SET_SAMPLE_MASK_X1_Y1,
+                                                  NVB197_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI,
+                                                  NVB197_INVALIDATE_SAMPLER_CACHE_NO_WFI}));
+    EXPECT_EQ(secondOnly, (std::multiset<uint32_t>{NVB197_NO_OPERATION, NVB197_NO_OPERATION}));
     EXPECT_EQ(sizes[1], sizes[2]);
 }
 
@@ -596,6 +600,59 @@ TEST_F(DeviceFetch, ConvexTwoTriangleQuadElidesIntraDrawBarrierAndDisjointQuadsE
     EXPECT_EQ(jobMethods().count(NVB197_PIXEL_SHADER_BARRIER), 1u);
 }
 
+TEST_F(DeviceFetch, CompressedTargetElidesInterDrawBarrierOnlyAcrossDisjointTiles)
+{
+    gm20b::RuntimeRecord r = fetchingRecord(0xca02, false);
+    r.keyString = "samples=1 c0=70:15:0 ds=0/0 a0=31:0:0:16:1:1 ";
+    r.pipeline.vertexSlot = 0;
+    r.pipeline.vertexStride = 16;
+    r.blob = {0x1a00, 0x1111, 0x1c00, (1u << 12) | 16};
+    std::string why;
+    gm20b::Pipeline *pl = dev.addRecord(r, true, why);
+    ASSERT_NE(pl, nullptr) << why;
+
+    const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    // 64x64 target: quadA [0, 16]^2 (tile 0,0), quadSameTile [20, 28]^2 (tile 0,0), quadFarTile [36, 48]^2 (tile 1,1).
+    const float quadA[16] = {-1.0f, 1.0f, 0, 1, -0.5f, 1.0f, 0, 1, -1.0f, 0.5f, 0, 1, -0.5f, 0.5f, 0, 1};
+    const float quadSameTile[16] = {-0.375f, 0.375f, 0, 1, -0.125f, 0.375f, 0, 1,
+                                    -0.375f, 0.125f, 0, 1, -0.125f, 0.125f, 0, 1};
+    const float quadFarTile[16] = {0.125f, -0.125f, 0, 1, 0.5f, -0.125f, 0, 1, 0.125f, -0.5f, 0, 1, 0.5f, -0.5f, 0, 1};
+
+    const auto drawPair = [&](gm20b::Texture &dest, const float second[16]) {
+        into = &dest;
+        const Drawn d = drawOnce(pl, [&](gm20b::RenderEncoder &e, const char **w) {
+            e.setBytes(1, 2, identity, sizeof identity);
+            e.setBytes(1, 0, quadA, sizeof quadA);
+            if (!e.draw(kStrip, 0, 4, 1, 0, w))
+                return false;
+            e.setBytes(1, 0, second, 16 * sizeof(float));
+            return e.draw(kStrip, 0, 4, 1, 0, w);
+        });
+        into = &target;
+        return d;
+    };
+
+    const Drawn plainSameTile = drawPair(target, quadSameTile);
+    EXPECT_TRUE(plainSameTile.ok) << plainSameTile.why;
+    EXPECT_EQ(plainSameTile.split, 0u);
+    EXPECT_EQ(jobMethods().count(NVB197_PIXEL_SHADER_BARRIER), 0u);
+
+    gm20b::Texture compressed = target;
+    compressed.comptags = true;
+
+    const Drawn compSameTile = drawPair(compressed, quadSameTile);
+    EXPECT_TRUE(compSameTile.ok) << compSameTile.why;
+    EXPECT_EQ(compSameTile.split, 2u);
+    EXPECT_EQ(jobMethods().count(NVB197_PIXEL_SHADER_BARRIER), 1u);
+
+    const uint64_t elidedBefore = dev.stats.fetchBarriersElided.load();
+    const Drawn compDisjointTile = drawPair(compressed, quadFarTile);
+    EXPECT_TRUE(compDisjointTile.ok) << compDisjointTile.why;
+    EXPECT_EQ(compDisjointTile.split, 2u);
+    EXPECT_EQ(jobMethods().count(NVB197_PIXEL_SHADER_BARRIER), 0u);
+    EXPECT_EQ(dev.stats.fetchBarriersElided.load(), elidedBefore + 1u);
+}
+
 TEST_F(DeviceFetch, FetchBarrierUsesSysmemBarOnlyForDirectVolatilePitchTargets)
 {
     gm20b::Pipeline *pl = pipeline(false);
@@ -648,6 +705,46 @@ TEST_F(DeviceFetch, FetchBarrierUsesSysmemBarOnlyForDirectVolatilePitchTargets)
     dev.destroyTexture(volDirect);
     dev.destroyBuffer(cachedBuf);
     dev.destroyBuffer(volBuf);
+}
+
+// The command fetcher reads an indirect draw's arguments: when work earlier in the command buffer wrote them it waits for
+// that work first (WAIT_FOR_IDLE, the shader caches, SET_REFERENCE); arguments no work of the command buffer wrote are
+// read at once, since an earlier command buffer's work ended in its job's wait-for-idle release
+TEST_F(DeviceFetch, AnIndirectDrawWaitsOnlyForArgumentsItsCommandBufferWrote)
+{
+    gm20b::Pipeline *pl = pipeline(false);
+    ASSERT_NE(pl, nullptr);
+    const uint32_t setReference = gm20b::Push::hdr(4, gm20b::SUBC_3D, 0x0050, 0);
+    const auto references = [&](bool fillFirst) {
+        gm20b::CommandBuffer *cb = dev.begin();
+        EXPECT_NE(cb, nullptr);
+        if (!cb)
+            return -1L;
+        if (fillFirst) {
+            gm20b::BlitEncoder *b = cb->blit();
+            b->fillWords(arguments.va, 16, 1);
+            b->end();
+        }
+        gm20b::PassDesc pass;
+        pass.color[0].texture = &target;
+        pass.color[0].load = gm20b::ColorAttachment::Load;
+        pass.count = 1;
+        gm20b::RenderEncoder *e = cb->render(pass);
+        EXPECT_NE(e, nullptr);
+        if (!e)
+            return -1L;
+        e->setPipeline(pl);
+        const char *why = nullptr;
+        EXPECT_TRUE(e->drawIndirect(kTriangle, &arguments, 0, &why)) << (why ? why : "?");
+        e->end();
+        uint32_t seqno = 0;
+        EXPECT_TRUE(cb->commit(seqno));
+        const std::vector<uint32_t> &words = kernel_model::model.jobs.back().words;
+        return long(std::count(words.begin(), words.end(), setReference));
+    };
+    EXPECT_EQ(references(false), 0) << "arguments nothing in the command buffer wrote";
+    EXPECT_EQ(references(true), 1) << "arguments a fill before the draw wrote";
+    EXPECT_EQ(references(false), 0) << "an earlier command buffer's fill";
 }
 
 }  // namespace

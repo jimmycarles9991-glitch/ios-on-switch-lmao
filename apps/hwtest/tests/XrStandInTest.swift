@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// BGRA10_XR (552), BGR10_XR (554) and their sRGB twins (553, 555) render into an RGBA16Float stand-in that holds

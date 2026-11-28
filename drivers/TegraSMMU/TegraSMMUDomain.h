@@ -16,14 +16,8 @@
 
 struct TegraSMMUDomain {
     static constexpr uint32_t kRead = 1u << 31, kWrite = 1u << 30, kNonSecure = 1u << 29, kNext = 1u << 28;
-    static constexpr uint32_t kPfnMask = 0x3fffff, kEntries = 1024;
+    static constexpr uint32_t kPfnMask = 0x3fffff, kEntries = 1024, kMaxDirtyRanges = 8;
     static constexpr uint64_t kPage = 4096, kSpan = 4ULL << 20, kLimit = 1ULL << 32;
-    uint32_t *va = nullptr;
-    uint64_t pa = 0;
-    uint32_t pages = 0, used = 0;
-    uintptr_t dirtyLow = UINTPTR_MAX, dirtyHigh = 0;
-    uint64_t iovaLow = UINT64_MAX, iovaHigh = 0;
-    bool directoryDirty = false;
 
     // The table bytes [low, high) written since the last take, from physical address pa on; the IOVAs [iovaLow,
     // iovaHigh) whose page entries they hold; directory: a directory entry among them, so any IOVA may have changed.
@@ -32,6 +26,27 @@ struct TegraSMMUDomain {
         uint64_t pa, iovaLow, iovaHigh;
         bool directory;
     };
+
+    struct DirtyRange {
+        uintptr_t low, high;
+        uint64_t pa, iovaLow, iovaHigh;
+    };
+
+    struct Changes {
+        DirtyRange ranges[kMaxDirtyRanges];
+        uint32_t count;
+        uintptr_t dirtyLow, dirtyHigh;
+        bool directory, overflow;
+    };
+
+    uint32_t *va = nullptr;
+    uint64_t pa = 0;
+    uint32_t pages = 0, used = 0;
+    uintptr_t dirtyLow = UINTPTR_MAX, dirtyHigh = 0;
+    uint64_t iovaLow = UINT64_MAX, iovaHigh = 0;
+    DirtyRange dirtyRanges[kMaxDirtyRanges] = {};
+    uint32_t dirtyCount = 0;
+    bool directoryDirty = false, dirtyOverflow = false;
 
     // tables: count 4 KiB pages at physical address tablesPa (page 0 becomes the empty directory). False when the buffer
     // cannot be one (unaligned, above 4 GiB, no room for a table).
@@ -174,18 +189,29 @@ struct TegraSMMUDomain {
         return (e & kRead) ? (static_cast<uint64_t>(e & kPfnMask) << 12) | (iova & (kPage - 1)) : UINT64_MAX;
     }
 
-    // What changed since the last take (takeDirty or takeChange); false when nothing did.
+    // What changed since the last take (takeDirty, takeChange or takeChanges); false when nothing did.
     bool takeChange(Change *out)
     {
         if (dirtyLow >= dirtyHigh)
             return false;
         *out = {dirtyLow, dirtyHigh, pa + (dirtyLow - reinterpret_cast<uintptr_t>(va)),
                 iovaLow,  iovaHigh,  directoryDirty};
-        dirtyLow = UINTPTR_MAX;
-        dirtyHigh = 0;
-        iovaLow = UINT64_MAX;
-        iovaHigh = 0;
-        directoryDirty = false;
+        clearDirty();
+        return true;
+    }
+
+    bool takeChanges(Changes *out)
+    {
+        if (dirtyLow >= dirtyHigh)
+            return false;
+        out->count = dirtyCount;
+        for (uint32_t i = 0; i < dirtyCount; ++i)
+            out->ranges[i] = dirtyRanges[i];
+        out->dirtyLow = dirtyLow;
+        out->dirtyHigh = dirtyHigh;
+        out->directory = directoryDirty;
+        out->overflow = dirtyOverflow;
+        clearDirty();
         return true;
     }
 
@@ -200,6 +226,63 @@ struct TegraSMMUDomain {
         return true;
     }
 
+    void clearDirty()
+    {
+        dirtyLow = UINTPTR_MAX;
+        dirtyHigh = 0;
+        iovaLow = UINT64_MAX;
+        iovaHigh = 0;
+        dirtyCount = 0;
+        directoryDirty = false;
+        dirtyOverflow = false;
+    }
+
+    void recordRange(const uint32_t *p, uint64_t iova)
+    {
+        if (dirtyOverflow || directoryDirty)
+            return;
+        const uintptr_t at = reinterpret_cast<uintptr_t>(p);
+        const uintptr_t end = at + sizeof(*p);
+        const uint64_t page = iova & ~(kPage - 1);
+        const uint64_t pageEnd = page + kPage;
+        constexpr uintptr_t kGroupBytes = 64;
+        constexpr uint64_t kGroupIova = 64ULL * 1024;
+        auto merges = [&](const DirtyRange &r) {
+            const uintptr_t rLow = r.low & ~(kGroupBytes - 1);
+            const uintptr_t rHigh = (r.high + kGroupBytes - 1) & ~(kGroupBytes - 1);
+            const uint64_t iLow = r.iovaLow & ~(kGroupIova - 1);
+            const uint64_t iHigh = (r.iovaHigh + kGroupIova - 1) & ~(kGroupIova - 1);
+            return at <= rHigh && end >= rLow && page <= iHigh && pageEnd >= iLow;
+        };
+        auto extend = [&](DirtyRange &r) {
+            if (at < r.low) {
+                r.low = at;
+                r.pa = pa + (at - reinterpret_cast<uintptr_t>(va));
+            }
+            if (end > r.high)
+                r.high = end;
+            if (page < r.iovaLow)
+                r.iovaLow = page;
+            if (pageEnd > r.iovaHigh)
+                r.iovaHigh = pageEnd;
+        };
+        if (dirtyCount && merges(dirtyRanges[dirtyCount - 1])) {
+            extend(dirtyRanges[dirtyCount - 1]);
+            return;
+        }
+        for (uint32_t i = 0; i + 1 < dirtyCount; ++i) {
+            if (merges(dirtyRanges[i])) {
+                extend(dirtyRanges[i]);
+                return;
+            }
+        }
+        if (dirtyCount == kMaxDirtyRanges) {
+            dirtyOverflow = true;
+            return;
+        }
+        dirtyRanges[dirtyCount++] = {at, end, pa + (at - reinterpret_cast<uintptr_t>(va)), page, pageEnd};
+    }
+
     void setPte(uint32_t *p, uint64_t iova, uint32_t value)
     {
         *p = value;
@@ -209,6 +292,7 @@ struct TegraSMMUDomain {
             iovaLow = page;
         if (page + kPage > iovaHigh)
             iovaHigh = page + kPage;
+        recordRange(p, iova);
     }
 
     void touch(const void *p, uintptr_t bytes)

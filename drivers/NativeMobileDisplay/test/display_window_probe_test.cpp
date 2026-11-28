@@ -108,9 +108,12 @@ struct Model {
     {
         std::vector<uint32_t> out(static_cast<size_t>(kPanelWidth) * kPanelHeight);
         const Window &w = step.a.on() ? step.a : step.b;
+        // Past the window's size (every probe window sits at the origin) the panel shows the background.
+        const uint32_t lines = w.on() ? w.size >> 16 : kPanelHeight, pixels = w.on() ? w.size & 0xffff : kPanelWidth;
         for (uint32_t line = 0; line < kPanelHeight; ++line)
             for (uint32_t pixel = 0; pixel < kPanelWidth; ++pixel)
-                out[static_cast<size_t>(line) * kPanelWidth + pixel] = fetch(w, line, pixel);
+                out[static_cast<size_t>(line) * kPanelWidth + pixel] =
+                    line < lines && pixel < pixels ? fetch(w, line, pixel) : 0;
         return out;
     }
 };
@@ -134,7 +137,8 @@ uint32_t crcOf(const std::vector<uint32_t> &panel)
 std::vector<Plan> allPlans()
 {
     std::vector<Plan> plans;
-    for (const Probe p : {kOverlayBlockYuv, kColumnScanYuv, kOffsetCrop}) {
+    for (const Probe p :
+         {kOverlayBlockYuv, kColumnScanYuv, kOffsetCrop, kColumnScanBgra, kColumnScanWords, kFlipWords}) {
         Plan plan;
         EXPECT_TRUE(planOf(p, plan));
         plans.push_back(plan);
@@ -239,7 +243,8 @@ TEST(WindowProbePlans, WindowBsHeaviestStepPassesTheMemoryMath)
         SCOPED_TRACE(probeName(plan.probe));
         native_planes::Image image;
         ASSERT_TRUE(heaviestOverlay(plan.step, plan.steps, image));
-        EXPECT_EQ(image.yuv, plan.probe != kColumnScanYuv);  // V3's is the UI's BGRA
+        EXPECT_EQ(image.yuv, plan.probe != kColumnScanYuv && plan.probe != kColumnScanBgra &&
+                                 plan.probe != kColumnScanWords && plan.probe != kFlipWords);  // V3's: the UI's BGRA
         const uint32_t bpp = image.yuv ? 1 : 4;
         switch_display_memory_window out = {};
         EXPECT_TRUE(switch_display::memoryWindow(
@@ -277,6 +282,64 @@ TEST(WindowProbePlans, ColumnScanRegistersFollowTheColumnScanRules)
     EXPECT_EQ(w.hOffset, 1279u);  // (x + w) * Bpp - 1
     EXPECT_EQ(w.kind, 0x12u);     // BLOCK, 2-GOB blocks: NVDEC's
     EXPECT_EQ(w.lineStride, 1280u << 16 | 1280u);
+}
+
+TEST(WindowProbePlans, BgraColumnScanRegistersFollowTheColumnScanRules)
+{
+    Plan plan;
+    ASSERT_TRUE(planOf(kColumnScanBgra, plan));
+    const Window &w = plan.step[1].b;
+    EXPECT_FALSE(plan.step[1].a.on());
+    EXPECT_EQ(w.options, 0x40000011u);            // WIN_ENABLE, SCAN_COLUMN, H_DIRECTION; no CSC, no filter at 1:1
+    EXPECT_EQ(w.prescaled, 1280u << 16 | 2880u);  // V: the source width, H: its height in bytes
+    EXPECT_EQ(w.size, 1280u << 16 | 720u);
+    EXPECT_EQ(w.dda, 0x10001000u);
+    EXPECT_EQ(w.hOffset, 5119u);  // (x + w) * Bpp - 1
+    EXPECT_EQ(w.kind, 0x42u);     // BLOCK, 16-GOB blocks: the GPU's render targets
+    EXPECT_EQ(w.lineStride, 5120u);
+    EXPECT_EQ(plan.step[4].b.vOffset, 719u);
+    EXPECT_EQ(plan.step[4].b.options, 0x40000014u);  // SCAN_COLUMN, V_DIRECTION: transform 4
+    EXPECT_EQ(plan.step[5].b.hOffset, 5116u);
+    EXPECT_EQ(plan.step[5].check, kReport);
+}
+
+// V7: words 6 and 5 column-scanned, word 6's picture row-scanned from its last byte and row, and a start one pixel in.
+TEST(WindowProbePlans, TheOtherColumnScanWordsAndAPitchFlipFollowTheRules)
+{
+    Plan plan;
+    ASSERT_TRUE(planOf(kColumnScanWords, plan));
+    EXPECT_TRUE(plan.mismatchFails);
+    EXPECT_EQ(plan.step[1].b.options, 0x40000010u);  // SCAN_COLUMN alone: transform 6
+    EXPECT_EQ(plan.step[3].b.options, 0x40000015u);  // SCAN_COLUMN, H_DIRECTION, V_DIRECTION: transform 5
+    EXPECT_EQ(plan.step[3].b.hOffset, 5119u);
+    EXPECT_EQ(plan.step[3].b.vOffset, 719u);
+    const Window &flip = plan.step[4].b;
+    EXPECT_EQ(flip.options & 0x15u, 0x05u) << "H and V, no SCAN_COLUMN";
+    EXPECT_EQ(flip.hOffset, 720u * 4 - 1);
+    EXPECT_EQ(flip.vOffset, 1279u);
+    EXPECT_EQ(flip.kind, 0u) << "pitch linear";
+    EXPECT_EQ(plan.step[4].against, 2u);
+    EXPECT_EQ(plan.step[5].b.hOffset, 1279u * 4 + 3);
+    EXPECT_EQ(plan.step[5].b.prescaled, 1279u << 16 | 2880u) << "one column fewer";
+    EXPECT_EQ(plan.step[6].b.hOffset, 1278u * 4 + 3);
+    EXPECT_EQ(plan.step[6].check, kDiffer);
+    EXPECT_EQ(plan.step[6].against, 5u);
+}
+
+// V8: words 1, 2 and 3 as row scans with H and V alone or together, pitch linear and in 16-GOB blocks.
+TEST(WindowProbePlans, TheFlipWordsScanRowsFromTheirLastByteOrRow)
+{
+    Plan plan;
+    ASSERT_TRUE(planOf(kFlipWords, plan));
+    EXPECT_TRUE(plan.mismatchFails);
+    EXPECT_EQ(plan.step[1].b.options & 0x15u, 0x01u);
+    EXPECT_EQ(plan.step[1].b.hOffset, 720u * 4 - 1);
+    EXPECT_EQ(plan.step[1].b.kind, 0u);
+    EXPECT_EQ(plan.step[3].b.options & 0x15u, 0x04u);
+    EXPECT_EQ(plan.step[3].b.vOffset, 1279u);
+    EXPECT_EQ(plan.step[4].b.kind & 3u, uint32_t(native_planes::kSurfaceKindBlock));
+    EXPECT_EQ(plan.step[7].b.options & 0x15u, 0x05u);
+    EXPECT_EQ(plan.step[7].against, 6u);
 }
 
 // --- The run -------------------------------------------------------------------------------------------------------

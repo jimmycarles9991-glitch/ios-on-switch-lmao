@@ -1,7 +1,9 @@
 import CoreVideo
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Passes into two-plane YCbCr surface textures made without RenderTarget usage: 32x32 surfaces '420v' (formats 540,

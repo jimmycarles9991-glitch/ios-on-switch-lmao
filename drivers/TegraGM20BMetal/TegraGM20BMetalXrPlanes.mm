@@ -8,7 +8,8 @@
 #include <algorithm>
 #include <cstring>
 
-static_assert(kXrPlanesOverflowTag >= gm20b::kFormatStandInTag + 2 * 8,
+static_assert(kXrPlanesOverflowTag >= gm20b::kFormatStandInTag + 2 * 8 &&
+                  kXrPlanesImageTag + 8 <= gm20b::kFormatStandInTag,
               "an overflow image's tag shares a fixed tag's memory");
 
 bool xrPlanesStorable(MTLTextureDescriptor *d)
@@ -88,27 +89,11 @@ bool makeXrWordPlane(SwitchMetalTexture *t, IOSurfaceRef s, uint32_t width, uint
 bool makeXrPlanes(SwitchMetalTexture *t, IOSurfaceRef s, uint32_t width, uint32_t height)
 {
     const uintptr_t at = uintptr_t(IOSurfaceGetBaseAddress(s));
-    MTLTextureDescriptor *d = t->_descriptor;
     const NSUInteger p = t->_plane;
     const uint64_t word = uintptr_t(IOSurfaceGetBaseAddressOfPlane(s, p)) - at,
                    alpha = uintptr_t(IOSurfaceGetBaseAddressOfPlane(s, p + 1)) - at;
-    if (!holdInPlanes(t, s, word, uint32_t(IOSurfaceGetBytesPerRowOfPlane(s, p)), alpha,
-                      uint32_t(IOSurfaceGetBytesPerRowOfPlane(s, p + 1)), width, height))
-        return false;
-    static std::atomic<bool> said{false};
-    if (!said.exchange(true)) {
-        const gm20b::Texture &w = *t->_raw.luma, &a = *t->_raw.chroma;
-        os_log(gm20bLog(),
-               "SwitchMetal: two-plane XR on (%ux%u '%c%c%c%c', drawn in its planes: rows %u and %u, va&127 %llu and "
-               "%llu, %s "
-               "and %s)",
-               unsigned(d.width), unsigned(d.height), char(IOSurfaceGetPixelFormat(s) >> 24),
-               char(IOSurfaceGetPixelFormat(s) >> 16), char(IOSurfaceGetPixelFormat(s) >> 8),
-               char(IOSurfaceGetPixelFormat(s)), w.pitch, a.pitch, (unsigned long long)(w.va & 127),
-               (unsigned long long)(a.va & 127), w.renderable ? "direct" : "shadowed",
-               a.renderable ? "direct" : "shadowed");
-    }
-    return true;
+    return holdInPlanes(t, s, word, uint32_t(IOSurfaceGetBytesPerRowOfPlane(s, p)), alpha,
+                        uint32_t(IOSurfaceGetBytesPerRowOfPlane(s, p + 1)), width, height);
 }
 
 uint32_t xrWordsFormat(uint32_t format)

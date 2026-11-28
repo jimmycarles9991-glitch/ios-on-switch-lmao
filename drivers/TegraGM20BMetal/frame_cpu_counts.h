@@ -7,7 +7,26 @@
 #include <atomic>
 #include <cstdint>
 
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+namespace gm20b {
+
+// How a render server's command buffer came out of the early schedule (TegraGM20BMetalSchedule.mm tryEarlySchedule): made, or
+// its last chance at its queue head refused for its shape (scheduled, held, failed, an event or a compute predicate), a
+// compute job or a pipeline variant still pending, its queue order, too little left to encode, a surface another
+// command buffer promised early, or the kernel refusing the promise
+enum class EarlyOutcome : uint8_t {
+    Made,
+    Shape,
+    Pending,
+    Order,
+    Small,
+    Busy,
+    Kernel,
+    Count
+};
+
+}  // namespace gm20b
+
+#if (!defined(SWITCH_DEBUG) || SWITCH_DEBUG) && defined(SWITCH_STATS_GPU) && SWITCH_STATS_GPU
 namespace gm20b {
 
 // A render pass as the recording thread opened it
@@ -93,12 +112,13 @@ struct FrameCpuCounts {
     std::atomic<uint64_t> longestParts[5] = {};
     std::atomic<uint64_t> recordPrepares{0};  // encoder ranges the recording thread prepared (gm20bPrepareEncoder)
     std::atomic<uint64_t> splits{0};          // ranges split where the encode ahead ended (gm20bPipelineSplit)
+    // indirect draws whose arguments work earlier in the command buffer wrote (drained before the fetch), and the rest
+    std::atomic<uint64_t> indirectDrained{0}, indirectFree{0};
     std::atomic<uint64_t> rangeSplits{0};
     // from a command buffer's commit to its first raw range's job: over the window and the longest
     std::atomic<uint64_t> kicks{0}, kickUs{0}, kickMaxUs{0};
     std::atomic<uint64_t> enqueues[size_t(EnqueueTiming::Count)] = {};
-    std::atomic<uint32_t> lateWritePeriod{128};
-    std::atomic<uint64_t> lateWriteSampled{0}, lateWriteBuffer{0}, lateWriteReplace{0}, lateWriteSurface{0};
+    std::atomic<uint64_t> early[size_t(EarlyOutcome::Count)] = {};
 };
 
 inline FrameCpuCounts &frameCpuCounts()

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #import "bootstrap_registration.h"
+#include "build_configuration.h"
 #include "uicache_options.h"
 
 #include <limits.h>
@@ -203,7 +204,7 @@ int switch_uicache_main(int argc, char **argv)
     const int result = arguments.count ? switch_registration_request(arguments) : EX_OK;
     if (result || !options.respring)
         return result;
-    char *const command[] = {const_cast<char *>("/var/jb/usr/bin/sbreload"), NULL};
+    char *const command[] = {const_cast<char *>(SWITCH_BOOTSTRAP_ROOT "/usr/bin/sbreload"), NULL};
     pid_t child = -1;
     if (posix_spawn(&child, command[0], NULL, NULL, command, environ))
         return EX_OSERR;

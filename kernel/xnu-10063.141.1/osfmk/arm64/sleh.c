@@ -34,6 +34,7 @@
 #include <arm/rtclock.h>
 #include <arm/trap_internal.h> /* for IS_ARM_GDB_TRAP() et al */
 #include <arm64/proc_reg.h>
+#include <switch/sched.h>
 #include <arm64/machine_machdep.h>
 #include <arm64/monotonic.h>
 #include <arm64/instructions.h>
@@ -60,6 +61,7 @@
 #include <vm/pmap.h>
 #include <vm/vm_fault.h>
 #include <vm/vm_kern.h>
+#include <vm/vm_shared_region.h>
 
 #include <sys/errno.h>
 #include <sys/kdebug.h>
@@ -677,6 +679,7 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far, __unused
 		}
 
 		thread->machine.exception_trace_code = (uint16_t)(ARM64_KDBG_CODE_USER | class);
+		switch_systime_entered(thread);
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
 		    MACHDBG_CODE(DBG_MACH_EXCP_SYNC_ARM, thread->machine.exception_trace_code) | DBG_FUNC_START,
 		    esr, far, get_saved_state_pc(state), 0, 0);
@@ -1224,6 +1227,8 @@ brk_out:
 
 #if DEVELOPMENT || DEBUG
 extern void switch_kprof_user_trap(arm_saved_state_t *state, uint32_t esr);
+#endif
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
 /* osfmk/kern/switch_kprof.c (r17-faults): a fault arm_fast_fault resolved, for the kprof faults lines */
 extern void switch_kprof_fast_fault(bool access_flag);
 #define SWITCH_FSC_ACCESS_FLAG(fc) \
@@ -1582,7 +1587,7 @@ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr
 			result = arm_fast_fault(map->pmap,
 			    vm_fault_addr,
 			    fault_type, (fault_code == FSC_ACCESS_FLAG_FAULT_L3), TRUE);
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
 			if (result == KERN_SUCCESS) {
 				switch_kprof_fast_fault(SWITCH_FSC_ACCESS_FLAG(fault_code));
 			}
@@ -1852,7 +1857,7 @@ handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_ad
 			    fault_addr,
 			    fault_type, (fault_code == FSC_ACCESS_FLAG_FAULT_L3), FALSE);
 			if (result == KERN_SUCCESS) {
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
 				switch_kprof_fast_fault(SWITCH_FSC_ACCESS_FLAG(fault_code));
 #endif
 				return;
@@ -2012,6 +2017,8 @@ static const uint32_t switch_sys_icache_invalidate_loop[] = {
 
 /* One kernel log line the first time each path runs, so a boot log shows the JIT publishes being completed. */
 static bool switch_ucm_noted_loop, switch_ucm_noted_single;
+static vm_shared_region_t switch_icache_loop_sr;
+static user_addr_t        switch_icache_loop_pc;
 
 static void
 switch_ucm_note(bool *noted, const char *what, arm_saved_state_t *state, uint64_t detail)
@@ -2029,15 +2036,42 @@ switch_ucm_note(bool *noted, const char *what, arm_saved_state_t *state, uint64_
 static bool
 switch_user_icache_loop(arm_saved_state_t *state)
 {
-	uint32_t       code[sizeof(switch_sys_icache_invalidate_loop) / sizeof(uint32_t)];
-	const int64_t  left = (int64_t)get_saved_state_reg(state, 10);
-	const uint64_t line = (uint64_t)get_saved_state_reg(state, 9);
-	uint64_t       lines;
+	uint32_t           code[sizeof(switch_sys_icache_invalidate_loop) / sizeof(uint32_t)];
+	const int64_t      left = (int64_t)get_saved_state_reg(state, 10);
+	const uint64_t     line = (uint64_t)get_saved_state_reg(state, 9);
+	const user_addr_t  pc   = get_saved_state_pc(state);
+	task_t             task = current_task();
+	vm_shared_region_t cached_sr;
+	uint64_t           lines;
 
-	if (left >= 0 || (get_saved_state_cpsr(state) & PSR64_SS) ||
-	    copyin(get_saved_state_pc(state), (char *)code, sizeof(code)) != 0 ||
-	    memcmp(code, switch_sys_icache_invalidate_loop, sizeof(code)) != 0) {
+	if (left >= 0 || (get_saved_state_cpsr(state) & PSR64_SS)) {
 		return false;
+	}
+	cached_sr = os_atomic_load(&switch_icache_loop_sr, acquire);
+	if (cached_sr == NULL || os_atomic_load(&switch_icache_loop_pc, relaxed) != pc ||
+	    os_atomic_load(&task->shared_region, relaxed) != cached_sr) {
+		if (copyin(pc, (char *)code, sizeof(code)) != 0 ||
+		    memcmp(code, switch_sys_icache_invalidate_loop, sizeof(code)) != 0) {
+			return false;
+		}
+		if (cached_sr == NULL) {
+			vm_shared_region_t sr = vm_shared_region_get(task);
+			if (sr != NULL) {
+				if (sr == primary_system_shared_region && sr->sr_persists && !sr->sr_stale &&
+				    sr->sr_mapping_in_progress == THREAD_NULL &&
+				    sr->sr_slide_in_progress == THREAD_NULL &&
+				    sr->sr_size >= sizeof(code) && pc != 0 && pc >= sr->sr_base_address &&
+				    (pc - sr->sr_base_address) <= (sr->sr_size - sizeof(code))) {
+					if (os_atomic_cmpxchg(&switch_icache_loop_pc, 0, pc, relaxed)) {
+						os_atomic_store(&switch_icache_loop_sr, sr, release);
+						sr = NULL;
+					}
+				}
+				if (sr != NULL) {
+					vm_shared_region_deallocate(sr);
+				}
+			}
+		}
 	}
 	lines = MIN((uint64_t)0 - (uint64_t)left, (uint64_t)SWITCH_ICACHE_LOOP_CHUNK);
 	if (switch_user_cache_maintenance(line, lines * SWITCH_ICACHE_LOOP_LINE, SWITCH_UCM_SYNC_I) != 0) {

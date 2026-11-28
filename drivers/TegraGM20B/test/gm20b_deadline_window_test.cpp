@@ -452,6 +452,28 @@ TEST_F(DeadlineWindow, AMissedFrameNamesItsCause)
 	EXPECT_EQ(tgm_deadline_miss_cause(&late), TGM_MISS_PRESENT);
 }
 
+// The display passes no vsync on while nothing draws, so the first frame after a still screen has no vblank of its own
+// yet: it is no miss (boot 2693043C, 19:21:00: "missed its vblank by 17449576 us" after 17 s with no frame).
+TEST_F(DeadlineWindow, TheFirstFrameAfterAStillScreenIsNoMiss)
+{
+	frameEnd();
+	now += 1000000;
+	tgm_deadline_kicked(1, 0);
+	tgm_deadline_progress(2000000, 0);
+	now += 2000000;
+	tgm_deadline_presented(now, 1);
+	char window[320];
+	tgm_deadline_miss_stats(window, sizeof(window));
+	logged.clear();
+	now += 17000000000ull;
+	tgm_deadline_kicked(1, 0);
+	tgm_deadline_progress(2000000, 0);
+	now += 2000000;
+	tgm_deadline_presented(now, 1);
+	EXPECT_EQ(logged.size(), 0u) << (logged.empty() ? "" : logged[0]);
+	EXPECT_EQ(tgm_deadline_miss_stats(window, sizeof(window)), 0) << window;
+}
+
 TEST_F(DeadlineWindow, LaterCompositorKicksReportNotFirstUntilPresent)
 {
 	tgm_deadline_presented(now, 1);

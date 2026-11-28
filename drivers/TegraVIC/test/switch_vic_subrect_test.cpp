@@ -87,7 +87,8 @@ void check(uint32_t transform, uint32_t scale, bool nv12, bool bilinear)
             if (!nv12) {
                 memcpy(expected.data() + v * kPitch + u * 4, &value, 4);
             } else {
-                const uint32_t input[] = {((value >> 16) & 255u) * 4, ((value >> 8) & 255u) * 4, (value & 255u) * 4};
+                const uint32_t input[] = {vic_model_widen((value >> 16) & 255u), vic_model_widen((value >> 8) & 255u),
+                                          vic_model_widen(value & 255u)};
                 uint32_t output[3];
                 tegra_vic_matrix_apply(&matrix, input, output);
                 expected[v * kPitch + u] = output[0] >> 2;

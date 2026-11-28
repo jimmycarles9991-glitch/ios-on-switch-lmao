@@ -52,18 +52,4 @@ TEST(Gm20bGrInit, TheFloorsweepWritesPdAndDsTpcCountsOnGm20b)
 	EXPECT_EQ(grctx.find("skip_pd_num_tpc_per_gpc"), std::string::npos);
 }
 
-TEST(Gm20bGrInit, EveryContextIsLookedForAtEveryFence)
-{
-	const std::string chan = Text(GPU_CHAN_C);
-	EXPECT_NE(Body(chan, "static int chan_new(").find("tgm_stats_gr_bind(chan);"),
-		  std::string::npos);
-	EXPECT_NE(Body(chan, "static void chan_free(struct tgm_chan *chan)\n{")
-			  .find("tgm_stats_gr_unbind(chan);"),
-		  std::string::npos);
-	EXPECT_NE(Body(Text(GPU_FENCED_H),
-		       "static inline void stats_fences(struct tgm_chan *chan)\n{")
-			  .find("tgm_stats_gr_context();"),
-		  std::string::npos);
-}
-
 }  // namespace

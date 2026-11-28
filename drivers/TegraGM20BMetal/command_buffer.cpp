@@ -7,15 +7,16 @@
 #include "slm.h"
 #include "stamps.h"
 #include "native_surface.h"
+#include "refusal_text.h"
 #include "tiled_cache.h"
 
 #include <mach/mach.h>
-#include <os/log.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
 
 #include "gm20b_gpu_internal.h"
+#include "gm20b_log.h"
 
 namespace gm20b {
 
@@ -66,6 +67,13 @@ CommandBuffer *Device::begin()
     if (!ensureChannel())
         return nullptr;
     learnCompleted();
+    set_.addPending(k_);
+    if (zcullOn_) {
+        const uint64_t reserved = zcullCarry_.live(channelGeneration(), lastSubmitted()) ? zcullCarry_.owner : 0;
+        zcullSlots_.makeAhead(reserved, ZcullSlots::slotBytes(zcullInfo_), [this](Bo &bo, uint64_t n) {
+            return makeZcullSlot(bo, n);
+        });
+    }
     Killed live = {};
     if ((contextless_ || k_.lost(channel_) || liveKill(live)) && !reopen())
         return nullptr;
@@ -82,11 +90,6 @@ CommandBuffer *Device::begin()
         freeMovedPlain();
     growRing(push_, kSizes[0].push);
     growRing(upload_, kSizes[0].upload);
-#if SWITCH_METAL_DIAGNOSTICS
-    if (glassMemOn.load(std::memory_order_relaxed) || glassMemLive_ || glassMemBusyCount_)
-        glassMemFrame();
-    cb_.glassMemSlot_ = -1;
-#endif
     CommandBuffer &cb = cb_;
     cb.dev_ = this;
     cb.segments_.clear();
@@ -96,10 +99,15 @@ CommandBuffer *Device::begin()
     cb.heaps_.clear();
     cb.surfaces_.clear();
     cb.zcullPlanes_.clear();
+    cb.zcullOwner_ = ++zcullOwners_;
+    cb.zcullTo_ = nullptr;
+    cb.zcullKept_ = 0;
+    cb.zcullResumed_ = false;
     set_.view(setView_);
     cb.memberUses_.clear();
     cb.memberRemovals_ = setView_.removals;
     cb.memberHostWritten_ = false;
+    cb.dirtyBuffers_.clear();
     cb.arenaKindInvalidate_ = false;
     cb.pendingKindSwitch_ = false;
     cb.kindSwitchGen_ = 0;
@@ -108,6 +116,8 @@ CommandBuffer *Device::begin()
     cb.inRender_ = false;
     cb.passBufferWrites_ = false;
     cb.prevBufferWrites_ = false;
+    cb.passShaderFlushed_ = false;
+    cb.computeReleased_ = false;
     cb.tiledCacheDirty_ = false;
     cb.cbArenaKinds_.clear();
     cb.cbCrossSeen_.clear();
@@ -143,6 +153,7 @@ CommandBuffer *Device::begin()
     cb.notSubmitted = nullptr;
     cb.setRefused.clear();
     cb.nativeReads_.clear();
+    cb.nativeWrites_.clear();
     cb.nativeSurfaces_.clear();
     cb.pitchImports_.clear();
     overflowing_ = false;
@@ -154,6 +165,8 @@ CommandBuffer *Device::begin()
     cb.rtLayer_ = rtLayer_;
     cb.alphaHeld_ = alphaHeld_;
     cb.sampleMaskHeld_ = sampleMaskHeld_;
+    cb.clampRangeHeld_ = clampRangeHeld_;
+    memcpy(cb.clampRange_, clampRange_, sizeof clampRange_);
     cb.tiledCacheSize_ = tiledCacheSize_;
     cb.ds_ = ds_;
     cb.extrasLive_ = extrasLive_;
@@ -172,7 +185,7 @@ CommandBuffer *Device::begin()
     }
     cb.stamp = stampOf(commits());
     cb.serial = ++begun_;
-    SWITCH_METAL_DIAGNOSTIC(spans_.begin(cb.stamp));
+    SWITCH_METAL_PROFD(spans_.begin(cb.stamp));
     cb.timings.clear();
     cb.loopsLaid = false;
     // submission prologue, as NVK opens each submission: header/sampler caches (headers written since), constant, shader data and
@@ -188,9 +201,16 @@ CommandBuffer *Device::begin()
     nextForms = {};
     cb.taken_ = {};
     cb.pixelOpenings_ = 0;
+    cb.zcullCounts_ = {};
 #endif
-    if (const EntryForm entry = entryFormFor(cb.barrierForms().entry); relaxed(entry)) {
-        cb.shaderInvalidate_ = entryOpening(p, entry);
+    cb.samplerInvalidate_ = nullptr;
+    cb.headerInvalidate_ = nullptr;
+    const EntryForm askedEntry = cb.barrierForms().entry;
+    if (const EntryForm entry = entryFormFor(askedEntry); relaxed(entry)) {
+        const bool gateHeaders = askedEntry == EntryForm::Rule;
+        cb.shaderInvalidate_ =
+            entryOpening(p, entry, gateHeaders ? &cb.samplerInvalidate_ : nullptr,
+                         gateHeaders ? &cb.headerInvalidate_ : nullptr);
         SWITCH_METAL_DIAGNOSTIC(cb.taken_.entries++);
     } else {
         p.m(INVALIDATE_SAMPLER_CACHE_NO_WFI, 0);
@@ -209,8 +229,10 @@ CommandBuffer *Device::begin()
     cb.splitRecords_.clear();
     cb.splitReuse_.clear();
     cb.bufferWrites_.clear();
+    cb.textureWrites_.clear();
     cb.geometryBudget_ = {};
     cb.geometryPool_.clear();
+    scrubInto(cb);
     return &cb;
 }
 
@@ -266,6 +288,20 @@ uint64_t CommandBuffer::transient(uint32_t bytes)
     return va;
 }
 
+Texture *CommandBuffer::copyScratch(uint64_t bytes)
+{
+    Device::DeferredFrees deferred(*dev_);
+    std::unique_lock<gm20b::Mutex> l(dev_->lock_);
+    Texture *b = dev_->copyScratch(l, deferred, bytes, kCopyOverlapTag);
+    l.unlock();
+    if (!b)
+        return nullptr;
+    if (std::find(backings_.begin(), backings_.end(), b) == backings_.end())
+        backings_.push_back(b);
+    use(*b, true);
+    return b;
+}
+
 std::shared_ptr<ResourceReadyCompletion> CommandBuffer::resourceReadiness(std::function<void()> ready, int &result)
 {
     auto events = dev_->k_.sharedEvents();
@@ -285,6 +321,8 @@ void CommandBuffer::foldCounts()
     stats.blendKillBinds += counts_.blendKillBinds;
     stats.interlockDraws += counts_.interlockDraws;
     stats.rasterOrderedDraws += counts_.rasterOrderedDraws;
+    stats.amplifiedDraws += counts_.amplifiedDraws;
+    stats.guestHoleWrites += counts_.guestHoleWrites;
     stats.fetch.interlocked += counts_.interlocked;
     stats.fetch.interlockedBlends += counts_.interlockedBlends;
     stats.fetch.twinRule += counts_.twinRule;
@@ -295,29 +333,28 @@ void CommandBuffer::foldCounts()
 }
 #endif
 
-void CommandBuffer::describeRefusal(char *line, size_t size) const
+static NotSubmitted refusalOf(const CommandBuffer &cb)
 {
-    if (!setRefused.empty())
-        snprintf(line, size, "%s", setRefused.c_str());
-    else if (kernelResult)
-        snprintf(line, size, "the kernel refused its job (0x%x)", unsigned(kernelResult));
-    else
-        snprintf(line, size, "%s", notSubmitted ? notSubmitted : "nothing named why");
+    return {cb.setRefused.c_str(), unsigned(cb.kernelResult), unsigned(cb.nativeError), cb.notSubmitted};
 }
 
-// One error line a commit that submits nothing more for a reason its caller does not take up again (the CPU holding a
-// use, a native surface changed under it): the first 16, then every 256th
+void CommandBuffer::describeRefusal(char *line, size_t size) const
+{
+    gm20b::describeRefusal(refusalOf(*this), line, size);
+}
+
+// One error line a commit that submits nothing more for a reason its caller does not take up again (refusal_text.h)
 static void logNotSubmitted(const CommandBuffer &cb)
 {
-    if (cb.kernelResult == kIOReturnCannotLock || (cb.nativeError && cb.kernelResult == cb.nativeError))
-        return;
     static std::atomic<uint32_t> lines{0};
+    if (takenUpAgain(refusalOf(cb), unsigned(kIOReturnCannotLock)))
+        return;
     const uint32_t n = lines.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (n > 16 && n % 256)
+    if (!notSubmittedLineDue(n))
         return;
     char why[192];
     cb.describeRefusal(why, sizeof why);
-    os_log_error(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "gm20b"),
+    os_log_error(gm20b::log(),
                  "SwitchMetal: a command buffer not submitted: %{public}s (#%u)", why, n);
 }
 
@@ -341,6 +378,7 @@ bool CommandBuffer::commit(uint32_t &seqno)
 
     Device &d = *dev_;
     SWITCH_METAL_DIAGNOSTIC(foldCounts());
+    settleZcull();
     // a commit that fails after some of its jobs ran leaves the channel holding a segment the device cannot name
     d.heldSegment_.lose();
     launchPrologues();
@@ -352,6 +390,8 @@ bool CommandBuffer::commit(uint32_t &seqno)
     uint64_t invalidatedBefore = 0;
     bool tablesInvalidate = false;
     uint64_t tablesBefore = 0;
+    bool ticInvalidate = false, tscInvalidate = false;
+    uint64_t ticBefore = 0, tscBefore = 0;
 
     struct RollbackInvalidation {
         Device &device;
@@ -359,6 +399,8 @@ bool CommandBuffer::commit(uint32_t &seqno)
         uint64_t &before;
         bool &tables;
         uint64_t &tablesBefore;
+        bool &tic, &tsc;
+        uint64_t &ticBefore, &tscBefore;
 
         ~RollbackInvalidation()
         {
@@ -366,8 +408,13 @@ bool CommandBuffer::commit(uint32_t &seqno)
                 device.heapInvalidated_ = before;
             if (tables && !published)
                 device.tablesInvalidated_ = tablesBefore;
+            if (tic && !published)
+                device.ticInvalidated_ = ticBefore;
+            if (tsc && !published)
+                device.tscInvalidated_ = tscBefore;
         }
-    } rollback{d, invalidates, published, invalidatedBefore, tablesInvalidate, tablesBefore};
+    } rollback{d, invalidates, published, invalidatedBefore, tablesInvalidate, tablesBefore,
+               ticInvalidate, tscInvalidate, ticBefore, tscBefore};
 
     uint64_t slmGiven = 0, slmVa = 0;
     const uint64_t placed = d.heapEpoch_.load(std::memory_order_acquire);
@@ -376,6 +423,20 @@ bool CommandBuffer::commit(uint32_t &seqno)
         invalidates = true;
         invalidatedBefore = d.heapInvalidated_;
         d.heapInvalidated_ = placed;
+    }
+    const uint64_t tscGen = d.tscWritten_.load(std::memory_order_acquire);
+    if (samplerInvalidate_ && tscGen != d.tscInvalidated_) {
+        *samplerInvalidate_ = Push::hdr(4, SUBC_3D, NVB197_INVALIDATE_SAMPLER_CACHE_NO_WFI, 0);
+        tscInvalidate = true;
+        tscBefore = d.tscInvalidated_;
+        d.tscInvalidated_ = tscGen;
+    }
+    const uint64_t ticGen = d.ticWritten_.load(std::memory_order_acquire);
+    if (headerInvalidate_ && ticGen != d.ticInvalidated_) {
+        *headerInvalidate_ = Push::hdr(4, SUBC_3D, NVB197_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI, 0);
+        ticInvalidate = true;
+        ticBefore = d.ticInvalidated_;
+        d.ticInvalidated_ = ticGen;
     }
     if (const uint64_t perWarp = d.slmPerWarp_.load(std::memory_order_acquire); perWarp != d.slmChannel_) {
         slmGiven = perWarp;
@@ -389,10 +450,6 @@ bool CommandBuffer::commit(uint32_t &seqno)
         emitSlm(p, slmVa, slmArea(slmGiven, d.k_.info().tpc_count));
         segments_.insert(0, {va, uint32_t(p.at - head), 0});
     }
-#if SWITCH_METAL_DIAGNOSTICS
-    if (!segments_.empty() && d.glassMemLive_)
-        glassMemTail();
-#endif
     if (!segments_.empty()) {
         uint64_t va;
         auto *tail = reinterpret_cast<uint32_t *>(d.alloc(d.push_, (kTiledCacheFlushWords + kStampWords) * 4, 4, va));
@@ -461,8 +518,8 @@ bool CommandBuffer::commit(uint32_t &seqno)
             admission ? (published ? uint32_t(TegraGM20BJobAdmissionContinue) : uint32_t(TegraGM20BJobAdmissionBegin)) |
                             (last ? uint32_t(TegraGM20BJobAdmissionEnd) : 0u)
                       : 0u;
-        SWITCH_METAL_DIAGNOSTIC(noteExecUses(uses.uses().size()));
-        SWITCH_METAL_DIAGNOSTIC(noteExecPushes(count));
+        SWITCH_METAL_PROFD(noteExecUses(uses.uses().size()));
+        SWITCH_METAL_PROFD(noteExecPushes(count));
         SWITCH_METAL_ENCODE_BEGIN(execSpan, Exec);
         const bool executed =
             d.job(d.setView_, d.channel_, pushes, count, uses, visibility, seq, &result, events, &memberUses_,
@@ -553,14 +610,16 @@ bool CommandBuffer::commit(uint32_t &seqno)
         signaled += signalCount;
     }
     seqno = d.lastSubmitted();
-#if SWITCH_METAL_DIAGNOSTICS
-    if (glassMemSlot_ >= 0) {
-        d.glassMemCbs_[glassMemSlot_].seqno = seqno;
-        d.glassMemBusy_[glassMemSlot_] = true;
-        d.glassMemBusyCount_++;
-        glassMemSlot_ = -1;
+    for (const DirtyBuffer &entry : dirtyBuffers_) {
+        uint64_t seen = __atomic_load_n(&entry.buffer->cpuSeenGen, __ATOMIC_RELAXED);
+        while (seen < entry.gen &&
+               !__atomic_compare_exchange_n(&entry.buffer->cpuSeenGen, &seen, entry.gen, true, __ATOMIC_RELEASE,
+                                            __ATOMIC_RELAXED)) {
+        }
     }
-#endif
+    dirtyBuffers_.clear();
+    d.scrubsSubmitted(*this, seqno);
+    parkZcull();
     if (slmGiven)
         d.slmChannel_ = slmGiven;
     d.retire(d.push_, seq);
@@ -570,11 +629,13 @@ bool CommandBuffer::commit(uint32_t &seqno)
     d.rtLayer_ = rtLayer_;
     d.alphaHeld_ = alphaHeld_;
     d.sampleMaskHeld_ = sampleMaskHeld_;
+    d.clampRangeHeld_ = clampRangeHeld_;
+    memcpy(d.clampRange_, clampRange_, sizeof clampRange_);
     d.tiledCacheSize_ = tiledCacheSize_;
     d.ds_ = ds_;
     d.extrasLive_ = extrasLive_;
     d.heldSegment_ = heldSegment_;
-    const uint64_t now = compClock();
+    const uint64_t now = backings_.empty() ? 0 : compClock();
     for (Texture *b : backings_) {
         Device::Backing &k = Device::backingOf(*b);
         k.lastUse.store(seq, std::memory_order_relaxed);
@@ -613,10 +674,82 @@ bool CommandBuffer::commit(uint32_t &seqno)
     return true;
 }
 
+// Before any of its words are submitted: each region carryZcull keeps is stored, each other one left unstored and its
+// slot given back
+void CommandBuffer::settleZcull()
+{
+    zcullPlanes_.settle(zcullTo_ ? zcullKept_ : 0, [this](int slot) {
+        dev_->zcullSlots_.release(slot);
+    });
+}
+
+// Once submitted: what settleZcull kept is parked for its command buffer's next range, in place of any earlier carry,
+// which this job's submission ended
+void CommandBuffer::parkZcull()
+{
+    Device &d = *dev_;
+    SWITCH_METAL_DIAGNOSTIC(d.stats.zcullPasses += zcullCounts_.passes; d.stats.zcullLoads += zcullCounts_.loads;
+                            d.stats.zcullCarried += zcullCounts_.carried; d.stats.zcullStores += zcullPlanes_.stores();
+                            d.stats.zcullUnstored += zcullPlanes_.unstored());
+    ZcullCarry &carry = d.zcullCarry_;
+    if (zcullResumed_)
+        carry.to = nullptr;
+    zcullResumed_ = false;
+    if (!zcullTo_ || zcullPlanes_.empty())
+        return;
+    carry.planes.carryFrom(zcullPlanes_);
+    carry.to = zcullTo_;
+    carry.from = zcullFrom_;
+    carry.owner = zcullOwner_;
+    carry.generation = d.channelGeneration();
+    carry.submitted = d.lastSubmitted();
+}
+
+void CommandBuffer::resumeZcull(const void *cb, uint64_t from)
+{
+    Device &d = *dev_;
+    ZcullCarry &carry = d.zcullCarry_;
+    if (!carry.to || carry.to != cb || carry.from != from)
+        return;
+    if (!carry.live(d.channelGeneration(), d.lastSubmitted())) {
+        carry.to = nullptr;
+        SWITCH_METAL_DIAGNOSTIC(d.stats.zcullCarriesLost++);
+        return;
+    }
+    zcullPlanes_.copyFrom(carry.planes);
+    zcullOwner_ = carry.owner;
+    zcullResumed_ = true;
+}
+
+// A resumed carry once its job is abandoned. Retried, the job submitted nothing, so the parked regions still hold what
+// their storing job wrote; the abandoned encode's slot takes and settle's releases are undone for the retry.
+void CommandBuffer::endResumedCarry(bool retried)
+{
+    if (!zcullResumed_)
+        return;
+    zcullResumed_ = false;
+    Device &d = *dev_;
+    ZcullCarry &carry = d.zcullCarry_;
+    if (retried && carry.live(d.channelGeneration(), d.lastSubmitted())) {
+        d.zcullSlots_.keepFor(carry.owner, carry.planes);
+        return;
+    }
+    carry.to = nullptr;
+    SWITCH_METAL_DIAGNOSTIC(d.stats.zcullCarriesLost++);
+}
+
+void CommandBuffer::abandonForRetry()
+{
+    endResumedCarry(true);
+    abandon();
+}
+
 void CommandBuffer::abandon()
 {
+    endResumedCarry(false);
     releaseNativeReads();
     Device &d = *dev_;
+    d.scrubsReturned(*this);
     d.closedCount_.store(d.closedCount_.load(std::memory_order_relaxed) + 1, std::memory_order_release);
     d.overflowing_ = false;
     d.overflow_.clear();
@@ -634,6 +767,7 @@ void CommandBuffer::abandon()
     }
     segments_.clear();
     dirty_.clear();
+    dirtyBuffers_.clear();
     surfaces_.clear();
     named_.clear();
     cbArenaKinds_.clear();

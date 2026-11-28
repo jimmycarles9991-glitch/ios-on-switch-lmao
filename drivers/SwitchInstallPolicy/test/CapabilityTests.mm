@@ -54,9 +54,16 @@ void switch_policy_capability_tests(NSURL *root)
     assert([[NSFileManager defaultManager] createDirectoryAtURL:app withIntermediateDirectories:YES attributes:nil error:nil]);
     NSURL *executable = [app URLByAppendingPathComponent:@"Main"];
     NSURL *helper = [app URLByAppendingPathComponent:@"Helper"];
+    NSURL *dylib = [app URLByAppendingPathComponent:@"libSupport.dylib"];
+    NSURL *asset = [app URLByAppendingPathComponent:@"Fake.PNG"];
+    NSURL *frameworkDir = [app URLByAppendingPathComponent:@"Frameworks/Sub.framework"];
+    assert([[NSFileManager defaultManager] createDirectoryAtURL:frameworkDir withIntermediateDirectories:YES attributes:nil error:nil]);
+    NSURL *frameworkBinary = [frameworkDir URLByAppendingPathComponent:@"Sub"];
     uint32_t magic = 0xfeedfacf;
     NSData *image = [NSData dataWithBytes:&magic length:sizeof(magic)];
-    assert([image writeToURL:executable atomically:YES] && [image writeToURL:helper atomically:YES]);
+    assert([image writeToURL:executable atomically:YES] && [image writeToURL:helper atomically:YES] &&
+           [image writeToURL:dylib atomically:YES] && [image writeToURL:asset atomically:YES] &&
+           [image writeToURL:frameworkBinary atomically:YES]);
     assert(switch_declared_capabilities(executable).count == 0);
     assert(switch_declared_capabilities([app URLByAppendingPathComponent:@"Missing"]).count == 0);
     NSError *error = nil;
@@ -64,10 +71,14 @@ void switch_policy_capability_tests(NSURL *root)
         @{app.URLByResolvingSymlinksInPath.path : effective}, &error));
     NSData *mainData = [NSData dataWithContentsOfFile:[executable.path stringByAppendingString:@".SwitchEntitlements"]];
     NSData *helperData = [NSData dataWithContentsOfFile:[helper.path stringByAppendingString:@".SwitchEntitlements"]];
+    NSData *dylibData = [NSData dataWithContentsOfFile:[dylib.path stringByAppendingString:@".SwitchEntitlements"]];
+    NSData *frameworkData = [NSData dataWithContentsOfFile:[frameworkBinary.path stringByAppendingString:@".SwitchEntitlements"]];
     NSDictionary *mainInfo = switch_deserialize_entitlements(mainData);
     NSDictionary *helperInfo = switch_deserialize_entitlements(helperData);
     assert([mainInfo isEqual:effective] && [helperInfo isEqual:effective]);
     assert([mainData isEqual:switch_serialize_entitlements(effective)] && [helperData isEqual:mainData]);
+    assert([dylibData isEqual:mainData] && [frameworkData isEqual:mainData]);
+    assert(![[NSFileManager defaultManager] fileExistsAtPath:[asset.path stringByAppendingString:@".SwitchEntitlements"]]);
     struct stat status;
     assert(!lstat([executable.path stringByAppendingString:@".SwitchEntitlements"].fileSystemRepresentation, &status));
     assert(S_ISREG(status.st_mode) && (status.st_mode & 0777) == 0600 && status.st_nlink == 1);

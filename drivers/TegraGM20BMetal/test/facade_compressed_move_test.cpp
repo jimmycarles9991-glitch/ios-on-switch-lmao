@@ -94,6 +94,25 @@ TEST(GM20BFacadeCompressedMove, ARecordingThreadUsesATargetWhileTheWorkerMovesIt
     EXPECT_EQ(counted(device, "switchMetalCounters", @"private_compressed_moves"), moves + 1);
 }
 
+// A private colour target binds the compressible kind of its texel size whatever its channels (NIL's nvc0_choose_pte_kind
+// picks colour kinds by element size alone): the single-channel 32-bit formats C32_2CRA as BGRA8Unorm does
+TEST(GM20BFacadeCompressedMove, ASingleChannelWordTargetTakesItsTexelSizesKind)
+{
+    {
+        std::lock_guard<std::mutex> l(kernel_model::callLock);
+        kernel_model::model.infoFlags |= TegraGM20BInfoCompression;
+    }
+    ASSERT_TRUE(opened().device != nil);
+    for (MTLPixelFormat format :
+         {MTLPixelFormatR32Uint, MTLPixelFormatR32Sint, MTLPixelFormatR32Float, MTLPixelFormatBGRA8Unorm}) {
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:200 height:120 mipmapped:NO];
+        td.storageMode = MTLStorageModePrivate;
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        EXPECT_EQ(privateCompressedKind(td), gm20b::kCompKindC32) << format;
+    }
+}
+
 // A private Depth32Float texture made plain for want of ZF32_2CZ memory moves onto it on the submit worker while
 // another thread records passes that clear, load and store it as their depth attachment: the move writes its memory
 // fields under the device lock and the recording reads none of them (the thread-sanitized build's check)

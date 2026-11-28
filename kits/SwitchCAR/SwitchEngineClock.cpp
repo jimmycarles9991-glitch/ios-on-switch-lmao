@@ -13,7 +13,7 @@ struct Pll {
     const char *name, *engines;
 };
 
-constexpr Pll kPllC2 = {0x4e8, 0x4ec, 0x4f0, 0x4f4, 0x4f8, "PLLC2", "NVJPG"};
+constexpr Pll kPllC2 = {0x4e8, 0x4ec, 0x4f0, 0x4f4, 0x4f8, "PLLC2", "NVJPG and VIC"};
 constexpr Pll kPllC3 = {0x4fc, 0x500, 0x504, 0x508, 0x50c, "PLLC3", "NVDEC and NVENC"};
 
 enum : uint32_t {
@@ -33,6 +33,8 @@ constexpr uint32_t kLockUs = 600;
 
 IOLock *gLock;
 const volatile uint8_t *gFuse, *gApbMisc;
+bool gSpeedoCached;
+int32_t gCachedSpeedo;
 
 enum Outcome {
     kRate,
@@ -60,17 +62,23 @@ IOLock *lock()
 // FUSE_SOC_SPEEDO_0 on a T210B01 (APB_MISC HIDREV chip 0x21, major 2); -1 elsewhere: the table is T210B01's.
 int32_t socSpeedo()
 {
+    if (gSpeedoCached)
+        return gCachedSpeedo;
     if (!gFuse) {
         gApbMisc = switch_mmio_map(kApbMiscPA, 0x100);
         gFuse = switch_mmio_map(kFusePA, 0x400);
     }
     if (!gApbMisc || !gFuse)
         return -1;
+    int32_t speedo = -1;
     const uint32_t hidrev = switch_mmio_read32(gApbMisc, APB_MISC_HIDREV);
-    if (((hidrev >> 8) & 0xff) != 0x21 || ((hidrev >> 4) & 0xf) != 2)
-        return -1;
-    switch_car_fuse_readable();
-    return static_cast<int32_t>(switch_mmio_read32(gFuse, FUSE_SOC_SPEEDO_0));
+    if (((hidrev >> 8) & 0xff) == 0x21 && ((hidrev >> 4) & 0xf) == 2) {
+        switch_car_fuse_readable();
+        speedo = static_cast<int32_t>(switch_mmio_read32(gFuse, FUSE_SOC_SPEEDO_0));
+    }
+    gCachedSpeedo = speedo;
+    gSpeedoCached = true;
+    return speedo;
 }
 
 void flush(uint32_t offset, uint32_t value, uint32_t settleUs)

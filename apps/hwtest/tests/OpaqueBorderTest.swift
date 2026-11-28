@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Opaque border colours on the driver (boot 21 gpu.heap.m2v_target: such a sampler was m2v's, call.sampler "border

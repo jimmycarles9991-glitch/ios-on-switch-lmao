@@ -159,6 +159,10 @@ py_test(
 py_binary(
     name = "assemble",
     srcs = ["assemble.py"],
+    deps = [
+        ":stage_format",
+        "//tools/common:hashing",
+    ],
 )
 
 py_library(
@@ -167,11 +171,26 @@ py_library(
     visibility = ["//tools/gpu/shaders:__pkg__"],
 )
 
+# The stage manifest's format. gpu/seed reads its PREFS (pack/ca/deepcolour.py), as the device runs with them.
+py_library(
+    name = "stage_format",
+    srcs = ["stage_format.py"],
+    visibility = [
+        "//boot:__pkg__",
+        "//gpu:__subpackages__",
+        "//tools/deploy:__pkg__",
+        "//tools/install:__pkg__",
+    ],
+)
+
+exports_files(["stage_format.py"])
+
 py_binary(
     name = "stage_manifest",
     srcs = ["stage_manifest.py"],
     deps = [
         ":seed_pack",
+        ":stage_format",
         "//tools/common:hashing",
     ],
 )
@@ -182,8 +201,10 @@ py_test(
         "stage_manifest.py",
         "stage_manifest_test.py",
     ],
+    data = ["//drivers/TegraGM20BMetal:stage-tegra-gm20b-metal.py"],
     deps = [
         ":seed_pack",
+        ":stage_format",
         "//tools/common:hashing",
     ],
 )

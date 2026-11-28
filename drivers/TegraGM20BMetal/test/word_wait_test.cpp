@@ -1,12 +1,37 @@
 // SPDX-License-Identifier: MIT
 #include "../word_wait.h"
 #include <gtest/gtest.h>
+#include <mach/mach.h>
+#include <pthread.h>
 #include <atomic>
 #include <chrono>
 #include <thread>
 #include <vector>
 
 namespace {
+
+// Until every thread of `ports` is blocked (TH_STATE_WAITING): a waiter inside its __ulock_wait. A fixed sleep was not
+// enough on a busy test host: a waiter still runnable when the test went on saw `done` already set, rightly did not sleep,
+// and returned false. False: one never blocked within 5 s.
+bool waitUntilBlocked(const std::vector<std::atomic<uint32_t>> &ports)
+{
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < until) {
+        bool all = true;
+        for (const std::atomic<uint32_t> &port : ports) {
+            thread_basic_info_data_t info = {};
+            mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+            const uint32_t p = port.load();
+            all = all && p &&
+                  thread_info(p, THREAD_BASIC_INFO, reinterpret_cast<thread_info_t>(&info), &count) == KERN_SUCCESS &&
+                  info.run_state == TH_STATE_WAITING;
+        }
+        if (all)
+            return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return false;
+}
 
 // As waitUntilCompleted against the completion: a change made at any point of a waiter's check wakes it, in every
 // interleaving, and a waiter whose state is already done returns without sleeping
@@ -154,12 +179,16 @@ TEST(OwnedWord, MultiWaiterOwnerHandoffReturnsTrueForEveryWaiter)
 
     word.setOwner(owner1Port.load());
     std::atomic<int> entered{0}, firstWoke{0}, finished{0};
-    std::vector<bool> firstResults(kWaiters, false), secondResults(kWaiters, false);
+    // a result a waiter thread each: std::vector<bool> packs them into one word, so the threads' writes raced and one
+    // was lost (a waiter woken with __ulock_wait's 1 read back false)
+    std::vector<std::atomic<bool>> firstResults(kWaiters), secondResults(kWaiters);
+    std::vector<std::atomic<uint32_t>> ports(kWaiters);
     gm20b::ChangeWord stepGate;
 
     std::vector<std::thread> waiters;
     for (int w = 0; w < kWaiters; ++w)
         waiters.emplace_back([&, w] {
+            ports[size_t(w)] = gm20b::OwnedWord::currentOwner();
             entered++;
             stepGate.changed();
             firstResults[size_t(w)] = word.waitOnce([&] {
@@ -176,7 +205,7 @@ TEST(OwnedWord, MultiWaiterOwnerHandoffReturnsTrueForEveryWaiter)
     stepGate.waitFor([&] {
         return entered.load() == kWaiters;
     });
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    ASSERT_TRUE(waitUntilBlocked(ports));
     EXPECT_EQ(firstWoke.load(), 0);
 
     // Replacing owner while done == false wakes all waiters; N-1 observe __ulock_wait > 0.
@@ -184,7 +213,7 @@ TEST(OwnedWord, MultiWaiterOwnerHandoffReturnsTrueForEveryWaiter)
     stepGate.waitFor([&] {
         return firstWoke.load() == kWaiters;
     });
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    ASSERT_TRUE(waitUntilBlocked(ports));
     EXPECT_EQ(finished.load(), 0);
 
     done = true;
@@ -203,8 +232,11 @@ TEST(OwnedWord, MultiWaiterOwnerHandoffReturnsTrueForEveryWaiter)
     entered = 0;
     finished = 0;
     waiters.clear();
+    for (std::atomic<uint32_t> &port : ports)
+        port = 0;
     for (int w = 0; w < kWaiters; ++w)
-        waiters.emplace_back([&] {
+        waiters.emplace_back([&, w] {
+            ports[size_t(w)] = gm20b::OwnedWord::currentOwner();
             entered++;
             stepGate.changed();
             word.waitWhileOwned([&] {
@@ -215,9 +247,9 @@ TEST(OwnedWord, MultiWaiterOwnerHandoffReturnsTrueForEveryWaiter)
     stepGate.waitFor([&] {
         return entered.load() == kWaiters;
     });
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    ASSERT_TRUE(waitUntilBlocked(ports));
     word.setOwner(owner2Port.load());
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    ASSERT_TRUE(waitUntilBlocked(ports));
     EXPECT_EQ(finished.load(), 0);
     done = true;
     word.clear();
@@ -229,6 +261,60 @@ TEST(OwnedWord, MultiWaiterOwnerHandoffReturnsTrueForEveryWaiter)
     ownerGate.changed();
     owner1.join();
     owner2.join();
+}
+
+// As the submit worker hands a command buffer to its queue's handler thread: the worker's own clear after the hand-off
+// leaves the handler thread owning it, so a waiter keeps donating to that thread until it clears its own ownership
+TEST(OwnedWord, ClearIfLeavesAHandedOnOwnerInPlace)
+{
+    gm20b::OwnedWord word;
+    std::atomic<uint32_t> workerPort{0}, handlerPort{0};
+    std::atomic<bool> releaseOwners{false};
+    gm20b::ChangeWord ownerGate;
+    const auto owner = [&](std::atomic<uint32_t> &port) {
+        return std::thread([&] {
+            port.store(gm20b::OwnedWord::currentOwner());
+            ownerGate.changed();
+            ownerGate.waitFor([&] {
+                return releaseOwners.load();
+            });
+        });
+    };
+    std::thread worker = owner(workerPort), handler = owner(handlerPort);
+    ownerGate.waitFor([&] {
+        return workerPort.load() != 0 && handlerPort.load() != 0;
+    });
+
+    word.setOwner(workerPort.load());
+    word.setOwner(handlerPort.load());
+    word.clearIf(workerPort.load());
+    EXPECT_EQ(word.owner(), handlerPort.load());
+    word.clearIf(0);
+    EXPECT_EQ(word.owner(), handlerPort.load());
+
+    std::atomic<bool> done{false}, returned{false};
+    std::thread waiter([&] {
+        word.waitWhileOwned([&] {
+            return done.load();
+        });
+        returned = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    word.clearIf(workerPort.load());
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    EXPECT_FALSE(returned.load());
+    EXPECT_EQ(word.owner(), handlerPort.load());
+
+    done = true;
+    word.clearIf(handlerPort.load());
+    waiter.join();
+    EXPECT_TRUE(returned.load());
+    EXPECT_FALSE(word.hasOwner());
+
+    releaseOwners = true;
+    ownerGate.changed();
+    worker.join();
+    handler.join();
 }
 
 TEST(OwnedWord, SelfOwnedWaitDoesNotBlockOrSpin)

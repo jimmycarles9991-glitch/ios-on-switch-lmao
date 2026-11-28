@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// NVDEC's, NVENC's and NVJPG's clock source (SwitchEngineClockPlan.h). The bus PLL is brought up the way L4T's
+// NVDEC's, NVENC's, NVJPG's and VIC's clock source (SwitchEngineClockPlan.h). The bus PLL is brought up the way L4T's
 // tegra_clk_pll_ops bring PLLC2/PLLC3 up from off (tegra210_pllcx_set_defaults, _update_pll_mnp, _clk_pll_enable,
 // clk_pll_wait_for_lock): defaults with reset and IDDQ asserted, M/N/P, IDDQ off, reset off, enable, then the lock bit,
 // which has no interrupt: a bounded wait of L4T's 300 x 2 us. A PLL found running with other dividers is someone

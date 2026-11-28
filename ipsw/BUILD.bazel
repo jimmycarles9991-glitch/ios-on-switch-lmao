@@ -71,6 +71,20 @@ filegroup(
     output_group = "pins",
 )
 
+# The System volume's translated files' trust module, which //deploy:sd checks the card's translated tree against.
+filegroup(
+    name = "pretranslated_os_trust",
+    srcs = [":pretranslated"],
+    output_group = "os_trust",
+)
+
+# The boot package's own translations of files the tree holds ({System path: CDHash}), which //deploy:sd places.
+filegroup(
+    name = "pretranslated_os_updates",
+    srcs = [":pretranslated"],
+    output_group = "os_updates",
+)
+
 py_binary(
     name = "derived",
     srcs = ["derived.py"],
@@ -101,7 +115,16 @@ py_binary(
     srcs = ["inflate.py"],
 )
 
-exports_files(["os_files.py"])
+exports_files([
+    "os_files.py",
+    "pins.bzl",
+])
+
+# //tools/install:translated_tree_test reads the pinned trust modules and update lists.
+exports_files(glob([
+    "pretranslated/*/*.trustcache",
+    "pretranslated/*/*.updates.json",
+]))
 
 py_library(
     name = "os_files_lib",

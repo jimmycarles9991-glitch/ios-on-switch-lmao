@@ -71,7 +71,8 @@ TEST(GM20BImportLockSource, ACachedBoAllocMakesItsBackingBeforeTheConnectionLock
 	ASSERT_EQ(Count(alloc, "IOLockLock(lock_);"), 2u);
 	const size_t charged = alloc.find("IOLockUnlock(lock_);"),
 		     settled = alloc.rfind("IOLockLock(lock_);");
-	for (const char *made : {"spareTake(in->bytes)", "cleanZeros(va, backing);"}) {
+	for (const char *made :
+	     {"spareTake(in->bytes, spareKind, charge.critical)", "cleanZeros(va, backing);"}) {
 		EXPECT_GT(alloc.find(made), charged) << made;
 		EXPECT_LT(alloc.find(made), settled) << made;
 	}

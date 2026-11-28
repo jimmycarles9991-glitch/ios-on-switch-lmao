@@ -146,6 +146,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         '--cache-log', action='store_true', help='log cache maintenance and xHCI DMA for cachecheck.py (cache.bin)'
     )
     parser.add_argument(
+        '--sd-card-time',
+        default='0,0',
+        metavar='LATENCY_US,US_PER_KIB',
+        help="each SD data command's card time, so requests queue as on the device (580,10: the card model's)",
+    )
+    parser.add_argument(
         '--usb',
         action='append',
         default=[],
@@ -175,8 +181,17 @@ def prepare(args: argparse.Namespace) -> tuple[Path, machine.Inputs]:
         icount=not args.mttcg,
         usb=tuple(args.usb),
         cache_log=args.cache_log,
+        sd_card_time=card_time(args.sd_card_time),
     )
     return run, inputs
+
+
+def card_time(value: str) -> tuple[int, int]:
+    """--sd-card-time's two whole numbers."""
+    latency_us, us_per_kib = (int(part) for part in value.split(','))
+    if latency_us < 0 or us_per_kib < 0:
+        raise ValueError(f'--sd-card-time {value}: both parts must be 0 or more')
+    return latency_us, us_per_kib
 
 
 def main() -> None:

@@ -91,6 +91,24 @@ TEST(GM20BPrivateComp, AStoredMultisampledTargetTakesItsKindWhereTheCopyEngineRe
     EXPECT_FALSE(gm20b::privateShapeCompresses(f));
 }
 
+// gpu.perf.nvn's cbr arm: under switchMetalProbeMs4Cbr: a 4x target binds NVN's 2CBR kind, not plain memory
+TEST(GM20BPrivateComp, TheCbrProbeBindsNvnsFourSampleKinds)
+{
+    gm20b::PrivateTextureFacts f = target(4);
+    f.shape = gm20b::PrivateShape2D::Multisample;
+    f.samples = 4;
+    gm20b::probeMs4Cbr = true;
+    const uint32_t c32 = gm20b::privateCompressedKind(f);
+    f.bpp = 8;
+    const uint32_t c64 = gm20b::privateCompressedKind(f);
+    const uint32_t memoryless = gm20b::backingKind(true, true, 0, 4, 4, false);
+    gm20b::probeMs4Cbr = false;
+    EXPECT_EQ(c32, 0xe0u) << "C32_MS4_2CBR";
+    EXPECT_EQ(c64, 0xeeu) << "C64_MS4_2CBR";
+    EXPECT_EQ(memoryless, 0xe2u) << "a memoryless 4x backing keeps 2CRA under the probe";
+    EXPECT_EQ(gm20b::privateCompressedKind(f), 0xf0u) << "C64_MS4_2CRA with the probe off";
+}
+
 // The copy engine moves a multisampled texture as fx::msLayout's grid of its samples
 TEST(GM20BPrivateComp, AMultisampledTextureMovesAsItsSampleGrid)
 {

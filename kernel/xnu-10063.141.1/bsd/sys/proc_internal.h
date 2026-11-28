@@ -477,6 +477,7 @@ struct proc {
 	int32_t           p_memstat_memlimit_active;    /* memory limit enforced when process is in active jetsam state */
 	int32_t           p_memstat_memlimit_inactive;  /* memory limit enforced when process is in inactive jetsam state */
 	int32_t           p_memstat_relaunch_flags;     /* flags indicating relaunch behavior for the process */
+	uint64_t          p_memstat_inactive_warned;    /* Switch: footprint at its last going-clean warning (switch/memstat_warn.h) */
 #if CONFIG_FREEZE
 	uint32_t          p_memstat_freeze_sharedanon_pages; /* shared pages left behind after freeze */
 	uint32_t          p_memstat_frozen_count;

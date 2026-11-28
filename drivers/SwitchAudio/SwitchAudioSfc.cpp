@@ -1,28 +1,10 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #include "SwitchAudioAhub.h"
-#ifndef SWITCH_MMIO_HOST_MODEL
-#include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
-#endif
 
 namespace switch_audio_ahub {
 namespace {
 
 constexpr uint32_t kTimeoutUs = 10000u;
-
-bool waitReg(const volatile uint8_t *ahub, uint32_t offset, uint32_t mask, uint32_t value, uint32_t timeoutUs)
-{
-#ifdef SWITCH_MMIO_HOST_MODEL
-    const uint32_t limit = timeoutUs < 1024u ? timeoutUs : 1024u;
-    for (uint32_t i = 0; i < limit; ++i) {
-        if ((switch_mmio_read32(ahub, offset) & mask) == value) {
-            return true;
-        }
-    }
-    return (switch_mmio_read32(ahub, offset) & mask) == value;
-#else
-    return switch_mmio_wait32(ahub, offset, mask, value, timeoutUs);
-#endif
-}
 
 // Tegra210 SFC Q23 coefficient RAM programs (mainline sound/soc/tegra/tegra210_sfc.c), zero-padded to 64 words.
 constexpr uint32_t kCoef2xDec[kSfcCoefDepth] = {

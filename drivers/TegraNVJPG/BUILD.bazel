@@ -34,6 +34,8 @@ kernel_driver(
     name = "TegraNVJPG",
     srcs = [
         "TegraNVJPG.cpp",
+        "TegraNVJPGFlight.cpp",
+        "TegraNVJPGJobs.cpp",
         "TegraNVJPGMapping.cpp",
         "TegraNVJPGRepack.cpp",
         "TegraNVJPGStats.cpp",

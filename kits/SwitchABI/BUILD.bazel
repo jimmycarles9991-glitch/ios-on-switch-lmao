@@ -9,7 +9,8 @@ load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
 load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
-load(":defs.bzl", "switch_abi_class")
+load("//kernel/rules:kernel.bzl", "kernel_driver")
+load(":defs.bzl", "switch_abi_bindings", "switch_abi_class")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -183,6 +184,22 @@ switch_abi_class(
 switch_abi_class(
     name = "IOHIDDevice",
     header_name = "OriginalHidDeviceABI.h",
+)
+
+switch_abi_bindings(
+    name = "iohiddevice_original_bindings",
+    out = "hid-original-bindings.S",
+    classes = [":IOHIDDevice"],
+    objects = [
+        "//drivers/SwitchTouch:SwitchTouch_cc",
+        "//drivers/SwitchJoyCon:SwitchJoyCon_cc",
+    ],
+)
+
+kernel_driver(
+    name = "IOHIDDeviceBindings",
+    srcs = ["hid-original-bindings.S"],
+    hdr_deps = [],
 )
 
 switch_abi_class(name = "IOSurface")

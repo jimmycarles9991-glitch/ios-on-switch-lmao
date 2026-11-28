@@ -23,8 +23,7 @@ std::atomic<uint64_t> gSurfaceTextures{0};  // the frame timeline's churn count 
 
 os_log_t gm20bLog()
 {
-    static os_log_t l = os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "gm20b");
-    return l;
+    return gm20b::log();
 }
 
 [[noreturn]] void waitTooLong(const char *what, const void *object)
@@ -40,10 +39,10 @@ os_log_t gm20bLog()
 // One line per distinct text, then silence (shipped paths: no diagnostics but one-shot lines).
 void once(NSString *text)
 {
-    static gm20b::Mutex lock;
+    static gm20b::UnfairMutex lock;
     static std::set<std::string> seen;
     {
-        std::lock_guard<gm20b::Mutex> l(lock);
+        std::lock_guard<gm20b::UnfairMutex> l(lock);
         if (seen.size() > 512 || !seen.insert(text.UTF8String).second)
             return;
     }
@@ -69,8 +68,28 @@ uint64_t nowUs()
 }
 
 GM20BState *gRM;
+Class gSwitchMetalBufferClass;
+Class gSwitchMetalTextureClass;
+Class gSwitchMetalNoCopyTextureClass;
+Class gSwitchMetalSamplerClass;
+Class gSwitchMetalPipelineClass;
+Class gSwitchMetalDepthStencilClass;
+Class gSwitchMetalHeapClass;
+Class gSwitchMetalComputeStateClass;
 
 @implementation SwitchMetalObject
+
++ (void)load
+{
+    gSwitchMetalBufferClass = [SwitchMetalBuffer class];
+    gSwitchMetalTextureClass = [SwitchMetalTexture class];
+    gSwitchMetalNoCopyTextureClass = objc_getClass("SwitchMetalNoCopyTexture");
+    gSwitchMetalSamplerClass = [SwitchMetalSampler class];
+    gSwitchMetalPipelineClass = [SwitchMetalPipeline class];
+    gSwitchMetalDepthStencilClass = [SwitchMetalDepthStencil class];
+    gSwitchMetalHeapClass = [SwitchMetalHeap class];
+    gSwitchMetalComputeStateClass = objc_getClass("SwitchMetalComputeState");
+}
 
 - (id<MTLDevice>)device
 {
@@ -148,21 +167,15 @@ static gm20b::Device *openDevice(const char *packPath, uint64_t stack, gm20b::De
 #endif
     gm20b::Device *dev = new gm20b::Device;
     dev->heapHolds(gm20b::heapHolds);
-    if (!dev->open(packPath, stack, err, role)) {
+    if (!dev->open(packPath, stack, err, role, true)) {
         failure = dev->openFailure();
         delete dev;  // its connection closes: the kernel frees what it held
         return nullptr;
     }
-    if (role == gm20b::Device::Role::Client)
-        return dev;
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-    const uint64_t opened = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-#endif
-    dev->warm();
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     if (openNs && warmNs) {
-        *openNs = opened - began;
-        *warmNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - opened;
+        *openNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - began;
+        *warmNs = 0;
     }
 #endif
     return dev;
@@ -217,6 +230,18 @@ void metal_complete_states(const char *cacheDir, const char *nativeSeed)
             std::make_unique<gm20b::Completion>(*gRM->raw, cacheDir, gRM->raw->pack().header()->stack, nativeSeed);
 }
 
+void metal_complete_states_lazy(switch_cache_dir_fn resolveCacheDir, const char *nativeSeed)
+{
+    if (gRM && !gRM->completion)
+        gRM->completion = std::make_unique<gm20b::Completion>(
+            *gRM->raw, nullptr, gRM->raw->pack().header()->stack, nativeSeed,
+            resolveCacheDir ? std::function<std::string()>([resolveCacheDir]() -> std::string {
+                char buf[512];
+                return resolveCacheDir(buf, sizeof buf) ? std::string(buf) : std::string();
+            })
+                            : nullptr);
+}
+
 dispatch_queue_t followingRootQueue()
 {
     return gm20b::followingRoot();
@@ -264,6 +289,29 @@ static Class deviceClass(NSString **error)
 gm20b::OpenFailure metal_open_failure(void)
 {
     return gOpenFailure;
+}
+
+// A client's memory goes back when its app goes to the background, as well as on memory pressure. By name: UIKit's and
+// Foundation's extension notifications post only in the processes that link them, and this driver links neither.
+static void observeBackground()
+{
+    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+    for (NSString *name in
+         @[ @"UIApplicationDidEnterBackgroundNotification", @"NSExtensionHostDidEnterBackgroundNotification" ])
+        [center addObserverForName:name
+                            object:nil
+                             queue:nil
+                        usingBlock:^(NSNotification *) {
+                            gRawRelease.backgrounded();
+                        }];
+    for (NSString *name in
+         @[ @"UIApplicationWillEnterForegroundNotification", @"NSExtensionHostWillEnterForegroundNotification" ])
+        [center addObserverForName:name
+                            object:nil
+                             queue:nil
+                        usingBlock:^(NSNotification *) {
+                            gRawRelease.foregrounded();
+                        }];
 }
 
 id<MTLDevice> metal_device_open(const char *packPath, uint64_t stack, uint64_t registryID, NSString **error)
@@ -347,12 +395,23 @@ id<MTLDevice> metal_device_open(const char *packPath, uint64_t stack, uint64_t r
     fillDeviceLimits(r->device);
     r->handlers = followingSerialQueue("com.brunostjohn.switch.gm20b.handlers");
     r->listener = [[MTLSharedEventListener alloc] initWithDispatchQueue:r->handlers];
-    gRawRelease.startOnPressure(
+    gRawRelease.start(
         [](void *) {
             gm20bReleaseAhead(gRM->raw->hasBoundVolatileArena());
             const SwitchMetalPassTrim passes = gm20bPassTrim();
+            // freed Shared spans zeroed and back in their chunks first, so an idle chunk they were in can park: the
+            // submit worker submits their job, and this thread waits for it, not the worker
+            if (gRM->raw->scrubDue()) {
+                uint32_t seqno = 0;
+                uint64_t generation = 0;
+                if (gm20bExcludingSubmissions([&] {
+                        return gRM->raw->scrubFreed(seqno, generation);
+                    }))
+                    gRM->raw->scrubWait(seqno, generation);
+            }
             const gm20b::Device::Trimmed kept = gRM->raw->trim();
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+            gRM->raw->kernelSparesGiveBack();
+#if SWITCH_METAL_STATS
             gm20b::Device::PurgeStats purge;
             gRM->raw->purgeArenas(gRM->committed, &purge);
 #else
@@ -360,10 +419,13 @@ id<MTLDevice> metal_device_open(const char *packPath, uint64_t stack, uint64_t r
 #endif
             gRM->raw->trimArenas(gRM->committed);
             releaseRecordings();
+            gm20bTrimCompiledLibraries();
+            if (gRM->completion)
+                gRM->completion->trim();
             // A daemon over its inactive jetsam limit is killed when it goes inactive, without a pressure notification that
             // would have made malloc give back the dirty pages its zones keep free (a compile's working memory)
             const size_t relieved = malloc_zone_pressure_relief(nullptr, 0);
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+#if SWITCH_METAL_STATS
             logGivenBack(relieved, passes, kept, purge);
 #else
             (void)relieved;
@@ -373,14 +435,8 @@ id<MTLDevice> metal_device_open(const char *packPath, uint64_t stack, uint64_t r
         },
         nullptr);
     const bool renderServer = dev->role() == gm20b::Device::Role::RenderServer;
-    // A client that opens the device and draws nothing gives back the room its first queue kept.
-    if (renderServer)
-        r->idle.pressureOnly();
-    else
-        r->idle.drained(clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
-    if (renderServer)
-        os_log(gm20bLog(), "SwitchMetal: shader heap %llu KB, each program placed at its state's first use",
-               (unsigned long long)(dev->heapBytes() >> 10));
+    if (!renderServer)
+        observeBackground();
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     {  // the stall line's timer (gm20bStallTick): one a process, on a serial queue of its own, which alone runs the tick
         // and so owns its state. Nothing the render server's other threads hold delays it; another process's rides the
@@ -402,8 +458,7 @@ id<MTLDevice> metal_device_open(const char *packPath, uint64_t stack, uint64_t r
         });
     }
     watchFetchBarrierWay(dev);
-    watchKeylineProbe();
-    watchGlassProbe(dev);
+    watchDebugSwitches(dev);
     watchFrameWeights(dev);
 #endif
     // what both threads hold up is the frame: they follow its committing threads (follow.h)

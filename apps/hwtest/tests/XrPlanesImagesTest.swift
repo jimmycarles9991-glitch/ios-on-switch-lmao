@@ -1,7 +1,9 @@
 import CoreVideo
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// RGB10A8_2P_XR10 (550) colours at the last colour index and beside a device-made 550, each rendered through its own

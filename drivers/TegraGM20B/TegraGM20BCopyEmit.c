@@ -117,6 +117,17 @@ static void tgm_fill_launch(struct nv_push *p, int multi_line)
 	       });
 }
 
+uint32_t tgm_copy_predicate(uint32_t *w, uint64_t va)
+{
+	struct nv_push p = tgm_push(w, TGM_COPY_PREDICATE_DWORDS);
+	P_MTHD(&p, NVB0B5, SET_RENDER_ENABLE_A);
+	P_NVB0B5_SET_RENDER_ENABLE_A(&p, (uint32_t)(va >> 32));
+	P_NVB0B5_SET_RENDER_ENABLE_B(&p, (uint32_t)va);
+	P_NVB0B5_SET_RENDER_ENABLE_C(&p, va ? NVB0B5_SET_RENDER_ENABLE_C_MODE_CONDITIONAL
+					    : NVB0B5_SET_RENDER_ENABLE_C_MODE_TRUE);
+	return (uint32_t)nv_push_dw_count(&p);
+}
+
 uint32_t tgm_fill_setup(uint32_t *w, uint32_t value)
 {
 	struct nv_push p = tgm_push(w, TGM_FILL_SETUP_DWORDS);

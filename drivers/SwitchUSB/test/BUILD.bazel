@@ -18,6 +18,14 @@ host_test(
     ],
 )
 
+host_test(
+    name = "xudc_settle_test",
+    srcs = [
+        "xudc_settle_test.cpp",
+        "//drivers/SwitchUSB:XudcSettle.h",
+    ],
+)
+
 # --- Device mode: the XUDC transfer planner ---
 # XudcTransfer.h's planner over 3000 random scatter-gather layouts and its OUT residue protocol against model
 # controllers of both residue kinds, plus the cost model; only the header, so a SwitchXUDC*.cpp edit does not rerun it.
@@ -89,24 +97,25 @@ host_test(
     name = "switch_xudc_source_test",
     srcs = ["switch_xudc_source_test.cpp"],
     data = [
+        "//drivers/SwitchUSB:SwitchUSB.cpp",
         "//drivers/SwitchUSB:SwitchXUDC.cpp",
         "//drivers/SwitchUSB:SwitchXUDC.h",
         "//drivers/SwitchUSB:SwitchXUDCData.cpp",
         "//drivers/SwitchUSB:SwitchXUDCEndpoints.cpp",
         "//drivers/SwitchUSB:SwitchXUDCEvents.cpp",
         "//drivers/SwitchUSB:SwitchXUDCIsoch.cpp",
+        "//drivers/SwitchUSB:SwitchXUDCSmmu.cpp",
         "//drivers/SwitchUSB:SwitchXUDCStats.cpp",
         "//drivers/SwitchUSB:SwitchXUDCStats.h",
-        "//drivers/SwitchUSB:SwitchXUDCSmmu.cpp",
         "//drivers/SwitchUSB:UsbDmaMapper.cpp",
         "//drivers/SwitchUSB:UsbSmmuMapper.cpp",
         "//drivers/SwitchUSB:UsbSmmuSpace.cpp",
         "//drivers/SwitchUSB:UsbSmmuSpace.h",
-        "//drivers/SwitchUSB:SwitchUSB.cpp",
-        "//drivers/SwitchUSB:XudcIova.h",
-        "//drivers/SwitchUSB:XudcTransfer.h",
         "//drivers/SwitchUSB:XudcHardware.cpp",
+        "//drivers/SwitchUSB:XudcIova.h",
         "//drivers/SwitchUSB:XudcRequestMemory.h",
+        "//drivers/SwitchUSB:XudcSettle.h",
+        "//drivers/SwitchUSB:XudcTransfer.h",
     ],
 )
 
@@ -209,6 +218,7 @@ host_library(
         "//drivers/SwitchUSB:XusbHostPower.cpp",
         "//drivers/SwitchUSB:XusbHostRegisters.h",
         "//drivers/SwitchUSB:XusbLanes.h",
+        "//drivers/SwitchUSB:XusbMailbox.h",
         "//drivers/SwitchUSB:XusbPadctl.h",
         "//drivers/SwitchUSB:XusbPartitions.h",
         "//drivers/SwitchUSB:XusbPorts.h",
@@ -233,6 +243,7 @@ host_test(
     srcs = [
         "xusb_host_power_test.cpp",
         "//drivers/SwitchUSB:XusbHost.h",
+        "//drivers/SwitchUSB:XusbMailbox.h",
         "//kits/SwitchCAR:SwitchPMC.h",
         "//kits/SwitchMMIO:SwitchMMIO.h",
         "//kits/SwitchMMIO:SwitchMMIOKernel.h",
@@ -242,6 +253,114 @@ host_test(
         ":xusb_host_power",
         ":xusb_kernel",
         ":xusb_register_model",
+    ],
+)
+
+host_shims(
+    name = "xusb_host_mailbox_kernel",
+    headers = [
+        "IOKit/IOBufferMemoryDescriptor.h",
+        "IOKit/IOLib.h",
+        "IOKit/IOMemoryDescriptor.h",
+        "kern/clock.h",
+        "libkern/c++/OSObject.h",
+        "os/log.h",
+    ],
+    stubs = "xusb_host_mailbox_stubs.h",
+)
+
+host_test(
+    name = "xusb_host_mailbox_test",
+    srcs = [
+        "xusb_host_mailbox_test.cpp",
+        "//drivers/SwitchUSB:UsbSmmuMapper.h",
+        "//drivers/SwitchUSB:XudcHardware.h",
+        "//drivers/SwitchUSB:XudcIsoch.h",
+        "//drivers/SwitchUSB:XudcLink.h",
+        "//drivers/SwitchUSB:XudcRequestMemory.h",
+        "//drivers/SwitchUSB:XudcTransfer.h",
+        "//drivers/SwitchUSB:XusbHost.cpp",
+        "//drivers/SwitchUSB:XusbHost.h",
+        "//drivers/SwitchUSB:XusbHostRegisters.h",
+        "//drivers/SwitchUSB:XusbLanes.h",
+        "//drivers/SwitchUSB:XusbMailbox.h",
+        "//drivers/SwitchUSB:XusbPorts.h",
+        "//drivers/SwitchUSB:XusbSettle.h",
+        "//drivers/SwitchUSB:XusbSuperSpeed.h",
+        "//kits/SwitchCAR:SwitchPMC.h",
+        "//kits/SwitchDMA:SwitchDMABuffer.h",
+        "//kits/SwitchDMA:SwitchDMADirect.h",
+        "//kits/SwitchDMA:SwitchDMADirectMemory.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+        "//kits/SwitchDMA:SwitchHwPage.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+    ],
+    copts = ["-Wno-unused-parameter"],
+    defines = [
+        "SWITCH_DCACHE_PHYS_MODEL=1",
+        "SWITCH_MMIO_HOST_MODEL=1",
+    ],
+    deps = [
+        ":xusb_host_mailbox_kernel",
+        ":xusb_host_power",
+        ":xusb_register_model",
+    ],
+)
+
+host_shims(
+    name = "switch_pd_nonblocking_kernel",
+    headers = [
+        "IOKit/IOInterruptEventSource.h",
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "IOKit/IOMessage.h",
+        "IOKit/IOService.h",
+        "IOKit/IOTimerEventSource.h",
+        "IOKit/IOWorkLoop.h",
+        "IOKit/pwr_mgt/RootDomain.h",
+        "kern/clock.h",
+        "os/log.h",
+    ],
+    stubs = "switch_pd_nonblocking_stubs.h",
+)
+
+host_library(
+    name = "switch_pd_nonblocking_lib",
+    srcs = [
+        "//drivers/SwitchBattery:SwitchBattery.h",
+        "//drivers/SwitchBattery:SwitchChargePolicy.h",
+        "//drivers/SwitchDisplayPort:SwitchPDAltModeHook.h",
+        "//drivers/SwitchUSB:SwitchPD.cpp",
+        "//drivers/SwitchUSB:SwitchPD.h",
+        "//drivers/SwitchUSB:SwitchPDPolicy.h",
+        "//drivers/SwitchUSB:SwitchPDRequest.cpp",
+        "//drivers/SwitchUSB:SwitchPDService.h",
+        "//drivers/SwitchUSB:SwitchPDSettings.cpp",
+        "//drivers/TegraGPIO:TegraGPIO.h",
+        "//drivers/TegraI2C:TegraI2C.h",
+    ],
+    copts = ["-Wno-unused-parameter"],
+    deps = [":switch_pd_nonblocking_kernel"],
+)
+
+host_test(
+    name = "switch_pd_nonblocking_test",
+    srcs = [
+        "switch_pd_nonblocking_test.cpp",
+        "//drivers/SwitchBattery:SwitchBattery.h",
+        "//drivers/SwitchBattery:SwitchChargePolicy.h",
+        "//drivers/SwitchDisplayPort:SwitchPDAltModeHook.h",
+        "//drivers/SwitchUSB:SwitchPD.h",
+        "//drivers/SwitchUSB:SwitchPDPolicy.h",
+        "//drivers/SwitchUSB:SwitchPDService.h",
+        "//drivers/TegraGPIO:TegraGPIO.h",
+        "//drivers/TegraI2C:TegraI2C.h",
+    ],
+    copts = ["-Wno-unused-parameter"],
+    deps = [
+        ":switch_pd_nonblocking_kernel",
+        ":switch_pd_nonblocking_lib",
     ],
 )
 

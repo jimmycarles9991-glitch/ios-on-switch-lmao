@@ -14,6 +14,31 @@ TEST(Spares, EachMissHasItsReason)
 	EXPECT_EQ(switch_gpu_spare_miss_of(2, 1, true), SWITCH_GPU_SPARE_PRESSURE);
 }
 
+// The refill with the copy engine too busy to zero anything (every scrub job taken): each spare it makes stays on the
+// dirty list, and the refill still stops at the class's depth. Counting only ready and zeroing spares, it made one
+// wired spare after another until memory pressure or the VM stopped it.
+TEST(Spares, ARefillWhileTheCopyEngineIsBusyStopsAtTheDepth)
+{
+	const uint16_t target = 2, ready = 0, zeroing = 0;
+	uint16_t dirty = 0;
+	unsigned made = 0;
+	while (made < 100 && switch_gpu_spare_short(ready, zeroing, dirty, target)) {
+		++made;
+		++dirty;
+	}
+	EXPECT_EQ(made, 2u);
+}
+
+TEST(Spares, ReadyZeroingAndDirtySparesAllCountTowardTheDepth)
+{
+	EXPECT_TRUE(switch_gpu_spare_short(0, 0, 0, 1));
+	EXPECT_FALSE(switch_gpu_spare_short(1, 0, 0, 1));
+	EXPECT_FALSE(switch_gpu_spare_short(0, 1, 0, 1));
+	EXPECT_FALSE(switch_gpu_spare_short(0, 0, 1, 1));
+	EXPECT_TRUE(switch_gpu_spare_short(1, 1, 1, 4));
+	EXPECT_FALSE(switch_gpu_spare_short(0, 0, 0, 0));
+}
+
 TEST(Spares, AWarmClassDoublesItsDepthAtEachMissUpToTheMaximum)
 {
 	uint16_t depth = 0;

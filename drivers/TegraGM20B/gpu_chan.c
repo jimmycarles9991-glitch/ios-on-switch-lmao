@@ -3,8 +3,12 @@
 #include "gpu_internal.h"
 #include "SwitchGpuChannelEpoch.h"
 
+#if TGM_STATS && TGM_PROF
 #define CHAN_SEMA_BYTES \
 	0x2000 /* nvif's GET semaphore at +0; stats stamps at CHAN_STAMPS, push profile at CHAN_PROF */
+#else
+#define CHAN_SEMA_BYTES 0x1000
+#endif
 #define CHAN_BYTES (CHAN_PUSH_BYTES + CHAN_GPFIFO_BYTES + CHAN_SEMA_BYTES)
 
 /* A channel's fence and room waiters (WaitFence, sync_for_cpu, its teardown, a submission waiting for room) sleep on its
@@ -38,6 +42,7 @@ int tgm_chan_announced(struct tgm_chan *chan, uint32_t seqno)
 }
 
 struct switch_gpu_chan_table tgm_chan_table;
+struct switch_gpu_live_dir tgm_live_dir;
 
 #include "SwitchGpuChannelCompletion.h"
 
@@ -56,17 +61,18 @@ static void chan_free(struct tgm_chan *chan)
 {
 	int i = 0;
 	tgm_fault_unpublish(chan);
-	if (stats_on())
-		tgm_stats_gr_unbind(chan);
 	if (chan->high || chan->tracked)
 		tgm_sched_forget(tgm_gpu.device, chan->chid);
 	nvif_event_dtor(&chan->kill);
-	switch_gpu_timeline_close(chan->timeline);
-	chan->timeline = NULL;
 	for (i = chan->nobj - 1; i >= 0; i--)
 		nvif_object_dtor(&chan->obj[i]);
 	nvif_object_unmap(&chan->user);
 	nvif_object_dtor(&chan->user);
+	/* After the channel: until the teardown above took it off the runlist, the channel could still execute a job's
+	 * increments (one whose fence never landed). Only now can the timeline's close hand its syncpoint on
+	 * (SwitchGpuTimelineInternal.h syncpt_return_locked), so none of them lands on the next owner's. */
+	switch_gpu_timeline_close(chan->timeline);
+	chan->timeline = NULL;
 	/* the channel is gone: unmap its ring (TLB invalidated) before the ring's pages go back to the pool */
 	nvif_vmm_put(&chan->vm->vmm, &chan->ring_vma);
 	if (chan->ring_mem) {
@@ -126,7 +132,7 @@ static int chan_new(struct tgm_vm *vm, const void *vm_owner, volatile uint32_t *
 	/* a fence word only moves forward: a channel made in a slot continues its predecessor's sequence, so a semaphore
 	 * acquire on the old seqno (the GPU present) is never left waiting for a word that went back to 0 */
 	chan->submitted = READ_ONCE(*fence_cpu);
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 	chan->timeslice = RAMFC_TIMESLICE_DEFAULT;
 	chan->timeslice_at = chan->submitted;
 	chan->timeslice_created = 1;
@@ -134,7 +140,9 @@ static int chan_new(struct tgm_vm *vm, const void *vm_owner, volatile uint32_t *
 	chan->event_through = chan->submitted;
 	switch_gpu_jobs_init(&chan->jobs, chan->submitted);
 	switch_gpu_quiet_init(&chan->quiet, chan->submitted);
+#if TGM_STATS
 	chan->stat_done = chan->submitted;
+#endif
 	chan->woken_done = chan->submitted;
 	chan->progress_done = chan->submitted;
 	chan->seen_done = chan->submitted;
@@ -195,8 +203,6 @@ static int chan_new(struct tgm_vm *vm, const void *vm_owner, volatile uint32_t *
 	chan->chid = args.chan.chid;
 	if (!ret)
 		ret = tgm_chan_ramfc_open(chan, critical);
-	if (!ret && stats_on())
-		tgm_stats_gr_bind(chan);
 	if (!ret && critical && vm_owner)
 		chan_prioritize(chan);
 	if (!ret)
@@ -267,8 +273,18 @@ static int chan_new(struct tgm_vm *vm, const void *vm_owner, volatile uint32_t *
 		goto fail;
 	}
 	list_add_tail(&chan->live, &tgm_live_chans);
+	{
+		const uintptr_t base = (uintptr_t)tgm_fence_pages.va;
+		const uintptr_t ptr = (uintptr_t)chan->fence_cpu;
+		const u32 fence_offset = base && ptr >= base && ptr - base < TGM_FENCE_BYTES
+						 ? (u32)(ptr - base)
+						 : SWITCH_GPU_LIVE_NO_FENCE;
+
+		switch_gpu_live_dir_set(&tgm_live_dir, chan->chid, chan->id, fence_offset,
+					chan->vm);
+	}
 	switch_gpu_busy_open(&tgm_busy, chan->chid, chan->submitted);
-	switch_gpu_busy_level(&tgm_busy, chan->chid, 1);
+	switch_gpu_busy_level(&tgm_busy, chan->chid, !chan->high);
 	switch_gpu_chan_table_set(&tgm_chan_table, chan->chid, chan);
 	tgm_fault_publish(chan);
 	mutex_unlock(&tgm_live_lock);
@@ -321,9 +337,9 @@ static void chan_abandon(struct tgm_chan *chan)
 	mutex_unlock(&tgm_live_lock);
 	for (;;) {
 		u32 seq = nvxnu_wake_seq();
-		if (READ_ONCE(chan->error))
+		if (__atomic_load_n(&chan->error, __ATOMIC_ACQUIRE))
 			return;
-		if (!nvxnu_idle(seq, end) && !READ_ONCE(chan->error)) {
+		if (!nvxnu_idle(seq, end) && !__atomic_load_n(&chan->error, __ATOMIC_ACQUIRE)) {
 			tgm_chan_hung(chan, "channel destroy: kill", chan->submitted,
 				      nvxnu_nanotime() - now);
 		}
@@ -338,6 +354,49 @@ int tgm_chan_visible_at(struct tgm_chan *chan, uint32_t seqno)
 		return (s32)(tgm_chan_completed(chan) - seqno) >= 0;
 	return (s32)(__atomic_load_n(chan->visible_cpu, __ATOMIC_ACQUIRE) - seqno) >= 0;
 }
+
+#if TGM_DEBUG_PROBES
+/* What closed channels counted, by process name (the last kept goes when a new name needs its place),
+ * tgm_live_lock's */
+#define TGM_JOBLESS_GONE 16
+
+static struct {
+	char owner[17];
+	u64 jobless;
+} jobless_gone[TGM_JOBLESS_GONE];
+
+static unsigned int jobless_gone_next;
+
+static void jobless_keep_locked(const struct tgm_chan *chan)
+{
+	unsigned int i = 0;
+
+	if (!chan->stat_jobless)
+		return;
+	for (i = 0; i < TGM_JOBLESS_GONE; i++) {
+		if (!strncmp(jobless_gone[i].owner, chan->owner, sizeof(chan->owner) - 1)) {
+			jobless_gone[i].jobless += chan->stat_jobless;
+			return;
+		}
+	}
+	i = jobless_gone_next++ % TGM_JOBLESS_GONE;
+	strscpy(jobless_gone[i].owner, chan->owner, sizeof(jobless_gone[i].owner));
+	jobless_gone[i].jobless = chan->stat_jobless;
+}
+
+u64 tgm_chan_jobless_gone_locked(const char *owner)
+{
+	unsigned int i = 0;
+	u64 jobless = 0;
+
+	for (i = 0; i < TGM_JOBLESS_GONE; i++) {
+		if (!strncmp(jobless_gone[i].owner, owner, sizeof(jobless_gone[i].owner) - 1))
+			jobless += jobless_gone[i].jobless;
+	}
+	return jobless;
+}
+
+#endif
 
 void tgm_chan_del(struct tgm_chan **pchan)
 {
@@ -359,7 +418,8 @@ void tgm_chan_del(struct tgm_chan **pchan)
 	for (;;) {
 		u32 seq = tgm_waiter_seq(waiter);
 		switch_gpu_waiter_want(&chan->wanted, chan->submitted);
-		if (chan->error || (s32)(tgm_chan_completed(chan) - chan->submitted) >= 0 ||
+		if (__atomic_load_n(&chan->error, __ATOMIC_ACQUIRE) ||
+		    (s32)(tgm_chan_completed(chan) - chan->submitted) >= 0 ||
 		    nvxnu_nanotime() >= end)
 			break;
 		if (!tgm_waiter_idle(waiter, seq, end) && tgm_chan_announced(chan, chan->submitted))
@@ -367,7 +427,7 @@ void tgm_chan_del(struct tgm_chan **pchan)
 	}
 	/* tearing down a channel that still runs would free pages the GPU is using: its owner is gone, so it is killed
 	 * as a hung client's is, and the teardown waits for that */
-	if (tgm_gpu.stage >= 3 && !chan->error &&
+	if (tgm_gpu.stage >= 3 && !__atomic_load_n(&chan->error, __ATOMIC_ACQUIRE) &&
 	    (s32)(tgm_chan_completed(chan) - chan->submitted) < 0)
 		chan_abandon(chan);
 	/* A watched producer whose fence passed with its pass still to come (an asked wake entry not taken yet) gets no
@@ -377,6 +437,10 @@ void tgm_chan_del(struct tgm_chan **pchan)
 	switch_gpu_busy_close(&tgm_busy, chan->chid);
 	mutex_lock(&tgm_live_lock);
 	list_del(&chan->live);
+#if TGM_DEBUG_PROBES
+	jobless_keep_locked(chan);
+#endif
+	switch_gpu_live_dir_clear(&tgm_live_dir, chan->chid);
 	mutex_unlock(&tgm_live_lock);
 	switch_gpu_chan_table_set(&tgm_chan_table, chan->chid, NULL);
 	nvxnu_pass_barrier();
@@ -528,6 +592,14 @@ int tgm_fence_kernel(unsigned int which, volatile uint32_t **va, uint64_t *page_
 	*page_pa = tgm_fence_pages.pa + (off & ~(PAGE_SIZE - 1));
 	*offset = (u32)(off & (PAGE_SIZE - 1));
 	return 0;
+}
+
+uint64_t tgm_fence_kernel_va(const struct tgm_vm *vm, unsigned int which)
+{
+	if (!vm || !vm->fences_va || which >= TGM_FENCE_KERNEL_CHANNELS)
+		return 0;
+	return vm->fences_va + TGM_FENCE_USER_PAGES * TGM_FENCE_SLOT +
+	       which * sizeof(struct TegraGM20BAbiFence);
 }
 
 /* Every address space maps the whole fence pool read-only (tgm_fences_map, from tgm_vm_new), as the present's does, so a

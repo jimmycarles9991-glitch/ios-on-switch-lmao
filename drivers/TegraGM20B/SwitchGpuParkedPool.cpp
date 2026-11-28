@@ -198,9 +198,17 @@ void AGXDeviceUserClient::parkUnlinkLocked(Bo *bo, bool consumeDemand)
 
 void AGXDeviceUserClient::parkUnlinkAllLocked()
 {
-	for (Bo *bo = bos_; bo; bo = bo->next)
+	for (Bo *bo = bos_; bo; bo = bo->next) {
 		parkUnlinkLocked(bo, false);
-	IOLockWakeup(lock_, &parkWait_, false);
+		parkSettledLocked(bo);
+	}
+}
+
+// lock_ held: `bo` has left Parking, Unparking or Reclaiming (or its owner handed it on): its waiters look again.
+void AGXDeviceUserClient::parkSettledLocked(Bo *bo)
+{
+	bo->parkOwner = nullptr;
+	switch_gpu_wakeup_inheritor(lock_, &bo->parkOwner);
 }
 
 void AGXDeviceUserClient::drainParkedRanges()
@@ -244,12 +252,14 @@ ReclaimedBacking *AGXDeviceUserClient::detachReclaimedLocked(Bo *bo)
 		bo->parkReclaimed = true;
 		if (SWITCH_GPU_OWNER_COUNTS && bo->handle)
 			ownerMemory_.change(bo->ownerKind, bo->bytes, false);
+#if TGM_STATS
 		if (bo->system && bo->handle) {
 			__atomic_sub_fetch(&gSystemCoherent, 1, __ATOMIC_RELAXED);
 			__atomic_sub_fetch(&gSystemCoherentBytes, bo->bytes, __ATOMIC_RELAXED);
 		}
+#endif
 	}
-	IOLockWakeup(lock_, &parkWait_, false);
+	parkSettledLocked(bo);
 	return rb;
 }
 
@@ -261,6 +271,7 @@ void AGXDeviceUserClient::parkFinishReclaimLocked(Bo *bo)
 	bo->reclaimDeferred = true;
 	bo->reclaimSeq = ++reclaimSeq_;
 	++reclaimDeferredCount_;
+	parkSettledLocked(bo);
 	if (!__atomic_load_n(&retirementStopped_, __ATOMIC_ACQUIRE) && releaseCall_)
 		thread_call_enter(releaseCall_);
 }
@@ -360,6 +371,7 @@ bool AGXDeviceUserClient::reclaimParkedBo(uint64_t handle)
 		return false;
 	}
 	bo->parkState = SwitchGpuParkState::Reclaiming;
+	bo->parkOwner = switch_gpu_current_thread();
 	parkUnlinkLocked(bo, true);
 	bo->reclaimPayload = rb;
 	rb = nullptr;
@@ -457,6 +469,7 @@ bool AGXDeviceUserClient::reclaimParkedBo(uint64_t handle)
 			releaseReclaimedOne(done);
 		return true;
 	}
+	parkSettledLocked(bo);
 	scheduleRetirement();
 	IOLockUnlock(lock_);
 	return true;

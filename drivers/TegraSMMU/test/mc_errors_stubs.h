@@ -39,6 +39,23 @@ inline void IOLog(const char *format, ...)
     switch_test_lines.emplace_back(line);
 }
 
+// A panic is what a filter may do: it neither blocks nor allocates. The test catches it with the panic's text.
+struct switch_test_panic : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+[[noreturn]] inline void panic(const char *format, ...) __attribute__((format(printf, 1, 2)));
+
+inline void panic(const char *format, ...)
+{
+    char line[512];
+    va_list arguments;  // NOLINT(cppcoreguidelines-init-variables): va_start initialises it
+    va_start(arguments, format);
+    vsnprintf(line, sizeof(line), format, arguments);
+    va_end(arguments);
+    throw switch_test_panic(line);
+}
+
 struct IOSimpleLock {
     bool held;
 };
@@ -170,6 +187,54 @@ inline void thread_deallocate(thread_t)
 extern "C" uintptr_t ml_io_map(uintptr_t phys_addr, uintptr_t size);
 
 #define NSEC_PER_USEC 1000u
+constexpr uint32_t kMillisecondScale = 1000000;
+
+// A wait: thread_block runs switch_test_while_blocked (what happens meanwhile: an interrupt, or nothing), then says
+// whether a thread_wakeup on the event came.
+using wait_interrupt_t = int;
+using event_t = void *;
+using thread_continue_t = void *;
+constexpr wait_interrupt_t THREAD_UNINT = 0;
+constexpr wait_result_t THREAD_WAITING = -1, THREAD_AWAKENED = 0, THREAD_TIMED_OUT = 1;
+#define THREAD_CONTINUE_NULL nullptr
+
+inline const void *switch_test_waiting_on;
+inline bool switch_test_woken;
+inline unsigned switch_test_blocks;
+inline void (*switch_test_while_blocked)();
+
+inline wait_result_t assert_wait_deadline(const void *event, wait_interrupt_t, uint64_t)
+{
+    switch_test_may_block("assert_wait_deadline");
+    switch_test_waiting_on = event;
+    switch_test_woken = false;
+    return THREAD_WAITING;
+}
+
+inline void thread_wakeup(const void *event)
+{
+    switch_test_woken = switch_test_woken || event == switch_test_waiting_on;
+}
+
+inline thread_t current_thread()
+{
+    return nullptr;
+}
+
+inline void clear_wait(thread_t, wait_result_t)
+{
+    switch_test_waiting_on = nullptr;
+}
+
+inline wait_result_t thread_block(thread_continue_t)
+{
+    switch_test_may_block("thread_block");
+    ++switch_test_blocks;
+    if (switch_test_while_blocked)
+        switch_test_while_blocked();
+    switch_test_waiting_on = nullptr;
+    return switch_test_woken ? THREAD_AWAKENED : THREAD_TIMED_OUT;
+}
 
 inline uint64_t mach_absolute_time()
 {

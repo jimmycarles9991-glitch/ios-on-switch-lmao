@@ -128,7 +128,7 @@ static void window_open(u64 target, u64 since, u64 now)
 	dl.expire_at = target;
 	dl.hold_at = now ? now : 1;
 	switch_gpu_kept_done(&dl.kept, target);
-	if (TGM_STATS)
+	if (TGM_DEBUG_PROBES)
 		WRITE_ONCE(dl.windows, dl.windows + 1);
 }
 
@@ -350,7 +350,12 @@ int tgm_deadline_kicked(int compositor, int app)
 	if (compositor) {
 		later = READ_ONCE(dl.kick_last) > READ_ONCE(dl.presented_at);
 		if (!later) {
-			WRITE_ONCE(dl.frame_target, READ_ONCE(dl.next_target));
+			const u64 target = READ_ONCE(dl.next_target);
+
+			/* No vsync comes while nothing draws (the frame end is masked): a target over an interval old is
+			 * the last frame's before that, and this frame has none to miss */
+			WRITE_ONCE(dl.frame_target,
+				   now > target + READ_ONCE(dl.interval) ? 0 : target);
 			WRITE_ONCE(dl.kick_first, now);
 		}
 		WRITE_ONCE(dl.kick_last, now);
@@ -510,7 +515,9 @@ static void presented_run(void *arg)
 			}
 		}
 		if (p->pass && !tail && ours && !READ_ONCE(dl.pass_biased) && frame_ns) {
-			WRITE_ONCE(dl.expected, tgm_expect(dl.expected, frame_ns));
+			const u64 cap = READ_ONCE(dl.interval) ?: 16666667ull;
+			const u64 sample = frame_ns > cap ? cap : frame_ns;
+			WRITE_ONCE(dl.expected, tgm_expect(dl.expected, sample));
 			if (TGM_STATS)
 				tgm_deadline_learned(frame_ns);
 		}

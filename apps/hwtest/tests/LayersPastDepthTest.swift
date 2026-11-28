@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// What a layered pass of 4 tests against past a loaded depth/stencil attachment of 2 layers (LayersPastDepthCases),

@@ -9,13 +9,15 @@
 // pass, the copy engine, the display's copy or the CPU reads what the draws wrote: whether a WAIT_FOR_IDLE alone drains the
 // tile coalescer is not documented. The flush that ends each command buffer leaves nothing binned for the kernel's fence.
 #pragma once
-#include <os/log.h>
 #include <atomic>
 #include <cstdint>
 #include "../../kits/SwitchGM20B/SwitchGM20B3D.h"
 #include "TegraGM20BABI.h"
 #include "push.h"
 #include "stats.h"
+#if SWITCH_METAL_DIAGNOSTICS
+#include <os/log.h>
+#endif
 
 namespace gm20b {
 
@@ -74,9 +76,9 @@ inline void tiledCacheInit(Push &p, const TegraGM20BAbiInfo &info)
     p.m(SET_TILED_CACHE_ENABLE, 1);
 #if SWITCH_METAL_DIAGNOSTICS
     static std::atomic<bool> logged{false};
-    if (!logged.exchange(true)) {
-        os_log(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "gm20b"),
-               "SwitchMetal: tiled cache on, enabled at context init");
+    if (!logged.exchange(true, std::memory_order_relaxed)) {
+        static os_log_t log = os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "gm20b");
+        os_log(log, "SwitchMetal: tiled cache on, enabled at context init");
     }
 #endif
 }

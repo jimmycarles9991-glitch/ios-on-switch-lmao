@@ -15,9 +15,13 @@ final class RowState: ObservableObject, Identifiable {
     }
 }
 
-/// Changed once a test, by `advance`.
+/// Changed once a test, by `advance`. While a run goes the list shows a fixed number of rows (the running one, the
+/// last `shown` finished, the next `shown` to come): a test's boundary redraws those, never the run's hundreds of rows,
+/// on the main thread the next test's start waits for (suite.harness).
 @MainActor
 final class RunList: ObservableObject {
+    static let shown = 6
+
     struct Progress: Equatable {
         var finished = 0
         var planned = 0
@@ -38,10 +42,16 @@ final class RunList: ObservableObject {
     let bySubsystem: [SubsystemRows]
     private let byID: [String: RowState]
     @Published private(set) var current: RowState?
+    /// The last `shown` finished, newest first.
     @Published private(set) var done: [RowState] = []
+    /// The next `shown` to run.
     @Published private(set) var upNext: [RowState] = []
     @Published private(set) var progress = Progress()
     private var verdicts: [String: Verdict] = [:]
+    /// Every test still to run, in order; `upNext` is its head.
+    private var remaining: [RowState] = []
+
+    var remainingCount: Int { remaining.count }
 
     init(tests: [any HWTest]) {
         let rows = tests.map(RowState.init)
@@ -61,9 +71,13 @@ final class RunList: ObservableObject {
             skip: summary.skip, failed: report.results.filter { $0.verdict == .fail }.map(\.id)
         )
         let planned = Set(report.run.order)
-        done = rows.filter { $0.record != nil && planned.contains($0.id) }
-            .sorted { ($0.record?.finished ?? .distantPast) > ($1.record?.finished ?? .distantPast) }
-        upNext = report.remaining.compactMap { byID[$0] }
+        done = Array(
+            rows.filter { $0.record != nil && planned.contains($0.id) }
+                .sorted { ($0.record?.finished ?? .distantPast) > ($1.record?.finished ?? .distantPast) }
+                .prefix(Self.shown)
+        )
+        remaining = report.remaining.compactMap { byID[$0] }
+        upNext = Array(remaining.prefix(Self.shown))
         current = nil
     }
 
@@ -72,14 +86,14 @@ final class RunList: ObservableObject {
             row.record = finished
             row.running = false
             count(finished.id, finished.outcome.verdict)
-            done.removeAll { $0 === row }
-            done.insert(row, at: 0)
+            done = [row] + done.filter { $0 !== row }.prefix(Self.shown - 1)
         }
         let nextRow = next.flatMap { byID[$0] }
         if let nextRow {
             nextRow.running = true
             nextRow.started = Date()
-            upNext.removeAll { $0 === nextRow }
+            if let at = remaining.firstIndex(where: { $0 === nextRow }) { remaining.remove(at: at) }
+            upNext = Array(remaining.prefix(Self.shown))
         }
         current = nextRow
     }

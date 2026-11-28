@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestKit
 import SwitchBench
 
 /// The GPU's channel epoch (TegraGM20BABI.h TegraGM20BChannelEpochWord, drivers/TegraGM20B/gpu_chan_epoch.c) on two

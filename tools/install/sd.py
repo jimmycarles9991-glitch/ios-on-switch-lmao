@@ -44,15 +44,28 @@ from tools.install import (
     populate,
     staged_apps,
     target as targets,
+    translated_tree,
 )
 
 COPY_CHUNK = composer.COPY_CHUNK
 SEEK_HOLE, SEEK_DATA = getattr(os, 'SEEK_HOLE', 3), getattr(os, 'SEEK_DATA', 4)
 
 
+INPUTS = (
+    'spec',
+    'ipsw',
+    'os_dmg',
+    'system_cryptex',
+    'app_cryptex',
+    'boot_package',
+    'pretranslated_trust',
+    'pretranslated_updates',
+)
+
+
 def resolve_inputs(args: argparse.Namespace) -> None:
     """Runfiles paths (from `bazel run`) to absolute paths, so a sudo re-exec needs no Bazel environment."""
-    for name in ('spec', 'ipsw', 'os_dmg', 'system_cryptex', 'app_cryptex', 'boot_package'):
+    for name in INPUTS:
         setattr(args, name, paths.located(getattr(args, name)))
 
 
@@ -256,6 +269,10 @@ class Installer:
             )
             if self.args.boot_package:
                 cards.sync_overlay(data, self.args.boot_package, self.log)
+                if self.args.pretranslated_trust:
+                    carried = Path(self.args.pretranslated_updates)
+                    wanted = translated_tree.plan(data, Path(self.args.pretranslated_trust), carried)
+                    translated_tree.stage(data, carried, wanted, self.log)
                 staged_apps.stage(data, owners, self.log, package=Path(self.args.boot_package))
                 bootstrap.stage(data, self.args.boot_package, self.pins, self.log, owners)
 
@@ -383,7 +400,7 @@ class Installer:
 def reexec_as_root(args: argparse.Namespace, argv: list[str]) -> NoReturn:
     """After confirmation: the same command under sudo, with absolute input paths and the confirmation."""
     passthrough = [a for a in argv if not a.startswith('--confirm')]
-    for name in ('spec', 'ipsw', 'os_dmg', 'system_cryptex', 'app_cryptex', 'boot_package', 'scratch', 'log'):
+    for name in (*INPUTS, 'scratch', 'log'):
         value = getattr(args, name)
         flag = '--' + name.replace('_', '-')
         passthrough = [a for a in passthrough if not a.startswith(flag + '=')]
@@ -420,6 +437,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--system-cryptex', required=True)
     parser.add_argument('--app-cryptex', required=True)
     parser.add_argument('--boot-package')
+    parser.add_argument(
+        '--pretranslated-trust', help="iOS 27: this build's os.trustcache (//ipsw:pretranslated_os_trust)"
+    )
+    parser.add_argument('--pretranslated-updates', help='iOS 27: //install:pretranslated_updates')
     args = parser.parse_args(argv)
     resolve_inputs(args)
     args.log = args.log or str(paths.run_log('install', 'switch-ios-install'))

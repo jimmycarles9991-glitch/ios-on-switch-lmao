@@ -360,12 +360,20 @@ def targets(key: str) -> int:
     return sum(1 << int(t[1]) for t in key.split() if t[:1] == 'c' and t[1:2].isdigit() and '=' in t)
 
 
+def _target_of(m: int) -> int:
+    if 0x1E00 <= m < 0x1F00:
+        return (m - 0x1E00) >> 5
+    if 0x1A00 <= m < 0x1A20:
+        return (m - 0x1A00) >> 2
+    if 0x1360 <= m < 0x1380:
+        return (m - 0x1360) >> 2
+    return -1
+
+
 def foreign(m: int, mask: int) -> bool:
     """Whether `m` is a color target's own register for a target `mask` lacks, past its last or between two."""
-    for base, stride in ((0x1E00, 0x20), (0x1A00, 4), (0x1360, 4)):
-        if base <= m < base + 8 * stride and not mask >> ((m - base) // stride) & 1:
-            return True
-    return False
+    target = _target_of(m)
+    return target >= 0 and not (mask >> target & 1)
 
 
 # SET_VERTEX_STREAM_A_FORMAT(j) with ENABLE (bit 12) clear: a stream the hardware does not fetch, whose stride the probe
@@ -381,15 +389,41 @@ def split_registers(simple: list[dict], post: dict[int, dict[int, int]]) -> tupl
     # every record would take it from the warm-up draw where the runtime's direct compile takes the init template's.
     # A state's targets are its maker's mask (p['targets'])
     allregs = set(post[0])
-    for p in simple:
-        allregs |= set(p['records'][0]['regs'])
-    vals = {
-        m: {p['records'][0]['regs'].get(m, 0) for p in simple if not foreign(m, p['targets'])}
-        for m in allregs
-        if not owned(m)
-    }
-    varying = sorted(m for m, v in vals.items() if len(v) > 1)
-    baseline = {m: next(iter(v)) for m, v in vals.items() if len(v) == 1 and next(iter(v)) != post[0].get(m, 0)}
+    records = [(p['records'][0]['regs'], p['targets']) for p in simple]
+    for regs, _ in records:
+        allregs.update(regs)
+    post0 = post[0]
+    varying: list[int] = []
+    baseline: dict[int, int] = {}
+    for m in sorted(allregs):
+        if owned(m):
+            continue
+        target = _target_of(m)
+        first = None
+        varies = False
+        if target < 0:
+            for regs, _ in records:
+                val = regs.get(m, 0)
+                if first is None:
+                    first = val
+                elif val != first:
+                    varies = True
+                    break
+        else:
+            bit = 1 << target
+            for regs, mask in records:
+                if not (mask & bit):
+                    continue
+                val = regs.get(m, 0)
+                if first is None:
+                    first = val
+                elif val != first:
+                    varies = True
+                    break
+        if varies:
+            varying.append(m)
+        elif first is not None and first != post0.get(m, 0):
+            baseline[m] = first
     return varying, baseline
 
 

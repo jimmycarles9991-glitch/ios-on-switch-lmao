@@ -169,6 +169,10 @@ def _boot_package_impl(ctx):
     smp = ctx.attr.smp[BuildSettingInfo].value
     profile = "release" if prebuilt else ctx.attr._profile[BuildSettingInfo].value
     release = profile == "release"
+    hwtest_flag = ctx.attr._hwtest[BuildSettingInfo].value
+    if prebuilt and hwtest_flag == "true":
+        fail("--//bazel:hwtest=true requires --//install:prebuilt=local (release assets do not ship HW Test)")
+    hwtest = (not release) if hwtest_flag == "auto" else (hwtest_flag == "true")
 
     # --- boot-args, overlay plan, ADT ------------------------------------------------------------------------------
     boot_args = out("boot-args.txt")
@@ -250,6 +254,7 @@ def _boot_package_impl(ctx):
     args.add_all(sorted(files.keys()), before_each = "--given")
     if release:
         args.add("--release")
+    args.add("--hwtest" if hwtest else "--no-hwtest")
     args.add("--out", plan)
     _run(ctx, ctx.executable._overlay, [args], [ctx.file.overlay_manifest, ctx.file.portrait_header], [plan], "OverlayPlan", "Planning the userland overlay")
 
@@ -276,6 +281,9 @@ def _boot_package_impl(ctx):
     if pretranslated.cache_list:
         args.add("--a64x-cache-pretranslated", pretranslated.cache_list)
         adt_inputs.append(pretranslated.cache_list)
+    if pretranslated.updates:
+        args.add("--pretranslated-updates", pretranslated.updates)
+        adt_inputs.append(pretranslated.updates)
 
     # Each role's CDHashes, which the kernel authenticates the role's files by: the cryptexes' (Apple's trust cache and,
     # on iOS 27, its pretranslated module) and the pretranslated tree's.
@@ -517,6 +525,7 @@ boot_package = rule(
             doc = "iOS 27's pinned pretranslate run: its trust modules join the bundle, its cache list the ADT",
         ),
         "_gpu_trustcache": attr.label(default = "//boot:gpu_trustcache"),
+        "_hwtest": attr.label(default = "//bazel:hwtest", providers = [BuildSettingInfo]),
         "_kind": attr.label(default = "//ipsw:kind"),
         "_profile": attr.label(default = "//bazel:profile"),
         # Only the loader's compile runs Xcode: a package staging the release's loader names neither, so the image

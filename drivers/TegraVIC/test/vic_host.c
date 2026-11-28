@@ -158,6 +158,11 @@ static double clamp255(double v)
     return v < 0 ? 0 : v > 255 ? 255 : v;
 }
 
+static uint32_t widen8(uint32_t v)
+{
+    return (v << 2) | (v >> 6);
+}
+
 static void colour(void)
 {
     for (int standard = 0; standard < 2; standard++)
@@ -174,7 +179,7 @@ static void colour(void)
             for (int r = 0; r < 256; r += 5)
                 for (int g = 0; g < 256; g += 5)
                     for (int b = 0; b < 256; b += 5) {
-                        const uint32_t in10[3] = {(uint32_t)r << 2, (uint32_t)g << 2, (uint32_t)b << 2};
+                        const uint32_t in10[3] = {widen8((uint32_t)r), widen8((uint32_t)g), widen8((uint32_t)b)};
                         uint32_t out10[3];
                         tegra_vic_matrix_apply(&toYcc, in10, out10);
                         double ideal[3];
@@ -187,7 +192,8 @@ static void colour(void)
                                 worst = d;
                         }
                         // Round trip through the engine's 8-bit storage.
-                        uint32_t back10[3], mid[3] = {(out10[0] >> 2) << 2, (out10[1] >> 2) << 2, (out10[2] >> 2) << 2};
+                        uint32_t back10[3],
+                            mid[3] = {widen8(out10[0] >> 2), widen8(out10[1] >> 2), widen8(out10[2] >> 2)};
                         tegra_vic_matrix_apply(&toRgb, mid, back10);
                         const int rgb[3] = {r, g, b};
                         for (int c = 0; c < 3; c++) {
@@ -214,9 +220,9 @@ static void colour(void)
                 for (int cb = 16; cb <= 240; cb += 8)
                     for (int cr = 16; cr <= 240; cr += 8) {
                         uint32_t in10[3];
-                        in10[0] = (uint32_t)y << 2;
-                        in10[kMeasured.cbChannel] = (uint32_t)cb << 2;
-                        in10[kMeasured.crChannel] = (uint32_t)cr << 2;
+                        in10[0] = widen8((uint32_t)y);
+                        in10[kMeasured.cbChannel] = widen8((uint32_t)cb);
+                        in10[kMeasured.crChannel] = widen8((uint32_t)cr);
                         uint32_t out10[3];
                         tegra_vic_matrix_apply(&toRgb, in10, out10);
                         const double yy = full ? y / 255.0 : (y - 16) / 219.0;

@@ -1,8 +1,8 @@
 """The Supplemental cryptex's jetsam overlay as this build's profile makes it (overlay/BUILD.bazel jetsam_properties).
 
-It holds the shader compiler's and the bootstrap helper's Overrides in both profiles (the manifest stages both daemons'
-jobs in release too) and the texture peer's (HW Test's second process, which the manifest stages in debug alone) in
-debug alone; its merge refuses a label named twice.
+It holds the shader compiler's, the bootstrap helper's and the app registration daemon's Overrides in both profiles (the
+manifest stages their jobs in release too) and the texture peer's (HW Test's second process) when HW Test is enabled;
+its merge refuses a label named twice.
 """
 
 import json
@@ -13,13 +13,14 @@ from pathlib import Path
 
 import jetsam_overlay
 
-PROFILE = os.environ['SWITCH_PROFILE']
+HWTEST = os.environ['SWITCH_HWTEST'] == '1'
 OVERLAY = Path('overlay/supplemental/com.apple.jetsamproperties.cryptex.plist')
 COMPILER = Path('overlay/supplemental/com.brunostjohn.switch.shadercompiler.jetsam.plist')
 PEER = Path('apps/hwtest/peer/com.brunostjohn.switch.texpeer.jetsam.plist')
 MANIFEST = Path('overlay/manifest.json')
 COMPILER_LABEL = 'com.brunostjohn.switch.shadercompiler'
 BOOTSTRAP_LABEL = 'com.brunostjohn.switch.bootstrap'
+APPREG_LABELS = {'com.brunostjohn.switch.appregd', 'com.brunostjohn.switch.bootstrap-apps'}
 PEER_LABEL = 'com.brunostjohn.switch.texpeer'
 
 
@@ -34,16 +35,20 @@ class ProfileTest(unittest.TestCase):
     def test_the_shader_compiler_has_its_override_in_both_profiles(self):
         self.assertEqual(self.override[COMPILER_LABEL], override(COMPILER)[COMPILER_LABEL])
 
-    def test_the_texture_peer_has_its_override_in_debug_alone(self):
-        labels = {COMPILER_LABEL, BOOTSTRAP_LABEL} | ({PEER_LABEL} if PROFILE == 'debug' else set())
+    def test_the_app_registration_daemon_is_above_the_global_6_mb(self):
+        for label in APPREG_LABELS:
+            self.assertEqual(self.override[label], {'ActiveSoftMemoryLimit': 32, 'InactiveHardMemoryLimit': 32})
+
+    def test_the_texture_peer_has_its_override_only_with_hwtest(self):
+        labels = {COMPILER_LABEL, BOOTSTRAP_LABEL} | APPREG_LABELS | ({PEER_LABEL} if HWTEST else set())
         self.assertEqual(set(self.override), labels)
-        if PROFILE == 'debug':
+        if HWTEST:
             self.assertEqual(self.override[PEER_LABEL], {'ActiveSoftMemoryLimit': 40, 'InactiveHardMemoryLimit': 40})
 
-    def test_the_peer_is_staged_in_debug_alone(self):
+    def test_the_peer_is_staged_only_with_hwtest(self):
         peer = [e for e in json.loads(MANIFEST.read_text())['files'] if 'texpeer' in e['path']]
         self.assertTrue(peer)
-        self.assertTrue(all(e.get('debug') for e in peer))
+        self.assertTrue(all(e.get('hwtest') and not e.get('debug') for e in peer))
 
 
 class MergeTest(unittest.TestCase):

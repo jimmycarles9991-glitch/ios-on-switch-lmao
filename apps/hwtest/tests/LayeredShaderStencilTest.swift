@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A slice-choosing state whose fragment function returns [[stencil]], in a layered pass of two layers over a Stencil8

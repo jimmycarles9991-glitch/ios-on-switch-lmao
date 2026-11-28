@@ -6,6 +6,7 @@
 #include "facade_variant_compiler.h"
 #include "../TegraGM20BMetalStatesKey.h"
 #include "../fragment_tests.h"
+#include "../turn_copy.h"
 #include "bazel/testing/fresh_process.h"
 
 #include <pthread/qos.h>
@@ -296,7 +297,7 @@ void packedTestClass()
 }
 
 // A state this process makes, of a Depth32Float attachment, whose record fetches: its creation makes the variant of
-// each test class a draw can take (Pass, ReadOnly, DepthWrite) before it returns, so its draws ask nothing
+// each test class a draw can take (Pass, ReadOnly, DepthWrite, StencilWrite) before it returns, so its draws ask nothing
 void madeTestClasses()
 {
     RenderCompiler compiler;
@@ -315,7 +316,8 @@ void madeTestClasses()
         if (request.variant.fragmentTests)
             classes.insert(request.variant.fragmentTests);
     EXPECT_EQ(classes, (std::set<uint8_t>{uint8_t(gm20b::FragmentTests::Pass), uint8_t(gm20b::FragmentTests::ReadOnly),
-                                          uint8_t(gm20b::FragmentTests::DepthWrite)}));
+                                          uint8_t(gm20b::FragmentTests::DepthWrite),
+                                          uint8_t(gm20b::FragmentTests::StencilWrite)}));
     for (const uint8_t tests : classes) {
         gm20b::RenderVariant forms;
         forms.fragmentTests = tests;
@@ -469,6 +471,119 @@ void depth16StencilTestClasses()
               (std::vector<uint32_t>{programOf(FragmentTests::DepthWrite), readOnly, readOnly}));
 }
 
+id<MTLDepthStencilState> stencilReplace(id<MTLDevice> device)
+{
+    MTLDepthStencilDescriptor *ds = [MTLDepthStencilDescriptor new];
+    MTLStencilDescriptor *stencil = [MTLStencilDescriptor new];
+    stencil.stencilCompareFunction = MTLCompareFunctionEqual;
+    stencil.depthStencilPassOperation = MTLStencilOperationReplace;
+    ds.frontFaceStencil = ds.backFaceStencil = stencil;
+    return [device newDepthStencilStateWithDescriptor:ds];
+}
+
+std::vector<uint32_t> zetaFormats(size_t firstJob)
+{
+    std::vector<uint32_t> formats;
+    for (size_t job = firstJob; job < kernel_model::model.jobs.size(); ++job) {
+        const auto &words = kernel_model::model.jobs[job].words;
+        std::vector<switch_gm20b_method> methods(words.size());
+        const long count = switch_gm20b_push_decode(words.data(), words.size(), methods.data(), methods.size());
+        EXPECT_GE(count, 0);
+        for (long i = 0; i < count; ++i)
+            if (methods[i].subchannel == 0 && methods[i].method == NVB197_SET_ZT_FORMAT)
+                formats.push_back(methods[i].value);
+    }
+    return formats;
+}
+
+void depth32StencilTestClasses()
+{
+    RenderCompiler compiler;
+    const std::string pack = writePack(packKey(MTLPixelFormatBGRA8Unorm));
+    id<MTLDevice> device = nil;
+    id<MTLLibrary> library = served(compiler, "variant-depth32-stencil", pack, device);
+    ASSERT_TRUE(library != nil);
+    for (const uint32_t format : {252u, 260u}) {
+        gm20b::RuntimeRecord r;
+        r.keyString = "samples=1 ds=" + std::to_string(format) + (format == 260 ? "/260 " : "/0 ");
+        for (gm20b::CapturedProgram &p : r.programs) {
+            p.image.assign(80 + 64, 0);
+            p.gprs = 8;
+        }
+        const char *name = gm20b::turnDepthState(format);
+        r.pipeline.keyHash = gm20b::Pack::fnv(name, strlen(name));
+        r.blob = {0x1a00, 0x1111};
+        std::string why;
+        ASSERT_NE(gRM->raw->addRecord(r, false, why), nullptr) << why;
+    }
+    MTLRenderPipelineDescriptor *d = descriptor(library, MTLPixelFormatBGRA8Unorm);
+    d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    id<MTLRenderPipelineState> state = [device newRenderPipelineStateWithDescriptor:d error:nil];
+    ASSERT_TRUE(state != nil);
+    __unsafe_unretained SwitchMetalPipeline *pipeline = (SwitchMetalPipeline *)state;
+    ASSERT_TRUE(pipeline->_raw);
+    using gm20b::FragmentTests;
+    const auto programOf = [&](FragmentTests tests) {
+        gm20b::RenderVariant forms;
+        forms.fragmentTests = uint8_t(tests);
+        gm20b::Variant<gm20b::Pipeline> *variant = variantOf(pipeline, forms);
+        return variant && ready(*variant) ? program(variant->value()->methods, 2) : UINT32_MAX;
+    };
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    id<MTLTexture> depthTex = image(device, MTLTextureUsageRenderTarget, MTLPixelFormatDepth32Float);
+    ASSERT_TRUE(depthTex != nil);
+
+    {
+        MTLRenderPassDescriptor *pass = colourPass(device, false);
+        pass.depthAttachment.texture = depthTex;
+        pass.depthAttachment.loadAction = MTLLoadActionClear;
+        pass.depthAttachment.storeAction = MTLStoreActionStore;
+        pass.depthAttachment.clearDepth = 1;
+        const size_t firstJob = kernel_model::model.jobs.size();
+        id<MTLCommandBuffer> commands = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:pass];
+        [encoder setRenderPipelineState:state];
+        [encoder setDepthStencilState:depthWrite(device)];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [encoder endEncoding];
+        [commands commit];
+        [commands waitUntilCompleted];
+        EXPECT_EQ(commands.status, MTLCommandBufferStatusCompleted) << commands.error.description.UTF8String;
+        EXPECT_EQ(drawnPrograms(firstJob, 2), (std::vector<uint32_t>{programOf(FragmentTests::DepthWrite)}));
+        EXPECT_EQ(zetaFormats(firstJob), (std::vector<uint32_t>{0x0au}));
+    }
+
+    {
+        MTLRenderPassDescriptor *pass = colourPass(device, false);
+        pass.depthAttachment.texture = depthTex;
+        pass.depthAttachment.loadAction = MTLLoadActionLoad;
+        pass.depthAttachment.storeAction = MTLStoreActionStore;
+        const size_t firstJob = kernel_model::model.jobs.size();
+        id<MTLCommandBuffer> commands = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:pass];
+        [encoder setRenderPipelineState:state];
+        [encoder setDepthStencilState:depthWrite(device)];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [encoder setDepthStencilState:stencilTest(device, MTLCompareFunctionEqual)];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [encoder setDepthStencilState:stencilTest(device, MTLCompareFunctionNotEqual)];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [encoder setDepthStencilState:stencilReplace(device)];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [encoder endEncoding];
+        [commands commit];
+        [commands waitUntilCompleted];
+        EXPECT_EQ(commands.status, MTLCommandBufferStatusCompleted) << commands.error.description.UTF8String;
+        const uint32_t readOnly = programOf(FragmentTests::ReadOnly);
+        const std::vector<uint32_t> programs = drawnPrograms(firstJob, 2);
+        ASSERT_GE(programs.size(), 6u);
+        EXPECT_EQ(std::vector<uint32_t>(programs.begin() + 1, programs.begin() + 5),
+                  (std::vector<uint32_t>{programOf(FragmentTests::DepthWrite), readOnly, readOnly,
+                                         programOf(FragmentTests::StencilWrite)}));
+        EXPECT_EQ(zetaFormats(firstJob), (std::vector<uint32_t>{0x19u, 0x19u, 0x0au}));
+    }
+}
+
 void asyncCreationBand()
 {
     RenderCompiler compiler;
@@ -581,6 +696,11 @@ TEST(GM20BFacadeVariant, ADrawInAPassOfNoDepthTakesItsHiddenAttachmentsTestClass
 TEST(GM20BFacadeVariant, ADepth16UnormPassesDrawsTakeTheTestClassOfItsConvertedStencil)
 {
     switch_ios::test::ExpectPassesInFreshProcess(depth16StencilTestClasses);
+}
+
+TEST(GM20BFacadeVariant, ADepth32FloatPassConvertsOnlyWhenStencilIsActive)
+{
+    switch_ios::test::ExpectPassesInFreshProcess(depth32StencilTestClasses);
 }
 
 TEST(GM20BFacadeVariant, AsyncCreationCompilesUnwaitedWhileVariantStaysWaited)

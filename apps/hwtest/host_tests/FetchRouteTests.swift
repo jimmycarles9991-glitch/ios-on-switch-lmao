@@ -44,4 +44,27 @@ final class FetchRouteTests: XCTestCase {
             ]
         )
     }
+
+    /// 11-24 (14:32), unforced: framebuffer_fetch's 12-triangle list over 64x64 took the twin for it and for the
+    /// one-triangle draw after it, its 64-instance draw stayed interlocked; 11-22 interlocked every one of them
+    func testTheTwinRulesDrawsMoveItsCounterAndNotTheInterlocks() {
+        XCTAssertEqual(
+            failed(FetchRoute.ruleChecks("list", twins: 2, interlocked: 0, moved: ["fetch_twin_rule": 2])), []
+        )
+        XCTAssertEqual(
+            failed(
+                FetchRoute.ruleChecks(
+                    "instanced", twins: 1, interlocked: 1, moved: ["fetch_twin_rule": 1, "interlock_draws": 1]
+                )
+            ),
+            []
+        )
+    }
+
+    func testAnInterlockedDrawTheRuleNamesForTheTwinFails() {
+        XCTAssertEqual(
+            failed(FetchRoute.ruleChecks("list", twins: 2, interlocked: 0, moved: ["interlock_draws": 2])),
+            ["list: fetch_twin_rule rose by 0, want 2", "list: interlock_draws rose by 2, want 0"]
+        )
+    }
 }

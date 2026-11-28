@@ -79,6 +79,7 @@ pub(crate) mod reassoc;
 pub(crate) mod regroup;
 mod residual_round;
 pub mod srgb;
+pub mod srgb_conversions;
 pub mod texel_round;
 pub mod wide;
 
@@ -664,11 +665,11 @@ impl FamilyStrategy for ArithStrategy {
                 format,
                 floats,
             } => {
-                // Each sRGB color channel's search or step read; the table is the module's,
-                // charged once ([`routine_words`]).
+                // Each sRGB channel's table read; the table is the module's, charged once
+                // ([`routine_words`]).
                 let srgb = match (*format, *dir) {
-                    (PackFormat::Unorm4x8Srgb, PackDir::Pack) => 3 * srgb::SEARCH_WORDS,
-                    (PackFormat::Unorm4x8Srgb, PackDir::Unpack) => 3 * srgb::STEP_WORDS,
+                    (PackFormat::Unorm4x8Srgb, PackDir::Pack) => 3 * srgb_conversions::READ_WORDS,
+                    (PackFormat::Unorm4x8Srgb, PackDir::Unpack) => 4 * srgb_conversions::READ_WORDS,
                     _ => 0,
                 };
                 // One vector sequence of the exact products or exact divisions
@@ -923,6 +924,9 @@ pub struct ArithPlan {
     /// recorded at selection: the module then requires `VkProperty::MetalHalfArithmetic`.
     pub f16_arith: bool,
     pub sm53_half: bool,
+    /// Whether a `half` `fast::powr` takes the device's `exp2(y · log2(x))` with no selects around it
+    /// (`NativeShaderTarget::ieee_half_powr`).
+    pub ieee_half_powr: bool,
     /// The precision notes the plan's operations record unless their entry's quotient and
     /// functions are Metal's own ([`ArithPlan::device_quotient`]), recorded at selection
     /// ([`OpNotes::unless_metal_fast`]); [`finish`] records them where they are not.
@@ -975,7 +979,7 @@ pub fn routine_words(plan: &ArithPlan) -> impl Iterator<Item = (&'static str, u6
             PackDir::Pack => SRGB_PACK,
             PackDir::Unpack => SRGB_UNPACK,
         };
-        (name, u64::from(srgb::TABLE_WORDS))
+        (name, u64::from(srgb_conversions::TABLE_WORDS))
     });
     // The extended-range sRGB table, once, and each padded `_sRGB` form's.
     let extended = plan.extended_range_srgb.then_some((
@@ -1058,6 +1062,7 @@ pub const FOLDED: &str = "arith.float.folded";
 pub fn finish(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     cx.families.arith.sm53_half =
         cx.profile.fields().native_target == crate::device::NativeShaderTarget::Sm53;
+    cx.families.arith.ieee_half_powr = cx.profile.fields().native_target.ieee_half_powr();
     cx.families.arith.wide = legal::holds_wide(cx.profile);
     cx.families.arith.quantize = narrow::quantize_form(cx.profile);
     cx.families.arith.native_half =
@@ -1208,7 +1213,7 @@ pub fn declare(
         decl.fast.insert(*r, math::define_fast_division(mb, *r)?);
     }
     if plan.families.arith.srgb.is_some() {
-        decl.srgb = Some(srgb::declare(mb)?);
+        decl.srgb = Some(srgb_conversions::declare(mb)?);
     }
     if let Some(class) = plan.families.arith.color_table {
         decl.color_table = Some(srgb::declare_color_table(mb, plan.stage, class)?);
@@ -2177,7 +2182,7 @@ fn select_in(
             // Metal compares an `f32` denormal as a zero; the result is a `bool`, never a NaN.
             fp_env(cx, *fmf, f);
             let s = S::FloatCompare {
-                pred: *pred,
+                pred: fast_fabs_gt_zero(cx, *pred, *a, *b, *fmf),
                 form: f,
             };
             with_denormals(cx, s, (f, f), &[*a, *b], denormal::Reading::binary(false))
@@ -2567,6 +2572,83 @@ fn every_flag(fmf: FastMath) -> bool {
         .iter()
         .fold(FastMath::NONE, |all, (flag, _)| all.union(*flag));
     fmf.contains(every)
+}
+
+/// Under fast math (`nnan`), Apple's backend lowers `fabs(x) > 0.0` (and `0.0 < fabs(x)`) as an
+/// unordered non-zero test, so NaN answers `true` while zeros and flushed denormals stay `false`.
+fn fast_fabs_gt_zero(
+    cx: &SelectCx<'_>,
+    pred: FloatPredicate,
+    a: Value,
+    b: Value,
+    fmf: FastMath,
+) -> FloatPredicate {
+    if !fmf.contains(FastMath::NNAN) {
+        return pred;
+    }
+    let matched = match pred {
+        FloatPredicate::Ogt => is_fabs(cx, a) && is_float_zero(cx, b),
+        FloatPredicate::Olt => is_float_zero(cx, a) && is_fabs(cx, b),
+        _ => false,
+    };
+    if matched {
+        FloatPredicate::Une
+    } else {
+        pred
+    }
+}
+
+fn is_fabs(cx: &SelectCx<'_>, v: Value) -> bool {
+    let Value::Inst(id) = v else { return false };
+    let Some(inst) = cx.body.insts.get(id) else {
+        return false;
+    };
+    let InstKind::Call(call) = &inst.kind else {
+        return false;
+    };
+    matches!(
+        call.callee,
+        crate::air::ir::Callee::Air {
+            op: AirIntrinsic::Math(Math {
+                f: MathFn::Fabs,
+                ..
+            }),
+            ..
+        } | crate::air::ir::Callee::Llvm {
+            op: LlvmIntrinsic::Float {
+                op: LlvmFloatOp::FAbs,
+                ..
+            },
+            ..
+        }
+    )
+}
+
+fn is_float_zero(cx: &SelectCx<'_>, v: Value) -> bool {
+    let Value::Const(id) = v else { return false };
+    const_is_float_zero(cx, id)
+}
+
+fn const_is_float_zero(cx: &SelectCx<'_>, id: crate::air::ir::ConstId) -> bool {
+    let Some(c) = cx.entry.module.consts().get(id) else {
+        return false;
+    };
+    match &c.value {
+        Const::Null => true,
+        Const::Float(bits) => {
+            let sign = match cx.entry.module.types().get(c.ty) {
+                Some(Type::Half | Type::BFloat) => 1u64 << 15,
+                Some(Type::Float) => 1u64 << 31,
+                Some(Type::Double) => 1u64 << 63,
+                _ => return false,
+            };
+            (*bits & !sign) == 0
+        }
+        Const::Aggregate(elems) => {
+            !elems.is_empty() && elems.iter().all(|&e| const_is_float_zero(cx, e))
+        }
+        _ => false,
+    }
 }
 
 fn select_call(

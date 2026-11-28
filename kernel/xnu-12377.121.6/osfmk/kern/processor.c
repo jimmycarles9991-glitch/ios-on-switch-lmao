@@ -219,7 +219,9 @@ static timer_call_func_t running_timer_funcs[] = {
 	[RUNNING_TIMER_PREEMPT] = thread_preempt_expire,
 	[RUNNING_TIMER_KPERF] = kperf_timer_expire,
 	[RUNNING_TIMER_PERFCONTROL] = perfcontrol_timer_expire,
+#if DEVELOPMENT || DEBUG
 	[RUNNING_TIMER_SWITCH_KPROF] = switch_kprof_expire,
+#endif
 };
 static_assert(sizeof(running_timer_funcs) / sizeof(running_timer_funcs[0])
     == RUNNING_TIMER_MAX, "missing running timer function");

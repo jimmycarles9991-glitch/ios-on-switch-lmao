@@ -31,3 +31,18 @@ filegroup(
         "crates/metal2vulkan-validation/profiles/vk12-floor.json",
     ],
 )
+
+# The storage form's tests' further inputs, upstream's at 963f0e64 too: the profiles lower/fragment/fetch/tests.rs names
+# beside translation_test_inputs' (apart from them, so engine_stencil.rs's sweep stays its four forms), and the engine's
+# fragment_fetch fixture.
+filegroup(
+    name = "fetch_test_inputs",
+    srcs = [
+        "crates/metal2vulkan-validation/fixtures/public/engine/fragment_fetch.ll",
+        "crates/metal2vulkan-validation/profiles/amd-rdna3-radv.json",
+        "crates/metal2vulkan-validation/profiles/intel-arl-anv.json",
+        "crates/metal2vulkan-validation/profiles/intel-irisxe-anv.json",
+        "crates/metal2vulkan-validation/profiles/nvidia-rtx5080-laptop.json",
+        "crates/metal2vulkan-validation/profiles/swiftshader.json",
+    ],
+)

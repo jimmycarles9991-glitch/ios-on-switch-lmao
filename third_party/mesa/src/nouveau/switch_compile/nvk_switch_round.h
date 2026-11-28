@@ -29,4 +29,9 @@ bool switch_nvk_round_half_outputs(nir_shader *nir, uint32_t targets);
  */
 extern _Thread_local uint32_t switch_nvk_half_targets_current;
 
+/* The colour attachments that store a half denormal as they store zero, of
+ * the stage switch_nvk_compile_stage compiles on this thread, 0 otherwise
+ */
+extern _Thread_local uint32_t switch_nvk_unorm_targets_current;
+
 #endif /* NVK_SWITCH_ROUND_H */

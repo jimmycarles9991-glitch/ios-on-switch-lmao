@@ -277,6 +277,21 @@ fn linked_sources(linked: &LinkedFunctions) -> Result<Vec<LinkedSource<'_>>, Err
         .collect()
 }
 
+/// [`Request::scope`] of a stage of `f` linking `linked` and searching `dynamic`
+fn stage_scope(f: &Function, linked: &LinkedFunctions, dynamic: &DynamicOrder<'_>) -> Option<u64> {
+    let mut scope = 0;
+    let scopes = std::iter::once(f.library().scope())
+        .chain(linked.listed().map(|(_, l)| l.function.library().scope()))
+        .chain(dynamic.libraries.iter().map(|d| d.library().scope()));
+    for s in scopes.filter(|s| *s != 0) {
+        if scope != 0 && scope != s {
+            return None;
+        }
+        scope = s;
+    }
+    Some(scope)
+}
+
 /// The dynamic libraries a stage's imports are searched in, in order, and the first install name of
 /// the search that no library was loaded for.
 #[derive(Clone, Debug, Default)]
@@ -288,14 +303,14 @@ pub(crate) struct DynamicOrder<'a> {
 }
 
 impl DynamicOrder<'_> {
-    /// What the compile key reads of the order: each library's install name and content hash,
+    /// What the compile key reads of the order: each library's install name and code identity,
     /// and the install name not loaded.
     pub(crate) fn key(&self) -> DynamicKey<'_> {
         DynamicKey {
             libraries: self
                 .libraries
                 .iter()
-                .map(|l| (l.install_name(), l.library().content_hash()))
+                .map(|l| (l.install_name(), l.library().code_identity()))
                 .collect(),
             unloaded: self.unloaded,
         }
@@ -456,7 +471,8 @@ pub(crate) fn compile_native_stage(
 ) -> Result<crate::pipeline::NativeFunction, Error> {
     guarded(|| with_request(&f.function, &f.constants, (&f.linked, &f.libraries), inputs, |r| {
         let keyed = key_one(r, p, m)?;
-        kept::native(keyed.key, m, |m| {
+        let key = keyed.key;
+        let make = |m: &mut Meter| -> Result<crate::pipeline::NativeFunction, Error> {
             let (artifact, _, mut program) = compile_keyed(r, p, m, SPIRV_WORDS, keyed,
                 crate::pipeline::native::capture, |module, _, _, _| Ok(module))?;
             if let Some(program) = &mut program {
@@ -464,7 +480,11 @@ pub(crate) fn compile_native_stage(
                 program.link(&linked.table)?;
             }
             Ok(crate::pipeline::NativeFunction { artifact, program })
-        })
+        };
+        match r.scope {
+            Some(scope) => kept::native(key, scope, m, make),
+            None => make(m),
+        }
     }))
 }
 
@@ -953,6 +973,7 @@ fn with_request_kept<'k, T>(
 ) -> Result<T, Error> {
     let source = f.source()?;
     let dynamic = dynamic_order(f, linked, libraries);
+    let scope = stage_scope(f, linked, &dynamic);
     let linked = linked_sources(linked)?;
     let r = match &source {
         FunctionSource::Metallib(lf) => Request {
@@ -964,6 +985,7 @@ fn with_request_kept<'k, T>(
             dynamic,
             inputs,
             kept,
+            scope,
         },
         FunctionSource::Module { bitcode, index, .. } => Request {
             bitcode,
@@ -974,6 +996,7 @@ fn with_request_kept<'k, T>(
             dynamic,
             inputs,
             kept,
+            scope,
         },
         FunctionSource::Visible => {
             let entries = f
@@ -1110,6 +1133,9 @@ struct Request<'a> {
     /// its specialized entry there, the one a check or key of the creation made, else one made
     /// there now ([`specialize_one`]). `None` specializes for the compile alone.
     kept: Option<(&'a StageEntries, &'a FunctionDescriptor)>,
+    /// What the stage's kept compile is kept under ([`kept`]), from its libraries' scopes: 0 when every one is sealed,
+    /// the one library's scope that is not, and `None` (nothing kept) when two are not.
+    scope: Option<u64>,
 }
 
 impl<'a> Request<'a> {
@@ -1131,6 +1157,7 @@ impl<'a> Request<'a> {
             dynamic: DynamicOrder::default(),
             inputs: InputsFrom::Given(inputs),
             kept: None,
+            scope: Some(0),
         }
     }
 }
@@ -1688,6 +1715,32 @@ fn instanced_attributes(
     })
 }
 
+/// Color write rules pruned to the attachments `spec` writes or zeroes and normalized to the form
+/// lowering reads (`color_writes::read_rules`). Non-constant render-target indices keep all entries.
+fn read_color_writes(spec: &air::Entry, mut inputs: LowerInputs) -> LowerInputs {
+    let mut written: BTreeSet<u32> = inputs.zeroed_colors.keys().copied().collect();
+    let mut constant = true;
+    for o in &spec.ep.outputs {
+        match o.role {
+            OutputRole::RenderTarget {
+                attachment: AbiInt::Const(a),
+                ..
+            } => {
+                written.insert(a);
+            }
+            OutputRole::RenderTarget { .. } => constant = false,
+            _ => {}
+        }
+    }
+    if constant {
+        inputs.color_writes.retain(|a, _| written.contains(a));
+    }
+    for rules in inputs.color_writes.values_mut() {
+        *rules = crate::pipeline::color_writes::read_rules(*rules);
+    }
+    inputs
+}
+
 /// The lowering inputs of the specialized entry `spec` (see [`InputsFrom`]).
 fn lower_inputs(
     spec: &air::Entry,
@@ -1696,7 +1749,13 @@ fn lower_inputs(
     m: &mut Meter,
 ) -> Result<LowerInputs, Error> {
     match inputs {
-        InputsFrom::Given(i) => Ok(i.clone()),
+        InputsFrom::Given(i) => {
+            let mut out = i.clone();
+            for rules in out.color_writes.values_mut() {
+                *rules = crate::pipeline::color_writes::read_rules(*rules);
+            }
+            Ok(out)
+        }
         // A post-tessellation vertex function pulls every attribute it reads.
         InputsFrom::Vertex(desc, variant, depth)
             if matches!(spec.ep.stage, AbiStage::Vertex { patch: Some(_) }) =>
@@ -1769,7 +1828,7 @@ fn lower_inputs(
                     })
                     .collect();
             }
-            Ok(key::canonical_inputs(&out))
+            Ok(key::canonical_inputs(&read_color_writes(spec, out)))
         }
     }
 }
@@ -1805,7 +1864,7 @@ fn specialize_one(r: &Request<'_>, m: &mut Meter) -> Result<Specialized, Error> 
         let kept = entries.specialized(fd, r.inputs.call_stack_depth(), m)?;
         return Ok(Specialized::clone(&kept));
     }
-    let (air_hash, mut decoded) = decode_kept(r.bitcode, m)?;
+    let (air_hash, mut decoded) = decode_kept(r.bitcode, r.container.map(|f| f.hash), m)?;
     if let Some(f) = r.container {
         decoded.abi.check_container(&decoded.module, f, m)?;
     }
@@ -1839,23 +1898,29 @@ const KEPT_DECODES: usize = 4;
 /// decode left charged.
 struct KeptDecode {
     bytes: Arc<[u8]>,
-    sha: Hash256,
+    sha: Option<Hash256>,
     decoded: Arc<air::Decoded>,
     charged: u64,
 }
 
 static KEPT: std::sync::Mutex<VecDeque<KeptDecode>> = std::sync::Mutex::new(VecDeque::new());
 
-/// The SHA-256 of `bitcode` and its decode. A process specializes the same few large modules over
+/// The SHA-256 of `bitcode` (`known`: its metallib function's `HASH`, taken as stated) and its decode. A process
+/// specializes the same few large modules over
 /// and over (an uber-shader's every variant: QuartzCore's `fixed_frag` modules, 113 KB of bitcode
 /// each, one per pipeline its render server makes), and decoding one was a sixth of a
 /// specialization. A module of at least [`KEPT_DECODE_BYTES`] is decoded once per process and
 /// kept (the last [`KEPT_DECODES`]), found again by its exact bytes; a later request takes a copy
 /// of the decode and charges `m` the bytes the first decode left charged, so the ledger stands as
 /// after a decode of its own. The decode is a pure function of the bytes.
-fn decode_kept(bitcode: &[u8], m: &mut Meter) -> Result<(Hash256, air::Decoded), Error> {
+fn decode_kept(
+    bitcode: &[u8],
+    known: Option<Hash256>,
+    m: &mut Meter,
+) -> Result<(Hash256, air::Decoded), Error> {
     if bitcode.len() < KEPT_DECODE_BYTES {
-        return Ok((container::sha256(bitcode), air::decode(bitcode, m)?));
+        let sha = known.unwrap_or_else(|| container::sha256(bitcode));
+        return Ok((sha, air::decode(bitcode, m)?));
     }
     let found = {
         let mut kept = KEPT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1868,23 +1933,48 @@ fn decode_kept(bitcode: &[u8], m: &mut Meter) -> Result<(Hash256, air::Decoded),
                 found
             })
     };
-    if let Some((sha, decoded, charged)) = found {
+    if let Some((cached_sha, decoded, charged)) = found {
         m.charge(usize::try_from(charged).unwrap_or(usize::MAX))?;
+        let sha = match known {
+            Some(h) => h,
+            None => match cached_sha {
+                Some(h) => h,
+                None => {
+                    let h = container::sha256(bitcode);
+                    let mut kept = KEPT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if let Some(k) = kept.iter_mut().find(|k| *k.bytes == *bitcode) {
+                        k.sha = Some(h);
+                    }
+                    h
+                }
+            },
+        };
         return Ok((sha, air::Decoded::clone(&decoded)));
     }
     let before = m.ledger();
     let decoded = air::decode(bitcode, m)?;
     let charged = m.ledger().saturating_sub(before);
-    let sha = container::sha256(bitcode);
+    let computed_sha = if known.is_some() {
+        None
+    } else {
+        Some(container::sha256(bitcode))
+    };
+    let sha = known.unwrap_or_else(|| computed_sha.expect("computed when known is None"));
     let entry = KeptDecode {
         bytes: Arc::from(bitcode),
-        sha,
+        sha: computed_sha,
         decoded: Arc::new(decoded.clone()),
         charged,
     };
     let mut kept = KEPT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    kept.push_front(entry);
-    kept.truncate(KEPT_DECODES);
+    if let Some(at) = kept.iter().position(|k| *k.bytes == *bitcode) {
+        if let Some(h) = computed_sha {
+            kept[at].sha = Some(h);
+        }
+    } else {
+        kept.push_front(entry);
+        kept.truncate(KEPT_DECODES);
+    }
     Ok((sha, decoded))
 }
 
@@ -2028,10 +2118,10 @@ fn compile_one(
         compile_keyed(r, p, m, word_cap, keyed, |_, _| Ok(()), serialize_module)
             .map(|(artifact, _, ())| artifact)
     };
-    if word_cap != SPIRV_WORDS {
-        return compile(m, keyed);
+    match r.scope {
+        Some(scope) if word_cap == SPIRV_WORDS => kept::artifact(keyed.key, scope, m, |m| compile(m, keyed)),
+        _ => compile(m, keyed),
     }
-    kept::artifact(keyed.key, m, |m| compile(m, keyed))
 }
 
 /// [`compile_one`], also returning the plan and what `keep` takes of the finished typed module

@@ -28,4 +28,6 @@ uint8_t switch_vic_turn_origin(int pid);
 void switch_vic_turn_count(uint8_t origin, bool submitted, bool turned, bool eventTurn, uint64_t ticks);
 extern "C" void switch_vic_turn_counters(SwitchVICTurnCounters *out);
 IOReturn switch_vic_landscape_call(const void *client, const IOExternalMethodArguments *a);
+// Ends the PORTRAIT and COPY holds `client` made (TegraVIC's close of that connection), as FORCE's traits are released
+void switch_vic_landscape_release(const void *client);
 #endif

@@ -1016,7 +1016,7 @@ void compositorEarlyScheduledRefusedNonPresentingFrameWithdrawsPromise()
     EXPECT_EQ(next.status, MTLCommandBufferStatusCompleted);
 }
 
-void nonCompositorClientNeverEarlySchedulesAndDefersPresent()
+void nonCompositorClientSchedulesWithoutPromisesAndDefersPresent()
 {
     const Opened o = openPacked(false);
     ASSERT_TRUE(o.device != nil && o.state != nil) << o.why;
@@ -1073,9 +1073,9 @@ void nonCompositorClientNeverEarlySchedulesAndDefersPresent()
     ASSERT_FALSE(dispatch_semaphore_wait(inJob, dispatch_time(DISPATCH_TIME_NOW, 10 * int64_t(NSEC_PER_SEC))));
     std::thread waiter;
     const bool early = waitScheduledWithin(cb, std::chrono::milliseconds(200), waiter);
-    EXPECT_FALSE(early) << "non-compositor client must never early-schedule";
-    EXPECT_EQ(drawable.presents, 0);
-    EXPECT_EQ(makes.load(std::memory_order_acquire), 0u);
+    EXPECT_TRUE(early) << "an app's waitUntilScheduled waited for its job's submission";
+    EXPECT_EQ(drawable.presents, 0) << "an app's drawable was presented before its command buffer completed";
+    EXPECT_EQ(makes.load(std::memory_order_acquire), 0u) << "an app made a writer promise";
 
     jobGuard.release();
     waiter.join();
@@ -1087,6 +1087,56 @@ void nonCompositorClientNeverEarlySchedulesAndDefersPresent()
         std::lock_guard<std::mutex> l(kernel_model::callLock);
         EXPECT_TRUE(m.promiseCalls.empty());
     }
+}
+
+void nonCompositorSurfaceWriterWaitsForSubmissionBeforeScheduled()
+{
+    const Opened o = openPacked(false);
+    ASSERT_TRUE(o.device != nil && o.state != nil) << o.why;
+    id<MTLCommandQueue> queue = [o.device newCommandQueue];
+    id<MTLCommandQueue> blockQueue = [o.device newCommandQueue];
+    id<MTLTexture> frame = surfaceTarget(o.device);
+    id<MTLTexture> scratch = plainTarget(o.device);
+    ASSERT_TRUE(frame != nil && scratch != nil);
+    ASSERT_GE(jobsOfDrawn(queue, frame, o.state, nil), 1u);
+
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    drawInto(cb, frame, o.state);
+    id<MTLCommandBuffer> blocker = [blockQueue commandBuffer];
+    drawInto(blocker, scratch, o.state);
+
+    kernel_model::Model &m = kernel_model::model;
+    dispatch_semaphore_t inBlock = dispatch_semaphore_create(0);
+    dispatch_semaphore_t releaseBlock = dispatch_semaphore_create(0);
+    std::atomic<int> jobNo{0};
+    const kernel_model::HooksCleared cleared;
+    SemGuard blockGuard{releaseBlock};
+
+    {
+        std::lock_guard<std::mutex> l(kernel_model::callLock);
+        m.jobAdded = [&m, &jobNo, inBlock, releaseBlock] {
+            const auto &j = m.jobs.back();
+            __atomic_store_n(&m.fence(j.channel - 1).completed, j.seqno, __ATOMIC_RELEASE);
+            if (jobNo.fetch_add(1, std::memory_order_acq_rel) == 0) {
+                dispatch_semaphore_signal(inBlock);
+                dispatch_semaphore_wait(releaseBlock, DISPATCH_TIME_FOREVER);
+            }
+        };
+    }
+
+    [blocker commit];
+    ASSERT_FALSE(dispatch_semaphore_wait(inBlock, dispatch_time(DISPATCH_TIME_NOW, 10 * int64_t(NSEC_PER_SEC))));
+    [cb commit];
+
+    std::thread waiter;
+    const bool early = waitScheduledWithin(cb, std::chrono::milliseconds(150), waiter);
+    EXPECT_FALSE(early) << "non-presenting IOSurface writer scheduled before kernel submission";
+
+    blockGuard.release();
+    waiter.join();
+    [blocker waitUntilCompleted];
+    [cb waitUntilCompleted];
+    EXPECT_EQ(cb.status, MTLCommandBufferStatusCompleted);
 }
 
 void compositorSerializesEarlyPromisesOnSameSurface()
@@ -1355,9 +1405,14 @@ TEST(GM20BFacadePresent, CompositorEarlyScheduledRefusedNonPresentingFrameWithdr
     switch_ios::test::ExpectPassesInFreshProcess(compositorEarlyScheduledRefusedNonPresentingFrameWithdrawsPromise);
 }
 
-TEST(GM20BFacadePresent, NonCompositorClientNeverEarlySchedulesAndDefersPresent)
+TEST(GM20BFacadePresent, NonCompositorClientSchedulesWithoutPromisesAndDefersPresent)
 {
-    switch_ios::test::ExpectPassesInFreshProcess(nonCompositorClientNeverEarlySchedulesAndDefersPresent);
+    switch_ios::test::ExpectPassesInFreshProcess(nonCompositorClientSchedulesWithoutPromisesAndDefersPresent);
+}
+
+TEST(GM20BFacadePresent, NonCompositorSurfaceWriterWaitsForSubmissionBeforeScheduled)
+{
+    switch_ios::test::ExpectPassesInFreshProcess(nonCompositorSurfaceWriterWaitsForSubmissionBeforeScheduled);
 }
 
 TEST(GM20BFacadePresent, CompositorSerializesEarlyPromisesOnSameSurface)

@@ -2,8 +2,13 @@
 #include "kernel_model.h"
 #include "../resource_set.h"
 #include <gtest/gtest.h>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <mutex>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -369,6 +374,234 @@ TEST(SetView, HoldsOnlyRangesInsideOneMember)
     EXPECT_FALSE(view.holds(0x12000, 1));
     EXPECT_TRUE(view.holds(0x20800, 0x800));
     EXPECT_FALSE(view.holds(0x21000, 1));
+}
+
+TEST_F(ResourceSetTest, SameUsesReusesCachedUsesAndRetriesOnBindOrBoChange)
+{
+    ASSERT_TRUE(set.add(kernel, root, kWrite));
+    gm20b::Bo sharedA, sharedB;
+    ASSERT_TRUE(kernel.alloc(0x10000, true, sharedA));
+    ASSERT_TRUE(kernel.alloc(0x10000, true, sharedB));
+    const std::vector<TegraGM20BAbiSurfaceUse> uses = {{sharedA.handle, kRead, 0}, {sharedB.handle, kWrite, 0}};
+
+    ASSERT_TRUE(job(uses));
+    EXPECT_EQ(model.sameUseHits, 0u);
+    EXPECT_EQ(model.sameUseMisses, 0u);
+    EXPECT_EQ(lastJob().flags & TegraGM20BJobSameUses, 0u);
+    EXPECT_TRUE(used(sharedA.handle, kRead));
+    EXPECT_TRUE(used(sharedB.handle, kWrite));
+
+    ASSERT_TRUE(job(uses));
+    EXPECT_EQ(model.sameUseHits, 1u);
+    EXPECT_EQ(model.sameUseMisses, 0u);
+    EXPECT_NE(lastJob().flags & TegraGM20BJobSameUses, 0u);
+    EXPECT_TRUE(used(sharedA.handle, kRead));
+    EXPECT_TRUE(used(sharedB.handle, kWrite));
+
+    gm20b::Bo extra;
+    ASSERT_TRUE(kernel.alloc(0x10000, true, extra));
+    ASSERT_TRUE(job(uses));
+    EXPECT_EQ(model.sameUseMisses, 1u);
+    EXPECT_EQ(lastJob().flags & TegraGM20BJobSameUses, 0u);
+    EXPECT_TRUE(used(sharedA.handle, kRead));
+    EXPECT_TRUE(used(sharedB.handle, kWrite));
+
+    ASSERT_TRUE(job(uses));
+    EXPECT_EQ(model.sameUseHits, 2u);
+    EXPECT_EQ(model.sameUseMisses, 1u);
+    EXPECT_NE(lastJob().flags & TegraGM20BJobSameUses, 0u);
+}
+
+TEST_F(ResourceSetTest, SameUsesMissAndStaleSetBothRecoverTransparently)
+{
+    ASSERT_TRUE(set.add(kernel, {{&root, kWrite}, {&ring, kWrite}}));
+    gm20b::Bo shared;
+    ASSERT_TRUE(kernel.alloc(0x10000, true, shared));
+    const std::vector<TegraGM20BAbiSurfaceUse> uses = {{shared.handle, kWrite, 0}};
+
+    ASSERT_TRUE(job(uses));
+    ASSERT_TRUE(job(uses));
+    EXPECT_EQ(model.sameUseHits, 1u);
+
+    gm20b::Bo member;
+    ASSERT_TRUE(kernel.alloc(0x10000, true, member));
+    ASSERT_TRUE(set.add(kernel, member, kRead));
+    ASSERT_TRUE(job(uses));
+    model.freeBo(member.handle);
+
+    ASSERT_TRUE(job(uses));
+    EXPECT_EQ(model.staleSets, 1u);
+    EXPECT_TRUE(used(shared.handle, kWrite));
+    EXPECT_TRUE(used(root.handle, kWrite));
+    ASSERT_TRUE(job(uses));
+    EXPECT_EQ(model.sameUseHits, 2u);
+}
+
+class SetIoctlGate {
+public:
+    explicit SetIoctlGate(uint32_t method) : method_(method)
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        active_ = this;
+        kernel_model::arriving.store(&arrive, std::memory_order_release);
+    }
+
+    ~SetIoctlGate()
+    {
+        release();
+        kernel_model::arriving.store(nullptr, std::memory_order_release);
+        std::lock_guard<std::mutex> l(mu_);
+        if (active_ == this)
+            active_ = nullptr;
+    }
+
+    bool waitHeld()
+    {
+        std::unique_lock<std::mutex> l(mu_);
+        return cv_.wait_for(l, std::chrono::seconds(5), [&] {
+            return held_;
+        });
+    }
+
+    void release()
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        released_ = true;
+        cv_.notify_all();
+    }
+
+private:
+    static int arrive(uint32_t method, const void *)
+    {
+        std::unique_lock<std::mutex> l(mu_);
+        SetIoctlGate *g = active_;
+        if (!g || method != g->method_ || g->matched_)
+            return KERN_SUCCESS;
+        g->matched_ = true;
+        g->held_ = true;
+        g->cv_.notify_all();
+        g->cv_.wait(l, [&] {
+            return g->released_;
+        });
+        return KERN_SUCCESS;
+    }
+
+    uint32_t method_ = 0;
+    bool matched_ = false, held_ = false, released_ = false;
+    std::condition_variable cv_;
+    static inline std::mutex mu_;
+    static inline SetIoctlGate *active_ = nullptr;
+};
+
+TEST_F(ResourceSetTest, ViewLeavingAndAddLaterDoNotBlockDuringResourceSetIoctls)
+{
+    gm20b::Bo extraA, extraB, deferredBo;
+    ASSERT_TRUE(kernel.alloc(0x10000, true, extraA));
+    ASSERT_TRUE(kernel.alloc(0x10000, true, extraB));
+    ASSERT_TRUE(kernel.alloc(0x10000, true, deferredBo));
+    ASSERT_TRUE(set.add(kernel, {{&root, kWrite}, {&extraA, kRead}}));
+
+    {
+        SetIoctlGate createGate(TegraGM20BMethodResourceSetCreate);
+        bool added = false;
+        std::thread adder([&] {
+            added = set.add(kernel, extraB, kRead);
+        });
+        ASSERT_TRUE(createGate.waitHeld());
+
+        gm20b::SetView snap;
+        set.view(snap);
+        EXPECT_TRUE(snap.holds(root));
+        EXPECT_TRUE(snap.holds(extraA));
+        EXPECT_FALSE(snap.holds(extraB)) << "uncommitted BO must not appear in SetView before ResourceSetCreate commits";
+
+        set.addLater({{&deferredBo, kRead}});
+
+        const uint64_t freedHandle = extraA.handle;
+        EXPECT_TRUE(set.leaving(freedHandle));
+        model.freeBo(freedHandle);
+        set.view(snap);
+        EXPECT_FALSE(snap.named(freedHandle));
+
+        createGate.release();
+        adder.join();
+        EXPECT_TRUE(added);
+        EXPECT_EQ(set.counts().refusals, 0u);
+    }
+
+    set.addPending(kernel);
+    set.view(view);
+    EXPECT_TRUE(view.holds(root));
+    EXPECT_TRUE(view.holds(extraB));
+    EXPECT_TRUE(view.holds(deferredBo));
+    EXPECT_FALSE(view.named(extraA.handle));
+    ASSERT_TRUE(job());
+
+    {
+        SetIoctlGate releaseGate(TegraGM20BMethodResourceSetRelease);
+        std::thread remover([&] {
+            set.remove(kernel, {root.handle, extraB.handle, deferredBo.handle});
+        });
+        ASSERT_TRUE(releaseGate.waitHeld());
+
+        gm20b::SetView snap;
+        set.view(snap);
+        EXPECT_EQ(snap.set, 0u);
+        set.addLater({{&ring, kRead}});
+
+        releaseGate.release();
+        remover.join();
+    }
+
+    set.addPending(kernel);
+    set.view(view);
+    EXPECT_TRUE(view.holds(ring));
+    ASSERT_TRUE(job());
+}
+
+TEST_F(ResourceSetTest, ConcurrentAddFreeViewAndRenewUnderTSan)
+{
+    ASSERT_TRUE(set.add(kernel, {{&root, kWrite}, {&tickets, kWrite}, {&ring, kRead}}));
+    std::atomic<bool> stop{false};
+
+    std::thread reader([&] {
+        gm20b::SetView localView;
+        while (!stop.load(std::memory_order_acquire)) {
+            set.view(localView);
+            (void)set.refusal();
+            (void)set.lastRefusal();
+        }
+    });
+
+    std::vector<std::thread> workers;
+    for (int t = 0; t < 3; ++t) {
+        workers.emplace_back([&, t] {
+            for (int i = 0; i < 20; ++i) {
+                gm20b::Bo bo;
+                ASSERT_TRUE(kernel.alloc(0x10000, true, bo));
+                if ((i + t) % 2 == 0) {
+                    set.add(kernel, bo, kRead);
+                    if (i % 3 == 0)
+                        set.promote(kernel, bo.handle);
+                } else {
+                    set.addLater({{&bo, kRead}});
+                    set.addPending(kernel);
+                }
+                kernel.free(bo);
+            }
+        });
+    }
+
+    for (auto &w : workers)
+        w.join();
+    stop.store(true, std::memory_order_release);
+    reader.join();
+
+    set.view(view);
+    EXPECT_TRUE(view.holds(root));
+    EXPECT_TRUE(view.holds(tickets));
+    EXPECT_TRUE(view.holds(ring));
+    ASSERT_TRUE(job());
 }
 
 }  // namespace

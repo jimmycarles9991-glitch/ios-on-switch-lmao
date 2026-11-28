@@ -17,6 +17,10 @@
 #include <kern/thread_call.h>
 #include <os/atomic_private.h>
 #include <os/log.h>
+#if XNU_12377_121_6 && CONFIG_CPU_COUNTERS
+#include <kern/cpc.h>
+#include <machine/machine_cpc.h>
+#endif
 
 #include "../../../kits/SwitchIdle/switch_idle_governor.h"
 
@@ -25,11 +29,13 @@ struct idle_core {
     uint64_t entered;
     uint64_t wake_at;
     uint64_t lead;
-    uint32_t state;
+    uint64_t enter_now;
     /* C7 requests the firmware refused and the last one's PSCI error. Only this core's idle path writes them (the count
      * last, release); idle_report reads them and keeps its own count of those it has logged (idle_logged). */
     uint64_t refused;
     int64_t refused_rc;
+    uint32_t state;
+    bool c7_seen;
 #if DEVELOPMENT || DEBUG
     struct switch_idle_counts counts;
     bool from_c7; /* back from C7 and no idle entry since: the next frame line paid the exit */
@@ -67,6 +73,28 @@ static void idle_refused(struct idle_core *core, int64_t rc)
     thread_call_enter(idle_report_call);
 }
 
+/* 12377's CPC_CPU_IDLE leaves the PMU counting, as WFI keeps its state; power-down loses it. The counts since the
+ * last read are folded in and PMIs masked first. A core that powered down comes back through cpu_idle_exit(TRUE)'s
+ * CPC_CPU_ACTIVE_COLD; one the firmware returned has its counters restarted here, since CPC_CPU_ACTIVE_WARM does
+ * nothing. 10063's mt_cpu_idle already stops the counters on every idle. */
+static void idle_pmu_save(struct cpu_data *cdp)
+{
+#if XNU_12377_121_6 && CONFIG_CPU_COUNTERS
+    cpc_cpu_transition(CPC_CPU_OFFLINE, cdp);
+#else
+    (void)cdp;
+#endif
+}
+
+static void idle_pmu_returned(struct cpu_data *cdp)
+{
+#if XNU_12377_121_6 && CONFIG_CPU_COUNTERS
+    cpc_cpu_transition(CPC_CPU_ACTIVE_COLD, cdp);
+#else
+    (void)cdp;
+#endif
+}
+
 static void idle_exit(struct idle_core *core, uint64_t now)
 {
     const uint64_t idle = now - core->entered;
@@ -77,6 +105,14 @@ static void idle_exit(struct idle_core *core, uint64_t now)
 #endif
 }
 
+void switch_idle_note_now(struct cpu_data *cdp, uint64_t now)
+{
+    const uint32_t cpu = (uint32_t)cdp->cpu_number;
+    if (cpu < SWITCH_SMP_CORE_COUNT) {
+        idle_cores[cpu].enter_now = now;
+    }
+}
+
 void switch_idle_wfi(struct cpu_data *cdp)
 {
     const uint32_t cpu = (uint32_t)cdp->cpu_number;
@@ -85,19 +121,33 @@ void switch_idle_wfi(struct cpu_data *cdp)
         return;
     }
     struct idle_core *core = &idle_cores[cpu];
-    const uint64_t now = mach_absolute_time();
+    const uint64_t now = core->enter_now ? core->enter_now : mach_absolute_time();
+    core->enter_now = 0;
     const uint64_t deadline = cdp->rtcPop;
 #if DEVELOPMENT || DEBUG
     core->from_c7 = false;
 #endif
     core->entered = now;
-    core->state = os_atomic_load(&idle_c7, acquire)
-                      ? switch_idle_choose(core->predicted, now, deadline, os_atomic_load(&idle_frame_at, relaxed))
-                      : SWITCH_IDLE_WFI;
+    bool c7 = core->c7_seen;
+    if (__improbable(!c7) && os_atomic_load(&idle_c7, relaxed)) {
+        c7 = os_atomic_load(&idle_c7, acquire);
+        core->c7_seen = c7;
+    }
+    core->state = c7 ? switch_idle_choose(core->predicted, now, deadline, os_atomic_load(&idle_frame_at, relaxed))
+                     : SWITCH_IDLE_WFI;
     if (core->state == SWITCH_IDLE_C7) {
         core->wake_at = switch_idle_c7_wake_at(deadline, core->lead);
+#if DEVELOPMENT || DEBUG
+        const uint64_t pmu_from = mach_absolute_time();
+        idle_pmu_save(cdp);
+        core->counts.pmu_save_ticks += mach_absolute_time() - pmu_from;
+        core->counts.pmu_saves++;
+#else
+        idle_pmu_save(cdp);
+#endif
         const int64_t rc =
             idle_platform->power_down(cpu, switch_idle_timer_ticks(now, core->wake_at, idle_platform->wake_ticks_max));
+        idle_pmu_returned(cdp);
         if (rc != 0) {
             idle_refused(core, rc);
         }

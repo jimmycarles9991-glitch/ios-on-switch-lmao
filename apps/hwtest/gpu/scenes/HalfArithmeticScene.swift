@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Finite half inputs keep NaN payload differences out of the bitwise oracle. FMA also covers cancellation after an

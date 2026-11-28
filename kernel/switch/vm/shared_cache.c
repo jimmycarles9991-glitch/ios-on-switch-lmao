@@ -35,7 +35,7 @@ bool switch_shared_cache_on_cryptex(proc_t p, vnode_t vp, mount_t cryptex)
         return false;
     }
     const bool on = vnode_mount(file) == cryptex;
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_DIAG_SHARED_CACHE) && SWITCH_DIAG_SHARED_CACHE
     printf("SwitchSharedCache: %s[%d] maps %s through the boot union at %s: its file is on %s %s: %s\n", p->p_comm,
            proc_getpid(p), vp->v_name ? vp->v_name : "?", vfs_statfs(mp)->f_mntonname,
            vfs_statfs(vnode_mount(file))->f_fstypename, vfs_statfs(vnode_mount(file))->f_mntonname,
@@ -54,7 +54,7 @@ bool switch_shared_cache_unusable(proc_t p, vnode_t vp, bool driverkit)
         return false;
     }
     const bool translated = a64x_cache_pretranslated(vp);
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_DIAG_SHARED_CACHE) && SWITCH_DIAG_SHARED_CACHE
     printf("SwitchSharedCache: %s[%d] maps the DriverKit cache %s from %s %s: %s\n", p->p_comm, proc_getpid(p),
            vp->v_name ? vp->v_name : "?", vfs_statfs(vnode_mount(vp))->f_fstypename,
            vfs_statfs(vnode_mount(vp))->f_mntonname, translated ? "translated offline" : "not translated");

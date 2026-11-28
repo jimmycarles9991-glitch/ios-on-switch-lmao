@@ -92,6 +92,7 @@ struct IOLock {
 inline std::mutex switchSleepMutex;
 inline std::condition_variable switchSleepChanged;
 inline unsigned switchSleeps = 0;
+inline std::atomic<unsigned> switchWakeups{0};
 
 inline IOLock *IOLockAlloc()
 {
@@ -127,5 +128,6 @@ inline void IOLockSleep(IOLock *lock, void *, int)
 
 inline void IOLockWakeup(IOLock *lock, void *, bool)
 {
+    ++switchWakeups;
     lock->changed.notify_all();
 }

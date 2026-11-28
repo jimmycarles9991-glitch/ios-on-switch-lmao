@@ -31,6 +31,10 @@ namespace {
 IOLock *gLock;
 SwitchVICQueue gQueue;
 TegraVICBuffer gConfigs;
+uint32_t gConfigBusy;
+uint32_t gConfigWaiters;
+uint8_t gConfigSlot[SwitchVICQueue::kSlots];
+uint32_t gCountWaiters;
 uint32_t gSyncpt;
 bool gSuspended, gFailed;
 bool gCancelling, gRecovered, gRecoveredReady;  // a stalled job's cancellation (TegraVICCancel.cpp)
@@ -39,9 +43,37 @@ int gResults[SwitchVICQueue::kSlots];
 constexpr uint32_t kThiMethod0 = 0x40;
 constexpr uint64_t kQueueUs = 2000000, kMaxBoundUs = 30000000, kAcquireUs = 2000000;
 constexpr uint32_t kBatchMax = 3;
+constexpr uint32_t kConfigMask = (1u << SwitchVICQueue::kSlots) - 1u;
 static_assert(kBatchMax * (2 + 3 * TEGRA_VIC_MAX_METHODS) +
                   SWITCH_HOST1X_WAIT_WORDS * (2 + SwitchHost1xProducers::kMax) <=
               SWITCH_HOST1X_ARENA_WORDS);
+
+void releaseConfigMaskLocked(uint32_t mask)
+{
+    if (!mask)
+        return;
+    __atomic_fetch_and(&gConfigBusy, ~mask, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&gConfigWaiters, __ATOMIC_ACQUIRE))
+        IOLockWakeup(gLock, &gConfigBusy, false);
+}
+
+void releaseConfigMask(uint32_t mask)
+{
+    if (!mask)
+        return;
+    __atomic_fetch_and(&gConfigBusy, ~mask, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&gConfigWaiters, __ATOMIC_ACQUIRE) && gLock) {
+        IOLockLock(gLock);
+        IOLockWakeup(gLock, &gConfigBusy, false);
+        IOLockUnlock(gLock);
+    }
+}
+
+uint32_t boundPixels(uint64_t pixels, bool acquire)
+{
+    const uint64_t us = kQueueUs + pixels / 8;
+    return static_cast<uint32_t>((us < kMaxBoundUs ? us : kMaxBoundUs) + (acquire ? kAcquireUs : 0));
+}
 
 using Results = SwitchHost1xResults<SWITCH_GPU_ENGINE_VIC>;
 
@@ -73,12 +105,6 @@ int tokenRetain(const switch_gpu_backing_token *token)
 void tokenRelease(const switch_gpu_backing_token *token)
 {
     Results::release(token);
-}
-
-uint32_t bound(const TegraVICJob &job, bool acquire)
-{
-    const uint64_t us = kQueueUs + job.pixels / 8;
-    return static_cast<uint32_t>((us < kMaxBoundUs ? us : kMaxBoundUs) + (acquire ? kAcquireUs : 0));
 }
 
 struct Retirement;
@@ -137,31 +163,31 @@ struct Retirement {
 
     static void ended(uint32_t slot, int result)
     {
-        IOLockLock(gLock);
-        auto *semantics = gQueue.jobs[slot].semantics;
-        auto *outcome = gQueue.jobs[slot].outcome;
-        gQueue.jobs[slot].semantics = nullptr;
-        gQueue.jobs[slot].outcome = nullptr;
-        IOLockUnlock(gLock);
+        auto *semantics = __atomic_load_n(&gQueue.jobs[slot].semantics, __ATOMIC_ACQUIRE);
         if (semantics) {
             const int semantic = switch_gpu_event_waits_cached_status(semantics);
             if (semantic < 0)
                 result = semantic;
-            switch_gpu_event_waits_release(&semantics);
         }
-        Results::complete(&outcome, result);
         Completed completed[SwitchVICQueue::kSlots];
-        uint32_t count = 0;
+        uint32_t count = 0, releasedConfigs = 0;
         IOLockLock(gLock);
+        semantics = gQueue.jobs[slot].semantics;
+        auto *outcome = gQueue.jobs[slot].outcome;
+        __atomic_store_n(&gQueue.jobs[slot].semantics, static_cast<switch_gpu_event_waits *>(nullptr),
+                         __ATOMIC_RELEASE);
+        gQueue.jobs[slot].outcome = nullptr;
         Stages::stages[slot].ended = true;
         gResults[slot] = result;
         while (gQueue.count) {
-            const auto &head = gQueue.jobs[gQueue.head];
+            const uint32_t headSlot = gQueue.head;
+            const auto &head = gQueue.jobs[headSlot];
             const uint32_t end = gQueue.batchEnd();
             if (!Stages::stages[end].ended)
                 break;
             if (head.completion)
                 completed[count++] = {head.completion, head.context, gResults[end]};
+            releasedConfigs |= 1u << gConfigSlot[headSlot];
             gQueue.retire(static_cast<uint32_t>(head.fence));
         }
         if (gRecovered && !gQueue.count)
@@ -169,9 +195,13 @@ struct Retirement {
         if (!gQueue.count)
             switch_vic_power_idle();
         __atomic_store_n(&gCompleted, gQueue.completed, __ATOMIC_RELEASE);
-        IOLockWakeup(gLock, &gQueue.count, false);
-        IOLockWakeup(gLock, &gQueue.completed, false);
+        releaseConfigMaskLocked(releasedConfigs);
+        if (gCountWaiters)
+            IOLockWakeup(gLock, &gQueue.count, false);
         IOLockUnlock(gLock);
+        if (semantics)
+            switch_gpu_event_waits_release(&semantics);
+        Results::complete(&outcome, result);
         switch_gpu_backing_completed();
         for (uint32_t i = 0; i < count; ++i)
             completed[i].completion(completed[i].context, completed[i].result < 0 ? completed[i].result : 0);
@@ -193,11 +223,45 @@ void semanticRetired(switch_gpu_event_waits *batch)
 }
 }  // namespace
 
+bool switch_vic_config_reserve(uint32_t count, uint8_t *slots, uint8_t **vas)
+{
+    if (!gConfigs.va || !count || count > kBatchMax || !slots || !vas)
+        return false;
+    uint32_t busy = __atomic_load_n(&gConfigBusy, __ATOMIC_ACQUIRE);
+    for (;;) {
+        uint32_t freeBits = (~busy) & kConfigMask;
+        uint32_t takeMask = 0;
+        uint32_t found = 0;
+        while (found < count && freeBits) {
+            const uint32_t bit = static_cast<uint32_t>(__builtin_ctz(freeBits));
+            slots[found] = static_cast<uint8_t>(bit);
+            vas[found] = gConfigs.va + static_cast<uint64_t>(bit) * kSwitchVICConfigStride;
+            takeMask |= 1u << bit;
+            freeBits &= freeBits - 1u;
+            ++found;
+        }
+        if (found < count)
+            return false;
+        if (__atomic_compare_exchange_n(&gConfigBusy, &busy, busy | takeMask, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return true;
+    }
+}
+
+void switch_vic_config_release(const uint8_t *slots, uint32_t count)
+{
+    uint32_t mask = 0;
+    for (uint32_t i = 0; i < count; ++i)
+        if (slots[i] < SwitchVICQueue::kSlots)
+            mask |= 1u << slots[i];
+    releaseConfigMask(mask);
+}
+
 bool switch_vic_jobs_start(const TegraVICBuffer &configs, uint32_t syncpt, uint32_t completed)
 {
     if (configs.size < kSwitchVICConfigBytes || !(gLock = IOLockAlloc()))
         return false;
     gConfigs = configs;
+    __atomic_store_n(&gConfigBusy, 0u, __ATOMIC_RELEASE);
     gSyncpt = syncpt;
     gQueue.reset(completed);
     __atomic_store_n(&gCompleted, completed, __ATOMIC_RELEASE);
@@ -226,9 +290,11 @@ int switch_vic_submit_owned(const TegraVICJob *jobs, uint32_t count, const Tegra
     return switch_vic_submit_checked(jobs, count, acquire, ownership, completion, context, fence);
 }
 
+namespace {
 int switch_vic_submit_checked(const TegraVICJob *jobs, uint32_t count, const TegraVICAcquire *acquire,
                               const SwitchVICOwnership &ownership, void (*completion)(void *, int), void *context,
-                              uint32_t *fence, SwitchVICEvents *events, switch_gpu_backing_token *written)
+                              uint32_t *fence, SwitchVICEvents *events, switch_gpu_backing_token *written,
+                              const SwitchVICStagedJob *staged)
 {
     auto *uses = ownership.uses;
     uint32_t useCount = ownership.useCount;
@@ -236,7 +302,7 @@ int switch_vic_submit_checked(const TegraVICJob *jobs, uint32_t count, const Teg
     const uint32_t leaseCount = ownership.leaseCount;
     if (!gLock)
         return -19;
-    if (!jobs || !count || count > kBatchMax || (useCount && !uses) ||
+    if ((!jobs && !staged) || (jobs && staged) || !count || count > kBatchMax || (useCount && !uses) ||
         (ownership.guardCount && (!ownership.guards || !useCount)) || (leaseCount && (!leases || !useCount)))
         return -22;
     // A job's output is a recorded write: it moves the allocation's host epoch, so the GPU's next reader invalidates its
@@ -247,11 +313,13 @@ int switch_vic_submit_checked(const TegraVICJob *jobs, uint32_t count, const Teg
     if (!writes)
         return -22;
     for (uint32_t j = 0; j < count; ++j) {
-        if (jobs[j].count > TEGRA_VIC_MAX_METHODS)
+        const uint32_t mcount = staged ? staged[j].methods.count : jobs[j].count;
+        const uint32_t *methods = staged ? staged[j].methods.method : jobs[j].method;
+        if (mcount > TEGRA_VIC_MAX_METHODS || (staged && staged[j].slot >= SwitchVICQueue::kSlots))
             return -22;
         uint32_t configs = 0;
-        for (uint32_t i = 0; i < jobs[j].count; ++i)
-            configs += jobs[j].method[i] == TEGRA_VIC_M_SET_CONFIG_STRUCT_OFFSET;
+        for (uint32_t i = 0; i < mcount; ++i)
+            configs += methods[i] == TEGRA_VIC_M_SET_CONFIG_STRUCT_OFFSET;
         if (configs != 1)
             return -22;
     }
@@ -259,6 +327,40 @@ int switch_vic_submit_checked(const TegraVICJob *jobs, uint32_t count, const Teg
     if (power.error)
         return power.error;
     SwitchVICDependencies dependencies;
+
+    struct ConfigGuard {
+        uint8_t slots[kBatchMax] = {};
+        uint32_t count = 0;
+        bool owned = false;
+
+        ~ConfigGuard()
+        {
+            if (owned)
+                switch_vic_config_release(slots, count);
+        }
+
+        void commit()
+        {
+            owned = false;
+        }
+    } configSlots;
+
+    if (staged) {
+        for (uint32_t j = 0; j < count; ++j)
+            configSlots.slots[j] = staged[j].slot;
+        configSlots.count = count;
+    } else {
+        uint8_t *vas[kBatchMax] = {};
+        if (switch_vic_config_reserve(count, configSlots.slots, vas)) {
+            configSlots.count = count;
+            configSlots.owned = true;
+            for (uint32_t j = 0; j < count; ++j) {
+                memcpy(vas[j], jobs[j].config, TEGRA_VIC_CONFIG_BYTES);
+                switch_dcache_clean_lines(vas[j], TEGRA_VIC_CONFIG_BYTES);
+            }
+            switch_dcache_sync();
+        }
+    }
 
     Results::Reservation outcome;
 
@@ -279,25 +381,50 @@ int switch_vic_submit_checked(const TegraVICJob *jobs, uint32_t count, const Teg
     const switch_gpu_backing_token *eventTokens = nullptr;
     const uint32_t eventCount = switch_vic_events_tokens(events, &eventTokens);
 retry:
-    if (const int error = outcome.renew()) {
-        SWITCH_VIC_REFUSED("result record");
-        return error;
-    }
     IOLockLock(gLock);
     while ((gSuspended || gQueue.count + count > SwitchVICQueue::kSlots ||
             __atomic_load_n(&gCancelling, __ATOMIC_ACQUIRE)) &&
-           !gFailed)
+           !gFailed) {
+        ++gCountWaiters;
         IOLockSleep(gLock, &gQueue.count, THREAD_UNINT);
+        --gCountWaiters;
+    }
     if (gFailed || !gQueue.canPublish(count)) {
         IOLockUnlock(gLock);
         return -19;
     }
+    if (!configSlots.count) {
+        uint8_t *vas[kBatchMax] = {};
+        while (!switch_vic_config_reserve(count, configSlots.slots, vas)) {
+            __atomic_fetch_add(&gConfigWaiters, 1u, __ATOMIC_SEQ_CST);
+            if (switch_vic_config_reserve(count, configSlots.slots, vas)) {
+                __atomic_fetch_sub(&gConfigWaiters, 1u, __ATOMIC_RELAXED);
+                break;
+            }
+            IOLockSleep(gLock, &gConfigBusy, THREAD_UNINT);
+            __atomic_fetch_sub(&gConfigWaiters, 1u, __ATOMIC_RELAXED);
+            if (gSuspended || gQueue.count + count > SwitchVICQueue::kSlots ||
+                __atomic_load_n(&gCancelling, __ATOMIC_ACQUIRE) || gFailed) {
+                IOLockUnlock(gLock);
+                goto retry;
+            }
+        }
+        configSlots.count = count;
+        configSlots.owned = true;
+        IOLockUnlock(gLock);
+        for (uint32_t j = 0; j < count; ++j) {
+            memcpy(vas[j], jobs[j].config, TEGRA_VIC_CONFIG_BYTES);
+            switch_dcache_clean_lines(vas[j], TEGRA_VIC_CONFIG_BYTES);
+        }
+        switch_dcache_sync();
+        goto retry;
+    }
     switch_gpu_backing_transaction transaction = {};
     uint32_t needed = 0;
     switch_gpu_backing_token token = {};
-    if (const int error = Results::prepare(outcome.value, gQueue.submitted + 1, gQueue.submitted + count, &token)) {
+    if (const int error = outcome.acquire(gQueue.submitted + 1, gQueue.submitted + count, &token)) {
         IOLockUnlock(gLock);
-        SWITCH_VIC_REFUSED("result token");
+        SWITCH_VIC_REFUSED(error == -12 ? "result record" : "result token");
         return error;
     }
     int error = 0;
@@ -419,12 +546,18 @@ retry:
         }
         goto retry;
     }
+    if (const int failed = dependencies.failed()) {
+        switch_gpu_backing_abort(&transaction);
+        IOLockUnlock(gLock);
+        SWITCH_VIC_REFUSED("failed GPU bridge");
+        return failed;
+    }
     uint32_t bridgeSyncpoint = 0, bridgeThreshold = 0;
     const bool bridged = dependencies.acquire(&bridgeSyncpoint, &bridgeThreshold);
     const uint32_t waits = (bridged ? 1 : 0) + (acquire ? 1 : 0) + producers.foreignCount(gSyncpt);
     uint32_t capacity = SWITCH_HOST1X_WAIT_WORDS * waits;
     for (uint32_t j = 0; j < count; ++j)
-        capacity += 2 + 3 * jobs[j].count;
+        capacity += 2 + 3 * (staged ? staged[j].methods.count : jobs[j].count);
     uint32_t *words = nullptr;
     if (const int reserved = switch_host1x_job_reserve(TEGRA_HOST1X_CHANNEL_VIC, capacity, &words)) {
         switch_gpu_backing_abort(&transaction);
@@ -458,17 +591,17 @@ retry:
             n += tegra_host1x_op_wait_syncpt(words + n, producers.tokens[i].queue,
                                              static_cast<uint32_t>(producers.tokens[i].value));
     for (uint32_t j = 0; j < count; ++j) {
-        const auto &job = jobs[j];
-        const uint64_t offset = static_cast<uint64_t>(gQueue.configurationSlot(j)) * kSwitchVICConfigStride;
-        memcpy(gConfigs.va + offset, job.config, TEGRA_VIC_CONFIG_BYTES);
-        switch_dcache_clean(gConfigs.va + offset, TEGRA_VIC_CONFIG_BYTES);
+        const uint32_t mcount = staged ? staged[j].methods.count : jobs[j].count;
+        const uint32_t *methods = staged ? staged[j].methods.method : jobs[j].method;
+        const uint32_t *values = staged ? staged[j].methods.value : jobs[j].value;
+        const uint64_t offset = static_cast<uint64_t>(configSlots.slots[j]) * kSwitchVICConfigStride;
         words[n++] = tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_VIC, 0, 0);
-        for (uint32_t i = 0; i < job.count; ++i) {
+        for (uint32_t i = 0; i < mcount; ++i) {
             words[n++] = tegra_host1x_op_incr(kThiMethod0 / 4, 2);
-            words[n++] = job.method[i] / 4;
-            words[n++] = job.method[i] == TEGRA_VIC_M_SET_CONFIG_STRUCT_OFFSET
+            words[n++] = methods[i] / 4;
+            words[n++] = methods[i] == TEGRA_VIC_M_SET_CONFIG_STRUCT_OFFSET
                              ? static_cast<uint32_t>((gConfigs.pa + offset) >> 8)
-                             : job.value[i];
+                             : values[i];
         }
         words[n++] = tegra_host1x_op_incr_syncpt(TEGRA_HOST1X_COND_OP_DONE, gSyncpt);
     }
@@ -481,12 +614,16 @@ retry:
     if (!status) {
         uint32_t boundUs = 0;
         for (uint32_t j = 0; j < count; ++j) {
-            boundUs += bound(jobs[j], acquire != nullptr || needed != 0);
+            const uint64_t pixels = staged ? staged[j].methods.pixels : jobs[j].pixels;
+            boundUs += boundPixels(pixels, acquire != nullptr || needed != 0);
+            const uint32_t qslot = gQueue.tail();
+            gConfigSlot[qslot] = configSlots.slots[j];
             gQueue.publish({0, started, j + 1 == count ? completion : nullptr, context,
                             j + 1 == count ? dependencies.takeBridge() : nullptr,
                             j + 1 == count ? batch.value : nullptr, j + 1 == count ? outcome.take() : nullptr,
                             count - 1 - j});
         }
+        configSlots.commit();
         if (batch.value)
             switch_gpu_event_waits_retain(batch.value);
         if (useCount)
@@ -505,7 +642,8 @@ retry:
                 Stages::start(end, gSyncpt, static_cast<uint32_t>(last.fence), bridge != nullptr,
                               last.semantics != nullptr, boundUs, producers, ahead, bridgeSyncpoint, bridgeThreshold))
             Retirement::unarmed(end, error);
-        IOLockWakeup(gLock, &gQueue.count, false);
+        if (gCountWaiters)
+            IOLockWakeup(gLock, &gQueue.count, false);
     } else if (useCount) {
         switch_gpu_backing_abort(&transaction);
     }
@@ -515,12 +653,30 @@ retry:
             Retirement::unarmed(end, error);
     return status;
 }
+}  // namespace
+
+int switch_vic_submit_checked(const TegraVICJob *jobs, uint32_t count, const TegraVICAcquire *acquire,
+                              const SwitchVICOwnership &ownership, void (*completion)(void *, int), void *context,
+                              uint32_t *fence, SwitchVICEvents *events, switch_gpu_backing_token *written)
+{
+    return switch_vic_submit_checked(jobs, count, acquire, ownership, completion, context, fence, events, written,
+                                     nullptr);
+}
 
 int switch_vic_submit_checked(const TegraVICJob *jobs, uint32_t count, const TegraVICAcquire *acquire,
                               const SwitchVICOwnership &ownership, void (*completion)(void *, int), void *context,
                               uint32_t *fence, SwitchVICEvents *events)
 {
-    return switch_vic_submit_checked(jobs, count, acquire, ownership, completion, context, fence, events, nullptr);
+    return switch_vic_submit_checked(jobs, count, acquire, ownership, completion, context, fence, events, nullptr,
+                                     nullptr);
+}
+
+int switch_vic_submit_staged(const SwitchVICStagedJob *jobs, uint32_t count, const TegraVICAcquire *acquire,
+                             const SwitchVICOwnership &ownership, void (*completion)(void *, int), void *context,
+                             uint32_t *fence, SwitchVICEvents *events, switch_gpu_backing_token *written)
+{
+    return switch_vic_submit_checked(nullptr, count, acquire, ownership, completion, context, fence, events, written,
+                                     jobs);
 }
 
 // switch_gpu_backing_token_filter_status for VIC: the job's own stage words, no lock. Its slot stays the job's until
@@ -557,8 +713,11 @@ bool switch_vic_jobs_park(bool drain)
     const bool parked = drain || (!gQueue.count && !__atomic_load_n(&gCancelling, __ATOMIC_ACQUIRE));
     if (parked)
         gSuspended = true;
-    while (parked && gQueue.count)
+    while (parked && gQueue.count) {
+        ++gCountWaiters;
         IOLockSleep(gLock, &gQueue.count, THREAD_UNINT);
+        --gCountWaiters;
+    }
     IOLockUnlock(gLock);
     return parked;
 }
@@ -590,6 +749,23 @@ bool switch_vic_jobs_falcon_failed()
         return false;
     switch_vic_job_stalled(fence, TEGRA_HOST1X_EFALCON, submittedUs ? switch_now_us() - submittedUs : 0, 0);
     return true;
+}
+
+bool switch_vic_job_background(uint32_t fence)
+{
+    IOLockLock(gLock);
+    bool found = false;
+    for (uint32_t i = 0; i < gQueue.count && !found; ++i) {
+        const uint32_t slot = (gQueue.head + i) % SwitchVICQueue::kSlots;
+        if (static_cast<uint32_t>(gQueue.jobs[slot].fence) != fence)
+            continue;
+        uint8_t *config = gConfigs.va + static_cast<uint64_t>(gConfigSlot[slot]) * kSwitchVICConfigStride;
+        TEGRA_VIC_SET(config, TEGRA_VIC_SLOTS, SLOT_ENABLE, 0);
+        switch_dcache_clean(config, TEGRA_VIC_CONFIG_BYTES);
+        found = true;
+    }
+    IOLockUnlock(gLock);
+    return found;
 }
 
 extern "C" bool switch_vic_host1x_cancelled(uint32_t syncpt, uint32_t reached)

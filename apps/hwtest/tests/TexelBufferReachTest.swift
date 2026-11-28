@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// An R8Uint texel buffer of 2^27 + 1 texels, one past the device's maxTextureBufferWidth answer (NVK's 2^27), made by

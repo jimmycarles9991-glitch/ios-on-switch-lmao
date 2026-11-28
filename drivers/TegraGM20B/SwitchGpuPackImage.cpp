@@ -2,6 +2,7 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOMemoryDescriptor.h>
+#include <kern/clock.h>
 #include <kern/thread.h>
 #include <string.h>
 #include <sys/errno.h>
@@ -17,21 +18,18 @@
 #ifndef O_NOFOLLOW_ANY
 #define O_NOFOLLOW_ANY 0x20000000
 #endif
-#ifndef MAXPRI_THROTTLE
-#define MAXPRI_THROTTLE 4
-#endif
-#ifndef IOPOL_THROTTLE
-#define IOPOL_THROTTLE 3
-#endif
+
+// The boot replay's class in the SD driver (big/boot: kernel/switch/vm/prefetch_vm.c switch_vm_prefetch_is_replay_thread,
+// SwitchSD's kSwitchSdReplayClass, one class below tier-0 demand reads): `thread`'s reads join it while `on`. The kernel's
+// static link resolves no undefined weak reference, so this default stands where big/boot's definition is absent, and the
+// reads keep their own class.
+extern "C" __attribute__((weak)) void switch_vm_prefetch_replay_thread(void *, int)
+{
+}
 
 extern "C" {
 // NOLINTNEXTLINE(readability-redundant-declaration): not declared in every kernel config's headers
-kern_return_t kernel_thread_start_priority(thread_continue_t continuation, void *parameter,
-					   integer_t priority, thread_t *new_thread);
-// NOLINTNEXTLINE(readability-redundant-declaration)
 kern_return_t thread_terminate(thread_t thread);
-// NOLINTNEXTLINE(readability-redundant-declaration)
-void throttle_set_thread_io_policy(int policy);
 // NOLINTNEXTLINE(readability-redundant-declaration)
 vfs_context_t vfs_context_kernel(void);
 }
@@ -42,9 +40,7 @@ struct PackImageStore {
 	IOLock *lock;
 	SwitchGpuPackState state;
 	bool buildActive;
-	bool warmRequested;
-	bool warmStarted;
-	bool warmActive;
+	uint8_t bootConditions;  // kVolumesMounted | kGpuUsable, as each has happened
 #ifdef SWITCH_GPU_PACK_IMAGE_HOST_TEST
 	uint32_t refusedCount;
 #endif
@@ -54,6 +50,12 @@ struct PackImageStore {
 	uint32_t npages;
 	tgm_mem *mem;
 	IOMemoryDescriptor *cpuMemory;
+	// The stream: its phase (kPhase*, read without the lock at each job's submission), the word it raises to the chunks
+	// landed (in the kernel's fence page, every address space's fence view), that word's offset in the fence pool, and
+	// the chunks it ends at
+	uint32_t phase;
+	volatile uint32_t *frontier;
+	uint32_t frontierPool, chunks;
 #if TGM_STATS
 	char firstProc[17];
 #endif
@@ -61,6 +63,13 @@ struct PackImageStore {
 
 PackImageStore gPack = {};
 volatile uint32_t gShutdown = 0;
+
+constexpr uint8_t kVolumesMounted = 1, kGpuUsable = 2;
+constexpr uint32_t kPhaseNone = 0, kPhaseStreaming = 1, kPhaseComplete = 2, kPhaseFailed = 3;
+#if TGM_STATS
+uint64_t gGatedFirstNs = 0;
+uint32_t gGatedJobs = 0;
+#endif
 
 IOLock *packLock()
 {
@@ -76,29 +85,6 @@ IOLock *packLock()
 		return expected;
 	}
 	return made;
-}
-
-void warmThread(void *, wait_result_t);
-
-void maybeStartWarmLocked(IOLock *lock)
-{
-	if (!gPack.warmRequested || gPack.warmStarted || gPack.state != SwitchGpuPackState::Ready ||
-	    switch_gpu_pack_shutdown_requested())
-		return;
-	gPack.warmStarted = true;
-	gPack.warmActive = true;
-	IOLockUnlock(lock);
-	thread_t worker = nullptr;
-	const kern_return_t kr =
-		kernel_thread_start_priority(warmThread, nullptr, MAXPRI_THROTTLE, &worker);
-	if (kr == KERN_SUCCESS) {
-		thread_deallocate(worker);
-		IOLockLock(lock);
-		return;
-	}
-	IOLockLock(lock);
-	gPack.warmActive = false;
-	IOLockWakeup(lock, &gPack.warmActive, false);
 }
 
 void finishRefused(IOLock *lock, const char *why, int err, bool silent)
@@ -177,40 +163,42 @@ void buildThread(void *, wait_result_t)
 		thread_terminate(current_thread());
 		return;
 	}
-	const bool streamed = switch_gpu_pack_stream_tier0(vp, heapOff, tier0Bytes, pas, chunkCpu,
-							   &why, &err, &stats);
-	vnode_close(vp, FREAD, ctx);
-	IODelete(chunkCpu, void *, chunkCount);
-	if (!streamed) {
-		multi->complete(kIODirectionInOut);
-		multi->release();
-		IODelete(pas, uint64_t, totalGpuPages);
-		const bool shuttingDown = switch_gpu_pack_shutdown_requested();
-		finishRefused(lock, why ? why : "stream failed", err, shuttingDown);
-		thread_terminate(current_thread());
-		return;
-	}
 	tgm_mem *mem = nullptr;
+	volatile uint32_t *frontier = nullptr;
+	uint64_t frontierPage = 0;
+	uint32_t frontierInPage = 0;
 	err = tgm_mem_new(nullptr, pas, totalGpuPages, &mem);
+	if (err == 0 && mem)
+		err = tgm_fence_kernel(TGM_FENCE_KERNEL_PACK, &frontier, &frontierPage,
+				       &frontierInPage);
 	if (err != 0 || !mem) {
+		const char *refused = mem ? "no frontier word" : "tgm_mem_new failed";
+		vnode_close(vp, FREAD, ctx);
+		IODelete(chunkCpu, void *, chunkCount);
+		if (mem)
+			tgm_mem_del(&mem);
 		multi->complete(kIODirectionInOut);
 		multi->release();
 		IODelete(pas, uint64_t, totalGpuPages);
-		finishRefused(lock, "tgm_mem_new failed", err, false);
+		finishRefused(lock, refused, err, false);
 		thread_terminate(current_thread());
 		return;
 	}
+	switch_gpu_pack_raise(frontier, 0);
+	// ahead of use, before launchd: below launchd's and its daemons' demand page-ins, as the boot replay's reads are
+	switch_vm_prefetch_replay_thread(current_thread(), 1);
+	const bool tablesRead = switch_gpu_pack_prefetch_tables(vp, hdr, ctx);
 	IOLockLock(lock);
 	if (switch_gpu_pack_shutdown_requested()) {
-		gPack.state = SwitchGpuPackState::Refused;
-		gPack.buildActive = false;
-		IOLockWakeup(lock, &gPack.state, false);
-		IOLockWakeup(lock, &gPack.buildActive, false);
 		IOLockUnlock(lock);
+		switch_vm_prefetch_replay_thread(current_thread(), 0);
+		vnode_close(vp, FREAD, ctx);
+		IODelete(chunkCpu, void *, chunkCount);
 		tgm_mem_del(&mem);
 		multi->complete(kIODirectionInOut);
 		multi->release();
 		IODelete(pas, uint64_t, totalGpuPages);
+		finishRefused(lock, "shutdown", ECANCELED, true);
 		thread_terminate(current_thread());
 		return;
 	}
@@ -220,67 +208,159 @@ void buildThread(void *, wait_result_t)
 	gPack.npages = totalGpuPages;
 	gPack.mem = mem;
 	gPack.cpuMemory = multi;
+	gPack.frontier = frontier;
+	gPack.frontierPool = tgm_fence_offset(frontier);
+	gPack.chunks = uint32_t((tier0Bytes + kSwitchGpuPackTransferBytes - 1) /
+				kSwitchGpuPackTransferBytes);
+	__atomic_store_n(&gPack.phase, kPhaseStreaming, __ATOMIC_RELEASE);
 	gPack.state = SwitchGpuPackState::Ready;
-	gPack.buildActive = false;
 #if TGM_STATS
+	const uint64_t publishedNs = switch_gpu_pack_now_ns();
 	char firstProc[sizeof(gPack.firstProc)] = {};
 	memcpy(firstProc, gPack.firstProc, sizeof(firstProc));
 #endif
 	IOLockWakeup(lock, &gPack.state, false);
+	IOLockUnlock(lock);
+
+	const bool streamed = switch_gpu_pack_stream_tier0(vp, heapOff, tier0Bytes, pas, chunkCpu,
+							   &why, &err, &stats, frontier);
+	switch_vm_prefetch_replay_thread(current_thread(), 0);
+	vnode_close(vp, FREAD, ctx);
+	IODelete(chunkCpu, void *, chunkCount);
+	const bool shuttingDown = switch_gpu_pack_shutdown_requested();
+	IOLockLock(lock);
+	__atomic_store_n(&gPack.phase, streamed ? kPhaseComplete : kPhaseFailed, __ATOMIC_RELEASE);
+	if (!streamed) {
+		gPack.state = SwitchGpuPackState::Refused;
+#ifdef SWITCH_GPU_PACK_IMAGE_HOST_TEST
+		if (!shuttingDown)
+			++gPack.refusedCount;
+#endif
+	}
+	IOLockWakeup(lock, &gPack.state, false);
+	IOLockUnlock(lock);
+	if (!streamed) {
+		if (!shuttingDown)
+			IOLog("tegra-gm20b: pack image: its stream stopped after %u of %u chunks "
+			      "(%s, err %d): the work "
+			      "waiting on it fails\n",
+			      *frontier, gPack.chunks, why ? why : "stream failed", err);
+		// While buildActive holds shutdown's wait, so no channel is recovered after the GPU's power-off began
+		tgm_acquire_recover_failed("the pack image's stream stopped");
+	}
+	IOLockLock(lock);
+	gPack.buildActive = false;
 	IOLockWakeup(lock, &gPack.buildActive, false);
-	maybeStartWarmLocked(lock);
 	IOLockUnlock(lock);
 #if TGM_STATS
-	const uint64_t totalMs = (switch_gpu_pack_now_ns() - startedNs) / 1000000ULL;
-	const uint64_t copyMs = stats.copyNs / 1000000ULL;
-	const uint64_t bigBytes =
-		switch_gpu_mapping_big_bytes(pas, totalGpuPages, TGM_PACK_WINDOW_VA, 0, tier0Bytes);
-	IOLog("tegra-gm20b: pack image: tier 0 %llu MiB built in %llu ms for %s (pagein requests "
-	      "%u, copy %llu ms, big-page bytes %llu)\n",
-	      (unsigned long long)(tier0Bytes >> 20), (unsigned long long)totalMs, firstProc,
-	      stats.pageinReqs, (unsigned long long)copyMs, (unsigned long long)bigBytes);
+	const uint64_t endNs = switch_gpu_pack_now_ns();
+	const uint64_t gatedNs = __atomic_load_n(&gGatedFirstNs, __ATOMIC_ACQUIRE);
+	IOLog("tegra-gm20b: pack image: tier 0 %llu MiB for %s, open %llu ms after the build began "
+	      "(tables %s), "
+	      "streamed %llu ms after that (pagein requests %u, copy %llu ms, big-page bytes "
+	      "%llu); %u jobs "
+	      "waited on it on the GPU, the first submitted %llu ms before its end\n",
+	      (unsigned long long)(tier0Bytes >> 20), firstProc,
+	      (unsigned long long)((publishedNs - startedNs) / 1000000ULL),
+	      tablesRead ? "read" : "unread",
+	      (unsigned long long)((endNs - publishedNs) / 1000000ULL), stats.pageinReqs,
+	      (unsigned long long)(stats.copyNs / 1000000ULL),
+	      (unsigned long long)switch_gpu_mapping_big_bytes(pas, totalGpuPages,
+							       TGM_PACK_WINDOW_VA, 0, tier0Bytes),
+	      __atomic_load_n(&gGatedJobs, __ATOMIC_RELAXED),
+	      (unsigned long long)(gatedNs && gatedNs < endNs ? (endNs - gatedNs) / 1000000ULL
+							      : 0));
+#else
+	(void)tablesRead;
 #endif
 	thread_terminate(current_thread());
 }
 
-void warmThread(void *, wait_result_t)
+// Under the lock: a store no one has asked for becomes Building, its build named for `who`; whether the caller starts it
+bool claimBuild(const char *who)
 {
-	throttle_set_thread_io_policy(IOPOL_THROTTLE);
-	IOLock *lock = packLock();
+	if (gPack.state != SwitchGpuPackState::None)
+		return false;
+	gPack.state = SwitchGpuPackState::Building;
+	gPack.buildActive = true;
 #if TGM_STATS
-	const uint64_t startedNs = switch_gpu_pack_now_ns();
+	if (who)
+		strlcpy(gPack.firstProc, who, sizeof(gPack.firstProc));
+#else
+	(void)who;
 #endif
-	SwitchGpuPackHeader hdr = {};
-	uint64_t fileSize = 0;
-	IOLockLock(lock);
-	const bool valid =
-		gPack.state == SwitchGpuPackState::Ready && !switch_gpu_pack_shutdown_requested();
-	if (valid) {
-		hdr = gPack.header;
-		fileSize = gPack.fileSize;
-	}
-	IOLockUnlock(lock);
-	SwitchGpuPackWarmStats stats = {};
-	if (valid)
-		switch_gpu_pack_warm_tier1(&hdr, fileSize, &stats);
-#if TGM_STATS
-	if (valid && !switch_gpu_pack_shutdown_requested()) {
-		const uint64_t elapsedMs = (switch_gpu_pack_now_ns() - startedNs) / 1000000ULL;
-		IOLog("tegra-gm20b: pack warm: %llu MiB of tier 1 read in %llu.%01llu s "
-		      "(throttled), %llu MiB already resident\n",
-		      (unsigned long long)(stats.readBytes >> 20),
-		      (unsigned long long)(elapsedMs / 1000ULL),
-		      (unsigned long long)((elapsedMs % 1000ULL) / 100ULL),
-		      (unsigned long long)(stats.residentBytes >> 20));
-	}
-#endif
-	IOLockLock(lock);
-	gPack.warmActive = false;
-	IOLockWakeup(lock, &gPack.warmActive, false);
-	IOLockUnlock(lock);
-	thread_terminate(current_thread());
+	return true;
 }
+
+// For a store the caller claimed: its build's thread, or the store refused
+void startBuild(IOLock *lock)
+{
+	thread_t worker = nullptr;
+	const kern_return_t kr = kernel_thread_start(buildThread, nullptr, &worker);
+	if (kr != KERN_SUCCESS) {
+		finishRefused(lock, "kernel_thread_start failed", int(kr), false);
+		return;
+	}
+	thread_deallocate(worker);
+}
+
+// The build needs pack.bin reachable and the copy engine: the second of the two to happen starts it, before any client
+// opens a device, so the render server's first acquire finds it under way or Ready instead of starting it
+void bootCondition(uint8_t condition)
+{
+	IOLock *lock = packLock();
+	if (!lock)
+		return;
+	IOLockLock(lock);
+	gPack.bootConditions |= condition;
+	const bool start = gPack.bootConditions == (kVolumesMounted | kGpuUsable) &&
+			   !switch_gpu_pack_shutdown_requested() && claimBuild("boot");
+	IOLockUnlock(lock);
+	if (start)
+		startBuild(lock);
+}
+
 }  // namespace
+
+extern "C" void switch_gpu_pack_volumes_mounted(void)
+{
+	bootCondition(kVolumesMounted);
+}
+
+void switch_gpu_pack_gpu_usable(void)
+{
+	bootCondition(kGpuUsable);
+}
+
+extern "C" int switch_gpu_pack_job_wait(uint32_t *pool, uint32_t *payload)
+{
+	switch (__atomic_load_n(&gPack.phase, __ATOMIC_ACQUIRE)) {
+	case kPhaseStreaming:
+		*pool = gPack.frontierPool;
+		*payload = gPack.chunks;
+#if TGM_STATS
+		{
+			uint64_t none = 0;
+			__atomic_compare_exchange_n(&gGatedFirstNs, &none, switch_gpu_pack_now_ns(),
+						    false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+			__atomic_fetch_add(&gGatedJobs, 1u, __ATOMIC_RELAXED);
+		}
+#endif
+		return 1;
+	case kPhaseFailed:
+		return -1;
+	case kPhaseNone:
+	case kPhaseComplete:
+	default:
+		return 0;
+	}
+}
+
+extern "C" int switch_gpu_pack_failed_word(uint32_t pool)
+{
+	return __atomic_load_n(&gPack.phase, __ATOMIC_ACQUIRE) == kPhaseFailed &&
+	       pool == gPack.frontierPool;
+}
 
 bool switch_gpu_pack_shutdown_requested(void)
 {
@@ -308,23 +388,9 @@ IOReturn switch_gpu_pack_image_acquire(const char *procName, SwitchGpuPackImageV
 		IOLockUnlock(lock);
 		return kIOReturnSuccess;
 	}
-	if (gPack.state == SwitchGpuPackState::None) {
-		gPack.state = SwitchGpuPackState::Building;
-		gPack.buildActive = true;
-#if TGM_STATS
-		if (procName)
-			strlcpy(gPack.firstProc, procName, sizeof(gPack.firstProc));
-#else
-		(void)procName;
-#endif
+	if (claimBuild(procName)) {
 		IOLockUnlock(lock);
-		thread_t worker = nullptr;
-		const kern_return_t kr = kernel_thread_start(buildThread, nullptr, &worker);
-		if (kr != KERN_SUCCESS) {
-			finishRefused(lock, "kernel_thread_start failed", int(kr), false);
-			return kIOReturnSuccess;
-		}
-		thread_deallocate(worker);
+		startBuild(lock);
 		IOLockLock(lock);
 	}
 	if (gPack.state == SwitchGpuPackState::Building) {
@@ -355,11 +421,42 @@ IOReturn switch_gpu_pack_image_acquire(const char *procName, SwitchGpuPackImageV
 	return kIOReturnSuccess;
 }
 
+namespace
+{
+uint64_t gPackCpuWiredBytes = 0;
+
+bool reserveCpuWireBytes(uint64_t bytes)
+{
+	uint64_t cur = __atomic_load_n(&gPackCpuWiredBytes, __ATOMIC_RELAXED);
+	for (;;) {
+		if (bytes > kSwitchGpuPackMaxCpuWireBytes ||
+		    cur > kSwitchGpuPackMaxCpuWireBytes - bytes)
+			return false;
+		if (__atomic_compare_exchange_n(&gPackCpuWiredBytes, &cur, cur + bytes, false,
+						__ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+			return true;
+	}
+}
+
+void releaseCpuWireBytes(uint64_t bytes)
+{
+	if (bytes)
+		__atomic_fetch_sub(&gPackCpuWiredBytes, bytes, __ATOMIC_RELEASE);
+}
+}  // namespace
+
 IOReturn switch_gpu_pack_client_wire_cpu(task_t task, const TegraGM20BAbiPackCpuRange *ranges,
 					 uint32_t count, IOMemoryDescriptor **outDescriptors,
 					 uint64_t *outBytes)
 {
 	uint64_t total = 0;
+	for (uint32_t i = 0; i < count; ++i) {
+		if (ranges[i].bytes > kSwitchGpuPackMaxCpuWireBytes - total)
+			return kIOReturnNoResources;
+		total += ranges[i].bytes;
+	}
+	if (!reserveCpuWireBytes(total))
+		return kIOReturnNoResources;
 	for (uint32_t i = 0; i < count; ++i) {
 		IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange(
 			ranges[i].address, ranges[i].bytes, kIODirectionOut, task);
@@ -371,10 +468,10 @@ IOReturn switch_gpu_pack_client_wire_cpu(task_t task, const TegraGM20BAbiPackCpu
 				outDescriptors[j]->release();
 				outDescriptors[j] = nullptr;
 			}
+			releaseCpuWireBytes(total);
 			return kIOReturnBadArgument;
 		}
 		outDescriptors[i] = md;
-		total += ranges[i].bytes;
 	}
 	if (outBytes)
 		*outBytes = total;
@@ -393,6 +490,8 @@ void switch_gpu_pack_client_release_cpu(SwitchGpuPackClient *client)
 		}
 	}
 	client->cpuWiredCount = 0;
+	releaseCpuWireBytes(client->cpuWiredBytes);
+	client->cpuWiredBytes = 0;
 }
 
 void switch_gpu_pack_client_unmap_gpu(tgm_vm *vm, SwitchGpuPackClient *client)
@@ -403,20 +502,7 @@ void switch_gpu_pack_client_unmap_gpu(tgm_vm *vm, SwitchGpuPackClient *client)
 	client->gpuBytes = 0;
 }
 
-extern "C" void switch_gpu_boot_complete(void)
-{
-	if (switch_gpu_pack_shutdown_requested())
-		return;
-	IOLock *lock = packLock();
-	if (!lock)
-		return;
-	IOLockLock(lock);
-	gPack.warmRequested = true;
-	maybeStartWarmLocked(lock);
-	IOLockUnlock(lock);
-}
-
-extern "C" void switch_gpu_pack_shutdown(void)
+extern "C" void switch_gpu_pack_shutdown_request(void)
 {
 	// Dekker seq_cst pair with packLock(): either shutdown observes the initialized lock and
 	// drains active workers, or any late caller observes gShutdown before launching a worker.
@@ -428,10 +514,32 @@ extern "C" void switch_gpu_pack_shutdown(void)
 	if (gPack.state == SwitchGpuPackState::None)
 		gPack.state = SwitchGpuPackState::Refused;
 	IOLockWakeup(lock, &gPack.state, false);
-	while (gPack.buildActive)
-		IOLockSleep(lock, &gPack.buildActive, THREAD_UNINT);
-	while (gPack.warmActive)
-		IOLockSleep(lock, &gPack.warmActive, THREAD_UNINT);
+	IOLockUnlock(lock);
+}
+
+// The build thread checks gShutdown before each 1 MiB read, each copy and each table read, so a stop waits on at most
+// one of those. A thread still running this long into shutdown is on one that never completed, and release kernels have
+// no other shutdown watchdog.
+constexpr uint32_t kShutdownWaitSeconds = 20;
+
+extern "C" void switch_gpu_pack_shutdown(void)
+{
+	switch_gpu_pack_shutdown_request();
+	IOLock *lock = __atomic_load_n(&gPack.lock, __ATOMIC_SEQ_CST);
+	if (!lock)
+		return;
+	uint64_t deadline = 0;
+	clock_interval_to_deadline(kShutdownWaitSeconds, NSEC_PER_SEC, &deadline);
+	IOLockLock(lock);
+	while (gPack.buildActive) {
+		if (IOLockSleepDeadline(lock, &gPack.buildActive, deadline, THREAD_UNINT) ==
+			    THREAD_TIMED_OUT &&
+		    gPack.buildActive)
+			panic("tegra-gm20b: pack image: the build thread is still running %u s "
+			      "into shutdown: a read or a "
+			      "copy never completed",
+			      kShutdownWaitSeconds);
+	}
 	IOLockUnlock(lock);
 }
 
@@ -455,22 +563,12 @@ void switch_gpu_pack_image_reset_for_test(void)
 		gPack.lock = nullptr;
 	}
 	gPack = {};
+	__atomic_store_n(&gPackCpuWiredBytes, 0u, __ATOMIC_SEQ_CST);
 	__atomic_store_n(&gShutdown, 0u, __ATOMIC_SEQ_CST);
 }
 
 uint32_t switch_gpu_pack_image_refused_count_for_test(void)
 {
 	return gPack.refusedCount;
-}
-
-void switch_gpu_pack_image_wait_warm_for_test(void)
-{
-	IOLock *lock = __atomic_load_n(&gPack.lock, __ATOMIC_SEQ_CST);
-	if (!lock)
-		return;
-	IOLockLock(lock);
-	while (gPack.warmActive)
-		IOLockSleep(lock, &gPack.warmActive, THREAD_UNINT);
-	IOLockUnlock(lock);
 }
 #endif

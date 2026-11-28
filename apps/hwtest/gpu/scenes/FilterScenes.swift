@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// generateMipmaps on power-of-two textures, every level against a 2x2 box filter of the level above as stored (in

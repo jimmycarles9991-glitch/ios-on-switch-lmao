@@ -198,13 +198,16 @@ bool SwitchMetalCommandPlan::record(const Cmd &c, const uint64_t *extra, size_t 
         }
         operation.uses = renderStates.own(draw.state).uses;
         if (encoder_ == OpRender) {
+            SwitchMetalPlanBegin &enc = begins_.own(operations_.own(encoderBegin_).payload);
+            if (!renderStates.own(draw.state).usesFinal)
+                ++enc.unfinalDraws;
             if (draw.count && draw.instances) {
                 const uint32_t state = renderStates.own(draw.state).raster;
                 // a raster snapshot is captured after every one before it: a state other than the last group's is new
                 if (lastRasterGroup_ == gm20b::kNoSnapshot || rasterGroups_.own(lastRasterGroup_).state != state) {
                     lastRasterGroup_ = uint32_t(rasterGroups_.size());
                     rasterGroups_.push_back({state, 0});
-                    ++begins_.own(operations_.own(encoderBegin_).payload).rasterCount;
+                    ++enc.rasterCount;
                 }
                 ++rasterGroups_.own(lastRasterGroup_).draws;
             }
@@ -274,6 +277,13 @@ bool SwitchMetalCommandPlan::record(const Cmd &c, const uint64_t *extra, size_t 
             operation.uses = kernelStates.own(control.compute).uses;
         }
         operation.payload = append(controls_, control);
+        if (encoder_ == OpRender) {
+            SwitchMetalPlanBegin &enc = begins_.own(operations_.own(encoderBegin_).payload);
+            if (c.op == OpWaitFence)
+                enc.hasWaitFence = true;
+            if (c.op != OpBarrier)
+                enc.hasNonDraw = true;
+        }
         if (c.op == OpUse || c.op == OpKernelUse) {
             const uint32_t usage = c.op == OpUse ? c.a : uint32_t(c.c);
             operation.uses = saveUses(
@@ -334,10 +344,60 @@ void SwitchMetalCommandPlan::setRenderUses(uint32_t state, const std::vector<gm2
     applyRenderUses(state, saveUses(uses));
 }
 
+void SwitchMetalCommandPlan::recordDraw(uint8_t primitive, uint32_t first, uint32_t count, uint32_t instances,
+                                        uint32_t baseInstance, bool resolvesUses)
+{
+    const uint32_t stateIndex = captureRender(!resolvesUses);
+    const auto &stateRef = renderStates.own(stateIndex);
+    SwitchMetalPlanOperation operation;
+    operation.op = OpDraw;
+    operation.uses = stateRef.uses;
+    if (encoder_ == OpRender) {
+        SwitchMetalPlanBegin &enc = begins_.own(operations_.own(encoderBegin_).payload);
+        if (!stateRef.usesFinal)
+            ++enc.unfinalDraws;
+        if (count && instances) {
+            const uint32_t rasterIndex = stateRef.raster;
+            if (lastRasterGroup_ == gm20b::kNoSnapshot || rasterGroups_.own(lastRasterGroup_).state != rasterIndex) {
+                lastRasterGroup_ = uint32_t(rasterGroups_.size());
+                rasterGroups_.push_back({rasterIndex, 0});
+                ++enc.rasterCount;
+            }
+            ++rasterGroups_.own(lastRasterGroup_).draws;
+        }
+    } else if (encoder_ != OpEnd && recordingError_ == SwitchMetalPlanError::None) {
+        recordingError_ = SwitchMetalPlanError::CommandAfterOtherWork;
+    }
+    const uint32_t payload = static_cast<uint32_t>(draws_.size());
+    SwitchMetalPlanDraw *draw = draws_.emplaceUninit();
+    draw->state = stateIndex;
+    draw->first = first;
+    draw->count = count;
+    draw->instances = instances;
+    draw->baseInstance = baseInstance;
+    draw->baseVertex = 0;
+    draw->indices = nullptr;
+    draw->indexOffset = 0;
+    draw->arguments = nullptr;
+    draw->argumentOffset = 0;
+    draw->primitive = primitive;
+    draw->indexType = 0;
+    draw->patches = gm20b::kNoSnapshot;
+    operation.payload = payload;
+    operations_.push_back(operation);
+}
+
 void SwitchMetalCommandPlan::applyRenderUses(uint32_t state, uint32_t span)
 {
-    renderStates.own(state).uses = span;
-    renderStates.own(state).usesFinal = true;
+    auto &ref = renderStates.own(state);
+    const bool wasUnfinal = !ref.usesFinal;
+    ref.uses = span;
+    ref.usesFinal = true;
+    if (wasUnfinal && encoder_ == OpRender) {
+        auto &enc = begins_.own(operations_.own(encoderBegin_).payload);
+        if (enc.unfinalDraws)
+            --enc.unfinalDraws;
+    }
     const SwitchMetalPlanDraw &last = draws_.own(operations_.back().payload);
     operations_.back().uses = drawUses(span, last.indices, last.arguments);
 }
@@ -484,6 +544,48 @@ void SwitchMetalCommandPlan::clear()
     resourceFacts_.clear();
     drawUseSpans_.clear();
     kernelUseSpans_.clear();
+}
+
+void SwitchMetalCommandPlan::swapClean(SwitchMetalCommandPlan &other) noexcept
+{
+    operations_.swap(other.operations_);
+    begins_.swap(other.begins_);
+    draws_.swap(other.draws_);
+    rasterGroups_.swap(other.rasterGroups_);
+    dispatches_.swap(other.dispatches_);
+    patches_.swap(other.patches_);
+    transfers_.swap(other.transfers_);
+    controls_.swap(other.controls_);
+    events_.swap(other.events_);
+    uses_.swap(other.uses_);
+    useSpans_.swap(other.useSpans_);
+    ranges_.swap(other.ranges_);
+    rangeIndex_.swap(other.rangeIndex_);
+    resourceFacts_.swap(other.resourceFacts_);
+    spanMarks_.swap(other.spanMarks_);
+    std::swap(spanStamp_, other.spanStamp_);
+    mergedUses_.swap(other.mergedUses_);
+    mergedPipelines_.swap(other.mergedPipelines_);
+    mergedVariants_.swap(other.mergedVariants_);
+    mergedComputes_.swap(other.mergedComputes_);
+    usePositions_.swap(other.usePositions_);
+    drawUseSpans_.swap(other.drawUseSpans_);
+    kernelUseSpans_.swap(other.kernelUseSpans_);
+    mergeUses_.swap(other.mergeUses_);
+    buildUses_.swap(other.buildUses_);
+    recordUses_.swap(other.recordUses_);
+    for (size_t i = 0; i < 3; ++i)
+        buffers[i].swapClean(other.buffers[i]);
+    for (size_t i = 0; i < 2; ++i)
+        textures[i].swapClean(other.textures[i]);
+    kernelTextures.swapClean(other.kernelTextures);
+    for (size_t i = 0; i < 3; ++i)
+        samplers[i].swapClean(other.samplers[i]);
+    raster.swapClean(other.raster);
+    kernel.swapClean(other.kernel);
+    renderStates.swap(other.renderStates);
+    kernelStates.swap(other.kernelStates);
+    viewArrays.swap(other.viewArrays);
 }
 
 void SwitchMetalCommandPlan::forgetRecentRenderUses()

@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// The copy engine in and out of a no-copy ASTC 4x4 texture that is its caller's memory (gpu.astc.layouts' image at a

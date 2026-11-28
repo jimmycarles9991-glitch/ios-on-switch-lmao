@@ -30,6 +30,7 @@ struct switch_gpu_backing_access {
 
 struct switch_gpu_backing {
 	switch_gpu_backing *next;
+	switch_gpu_backing *surface_next;
 	switch_gpu_backing *retiring_next, *expiry_next, *expiry_prev;
 	IOLock *lock;
 	uint64_t id, generation, content, host_epoch, host_visible_epoch;
@@ -70,8 +71,6 @@ struct switch_gpu_backing {
 	switch_gpu_backing *promise_sleep_next, *promise_sleep_prev;
 	uint32_t promise_sleepers;
 	const void *host_acquire_handle;  // host_acquire's timeline, as a record's handle
-	uint32_t
-		claims;  // under the ownership order: parties holding `lock` as a claim (switch_gpu_backing_claim)
 	void *mapping_contexts[SWITCH_GPU_ENGINE_COUNT];
 	void (*mapping_destroy[SWITCH_GPU_ENGINE_COUNT])(void *);
 	uint32_t mapping_engines;
@@ -102,17 +101,8 @@ struct switch_gpu_cpu_lease {
 #endif
 };
 
-// The ownership order (SwitchGpuBackingOrder.cpp): one lock under which every party reads and changes the backings'
-// state, so a job takes it once for all its uses. A party that sleeps on a backing, lets its lock go mid-section, or does
-// work that grows with the backing (cache maintenance, another engine's kick inside its transaction) claims the backing
-// instead: its own lock, with `claims` raised in the order. While a backing is claimed or CPU-dirty everyone takes its
-// lock too, before the order, so a claim's holder works under that lock alone and never holds the order across it.
-// The order is taken after any backing's lock, the registry's and the promise sleepers' list's, never before them.
-IOLock *switch_gpu_backing_order(void);
-void switch_gpu_backing_order_lock(void);
-void switch_gpu_backing_order_unlock(void);
-// Debug kernels: the caller may read and change the backing's state (the order and, while it needs it, the backing's
-// lock), or sleep on its lock (a claim).
+// Per-backing locking (SwitchGpuBackingOrder.cpp): multi-backing operations acquire backing->lock in ascending
+// backing->id order and release in reverse. Registry and promise-sleeper locks precede single-backing locks.
 #if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
 void switch_gpu_backing_assert_held(const switch_gpu_backing *backing);
 void switch_gpu_backing_assert_claimed(const switch_gpu_backing *backing);
@@ -130,20 +120,11 @@ void switch_gpu_backing_unclaim(switch_gpu_backing *backing);
 // uses sorted by allocation id, each backing once (switch_gpu_backing_sort_uses)
 void switch_gpu_backing_claim_uses(const switch_gpu_backing_use *uses, uint32_t count);
 void switch_gpu_backing_unclaim_uses(const switch_gpu_backing_use *uses, uint32_t count);
-// A short section on one backing: in the order alone while nobody claims it and it is clean, else claimed (true). It
-// never sleeps or lets go of what it holds; leave with what enter returned.
 bool switch_gpu_backing_enter(switch_gpu_backing *backing);
 void switch_gpu_backing_leave(switch_gpu_backing *backing, bool claimed);
 bool switch_gpu_backing_enter_uses(const switch_gpu_backing_use *uses, uint32_t count);
 void switch_gpu_backing_leave_uses(const switch_gpu_backing_use *uses, uint32_t count,
 				   bool claimed);
-
-// In the order: whether a party must hold the backing's lock as well. A CPU-dirty backing's next user cleans it, work
-// that grows with its size, so it is cleaned under the backing's lock.
-inline bool switch_gpu_backing_needs_lock(const switch_gpu_backing *backing)
-{
-	return backing->claims || (backing->dirty & SWITCH_GPU_BACKING_CPU_DIRTY);
-}
 
 const switch_gpu_backing_engine *switch_gpu_backing_engine_ops(uint32_t engine);
 // destroy: every engine that mapped the backing forgets its allocation, before the pages go back.
@@ -180,8 +161,6 @@ int switch_gpu_backing_adopt_locked(switch_gpu_backing *backing,
 /* Something outside the set reaches a member, or its layout changes: the set's jobs become its users and it leaves. */
 void switch_gpu_set_reached(switch_gpu_backing *backing, uint32_t cause);
 
-// Threads asleep until a backing's CPU holders leave. A holder whose IOSurface client died leaves only at a sweep
-// (switch_gpu_surface_sweep), which GPU jobs run while any thread or ready watch (switch_gpu_ready_waiting) waits.
 extern uint32_t switch_gpu_cpu_sleepers;
 void switch_gpu_backing_sleep_cpu_locked(switch_gpu_backing *backing);
 

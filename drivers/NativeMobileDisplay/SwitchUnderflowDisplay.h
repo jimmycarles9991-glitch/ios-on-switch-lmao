@@ -8,18 +8,24 @@ static constexpr uint32_t kUnderflowLatch[kUnderflowWindows] = {kWinAUnderflowIn
 static constexpr uint32_t kDcIntType = 0x03a, kDcIntPolarity = 0x03b;
 switch_display::UnderflowAccounting underflows;
 uint32_t underflowCounts[kUnderflowWindows] = {};
-bool underflowLatched[kUnderflowWindows] = {}, underflowFirstRead = false;
+bool underflowLatched[kUnderflowWindows] = {}, underflowFirstRead = false, underflowCleared = false;
 
-// Every DC A frame end, before checkRotation and planeFrameEnd change what scans: every count is read and cleared, and
-// kept only for a window that scanned for the driver through the frame that ended. The boot chain's counts and a
-// window's counts from before it scanned for us are dropped this way.
+// Every DC A frame end, before checkRotation and planeFrameEnd change what scans: read and clear only windows
+// scanning for the driver, after clearing any boot-chain counts once on the first frame end.
 void underflowRead()
 {
     const PlaneSet &overlays = planeSetOf(planeLatch.active);
-    const bool scanned[kUnderflowWindows] = {rotationLatched, planesAttached && overlays.window[0].on,
-                                             planesAttached && overlays.window[1].on};
+    const bool scanned[kUnderflowWindows] = {
+        rotationLatched, (planesAttached && overlays.window[0].on) || (rotationLatched && landscapeOn()),
+        planesAttached && overlays.window[1].on};
+    const bool first = !underflowCleared;
+    underflowCleared = true;
     uint32_t counts[kUnderflowWindows] = {};
     for (unsigned w = 0; w != kUnderflowWindows; ++w) {
+        if (!first && (scanoutStopped || !scanned[w])) {
+            underflowCounts[w] = 0u;
+            continue;
+        }
         counts[w] = dc[kUnderflowCount[w]];
         if (counts[w])
             dc[kUnderflowCount[w]] = 0;

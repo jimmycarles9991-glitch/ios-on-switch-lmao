@@ -3,15 +3,15 @@
 // runs this exact code against a model. The caller holds a lock around every call, owns the windows' memory, issues
 // the reads this returns and copies the blocks out.
 //
-// APFS reads the cryptex volumes' files one 4 KiB block at a time, each after the last. A card command costs ~0.30 ms
-// for 4 KiB and ~1.6 ms for 128 KiB, and of every 128 KiB window of the System image a boot reads at all it reads ~81%
-// (89% of 64 KiB windows, 73% of 256 KiB): 64-256 KiB windows cost about the same card time, 128 KiB the least, a
-// fifth of reading the blocks one by one. So the image is cached in aligned windows of kSwitchWindowBlocks blocks:
-//  - a small request that misses reads its whole window (every block of it not held or being read), and waits;
+// APFS reads the cryptex volumes' files in small blocks (4 KiB metadata and 16 KiB page-ins). Caching in aligned
+// 32 KiB windows (kSwitchWindowBlocks = 8) bounds random-miss read amplification to 32 KiB while keeping 4x as many
+// windows in the 8 MiB steady cache:
+//  - a small request (<= 16 KiB) that misses reads its whole window (every block of it not held or being read), and
+//    waits;
 //  - a request for blocks being read waits for that read: a block is never read twice at once, and never read while
 //    it is held (a held block's bytes never change while it is held, so copies out of it need no lock);
-//  - readAhead reads exactly the blocks asked for (the boot prefetch's runs), for the page-ins that follow;
-//  - a large request is served here only if every block is held or being read, else straight into its own pages;
+//  - readAhead reads exactly the blocks asked for, for the page-ins that follow;
+//  - a larger request is served here only if every block is held or being read, else straight into its own pages;
 //  - an idle window (no request holding it, no read filling it) is reused least recently used first, and a window whose
 //    held blocks have all been served (they are in the files' page cache now) goes to the cold end at once.
 #ifndef SWITCH_CRYPTEX_CACHE_H
@@ -20,11 +20,12 @@
 #include <stdint.h>
 
 constexpr uint32_t kSwitchCacheBlock = 4096;
-constexpr uint32_t kSwitchWindowBlocks = 32;  // 128 KiB: one bit per block in a uint32_t
+constexpr uint32_t kSwitchWindowBlocks = 8;  // 32 KiB: one bit per block in a uint32_t
+constexpr uint32_t kSwitchWindowFullMask = kSwitchWindowBlocks >= 32 ? ~0u : (1u << kSwitchWindowBlocks) - 1u;
 constexpr uint32_t kSwitchWindowBytes = kSwitchWindowBlocks * kSwitchCacheBlock;
-constexpr uint32_t kSwitchSpanWindows = 9;                        // windows a request of up to 1 MiB can touch
+constexpr uint32_t kSwitchSpanWindows = 33;                       // windows a request of up to 1 MiB can touch
 constexpr uint32_t kSwitchWindowReads = kSwitchWindowBlocks / 2;  // most separate reads one window can need
-constexpr uint32_t kSwitchAroundWindows = 2;  // windows a read-around request may touch (at most 16 blocks)
+constexpr uint32_t kSwitchAroundWindows = 2;  // windows a read-around request may touch (at most 4 blocks)
 constexpr uint64_t kSwitchNoTag = ~0ULL;
 
 struct SwitchCacheRequest;
@@ -44,6 +45,9 @@ struct SwitchWindow {
     uint32_t ahead;    // blocks read ahead for the prefetch, not for a request
     uint32_t users;    // requests holding the window: waiting for it or copying out of it
     uint8_t image;
+    // A tier-0 request waits on its reads, or XNU raised them. Set under the caller's lock; the issuer of a read reads
+    // it without that lock once its read is queued (SwitchCryptex.cpp issueRead), so it is accessed atomically.
+    bool urgent;
     bool idle;                    // on the idle list: no users, nothing reading, reusable
     bool retired;                 // given back to the caller (its memory freed): never used again
     SwitchWindow *older, *newer;  // the idle list
@@ -62,6 +66,7 @@ struct SwitchCacheRequest {
     uint32_t windows;  // windows held
     uint32_t waiting;  // windows it still waits on: ready to copy at 0
     bool failed;       // a read of a block it needed failed: complete it with an error
+    bool joined;       // it waits on blocks a read issued before its plan is filling (another request's priority)
 };
 
 // One read for the caller to issue: blocks [first, first + count) of `window`, into window->bytes at first * 4 KiB.
@@ -86,8 +91,8 @@ struct SwitchCacheStats {
 // The blocks [from, to) of a window as a mask (0 <= from <= to <= kSwitchWindowBlocks).
 inline uint32_t switchWindowMask(uint32_t from, uint32_t to)
 {
-    const uint32_t high = to >= kSwitchWindowBlocks ? ~0u : (1u << to) - 1;
-    const uint32_t low = from >= kSwitchWindowBlocks ? ~0u : (1u << from) - 1;
+    const uint32_t high = to >= kSwitchWindowBlocks ? kSwitchWindowFullMask : (1u << to) - 1u;
+    const uint32_t low = from >= kSwitchWindowBlocks ? kSwitchWindowFullMask : (1u << from) - 1u;
     return high & ~low;
 }
 
@@ -120,7 +125,7 @@ public:
             w.tag = kSwitchNoTag;
             w.valid = w.reading = w.served = w.ahead = w.users = 0;
             w.image = 0;
-            w.idle = w.retired = false;
+            w.urgent = w.idle = w.retired = false;
             w.older = w.newer = w.chain = nullptr;
             w.waits = nullptr;
             linkIdle(&w, true);
@@ -131,12 +136,13 @@ public:
     // A request for blocks [first, first + blocks) of image `image` (imageBlocks long). True when the cache takes it:
     // r holds its windows, r->waiting says how many it waits on (0: copy now), and reads[0, *count) are to be issued (at
     // most kSwitchAroundWindows * kSwitchWindowReads, which `capacity` must allow in kReadAround). False: go direct.
+    // `urgent`: the request is tier 0, and a window whose reads it joins is marked so (SwitchWindow::urgent).
     bool plan(SwitchCacheRequest *r, uint8_t image, uint64_t first, uint32_t blocks, uint64_t imageBlocks, Mode mode,
-              SwitchCacheRead *reads, uint32_t capacity, uint32_t *count)
+              SwitchCacheRead *reads, uint32_t capacity, uint32_t *count, bool urgent = false)
     {
         *count = 0;
         r->windows = r->waiting = 0;
-        r->failed = false;
+        r->failed = r->joined = false;
         r->nextReady = nullptr;
         if (!blocks || first >= imageBlocks || blocks > imageBlocks - first)
             return refuse(r, 0);
@@ -166,6 +172,11 @@ public:
         }
         for (uint32_t i = 0; i < n; ++i) {
             SwitchWindow *w = r->window[i];
+            if (r->need[i] & w->reading) {
+                r->joined = true;
+                if (urgent)
+                    __atomic_store_n(&w->urgent, true, __ATOMIC_RELEASE);
+            }
             if (mode == kReadAround)
                 *count += emit(w, within(w->tag, imageBlocks) & ~(w->valid | w->reading), false, reads + *count);
             const uint32_t pending = r->need[i] & ~w->valid;
@@ -182,6 +193,76 @@ public:
         if (!r->waiting)
             ++st.ready;
         return true;
+    }
+
+    // Returns 0 on miss/in-progress, 1 if copied inline (outCopied set), 2 if pinned in `r` for unlocked copy+release.
+    template <typename CopyFn>
+    int tryHit(SwitchCacheRequest *r, uint8_t image, uint64_t first, uint32_t blocks, uint64_t imageBlocks,
+               bool inlineCopy, CopyFn &&copyFn, bool *outCopied)
+    {
+        *outCopied = false;
+        if (!blocks || first >= imageBlocks || blocks > imageBlocks - first)
+            return 0;
+        const uint64_t firstTag = first - first % kSwitchWindowBlocks;
+        const uint64_t last = first + blocks - 1;
+        const uint64_t lastTag = last - last % kSwitchWindowBlocks;
+        const uint32_t n = static_cast<uint32_t>((lastTag - firstTag) / kSwitchWindowBlocks + 1);
+        if (n > kSwitchSpanWindows)
+            return 0;
+        SwitchWindow *wins[kSwitchSpanWindows];
+        uint32_t needs[kSwitchSpanWindows];
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint64_t tag = firstTag + static_cast<uint64_t>(i) * kSwitchWindowBlocks;
+            const uint64_t from = first > tag ? first : tag;
+            const uint64_t to = first + blocks < tag + kSwitchWindowBlocks ? first + blocks : tag + kSwitchWindowBlocks;
+            const uint32_t need = switchWindowMask(static_cast<uint32_t>(from - tag), static_cast<uint32_t>(to - tag));
+            SwitchWindow *w = lookup(image, tag);
+            if (!w || (need & ~w->valid) != 0u)
+                return 0;
+            wins[i] = w;
+            needs[i] = need;
+        }
+        ++st.requests;
+        ++st.ready;
+        if (inlineCopy && n <= kSwitchAroundWindows) {
+            bool ok = true;
+            for (uint32_t i = 0; i < n; ++i) {
+                SwitchWindow *w = wins[i];
+                const uint64_t from = first > w->tag ? first : w->tag;
+                const uint64_t to =
+                    first + blocks < w->tag + kSwitchWindowBlocks ? first + blocks : w->tag + kSwitchWindowBlocks;
+                if (ok && !copyFn(w, from, to))
+                    ok = false;
+            }
+            for (uint32_t i = 0; i < n; ++i) {
+                SwitchWindow *w = wins[i];
+                if (ok) {
+                    const uint32_t fresh = needs[i] & w->valid & ~w->served;
+#if !defined(KERNEL) || SWITCH_STATS_IO
+                    st.served += switchBlockCount(fresh);
+                    st.aheadServed += switchBlockCount(fresh & w->ahead);
+#endif
+                    w->served |= fresh;
+                }
+                if (w->idle) {
+                    unlinkIdle(w);
+                    linkIdle(w, (w->valid & ~w->served) == 0u);
+                }
+            }
+            *outCopied = ok;
+            return 1;
+        }
+        r->windows = n;
+        r->waiting = 0;
+        r->failed = false;
+        r->joined = false;
+        r->nextReady = nullptr;
+        for (uint32_t i = 0; i < n; ++i) {
+            pin(wins[i]);
+            r->window[i] = wins[i];
+            r->need[i] = needs[i];
+        }
+        return 2;
     }
 
     // Reads blocks [first, first + blocks) of image `image` ahead into windows, for the requests to come: those of them
@@ -212,12 +293,25 @@ public:
         return static_cast<uint32_t>(end - first);
     }
 
+    // Marks the windows of blocks [first, first + blocks) of image `image` with reads still filling them urgent.
+    void markUrgent(uint8_t image, uint64_t first, uint64_t blocks)
+    {
+        const uint64_t firstTag = first - first % kSwitchWindowBlocks;
+        for (uint64_t tag = firstTag; blocks && tag < first + blocks; tag += kSwitchWindowBlocks) {
+            SwitchWindow *w = lookup(image, tag);
+            if (w && w->reading)
+                __atomic_store_n(&w->urgent, true, __ATOMIC_RELEASE);
+        }
+    }
+
     // A read from emit() has finished (ok: the blocks hold the image's bytes). Returns the requests it made ready (linked
     // by nextReady); each is then copied out (unless failed) and released.
     SwitchCacheRequest *finished(SwitchWindow *w, uint32_t first, uint32_t count, bool ok)
     {
         const uint32_t m = switchWindowMask(first, first + count);
         w->reading &= ~m;
+        if (!w->reading)
+            __atomic_store_n(&w->urgent, false, __ATOMIC_RELAXED);
         if (ok) {
             w->valid |= m;
         } else {
@@ -256,8 +350,10 @@ public:
             SwitchWindow *w = r->window[i];
             if (copied) {
                 const uint32_t fresh = r->need[i] & w->valid & ~w->served;
+#if !defined(KERNEL) || SWITCH_STATS_IO
                 st.served += switchBlockCount(fresh);
                 st.aheadServed += switchBlockCount(fresh & w->ahead);
+#endif
                 w->served |= fresh;
             }
             unpin(w);
@@ -377,7 +473,7 @@ private:
     // The window's blocks inside an image of imageBlocks blocks.
     static uint32_t within(uint64_t tag, uint64_t imageBlocks)
     {
-        return imageBlocks - tag >= kSwitchWindowBlocks ? ~0u
+        return imageBlocks - tag >= kSwitchWindowBlocks ? kSwitchWindowFullMask
                                                         : switchWindowMask(0, static_cast<uint32_t>(imageBlocks - tag));
     }
 
@@ -447,6 +543,7 @@ private:
         w->tag = tag;
         w->image = image;
         w->valid = w->reading = w->served = w->ahead = 0;
+        __atomic_store_n(&w->urgent, false, __ATOMIC_RELAXED);
         w->waits = nullptr;
         const uint32_t b = bucket(image, tag);
         w->chain = table[b];

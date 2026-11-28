@@ -1,17 +1,11 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import UIKit
 
 /// ui.glass_live's read-back loop, on a thread of its own so the display link keeps its frames: each presented frame
-/// read in place and judged, compared with the frame read before it, then the read-back armed for the next present;
-/// after each frame, the render server's record (GlassProbe) read, its command buffers given to the frame they came
-/// before.
+/// read in place and judged, compared with the frame read before it, then the read-back armed for the next present.
 final class LiveReader {
-    struct Read {
-        let recorded: Int
-        let regenerated: Int
-    }
-
     private struct Kept {
         let sequence: UInt64
         let whole: UInt64
@@ -40,61 +34,37 @@ final class LiveReader {
         uiPixels = (max(w, h), min(w, h))
     }
 
-    static func run(_ reader: LiveReader?, until deadline: Date, after: UInt64) async -> Read {
+    static func run(_ reader: LiveReader?, until deadline: Date) async {
+        guard let reader else {
+            let remaining = deadline.timeIntervalSinceNow
+            if remaining > 0 { try? await Task.sleep(nanoseconds: UInt64(remaining * 1e9)) }
+            return
+        }
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(
-                    returning: reader?.loop(until: deadline, after: after) ?? record(until: deadline, after: after)
-                )
+                reader.loop(until: deadline)
+                continuation.resume()
             }
         }
     }
 
-    /// The render server's command buffers until `deadline`, for the variant that reads nothing back.
-    static func record(until deadline: Date, after: UInt64) -> Read {
-        var (count, recorded, regenerated) = (after, 0, 0)
-        while Date() < deadline {
-            usleep(50_000)
-            let read = GlassProbe.buffers(after: count)
-            count = read.count
-            recorded += read.buffers.count + Int(read.lost)
-            regenerated += read.buffers.filter { $0.levels > 0 }.count
-        }
-        return Read(recorded: recorded, regenerated: regenerated)
-    }
-
-    func loop(until deadline: Date, after: UInt64) -> Read {
+    func loop(until deadline: Date) {
         let start = Date()
-        var (count, recorded, regenerated) = (after, 0, 0)
-        var pending: [GlassProbe.Buffer] = []
         _ = session.rearm()
         while Date() < deadline {
-            let next = session.next(timeout: 0.5)
-            var ticks: UInt64?
-            switch next {
+            switch session.next(timeout: 0.5) {
             case .none: break
             case .failed(let why):
                 failure = why
-                return Read(recorded: recorded, regenerated: regenerated)
+                return
             case .frame(let frame):
                 judge(frame, ms: Date().timeIntervalSince(start) * 1000)
                 guard session.rearm() else {
                     failure = "rearm"
-                    return Read(recorded: recorded, regenerated: regenerated)
+                    return
                 }
-                ticks = frame.ticks & ((1 << 40) - 1)
-            }
-            let read = GlassProbe.buffers(after: count)
-            count = read.count
-            recorded += read.buffers.count + Int(read.lost)
-            regenerated += read.buffers.filter { $0.levels > 0 }.count
-            pending += read.buffers
-            if let ticks, !frames.isEmpty {
-                frames[frames.count - 1].buffers = pending.filter { $0.ticks <= ticks }.map(\.text)
-                pending.removeAll { $0.ticks <= ticks }
             }
         }
-        return Read(recorded: recorded, regenerated: regenerated)
     }
 
     private func judge(_ frame: ScanoutSession.Frame, ms: Double) {
@@ -127,7 +97,7 @@ final class LiveReader {
                 sequence: frame.sequence, atPresent: glass.verdict, black: glass.black, mean: glass.mean,
                 backdropChanged: consecutive.map { $0.strip != now.strip }, endVerdict: end?.verdict,
                 endBlack: end?.black, changedOnScreen: changed, glassChangedOnScreen: glassChanged,
-                buffers: [], ms: ms
+                ms: ms
             )
         )
         save(frame, now: now, consecutive: consecutive, glass: glass, end: end, changed: changed == true)

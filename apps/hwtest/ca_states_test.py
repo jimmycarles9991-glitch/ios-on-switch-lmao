@@ -58,13 +58,12 @@ class States(unittest.TestCase):
         labels = [line.split()[2] for line in kept]
         label_set = set(labels)
         demanded = ca_states.closure.demand(self.build)
+        self.assertGreater(len(demanded), 300)
+        for name in demanded:
+            self.assertIn(f'label=com.apple.coreanimation.{name}', label_set)
         if self.build == '24B119':
-            self.assertGreater(len(demanded), 300)
-            for name in demanded:
-                self.assertIn(f'label=com.apple.coreanimation.{name}', label_set)
             self.assertEqual(labels.count('label=com.apple.coreanimation.PBGRABsovXmw_TlrpA3Xhfs_Iclr_Iclr'), 1)
         else:
-            self.assertEqual(demanded, [])
             self.assertNotIn('label=com.apple.coreanimation.PBGRABsovXmw_TlrpA3Xhfs_Iclr_Iclr', label_set)
 
 

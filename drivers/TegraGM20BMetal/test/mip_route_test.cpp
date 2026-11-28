@@ -203,6 +203,8 @@ void checkRun(const MipChain &c, uint32_t first, uint32_t last, uint32_t firstLa
     ASSERT_TRUE(sim.run(push.data(), size_t(p.at - push.data()))) << sim.error();
     EXPECT_TRUE(sim.endsSampleable);
     EXPECT_EQ(sim.launches, (last - first) * layers);
+    EXPECT_EQ(sim.texInvalidates2d, last - first);
+    EXPECT_EQ(sim.waits2d, last > first ? last - first - 1 : 0u);
     for (uint32_t layer = 0; layer < c.layers; layer++)
         for (uint32_t l = 0; l < c.levels; l++) {
             const std::vector<uint8_t> got = level(mem, c, layer, l);

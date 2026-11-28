@@ -9,12 +9,13 @@
 void declareGpuWrites(SwitchMetalTexture *t)
 {
     // every pass over a surface target asks: only the first may exchange
-    if (!t->_surface || t->_gpuWrites.load(std::memory_order_acquire) || t->_gpuWrites.exchange(true))
+    if (!t->_surface || t->_gpuWrites.load(std::memory_order_relaxed) ||
+        t->_gpuWrites.exchange(true, std::memory_order_acq_rel))
         return;
     if (gRM && gRM->raw && gRM->raw->surfaceGpuWrites(IOSurfaceGetID(t->_surface)))
         return;
     static std::atomic<bool> said{false};
-    if (!said.exchange(true))
+    if (!said.exchange(true, std::memory_order_relaxed))
         os_log_error(gm20bLog(),
                      "SwitchMetal: the GPU's writes to IOSurface %u were not declared: CPU readers may see stale lines",
                      IOSurfaceGetID(t->_surface));
@@ -59,7 +60,7 @@ void traceSurfaceImage(SwitchMetalTexture *t, const char *what, uint32_t seed)
     if (_ownForm)
         gm20bForgetForm(self);
     if (_heap && !_raw.arena) {
-        _heap->_used -= _heapBytes;
+        _heap->_used.fetch_sub(_heapBytes, std::memory_order_relaxed);
         const gm20b::Texture::StorageRange storage = _raw.storageRange();
         gm20bHeapForget(_heap, storage.bytes ? storage.va : _raw.va);
     }
@@ -248,7 +249,7 @@ void traceSurfaceImage(SwitchMetalTexture *t, const char *what, uint32_t seed)
     _aliasable = true;
     if (_raw.arena)
         gRM->raw->makeArenaAliasable(_raw);
-    _heap->_used -= _heapBytes;
+    _heap->_used.fetch_sub(_heapBytes, std::memory_order_relaxed);
     _heapBytes = 0;
 }
 

@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Rule fetch.blend (drivers/TegraGM20BMetal/fetch_rungs.h fixedBlendAcceptable) on the chip: N

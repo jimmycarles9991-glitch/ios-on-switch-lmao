@@ -9,6 +9,7 @@
 #include "../reflection_blob.h"
 #include "empty_pack.h"
 #include "TegraGM20BCompilerABI.h"
+#include <atomic>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -103,7 +104,8 @@ TEST(CompilerGroups, TheNativeAdaptersPreserveGroupedFunctionsAndTheUngroupedPro
             ASSERT_EQ(engine.compile(prepared, result, why), TegraGM20BCompileMade) << why;
             if (kind == gm20b::RequestKind::Facts) {
                 gm20b::PackComputeFacts facts = {};
-                ASSERT_EQ(gm20b::decodeFactsEntry(result, prepared.key, facts, why), gm20b::RecordCache::Found::Record)
+                ASSERT_EQ(gm20b::decodeFactsEntry(result, prepared.content, facts, why),
+                          gm20b::RecordCache::Found::Record)
                     << why;
                 EXPECT_GT(facts.maxThreads, 0u);
                 EXPECT_GT(facts.executionWidth, 0u);
@@ -117,7 +119,7 @@ TEST(CompilerGroups, TheNativeAdaptersPreserveGroupedFunctionsAndTheUngroupedPro
             } else if (kind == gm20b::RequestKind::Reflection) {
                 bool made = false;
                 std::string reflection;
-                ASSERT_TRUE(gm20b::decodeReflectionEntry(result, prepared.key, made, reflection) && made);
+                ASSERT_TRUE(gm20b::decodeReflectionEntry(result, prepared.content, made, reflection) && made);
                 ASSERT_FALSE(reflection.empty());
                 if (grouped)
                     EXPECT_EQ(reflection, plainReflection);
@@ -125,7 +127,7 @@ TEST(CompilerGroups, TheNativeAdaptersPreserveGroupedFunctionsAndTheUngroupedPro
                     plainReflection = std::move(reflection);
             } else {
                 gm20b::ComputeRecord kernel;
-                ASSERT_EQ(gm20b::decodeKernelEntry(result, prepared.key, kernel, why),
+                ASSERT_EQ(gm20b::decodeKernelEntry(result, prepared.content, kernel, why),
                           gm20b::RecordCache::Found::Record)
                     << why;
                 ASSERT_FALSE(kernel.code.empty());
@@ -143,6 +145,77 @@ TEST(CompilerGroups, TheNativeAdaptersPreserveGroupedFunctionsAndTheUngroupedPro
             }
         }
     }
+}
+
+TEST(CompilerGroups, ClientLibraryHandleCompilesIdenticallyToInlineBytes)
+{
+    const char *path = getenv("SWITCH_GROUPED_METALLIB");
+    ASSERT_NE(path, nullptr);
+    std::ifstream input(path, std::ios::binary);
+    const std::string bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    ASSERT_FALSE(bytes.empty());
+    std::map<std::string, gm20b::AirHash> hashes;
+    ASSERT_TRUE(gm20b::metallibAirHashes(reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size(), hashes));
+
+    gm20b::CompileRequest request;
+    request.kind = gm20b::RequestKind::Facts;
+    gm20b::RequestLibrary handleLib;
+    handleLib.libraryId = 42;
+    request.libraries.push_back(handleLib);
+    gm20b::RequestStage entry;
+    entry.tag = "k";
+    entry.function = entry.name = "grouped_pointer";
+    request.stages.push_back(entry);
+    std::vector<gm20b::LinkedComputeFunction> linked;
+    for (const char *name : {"grouped_add", "grouped_mul"}) {
+        gm20b::RequestStage stage;
+        stage.tag = "kl";
+        stage.function = stage.name = name;
+        gm20b::LinkedComputeFunction function;
+        function.air = hashes.at(name);
+        function.symbol = function.name = name;
+        request.stages.push_back(std::move(stage));
+        linked.push_back(std::move(function));
+    }
+    const std::string state =
+        gm20b::computeStateKey(hashes.at("grouped_pointer"), gm20b::computeLinkedText(linked), 0, false);
+    request.key = gm20b::factsCacheKey(0, state).key;
+
+    int mapCalls = 0;
+    auto unmapCalls = std::make_shared<std::atomic<int>>(0);
+    switch_compiler::ClientLibraries clientLibs(
+        [&](uint64_t, uint64_t, const uint8_t *&ptr, size_t &sz, std::string &) {
+            mapCalls++;
+            ptr = reinterpret_cast<const uint8_t *>(bytes.data());
+            sz = bytes.size();
+            return true;
+        },
+        [unmapCalls](uint64_t, uint64_t) {
+            unmapCalls->fetch_add(1, std::memory_order_relaxed);
+        });
+    switch_compiler::SystemLibraries system;
+    switch_compiler::Engine engine;
+    std::string why;
+    ASSERT_TRUE(engine.open(0, {emptyPack(), "", {}}, why)) << why;
+
+    std::string handleResult;
+    {
+        switch_compiler::Prepared prepared;
+        ASSERT_TRUE(switch_compiler::prepare(gm20b::encodeRequest(request), 0, system, prepared, why, 7, &clientLibs))
+            << why;
+        ASSERT_EQ(engine.compile(prepared, handleResult, why), TegraGM20BCompileMade) << why;
+    }
+    EXPECT_EQ(mapCalls, 1);
+
+    request.libraries[0].libraryId = 0;
+    request.libraries[0].bytes = bytes;
+    std::string inlineResult;
+    {
+        switch_compiler::Prepared prepared;
+        ASSERT_TRUE(switch_compiler::prepare(gm20b::encodeRequest(request), 0, system, prepared, why)) << why;
+        ASSERT_EQ(engine.compile(prepared, inlineResult, why), TegraGM20BCompileMade) << why;
+    }
+    EXPECT_EQ(handleResult, inlineResult);
 }
 
 }  // namespace

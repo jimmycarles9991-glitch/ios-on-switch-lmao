@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 
 /// The compression and zcull cases left behind (zcull-comp LIST #18, #15, #27, #32), each run under the facade's debug

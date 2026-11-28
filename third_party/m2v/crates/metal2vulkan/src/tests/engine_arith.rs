@@ -5302,3 +5302,191 @@ fn half_functions_answer_metals_half_nan() {
         }
     }
 }
+
+/// Under fast math, Metal lowers `fabs(x) > 0.0` (and `0.0 < fabs(x)`) as an unordered non-zero
+/// check: every NaN answers `true`, while zeros and flushed `f32` denormals answer `false`. Plain
+/// `x > 0.0` under fast math and IEEE `fabs(x) > 0.0` without `nnan` still answer `false` on NaN.
+#[test]
+fn fast_fabs_gt_zero_nan_matches_apple_fast_math() {
+    use crate::device::requirements::ApiVersion;
+    use crate::device::DevicePolicy;
+    const MAGNITUDES: [u32; 20] = [
+        0,
+        1,
+        2,
+        0x0040_0000,
+        0x007f_fffe,
+        0x007f_ffff,
+        0x0080_0000,
+        0x0080_0001,
+        0x0100_0000,
+        0x3f7f_ffff,
+        0x3f80_0000,
+        0x3f80_0001,
+        0x7f7f_fffe,
+        0x7f7f_ffff,
+        0x7f80_0000,
+        0x7f80_0001,
+        0x7fbf_ffff,
+        0x7fc0_0000,
+        0x7fc0_0001,
+        0x7fff_ffff,
+    ];
+    let ir = r#"target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32"
+target triple = "air64_v28-apple-macosx26.0.0"
+
+declare float @air.fast_fabs.f32(float)
+declare float @air.fabs.f32(float)
+declare float @llvm.fabs.f32(float)
+
+define void @k(ptr addrspace(1) %out, ptr addrspace(1) %in, i32 %i) {
+  %x = zext i32 %i to i64
+  %p = getelementptr inbounds float, ptr addrspace(1) %in, i64 %x
+  %v = load float, ptr addrspace(1) %p, align 4
+  %af = call fast float @air.fast_fabs.f32(float %v)
+  %ai = call float @air.fabs.f32(float %v)
+  %lf = call fast float @llvm.fabs.f32(float %v)
+  %b0 = fcmp fast ogt float %af, 0.000000e+00
+  %b1 = fcmp fast olt float 0.000000e+00, %af
+  %b2 = fcmp fast ogt float %lf, -0.000000e+00
+  %b3 = fcmp ogt float %ai, 0.000000e+00
+  %b4 = fcmp fast ogt float %v, 0.000000e+00
+  %m0 = select i1 %b0, i32 1, i32 0
+  %m1 = select i1 %b1, i32 2, i32 0
+  %m2 = select i1 %b2, i32 4, i32 0
+  %m3 = select i1 %b3, i32 8, i32 0
+  %m4 = select i1 %b4, i32 16, i32 0
+  %t0 = or i32 %m0, %m1
+  %t1 = or i32 %t0, %m2
+  %t2 = or i32 %t1, %m3
+  %mask = or i32 %t2, %m4
+  %q = getelementptr inbounds i32, ptr addrspace(1) %out, i64 %x
+  store i32 %mask, ptr addrspace(1) %q, align 4
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint", !"air.arg_name", !"out"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"float", !"air.arg_name", !"in"}
+!5 = !{i32 2, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint", !"air.arg_name", !"i"}
+"#;
+    let Some(bitcode) = assemble("fast-fabs-gt-zero", ir) else {
+        return;
+    };
+    let mut desc = DeviceDescription::new(ApiVersion::V1_3);
+    desc.limits = crate::device::profile::Limits {
+        max_compute_work_group_size: [1024, 1024, 64],
+        max_compute_work_group_count: [65535; 3],
+        max_compute_work_group_invocations: 1024,
+        max_push_constants_size: 128,
+        max_bound_descriptor_sets: 4,
+        max_per_stage_descriptor_storage_buffers: 16,
+        max_per_stage_resources: 64,
+        max_descriptor_set_storage_buffers: 32,
+        max_storage_buffer_range: 1 << 27,
+        min_storage_buffer_offset_alignment: 16,
+        ..crate::device::profile::Limits::default()
+    };
+    let dev = Device::new(desc, DevicePolicy::default()).expect("default device");
+    let p = dev.profile();
+    let a = compile(&bitcode, "k", p).expect("compile");
+    let _ = link_and_validate(&a, p).expect("spirv-val");
+
+    let mut m = meter();
+    let decoded = air::decode(&bitcode, &mut m).expect("decode");
+    let req = SpecRequest {
+        call_stack_depth: 1,
+        entry: "k".to_owned(),
+        ..SpecRequest::default()
+    };
+    let spec_entry = air::specialize(decoded, &req, &mut m).expect("specialize");
+    let mem = analyze_memory(&spec_entry, p, &mut m).expect("memory");
+    let selected = select(&spec_entry, &mem, p, &LowerInputs::new(), &mut m).expect("select");
+    let typed = emit_module(&spec_entry, &selected, &mut m)
+        .expect("emit")
+        .module;
+
+    let values: Vec<u32> = [0u32, 0x8000_0000]
+        .into_iter()
+        .flat_map(|s| MAGNITUDES.into_iter().map(move |mag| s | mag))
+        .collect();
+    let mut in_bytes = Vec::with_capacity(values.len() * 4);
+    for &bits in &values {
+        in_bytes.extend_from_slice(&bits.to_le_bytes());
+    }
+    let mut spec = std::collections::BTreeMap::new();
+    for axis in [
+        crate::pipeline::sym::Axis::X,
+        crate::pipeline::sym::Axis::Y,
+        crate::pipeline::sym::Axis::Z,
+    ] {
+        spec.insert(crate::pipeline::sym::SpecKey::LocalSize(axis), 1);
+    }
+    spec.insert(crate::pipeline::sym::SpecKey::FlatLocalSize, 1);
+    let res = Resources {
+        buffers: vec![
+            Buffer {
+                slot: Some(ResourceSlot {
+                    stage: Stage::Kernel,
+                    kind: ResourceKind::Buffer,
+                    index: 0,
+                }),
+                address: None,
+                bytes: vec![0u8; values.len() * 4],
+            },
+            Buffer {
+                slot: Some(ResourceSlot {
+                    stage: Stage::Kernel,
+                    kind: ResourceKind::Buffer,
+                    index: 1,
+                }),
+                address: None,
+                bytes: in_bytes,
+            },
+        ],
+        push: vec![
+            0u8;
+            selected
+                .push
+                .push_range
+                .map_or(0, |(_, end)| end as usize)
+        ],
+        spec,
+    };
+    let out = run(
+        &typed,
+        &Config {
+            workgroups: [values.len() as u32, 1, 1],
+            step_limit: 500_000,
+            ..Config::default()
+        },
+        res,
+    )
+    .expect("interpret");
+    for (idx, &bits) in values.iter().enumerate() {
+        let got = u32::from_le_bytes(out.buffers[0][idx * 4..idx * 4 + 4].try_into().unwrap());
+        let f = f32::from_bits(bits);
+        let want = if f.is_nan() {
+            1 | 2 | 4
+        } else {
+            let v = if f.is_subnormal() {
+                0.0f32.copysign(f)
+            } else {
+                f
+            };
+            let abs_gt_zero = v.abs() > 0.0;
+            let mut w = 0u32;
+            if abs_gt_zero {
+                w |= 1 | 2 | 4 | 8;
+            }
+            if v > 0.0 {
+                w |= 16;
+            }
+            w
+        };
+        assert_eq!(got, want, "bits={bits:#010x}: got {got:#x}, want {want:#x}");
+    }
+}

@@ -1,19 +1,10 @@
 // SPDX-License-Identifier: MIT
-// Rule barrier.pass_pixel: a pass opens with PIXEL_SHADER_BARRIER and its pixel-ordered texture invalidate (0x0f74), in
-// place of today's drain, where every dependency it has on the passes since the last drain is a cell
-// gpu.x1.pass_pixel_barrier held in: claim PASS on boots 8, 14, 15, 19 and 21, boot 21 22 cells held, none failed, 91,294
-// passes (kHeldCells, that line's pixel_cells). A cell is a format, a layout, the read's shape and a size; a pass shows
-// all of those but the shape of its samples, which only its program's arithmetic says. So a read of an earlier pass's
-// target is held where every shape was held at its size (64x64 block-linear), or where the pass draws a pyramid level of
-// it (a target at most half its size), or a write over it (waw); every other dependency, the 8 blind cells' sizes among
-// them, and anything a pass does that no cell did (storage writes, depth, more than one sample, level or layer,
-// vertex-stage samples, an unnamed or fenced read, a target sampled before it is written) keeps the drain. A memoryless
-// attachment's backing is scratch: Metal leaves its contents undefined at every pass's start, so a later pass's scratch
-// over the same memory depends on nothing an earlier pass left there. Every pass the rule opens begins with
-// PIXEL_SHADER_BARRIER, which holds its pixel shading until the earlier passes' pixels have left the ROP, so their
-// scratch writes and in-pass fetches of it are done before its own begin; its first fetch of a cleared or DontCare
-// attachment takes the in-pass barrier and its texture invalidate (RenderEncoder::begin's whole-area write). Scratch over
-// memory a real image of the chain names, either way, keeps the drain.
+// Maxwell GM20B 3D pass-to-pass hazard rule: after the previous pass flushes the tiled cache (TILED_CACHE_FLUSH),
+// PIXEL_SHADER_BARRIER followed by INVALIDATE_TEXTURE_DATA_CACHE_PIXEL_ORDERED (0x0f74) orders ROP->FS reads and
+// ROP->ROP writes of plain color targets regardless of format, dimensions or sample pattern. Full WAIT_FOR_IDLE is kept
+// for cross-stage reads (VS/TS/GS, unnamed useResource), depth/stencil, WAR over earlier sampled textures, unknown
+// passes (heaps, fence waits, storage/shader/buffer writes), non-plain targets (volatile pitch, memoryless, zeta,
+// planar, multisample, layered/3D/mip-chain), and scratch-vs-real overlap.
 #pragma once
 #include <cstdint>
 #include <iterator>
@@ -27,68 +18,13 @@ enum class HazardLayout : uint8_t {
     Compressed
 };
 
-enum class HazardShape : uint8_t {
-    Same,
-    Stride,
-    Flip,
-    Pyramid,
-    Waw
-};
-
-enum class HazardSize : uint8_t {
-    Small,   // 64 x 64 at most (the probe's "s")
-    Medium,  // 320 x 180 at most ("m")
-    Large    // the rest: 1280 x 720 ("f") held in no cell
-};
-
-struct HeldCell {
-    uint32_t format;  // MTLPixelFormat
-    HazardLayout layout;
-    HazardShape shape;
-    HazardSize size;
-};
-
 constexpr uint32_t kHazardBgra8 = 80, kHazardRgba16f = 115;
 
-// gpu.x1.pass_pixel_barrier boot 21 (-20261113-134714) pixel_cells' H entries, BGRA8 then RGBA16F alike
-constexpr HeldCell kHeldCells[] = {
-    {kHazardBgra8, HazardLayout::BlockLinear, HazardShape::Same, HazardSize::Small},
-    {kHazardBgra8, HazardLayout::BlockLinear, HazardShape::Same, HazardSize::Medium},
-    {kHazardBgra8, HazardLayout::BlockLinear, HazardShape::Stride, HazardSize::Small},
-    {kHazardBgra8, HazardLayout::BlockLinear, HazardShape::Flip, HazardSize::Small},
-    {kHazardBgra8, HazardLayout::BlockLinear, HazardShape::Pyramid, HazardSize::Small},
-    {kHazardBgra8, HazardLayout::BlockLinear, HazardShape::Pyramid, HazardSize::Medium},
-    {kHazardBgra8, HazardLayout::Pitch, HazardShape::Same, HazardSize::Medium},
-    {kHazardBgra8, HazardLayout::Pitch, HazardShape::Pyramid, HazardSize::Medium},
-    {kHazardBgra8, HazardLayout::Compressed, HazardShape::Same, HazardSize::Medium},
-    {kHazardBgra8, HazardLayout::Compressed, HazardShape::Pyramid, HazardSize::Medium},
-    {kHazardBgra8, HazardLayout::BlockLinear, HazardShape::Waw, HazardSize::Medium},
-    {kHazardRgba16f, HazardLayout::BlockLinear, HazardShape::Same, HazardSize::Small},
-    {kHazardRgba16f, HazardLayout::BlockLinear, HazardShape::Same, HazardSize::Medium},
-    {kHazardRgba16f, HazardLayout::BlockLinear, HazardShape::Stride, HazardSize::Small},
-    {kHazardRgba16f, HazardLayout::BlockLinear, HazardShape::Flip, HazardSize::Small},
-    {kHazardRgba16f, HazardLayout::BlockLinear, HazardShape::Pyramid, HazardSize::Small},
-    {kHazardRgba16f, HazardLayout::BlockLinear, HazardShape::Pyramid, HazardSize::Medium},
-    {kHazardRgba16f, HazardLayout::Pitch, HazardShape::Same, HazardSize::Medium},
-    {kHazardRgba16f, HazardLayout::Pitch, HazardShape::Pyramid, HazardSize::Medium},
-    {kHazardRgba16f, HazardLayout::Compressed, HazardShape::Same, HazardSize::Medium},
-    {kHazardRgba16f, HazardLayout::Compressed, HazardShape::Pyramid, HazardSize::Medium},
-    {kHazardRgba16f, HazardLayout::BlockLinear, HazardShape::Waw, HazardSize::Medium},
-};
-
-constexpr bool heldCell(uint32_t format, HazardLayout layout, HazardShape shape, HazardSize size)
-{
-    for (const HeldCell &c : kHeldCells)
-        if (c.format == format && c.layout == layout && c.shape == shape && c.size == size)
-            return true;
-    return false;
-}
-
-// One image a pass reads or writes: its memory and what a cell is keyed by. `plain`: one sample, level, layer and depth
-// plane of a colour format, with memory of its own
+// One image a pass reads or writes. `plain`: single-sample, single-level, single-layer, non-volatile, non-zeta,
+// non-planar, non-memoryless color target.
 struct HazardImage {
     uint64_t va = 0, bytes = 0;
-    uint64_t importBase = 0, importBytes = 0;  // the surface or no-copy pages under it
+    uint64_t importBase = 0, importBytes = 0;
     uint32_t format = 0, width = 0, height = 0;
     HazardLayout layout = HazardLayout::BlockLinear;
     bool plain = false;
@@ -123,64 +59,41 @@ constexpr bool overlaps(const HazardImage &x, const HazardImage &y)
            rangesOverlap(x.importBase, x.importBytes, y.importBase, y.importBytes);
 }
 
-constexpr HazardSize hazardSize(uint32_t width, uint32_t height)
+constexpr bool heldRead(const HazardImage &read)
 {
-    return width <= 64 && height <= 64     ? HazardSize::Small
-           : width <= 320 && height <= 180 ? HazardSize::Medium
-                                           : HazardSize::Large;
-}
-
-// A sample of `read`, which an earlier pass wrote, by a pass drawing `areaWidth` x `areaHeight`: held where every shape
-// its samples could take was, or where the pass is a pyramid level of it
-constexpr bool heldRead(const HazardImage &read, uint32_t areaWidth, uint32_t areaHeight)
-{
-    if (!read.plain)
-        return false;
-    const HazardSize size = hazardSize(read.width, read.height);
-    const bool pyramid =
-        areaWidth && areaHeight && 2ull * areaWidth <= read.width + 1ull && 2ull * areaHeight <= read.height + 1ull;
-    if (pyramid && heldCell(read.format, read.layout, HazardShape::Pyramid, size))
-        return true;
-    for (HazardShape shape : {HazardShape::Same, HazardShape::Stride, HazardShape::Flip, HazardShape::Pyramid})
-        if (!heldCell(read.format, read.layout, shape, size))
-            return false;
-    return true;
+    return read.plain;
 }
 
 constexpr bool heldWrite(const HazardImage &written)
 {
-    return written.plain &&
-           heldCell(written.format, written.layout, HazardShape::Waw, hazardSize(written.width, written.height));
+    return written.plain;
 }
 
 constexpr uint32_t kPassImages = 16, kChainImages = 128;
 
-// Why a known pass keeps the drain (drainCause)
 enum class DrainCause : uint8_t {
     None,
-    Unknown,       // the pass is not known
-    Chain,         // a pass since the last drain was not known, or a list of the chain filled
-    Depth,         // a depth or stencil attachment, this pass's or the chain's
-    Read,          // it samples what the chain wrote, in no held cell
-    Write,         // it writes what the chain wrote, in no held cell
-    WriteSampled,  // it writes what the chain sampled
-    Scratch        // scratch over memory a real image names
+    Unknown,
+    Chain,
+    Depth,
+    Read,
+    Write,
+    WriteSampled,
+    Scratch
 };
 
-// What a pass reads and writes. `known`: everything it reads came through its bindings and named uses (no heap, fence
-// wait, storage write or an image past the lists); `vertexSamples`: its vertex stage binds a texture
 struct PassUses {
     bool known = false, vertexSamples = false;
     bool shaderWrites = false, bufferWrites = false;
     uint32_t areaWidth = 0, areaHeight = 0;
-    HazardImage written[8];  // its colour targets
+    HazardImage written[8];
     uint8_t writtenCount = 0;
-    HazardImage scratch[8];  // its memoryless colours' backings
+    HazardImage scratch[8];
     uint8_t scratchCount = 0;
-    bool depthStencil = false;  // it binds a depth or stencil attachment
+    bool depthStencil = false;
     HazardImage depth;
-    HazardImage sampled[kPassImages];  // what its stages sample and the resources it names (useResource)
-    bool named[kPassImages] = {};      // through a use, whose stage it does not say
+    HazardImage sampled[kPassImages];
+    bool named[kPassImages] = {};
     uint8_t sampledCount = 0;
 
     bool write(const HazardImage &image)
@@ -207,15 +120,44 @@ struct PassUses {
         sampled[sampledCount++] = image;
         return true;
     }
+
+    void reset()
+    {
+        known = vertexSamples = shaderWrites = bufferWrites = depthStencil = false;
+        areaWidth = areaHeight = 0;
+        writtenCount = scratchCount = sampledCount = 0;
+    }
+
+    void copyFrom(const PassUses &src)
+    {
+        known = src.known;
+        vertexSamples = src.vertexSamples;
+        shaderWrites = src.shaderWrites;
+        bufferWrites = src.bufferWrites;
+        areaWidth = src.areaWidth;
+        areaHeight = src.areaHeight;
+        writtenCount = src.writtenCount;
+        for (uint8_t i = 0; i < writtenCount; ++i)
+            written[i] = src.written[i];
+        scratchCount = src.scratchCount;
+        for (uint8_t i = 0; i < scratchCount; ++i)
+            scratch[i] = src.scratch[i];
+        depthStencil = src.depthStencil;
+        if (depthStencil)
+            depth = src.depth;
+        sampledCount = src.sampledCount;
+        for (uint8_t i = 0; i < sampledCount; ++i) {
+            sampled[i] = src.sampled[i];
+            named[i] = src.named[i];
+        }
+    }
 };
 
-// The passes since the last drain: the images they wrote, sampled and used as scratch, each once; `valid` false where
-// one of them was not known or a list filled
 struct PassChain {
     bool valid = false;
     HazardImage written[kChainImages], sampled[kChainImages], scratch[kChainImages];
     uint8_t writtenCount = 0, sampledCount = 0, scratchCount = 0;
-    bool depth = false;  // one of them bound a depth or stencil attachment
+    bool depth = false;
 
     void reset()
     {
@@ -232,8 +174,6 @@ constexpr bool overlapsAny(const HazardImage &image, const HazardImage *list, ui
     return false;
 }
 
-// What keeps `next` from opening with PIXEL_SHADER_BARRIER after the chain: None where its dependencies on it are all
-// held cells
 constexpr DrainCause drainCause(const PassChain &chain, const PassUses &next)
 {
     if (!next.known)
@@ -263,15 +203,13 @@ constexpr DrainCause drainCause(const PassChain &chain, const PassUses &next)
         for (uint8_t j = 0; j < chain.writtenCount; j++) {
             if (!overlaps(read, chain.written[j]))
                 continue;
-            if (next.named[s] || next.vertexSamples || !heldRead(read, next.areaWidth, next.areaHeight) ||
-                !heldRead(chain.written[j], next.areaWidth, next.areaHeight))
+            if (next.named[s] || next.vertexSamples || !heldRead(read) || !heldRead(chain.written[j]))
                 return DrainCause::Read;
         }
     }
     return DrainCause::None;
 }
 
-// Whether `next`'s dependencies on the chain are all held cells: PIXEL_SHADER_BARRIER may open it
 constexpr bool pixelBarrierHolds(const PassChain &chain, const PassUses &next)
 {
     return drainCause(chain, next) == DrainCause::None;
@@ -306,7 +244,6 @@ constexpr bool passesIndependent(const PassChain &chain, const PassUses &next)
 
 namespace pass_hazard_detail {
 
-// `image` into `list` unless an image of the same memory is there; false where the list is full
 inline bool addOnce(HazardImage *list, uint8_t &count, const HazardImage &image)
 {
     for (uint8_t j = 0; j < count; j++)
@@ -320,7 +257,6 @@ inline bool addOnce(HazardImage *list, uint8_t &count, const HazardImage &image)
 
 }  // namespace pass_hazard_detail
 
-// The chain after `next` opened: itself alone after a drain, else added to it
 inline void advanceChain(PassChain &chain, const PassUses &next, bool drained)
 {
     using pass_hazard_detail::addOnce;

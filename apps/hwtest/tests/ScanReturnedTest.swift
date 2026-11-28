@@ -1,5 +1,7 @@
 import Foundation
 import HWTestCore
+import HWTestKit
+import HWTestShared
 import UIKit
 
 /// Window A never scans a page Core Animation has back, and window B never has a surface in reach whose use count it

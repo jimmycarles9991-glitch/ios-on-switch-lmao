@@ -1,6 +1,8 @@
 import AVFoundation
 import Darwin
 import HWTestCore
+import HWTestKit
+import HWTestShared
 import HWTestVideo
 import UIKit
 
@@ -23,7 +25,9 @@ struct PlaneTagsTest: HWTest {
         guard !first.isEmpty else {
             var metrics = Metrics()
             metrics.set("sysctl", KernelSysctl.code(unread))
-            return .skip(KernelSysctl.unreadable("kern.switch_planes_*", unread), metrics)
+            return .skip(
+                KernelSysctl.unreadable("kern.switch_planes_*", unread, flag: "--//bazel:stats_frame"), metrics
+            )
         }
         var metrics = Metrics()
         var checks: [(String, Bool)] = []

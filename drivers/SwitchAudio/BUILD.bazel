@@ -88,7 +88,10 @@ ios_binary(
     copts = [
         "-I",
         "{tree}",
-        "-O2",
+    ] + select({
+        "//bazel:release": ["-O3"],
+        "//conditions:default": ["-O2"],
+    }) + [
         "-Wall",
         "-Wextra",
         "-Werror",

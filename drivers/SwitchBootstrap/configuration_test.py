@@ -118,6 +118,24 @@ class ConfigurationTest(unittest.TestCase):
         del manifest['sileo_executable_sha256']
         self.reject_manifest(manifest)
 
+    def test_a_development_image_manages_its_ssh_set_after_the_four(self) -> None:
+        manifest = self.manifest()
+        records = manifest['managed_packages']
+        for name, filename in configuration.DEVELOPMENT.items():
+            records[name] = dict(records['ellekit'], file=filename)
+        manifest['managed_generation'] = hashlib.sha256(
+            b'Switch bootstrap migration v1\n' + json.dumps(records, sort_keys=True, separators=(',', ':')).encode()
+        ).hexdigest()
+        self.assertEqual(configuration.managed_packages(manifest), records)
+        header = configuration.package_header(records)
+        order = [header.index('@' + json.dumps(name) + ': @{') for name in configuration.MANAGED]
+        order += [header.index('@' + json.dumps(name) + ': @{') for name in configuration.DEVELOPMENT]
+        self.assertEqual(order, sorted(order))
+        for name in configuration.DEVELOPMENT:
+            partial = copy.deepcopy(manifest)
+            del partial['managed_packages'][name]
+            self.reject_manifest(partial)
+
     def reject_manifest(self, manifest: dict) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             source, output = Path(temporary) / 'manifest', Path(temporary) / 'output'

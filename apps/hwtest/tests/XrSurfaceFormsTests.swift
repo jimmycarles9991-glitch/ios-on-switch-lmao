@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// 550 over each plane of a three-plane 'b3a8' 32x8 (gpu/XrPlaneReads.swift nextPlane), against an M4 Max: over planes

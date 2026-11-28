@@ -48,6 +48,7 @@ void disarm(uint32_t cpu)
 {
     tmrWrite(cpu, kPtv, 0);
     tmrWrite(cpu, kPcr, kPcrInterruptClear);
+    (void)switch_mmio_read32(gTmr, kTmr10 + cpu * 8 + kPcr);
 }
 
 int64_t powerDown(uint32_t cpu, uint64_t ticks)

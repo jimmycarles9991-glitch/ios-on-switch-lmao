@@ -5,6 +5,9 @@ use metal2vulkan::pipeline::Stage;
 use std::ffi::{c_char, c_void};
 
 pub const HEAP_ARRAYS: usize = 8;
+/// pack.h kPackGuestBases, and its fragment stage's bit in guestBaseSlot
+pub const GUEST_BASES: usize = 4;
+pub const GUEST_BASE_FRAGMENT: u8 = 0x80;
 /// The driver's texture header pool (heap_tables.h kHeapElements): its heap holds texture header i and sampler header
 /// i at element i, so no array needs more elements
 pub const SWITCH_METAL_HEAP_ELEMENTS: u32 = 8192;
@@ -160,6 +163,8 @@ pub struct NmbDirectDraw {
     pub spill: [*const u32; 2],
     pub spill_words: [u32; 2],
     pub residual_word: [[u8; 32]; 2],
+    pub guest_base_word: [u8; GUEST_BASES],
+    pub guest_base_slot: [u8; GUEST_BASES],
 }
 
 #[repr(C)]

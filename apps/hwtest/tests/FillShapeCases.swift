@@ -5,31 +5,37 @@ import Metal
 
 /// The fillTexture: (SPI) shapes gpu.gm20b.fill_shapes fills, each into a texture of its own, as an M4 Max's Metal fills
 /// them: every byte of the region at the expected texel and every byte outside it as it was.
-struct FillShapeResult {
-    var path = "-"
-    var insideWrong = 0
-    var outsideChanged = 0
+public struct FillShapeResult {
+    public var path = "-"
+    public var insideWrong = 0
+    public var outsideChanged = 0
+
+    public init(path: String = "-", insideWrong: Int = 0, outsideChanged: Int = 0) {
+        self.path = path
+        self.insideWrong = insideWrong
+        self.outsideChanged = outsideChanged
+    }
 }
 
-enum FillShapeCases {
-    typealias Fill = @convention(c) (AnyObject, Selector, MTLTexture, Int, Int, MTLRegion, MTLClearColor) -> Void
-    typealias FillAs =
+public enum FillShapeCases {
+    public typealias Fill = @convention(c) (AnyObject, Selector, MTLTexture, Int, Int, MTLRegion, MTLClearColor) -> Void
+    public typealias FillAs =
         @convention(c) (
             AnyObject, Selector, MTLTexture, Int, Int, MTLRegion, MTLClearColor, MTLPixelFormat
         ) -> Void
-    static let fill = NSSelectorFromString("fillTexture:level:slice:region:color:")
-    static let fillAs = NSSelectorFromString("fillTexture:level:slice:region:color:pixelFormat:")
+    public static let fill = NSSelectorFromString("fillTexture:level:slice:region:color:")
+    public static let fillAs = NSSelectorFromString("fillTexture:level:slice:region:color:pixelFormat:")
 
     /// Each case's key and how it runs; nil when the blit encoder answers neither fill
-    static let all: [(key: String, run: (GPU) async throws -> FillShapeResult?)] = [
+    public static let all: [(key: String, run: (GPU) async throws -> FillShapeResult?)] = [
         ("rgb9e5", rgb9e5), ("volume", volume), ("samples4", samples4), ("depth_keeps_stencil", depthKeepsStencil),
         ("through_r8", throughR8), ("through_rgba16f", throughHalf), ("cube_slice7", cubeSlice7),
     ]
 
-    static let region = MTLRegionMake2D(2, 3, 9, 7)
+    public static let region = MTLRegionMake2D(2, 3, 9, 7)
 
     /// Encodes the fill (`as`: through that format) in a command buffer of its own; the buffer's path, nil without the SPI
-    static func filled(
+    public static func filled(
         _ gpu: GPU, _ texture: MTLTexture, slice: Int = 0, region: MTLRegion = region, _ colour: MTLClearColor,
         as format: MTLPixelFormat? = nil
     ) async throws -> String? {
@@ -51,13 +57,13 @@ enum FillShapeCases {
         return answered ? path : nil
     }
 
-    static func pattern(_ count: Int, seed: Int) -> [UInt8] {
+    public static func pattern(_ count: Int, seed: Int) -> [UInt8] {
         (0 ..< count).map { UInt8(truncatingIfNeeded: $0 &* 37 &+ seed) }
     }
 
     /// A 2D texture's bytes after a fill of `region` against `texel` inside (a nil byte: one Metal leaves undefined) and
     /// the uploaded pattern outside
-    static func judged(
+    public static func judged(
         _ got: [UInt8], before: [UInt8], width: Int, texel: [UInt8?], region: MTLRegion = region, path: String
     ) -> FillShapeResult {
         var result = FillShapeResult(path: path)

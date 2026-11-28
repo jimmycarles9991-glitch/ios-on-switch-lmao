@@ -25,6 +25,15 @@ host_test(
     ],
 )
 
+host_test(
+    name = "switch_audio_codec_seq_test",
+    srcs = [
+        "switch_audio_codec_seq_test.cpp",
+        "//drivers/SwitchAudio:SwitchCodecSeq.h",
+        "//drivers/SwitchAudio:SwitchRT5639.h",
+    ],
+)
+
 # The harness twice: NEON (as on the device), and the scalar fallback the plug-in has without it.
 host_library(
     name = "neon_harness",
@@ -105,11 +114,13 @@ host_test(
         "//drivers/SwitchAudio:SwitchAudioSfc.cpp",
         "//drivers/SwitchAudio:SwitchAudioStream.cpp",
         "//drivers/SwitchAudio:SwitchAudioSysctl.cpp",
+        "//drivers/SwitchAudio:SwitchCodecSeq.h",
         "//drivers/SwitchAudio:SwitchDisplayAudio.cpp",
         "//drivers/SwitchAudio:SwitchHDA.cpp",
         "//drivers/SwitchAudio:SwitchRT5639.cpp",
         "//drivers/SwitchAudio:SwitchRT5639.h",
         "//drivers/SwitchAudio:hal/SwitchAudioPlugIn.c",
+        "//drivers/SwitchAudio:hal/SwitchDisplayAudio.c",
         "//drivers/TegraGPIO:TegraGPIO.cpp",
     ],
     deps = [":neon_harness"],

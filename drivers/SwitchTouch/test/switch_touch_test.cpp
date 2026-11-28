@@ -79,6 +79,7 @@ static Event contactEvent(unsigned type, unsigned id, unsigned x, unsigned y, un
 struct Ftm4 : Device {
     std::deque<Event> fifo;
     bool intEnabled = false, sensing = false, reading = false;
+    bool burstZeroPad = true;
     uint8_t mode = 0;
     std::vector<uint8_t> command;
     std::vector<uint8_t> out;  // a register read's bytes
@@ -140,6 +141,8 @@ struct Ftm4 : Device {
             if (!fifo.empty()) {
                 current = fifo.front();
                 fifo.pop_front();
+            } else if (!burstZeroPad && command[0] == 0x86) {
+                current.fill(0xaa);
             }
         }
         return current[at % 8];
@@ -260,10 +263,12 @@ struct Controller {
     Device *device = nullptr;
     uint64_t generation = 0;  // a flush cancels the packet's scheduled bytes
     IOInterruptEventSource *source = nullptr;
-    bool deliveryPending = false;
-    unsigned packets = 0, actionsSeen = 0;
+    IOFilterInterruptEventSource *filter = nullptr;
+    bool deliveryPending = false, stall = false;
+    unsigned packets = 0, actionsSeen = 0, filterCalls = 0, fifoFlushes = 0;
+    uint32_t everUnmasked = 0;
     unsigned arbLosses = 0;  // packets that lose the bus to another master at their START (I2C5's CL-DVFS master)
-    std::vector<std::string> trace;  // per submission: "W3+R2 chained" etc.
+    std::vector<std::string> trace;  // per submission: "W3+rs" etc.
 
     unsigned rxTrigger() const
     {
@@ -323,6 +328,8 @@ struct Controller {
 
     void addressed(uint8_t addr)
     {
+        if (stall)
+            return;
         if (arbLosses) {
             --arbLosses;
             latched |= INT_ARB_LOST;
@@ -421,6 +428,7 @@ struct Controller {
     // one-packet path flushes between its write and its read, as it did on hardware before r17-touch).
     void flush()
     {
+        ++fifoFlushes;
         tx.clear();
         rx.clear();
         ++generation;
@@ -464,6 +472,7 @@ struct Controller {
             break;
         case INT_MASK:
             intMask = v;
+            everUnmasked |= v;
             break;
         case FIFO_CONTROL:
             fifoControl = v & ~3u;
@@ -559,12 +568,8 @@ void w32(volatile uint8_t *base, uint32_t o, uint32_t v)
     *(volatile uint32_t *)(base + o) = v;
 }
 
-static unsigned gDmaSyncs = 0;
-
-void dmaSync(const uint8_t *, size_t)
-{
-    ++gDmaSyncs;
-}
+static unsigned gDmaInvalidates = 0;
+static unsigned gDmaInvalidateWhileActive = 0;
 
 // --- APB DMA (TegraAPBDMA.h) ------------------------------------------------------------------------------------------
 struct tegra_apbdma_channel {
@@ -579,6 +584,14 @@ struct tegra_apbdma_channel {
 static tegra_apbdma_channel gDma[TEGRA_APBDMA_CHANNELS];
 static std::map<uint32_t, uint8_t *> gDmaMemory;  // pa -> buffer
 static bool gDmaBroken = false, gDmaLoseInterrupt = false, gDmaOpenFails = false;
+
+void dmaInvalidate(const uint8_t *, size_t size)
+{
+    check(size != 0 && (size % 64) == 0, "DMA invalidate rounded to whole cache lines");
+    if (gDma[TEGRA_APBDMA_CH_I2C3_RX].enabled)
+        ++gDmaInvalidateWhileActive;
+    ++gDmaInvalidates;
+}
 
 bool tegra_apbdma_alloc(uint32_t size, tegra_apbdma_buffer *out)
 {
@@ -748,6 +761,20 @@ extern "C" void switch_frames_touch(uint64_t stamp, bool down, unsigned changes)
     gFramesTouches.push_back({stamp, down, changes});
 }
 
+static bool gDisplayOn = true;
+
+extern "C" bool switch_display_is_on(void)
+{
+    return gDisplayOn;
+}
+
+static std::vector<uint64_t> gJoyConTouchMs;
+
+extern "C" void switch_joycon_note_touch_ms(uint64_t now_ms)
+{
+    gJoyConTouchMs.push_back(now_ms);
+}
+
 struct Report {
     SwitchTouchReport report;
     uint64_t stamp, postedAt;
@@ -757,11 +784,20 @@ struct Report {
 static std::vector<Report> gReports;
 static bool gTimedPosts = true;
 static uint32_t gEdge = 0;
+static IOWorkLoop *gHidLoop = nullptr;
+
+IOService *switch_hid_create(SwitchHIDKind kind, IOWorkLoop *sharedLoop)
+{
+    check(kind == kSwitchHIDTouch, "only the touch device");
+    gHidLoop = sharedLoop;
+    if (sharedLoop)
+        sharedLoop->retain();
+    return new IOService;
+}
 
 IOService *switch_hid_create(SwitchHIDKind kind)
 {
-    check(kind == kSwitchHIDTouch, "only the touch device");
-    return new IOService;
+    return switch_hid_create(kind, nullptr);
 }
 
 bool switch_hid_supports_timestamps(IOService *)
@@ -815,8 +851,10 @@ static std::vector<IrqRecord> gIrqs;
 
 static unsigned i2cActions(unsigned bus)
 {
-    unsigned n = 0;
-    for (IOInterruptEventSource *s : IOInterruptEventSource::all) {
+    unsigned n = gControllers[bus].filterCalls;
+    if (bus == 3)
+        n += gDma[TEGRA_APBDMA_CH_I2C3_RX].interrupts;
+    for (const IOInterruptEventSource *s : IOInterruptEventSource::all) {
         if (s->provider == gInterruptNubs[gIntid[bus]] || (bus == 3 && !s->provider))
             n += s->actions;
     }
@@ -827,11 +865,29 @@ static void deliver()
 {
     for (unsigned bus = 1; bus <= 5; ++bus) {
         Controller &c = gControllers[bus];
-        if (!c.source) {
+        if (!c.filter && !c.source) {
+            for (IOFilterInterruptEventSource *s : IOFilterInterruptEventSource::filters) {
+                if (gInterruptNubs.contains(gIntid[bus]) && s->provider == gInterruptNubs[gIntid[bus]])
+                    c.filter = s;
+            }
             for (IOInterruptEventSource *s : IOInterruptEventSource::all) {
-                if (gInterruptNubs.count(gIntid[bus]) && s->provider == gInterruptNubs[gIntid[bus]])
+                if (!c.filter && gInterruptNubs.contains(gIntid[bus]) && s->provider == gInterruptNubs[gIntid[bus]])
                     c.source = s;
             }
+        }
+        if (c.filter) {
+            if (!c.filter->enabled || !(c.status() & c.intMask))
+                continue;
+            ++c.filterCalls;
+            if (c.filter->filter(c.filter->owner, c.filter) && !c.deliveryPending) {
+                c.deliveryPending = true;
+                gSchedule(gNow + gWorkLoopNs, [&c] {
+                    c.deliveryPending = false;
+                    if (c.filter->enabled)
+                        c.filter->run();
+                });
+            }
+            continue;
         }
         if (!c.source || c.deliveryPending || !(c.status() & c.intMask))
             continue;
@@ -931,17 +987,19 @@ static uint64_t drag(unsigned fingers, unsigned moves, uint64_t periodNs, unsign
     return start;
 }
 
-// Each touch interrupt: exactly the count read and the event read on the wire, and `actions` I2C3 interrupt actions
-// (0: report the most seen instead of checking).
-static unsigned checkIrqTraffic(size_t fromIrq, unsigned want, const char *what)
+// Each touch interrupt: single-transfer burst read (1-2 fingers) or count+events (3+ fingers / fallback), and `actions`
+// I2C3 interrupt actions (0: report the most seen instead of checking).
+static unsigned checkIrqTraffic(size_t fromIrq, unsigned want, const char *what, bool singleTransfer = false)
 {
     unsigned most = 0;
     for (size_t i = fromIrq; i < gIrqs.size(); ++i) {
         const IrqRecord &r = gIrqs[i];
         std::vector<std::string> ops(gFtm4.ops.begin() + (long)r.opsBefore, gFtm4.ops.begin() + (long)r.opsAfter);
-        const bool ok = ops.size() == 2 && ops[0] == "R b6 00 23 x2" && ops[1].rfind("R 86 x", 0) == 0;
-        check(ok, format("%s: interrupt %zu: exactly the count read and the event read on the wire (%zu ops: %s ...)",
-                         what, i, ops.size(), ops.empty() ? "" : ops[0].c_str()));
+        const bool ok = singleTransfer
+                            ? (ops.size() == 1 && ops[0].rfind("R 86 x", 0) == 0)
+                            : (ops.size() == 2 && ops[0] == "R b6 00 23 x2" && ops[1].rfind("R 86 x", 0) == 0);
+        check(ok, format("%s: interrupt %zu: unexpected wire ops (%zu ops: %s ...)", what, i, ops.size(),
+                         ops.empty() ? "" : ops[0].c_str()));
         const unsigned actions = r.i2cActionsAfter - r.i2cActionsBefore;
         most = std::max(most, actions);
         if (want)
@@ -997,21 +1055,36 @@ static void scenarioDrag()
     }
     const size_t irqsBefore = gIrqs.size(), reportsBefore = gReports.size();
     const unsigned hintsBefore = gPerfHints;
+    const unsigned flushesBefore = gControllers[3].fifoFlushes;
     drag(1, 60, 8333333);  // 120 Hz
     check(gIrqs.size() - irqsBefore == 62, format("62 touch interrupts (got %zu)", gIrqs.size() - irqsBefore));
     check(gReports.size() - reportsBefore == 62, format("62 reports (got %zu)", gReports.size() - reportsBefore));
     check(gPerfHints - hintsBefore == 62, "one perf hint per interrupt, from the filter");
-    checkIrqTraffic(irqsBefore, 2, "1-finger drag");
+    check(gControllers[3].fifoFlushes == flushesBefore,
+          format("clean consecutive I2C3 transfers skip redundant FIFO_FLUSH (got %u)",
+                 gControllers[3].fifoFlushes - flushesBefore));
+    checkIrqTraffic(irqsBefore, 1, "1-finger drag", true);
     checkStamps(reportsBefore, "1-finger drag");
     check(downContacts(gReports[reportsBefore].report) == 1 && downContacts(gReports.back().report) == 0,
           "first report down, last up");
+    // Inactive slots never set kSwitchTouchValid; active slot 0 does on down and on lift.
+    for (unsigned s = 1; s < kSwitchTouchSlots; ++s) {
+        check(gReports[reportsBefore].report.slot[s].flags == 0, "inactive slot has flags == 0 on down");
+        check(gReports.back().report.slot[s].flags == 0, "inactive slot has flags == 0 on lift");
+    }
+    check(gReports[reportsBefore].report.slot[0].flags == (kSwitchTouchValid | kSwitchTouchTip | kSwitchTouchInRange),
+          "active slot has Valid|Tip|InRange on down");
+    check(gReports.back().report.slot[0].flags == kSwitchTouchValid, "lifted slot has Valid only on lift");
+    check(gReports[reportsBefore].report.contactCount == 1 && gReports.back().report.contactCount == 1,
+          "contactCount counts active slots");
+    check(gReports.back().report.scanTime != gReports[reportsBefore].report.scanTime,
+          "scanTime advances in 100 us units");
     check(gFramesTouches.size() >= 62 && gFramesTouches[gFramesTouches.size() - 62].down &&
               !gFramesTouches.back().down && gFramesTouches.back().stamp == gReports.back().stamp,
           "each report reaches the frame diagnostics with its stamp, down until the lift");
     check(gFramesTouches[gFramesTouches.size() - 62].changes == 1 && gFramesTouches.back().changes == 2 &&
               gFramesTouches[gFramesTouches.size() - 2].changes == 0,
           "the touch-down report says began, the lift ended, the motion between neither");
-    // irq -> post in the model: the work loop's latency, two chained transactions at 400 kHz, the wake-ups.
     uint64_t worst = 0, sum = 0;
     for (size_t i = irqsBefore; i < gIrqs.size(); ++i) {
         worst = std::max(worst, gIrqs[i].end - gIrqs[i].filter);
@@ -1019,7 +1092,7 @@ static void scenarioDrag()
     }
     std::printf("model: 1-finger irq->post mean %" PRIu64 " us, max %" PRIu64 " us\n",
                 sum / (gIrqs.size() - irqsBefore) / 1000, worst / 1000);
-    check(worst < 900000, "irq->post under 0.9 ms in the model");
+    check(worst < 600000, "irq->post under 0.6 ms in the model");
     fireWatchdog();
     const std::string line = logLine("SwitchTouch stats:");
     std::printf("%s\n", line.c_str());
@@ -1030,8 +1103,8 @@ static void scenarioDrag()
     check(line.find("62 interrupts (0 empty), 62 reports, 62 events (max 1)") != std::string::npos, "stats counts");
     check(line.find("report interval 8333/") != std::string::npos && line.find("120.0 Hz") != std::string::npos,
           "report interval 8333 us, 120 Hz");
-    check(line.find("I2C3 124 interrupts (2.0 per interrupt), 0 DMA reads; stamps irq") != std::string::npos,
-          "2 I2C interrupts per touch interrupt, no DMA for 8-byte reads");
+    check(line.find("I2C3 62 interrupts (1.0 per interrupt), 0 DMA reads; stamps irq") != std::string::npos,
+          "1 I2C interrupt per touch interrupt, no DMA for 16-byte burst reads");
     gLog.clear();
     fireWatchdog();
     check(!logged("SwitchTouch stats:"), "no stats line for a window without interrupts");
@@ -1052,28 +1125,34 @@ static void scenarioFiveFingers(bool dmaWorks)
     }
     const size_t irqsBefore = gIrqs.size(), reportsBefore = gReports.size();
     const unsigned startsBefore = gDma[TEGRA_APBDMA_CH_I2C3_RX].starts;
+    const unsigned invalidatesBefore = gDmaInvalidates;
     drag(5, 30, 8333333);
     check(gReports.size() - reportsBefore == 32, format("32 reports (got %zu)", gReports.size() - reportsBefore));
     check(downContacts(gReports[reportsBefore + 5].report) == 5, "five contacts down");
     checkStamps(reportsBefore, "5-finger drag");
-    // DMA: the count read's completion, the event read's, the channel's end of count. PIO: the event read's RX
-    // requests on top (10 words, more than the RX FIFO, at the 1-word trigger).
+    // Steady-state 5-finger scans (after scan 0 lands all 5 from 0 down): count read + 40-byte event read by DMA/PIO.
     const unsigned most =
-        checkIrqTraffic(irqsBefore, dmaWorks ? 3 : 0, dmaWorks ? "5-finger drag, DMA" : "5-finger drag, PIO");
+        checkIrqTraffic(irqsBefore + 1, dmaWorks ? 3 : 0, dmaWorks ? "5-finger drag, DMA" : "5-finger drag, PIO");
     std::printf("model: 5-finger %s: up to %u I2C3 interrupt actions per touch interrupt\n", dmaWorks ? "DMA" : "PIO",
                 most);
     if (!dmaWorks)
         check(most > 3, "PIO takes RX interrupts for a read beyond the RX FIFO");
-    // Every 40-byte event read went by DMA (or none did).
+    // Every steady-state 40-byte event read went by DMA (or none did).
     const unsigned starts = gDma[TEGRA_APBDMA_CH_I2C3_RX].starts - startsBefore;
-    check(starts == (dmaWorks ? 32u : 0u), format("DMA reads %u", starts));
+    check(starts == (dmaWorks ? 31u : 0u), format("DMA reads %u", starts));
+    check(gDmaInvalidates - invalidatesBefore == starts,
+          format("exactly one post-DMA invalidate per DMA read (%u for %u reads)", gDmaInvalidates - invalidatesBefore,
+                 starts));
+    check(gDmaInvalidateWhileActive == 0, "DMA invalidate never runs while channel is active");
+    check(gControllers[3].filter && gControllers[3].filter->actions == 0,
+          "I2C3 filter-only ISR never bounces to work loop");
     // Positions survived the trip: contact 4 at the last move.
     const SwitchTouchReport &r = gReports[reportsBefore + 30].report;
     check((r.slot[4].flags & kSwitchTouchTip) != 0, "contact 4 down at the last move");
     fireWatchdog();
     const std::string line = logLine("SwitchTouch stats:");
     std::printf("%s\n", line.c_str());
-    check(line.find(dmaWorks ? "32 DMA reads" : "0 DMA reads (DMA off)") != std::string::npos, "stats DMA count");
+    check(line.find(dmaWorks ? "31 DMA reads" : "0 DMA reads (DMA off)") != std::string::npos, "stats DMA count");
 }
 
 static void scenarioSameBatch()
@@ -1241,7 +1320,7 @@ static void scenarioChainBroken()
     const size_t before = gReports.size(), irqsBefore = gIrqs.size();
     drag(2, 10, 8333333);
     check(gReports.size() - before == 12, "reports by the one-packet path");
-    const unsigned most = checkIrqTraffic(irqsBefore, 0, "unchained");
+    const unsigned most = checkIrqTraffic(irqsBefore + 1, 0, "unchained", true);
     std::printf("model: unchained 2-finger: up to %u I2C3 interrupt actions per touch interrupt\n", most);
     fireWatchdog();
     check(logLine("SwitchTouch stats:").find("unchained, 0 DMA reads (DMA off)") != std::string::npos,
@@ -1290,10 +1369,11 @@ static std::pair<int, int> reported(unsigned rx, unsigned ry)
     return {ly, 1279 - lx};
 }
 
-// Every scan of a down contact is reported, the lift too, and none of them moves the slot from where it landed.
-static bool stillAndEveryScan(const std::vector<SwitchTouchReport> &r, unsigned slot, size_t scans)
+// A stationary contact emits periodic heartbeats (every ~16.7 ms at 120 Hz, well inside SpringBoard's 42 ms window),
+// never moves from where it landed, and lifts cleanly.
+static bool stillAndHeartbeated(const std::vector<SwitchTouchReport> &r, unsigned slot, size_t scanCount)
 {
-    if (r.size() != scans + 1)
+    if (r.size() < 3 || r.size() >= scanCount + 1)
         return false;
     for (const SwitchTouchReport &rep : r) {
         if (rep.slot[slot].x != r[0].slot[slot].x || rep.slot[slot].y != r[0].slot[slot].y)
@@ -1311,8 +1391,8 @@ static void scenarioFilter()
         for (unsigned i = 0; i < 10; ++i)
             p.push_back({600, 400 + std::min(i, 2u)});
         const auto r = scans(0, p);
-        check(stillAndEveryScan(r, 0, p.size()),
-              format("tap inside the hysteresis: every scan reported, none moved (%zu reports)", r.size()));
+        check(stillAndHeartbeated(r, 0, p.size()),
+              format("tap inside the hysteresis: paced stationary heartbeats, none moved (%zu reports)", r.size()));
     }
     // One whose centroid creeps 8 raw px at a steady strength once settled, as the FTM4's do for the first ~50 ms: it
     // stays inside the still radius (0.8 mm), so the tap lifts within a pixel of where it landed.
@@ -1332,28 +1412,35 @@ static void scenarioFilter()
         const std::vector<std::pair<unsigned, unsigned>> p = {{700, 500}, {700, 506}, {700, 512}, {700, 512},
                                                               {700, 512}, {700, 521}, {700, 530}};
         const auto r = scans(5, p, 16, {12, 35, 70, 72, 71, 40, 15});
-        check(stillAndEveryScan(r, 5, p.size()),
-              format("pressed and lifted tap: every scan reported, none moved (%zu reports)", r.size()));
+        check(stillAndHeartbeated(r, 5, p.size()),
+              format("pressed and lifted tap: paced stationary heartbeats, none moved (%zu reports)", r.size()));
     }
-    // A finger held still with 1-2 px of jitter: a stationary touch, reported every scan (iOS's digitizer contract:
-    // SpringBoard sees the pause, UIKit's velocity falls to nothing) at the point where it landed.
+    // A finger held still with 1-2 px of jitter: stationary heartbeats stay inside SpringBoard's 42 ms window while
+    // cutting duplicate HID traffic.
     {
         std::vector<std::pair<unsigned, unsigned>> p;
         for (unsigned i = 0; i < 20; ++i)
             p.push_back({700 + (i % 3), 300 + ((i * 7) % 2)});
+        const size_t before = gReports.size();
         const auto r = scans(2, p);
-        check(stillAndEveryScan(r, 2, p.size()),
-              format("jittering hold: every scan reported, none moved (%zu reports)", r.size()));
+        check(stillAndHeartbeated(r, 2, p.size()),
+              format("jittering hold: paced stationary heartbeats, none moved (%zu reports)", r.size()));
+        uint64_t worstGapNs = 0;
+        for (size_t i = before + 1; i < gReports.size(); ++i)
+            worstGapNs = std::max(worstGapNs, gReports[i].stamp - gReports[i - 1].stamp);
+        check(worstGapNs <= 20000000ULL,
+              format("jittering hold: max gap %" PRIu64 " us stays well under SpringBoard's 42 ms window",
+                     worstGapNs / 1000));
     }
-    // A slow drag (3 raw px a scan) from touch-down: every scan reported, the first ones from inside the still radius
-    // where it landed, then in steps of at most 1.5 of the finger's (3 px, so 5 once rounded); it ends within the
-    // hysteresis of the finger.
+    // A slow drag (3 raw px a scan) from touch-down: initial still-radius scans pace, then moving scans report in
+    // steps of at most 5 px and end within 3 px of the finger.
     {
         std::vector<std::pair<unsigned, unsigned>> p;
         for (unsigned i = 0; i < 30; ++i)
             p.push_back({800, 300 + 3 * i});
         const auto r = scans(3, p);
-        check(r.size() == p.size() + 1, format("slow drag: every scan and the lift reported (%zu reports)", r.size()));
+        check(r.size() >= 25 && r.size() <= p.size() + 1,
+              format("slow drag: paced while inside still radius, then 1:1 (%zu reports)", r.size()));
         int last = r.empty() ? 0 : r[0].slot[3].x, worst = 0;
         for (const auto &rep : r) {
             worst = std::max(worst, std::abs((int)rep.slot[3].x - last));
@@ -1364,7 +1451,7 @@ static void scenarioFilter()
         check(std::abs(r.back().slot[3].x - want.first) <= 3,
               format("slow drag: ends within 3 px of the finger (%d, want %d)", r.back().slot[3].x, want.first));
     }
-    // A fast start (24 raw px a scan): every scan reported.
+    // A fast start (24 raw px a scan): every 120 Hz moving scan reported.
     {
         const auto r = scans(4, {{900, 200}, {900, 224}, {900, 248}, {900, 272}});
         check(r.size() == 5, format("fast drag: every scan reported (%zu)", r.size()));
@@ -1482,7 +1569,7 @@ static void scenarioFourFingers()
 // The same drags over this tree's drivers or main's (the before/after of r17-touch): per touch interrupt, the
 // transactions on the wire, I2C3 interrupt actions, and INT-to-last-report time. `actions` is the I2C3 interrupt
 // actions per touch interrupt expected (as printed, two decimals); returns the mean INT-to-last-report time in us.
-static uint64_t measureDrag(unsigned fingers, const char *name, const char *actionsPer)
+static uint64_t measureDrag(unsigned fingers, const char *name, const char *opsPer, const char *actionsPer)
 {
     const size_t irqsBefore = gIrqs.size();
     drag(fingers, 60, 8333333);
@@ -1502,7 +1589,7 @@ static uint64_t measureDrag(unsigned fingers, const char *name, const char *acti
     std::printf("measure %s: %zu interrupts, %.2f transactions and %.2f I2C3 interrupt actions per interrupt, "
                 "INT->last report mean %" PRIu64 " us max %" PRIu64 " us\n",
                 name, n, (double)ops / (double)n, (double)actions / (double)n, sum / n / 1000, worst / 1000);
-    EXPECT_EQ(format("%.2f", (double)ops / (double)n), "2.00") << name << ": transactions per interrupt";
+    EXPECT_EQ(format("%.2f", (double)ops / (double)n), opsPer) << name << ": transactions per interrupt";
     EXPECT_EQ(format("%.2f", (double)actions / (double)n), actionsPer)
         << name << ": I2C3 interrupt actions per interrupt";
     return sum / n / 1000;
@@ -1511,12 +1598,262 @@ static uint64_t measureDrag(unsigned fingers, const char *name, const char *acti
 static void scenarioMeasure()
 {
     bringUp();
-    const uint64_t oneFinger = measureDrag(1, "1-finger", "2.00");
-    measureDrag(2, "2-finger", "2.00");
-    measureDrag(5, "5-finger", "3.00");
-    // Two chained transactions at 400 kHz after the work loop's 40 us: under 0.6 ms for one finger (main's three
-    // transactions of two packets each took 1.04 ms in this model).
-    EXPECT_LT(oneFinger, 650u) << "1-finger INT->last report mean, us";
+    const uint64_t oneFinger = measureDrag(1, "1-finger", "1.00", "1.00");
+    measureDrag(2, "2-finger", "1.02", "1.02");
+    measureDrag(5, "5-finger", "2.02", "3.00");
+    EXPECT_LT(oneFinger, 550u) << "1-finger INT->last report mean, us";
+}
+
+// Real hardware FTM4 scans at 200 Hz (5 ms): moving drags coalesce to 100 Hz (10 ms), pausing emits a stationary sample
+// within 10 ms and then paces to 50 Hz (20 ms, 4x reduction while keeping 2-3 samples inside SpringBoard's 42 ms
+// window), a pre-lift move on a skipped scan is flushed at its own timestamp before the lift, and inactive slots stay
+// flags == 0.
+static void scenarioCadence200Hz()
+{
+    bringUp();
+    constexpr uint64_t k5ms = 5000000ULL;
+    const size_t before = gReports.size();
+    const uint64_t start = gNow + 1000000;
+    // 20 moving scans (100 ms) at 200 Hz, then 16 stationary scans (80 ms), then 1 final move + immediate lift.
+    unsigned s = 0;
+    unsigned x = 200;
+    for (unsigned i = 0; i < 20; ++i, ++s) {
+        const unsigned type = i == 0 ? 3 : 5;
+        const unsigned px = x;
+        gSchedule(start + s * k5ms, [type, px] {
+            gFtm4.scan({contactEvent(type, 0, px, 300)});
+        });
+        x += 20;
+    }
+    const unsigned heldX = x - 20;
+    for (unsigned i = 0; i < 16; ++i, ++s) {
+        gSchedule(start + s * k5ms, [heldX] {
+            gFtm4.scan({contactEvent(5, 0, heldX, 300)});
+        });
+    }
+    const unsigned flickX = heldX + 40;
+    gSchedule(start + s * k5ms, [flickX] {
+        gFtm4.scan({contactEvent(5, 0, flickX, 300)});
+    });
+    ++s;
+    gSchedule(start + s * k5ms, [flickX] {
+        gFtm4.scan({contactEvent(4, 0, flickX, 300)});
+    });
+    gRunUntil(start + (s + 4) * k5ms);
+
+    const size_t totalReports = gReports.size() - before;
+    // 38 scans at 200 Hz should coalesce to ~18-20 reports (down + ~10 moving + ~5-6 stationary + pre-lift + lift).
+    check(totalReports >= 15 && totalReports <= 22,
+          format("200 Hz drag+hold+flick coalesced to %zu reports (expected 15..22 from 38 scans)", totalReports));
+    // Verify timestamps strictly increase and max gap during hold stays <= 20 ms (well inside 42 ms window).
+    uint64_t maxGapNs = 0;
+    for (size_t i = before + 1; i < gReports.size(); ++i) {
+        check(gReports[i].stamp > gReports[i - 1].stamp, "200 Hz stamps strictly increasing");
+        maxGapNs = std::max(maxGapNs, gReports[i].stamp - gReports[i - 1].stamp);
+    }
+    check(maxGapNs >= 16000000ULL && maxGapNs <= 20000000ULL,
+          format("200 Hz stationary hold gap %" PRIu64 " us paces to 16..20 ms (50-60 Hz inside 42 ms window)",
+                 maxGapNs / 1000));
+    // Final lift report must reflect the flicked position, preceded by a down report at that flicked position.
+    ASSERT_GE(totalReports, 2u);
+    const Report &preLift = gReports[gReports.size() - 2];
+    const Report &lift = gReports.back();
+    check((preLift.report.slot[0].flags & kSwitchTouchTip) != 0, "pre-lift move stays down");
+    check((lift.report.slot[0].flags & kSwitchTouchTip) == 0, "lift clears Tip");
+    check(preLift.report.slot[0].y == lift.report.slot[0].y, "pre-lift move carries the final flick position");
+    const auto wantHeld = reported(heldX, 300);
+    check(preLift.report.slot[0].y != wantHeld.second, "pre-lift move advanced past the held position");
+    for (size_t i = before; i < gReports.size(); ++i) {
+        for (unsigned slot = 1; slot < kSwitchTouchSlots; ++slot)
+            check(gReports[i].report.slot[slot].flags == 0, "inactive slots never set kSwitchTouchValid");
+    }
+}
+
+// A controller whose 0x86 read does not zero-pad past FIFO end: bringUp detects it once, logs one line, and falls back
+// cleanly to the 2-transfer RegEventCount + CmdReadAllEvents path.
+static void scenarioSingleReadFallback()
+{
+    gFtm4.burstZeroPad = false;
+    bringUp();
+    check(logged("SwitchTouch: single-transfer event reads off for this boot"), "single-read fallback logged once");
+    const size_t irqsBefore = gIrqs.size(), reportsBefore = gReports.size();
+    drag(1, 10, 8333333);
+    check(gReports.size() - reportsBefore == 12, "fallback still reports every 120 Hz scan");
+    checkIrqTraffic(irqsBefore, 2, "fallback 2-transfer drag", false);
+}
+
+// Clean consecutive I2C transfers skip FIFO_FLUSH, while an error (NACK / ARB_LOST) invalidates fifoClean so the next
+// transfer flushes the FIFOs and succeeds.
+static void scenarioFifoFlushBehavior()
+{
+    bringUp();
+    Controller &i2c5 = gControllers[5];
+    const uint8_t reg = 0x2f;
+    uint8_t val = 0;
+    check(tegra_i2c_transfer(5, 0x3c, &reg, 1, &val, 1) == TEGRA_I2C_OK, "priming I2C5 read");
+    const unsigned afterPrime = i2c5.fifoFlushes;
+    for (int i = 0; i < 5; ++i)
+        check(tegra_i2c_transfer(5, 0x3c, &reg, 1, &val, 1) == TEGRA_I2C_OK, "clean I2C5 read");
+    check(i2c5.fifoFlushes == afterPrime,
+          format("5 clean I2C5 transfers skipped FIFO_FLUSH (%u extra)", i2c5.fifoFlushes - afterPrime));
+    i2c5.arbLosses = 1;
+    check(tegra_i2c_transfer(5, 0x3c, &reg, 1, &val, 1) == TEGRA_I2C_EARB, "ARB_LOST error");
+    const unsigned afterErr = i2c5.fifoFlushes;
+    check(tegra_i2c_transfer(5, 0x3c, &reg, 1, &val, 1) == TEGRA_I2C_OK, "transfer after error succeeds");
+    check(i2c5.fifoFlushes > afterErr, "transfer after error flushed FIFOs before queueing");
+}
+
+static void scenarioFilterOnlyNoWorkLoop()
+{
+    bringUp();
+    check(gControllers[3].filter != nullptr && gControllers[5].filter != nullptr,
+          "I2C buses attach IOFilterInterruptEventSource");
+    check(gControllers[3].source == nullptr && gControllers[5].source == nullptr,
+          "no plain IOInterruptEventSource attached for I2C");
+    drag(1, 5, 8333333);
+    drag(5, 5, 8333333);
+    check(gControllers[3].filter->actions == 0, "I2C3 runs zero work-loop actions");
+    check(gControllers[5].filter->actions == 0, "I2C5 runs zero work-loop actions");
+    for (const IOInterruptEventSource *s : IOInterruptEventSource::all)
+        check(s->provider != nullptr, "no provider-less dmaDoneSource created");
+    check(gDmaInvalidates == gDma[TEGRA_APBDMA_CH_I2C3_RX].starts,
+          "exactly one invalidate per DMA read across bring-up and drags");
+    check(gDmaInvalidateWhileActive == 0, "DMA invalidate only runs after completion");
+}
+
+static void scenarioDrainAtEndNonChained()
+{
+    bringUp();
+    Controller &i2c5 = gControllers[5];
+    for (unsigned i = 0; i < 64; ++i)
+        gPmic.regs[0x40 + i] = static_cast<uint8_t>(0xa0 ^ i);
+    const uint8_t reg = 0x40;
+    uint8_t small[32] = {};
+    i2c5.everUnmasked = 0;
+    const unsigned irqsBefore = i2c5.filterCalls;
+    check(tegra_i2c_transfer(5, 0x3c, &reg, 1, small, sizeof(small)) == TEGRA_I2C_OK,
+          "32-byte read on non-chained I2C5 succeeds");
+    check((i2c5.everUnmasked & INT_RX_REQ) == 0, "32-byte read on non-chained bus never unmasks INT_RX_REQ");
+    check(i2c5.filterCalls - irqsBefore == 2,
+          format("32-byte write+read takes 2 filter IRQs (got %u)", i2c5.filterCalls - irqsBefore));
+    for (unsigned i = 0; i < sizeof(small); ++i)
+        check(small[i] == static_cast<uint8_t>(0xa0 ^ i), "32-byte drainAtEnd data matches");
+
+    uint8_t large[40] = {};
+    i2c5.everUnmasked = 0;
+    check(tegra_i2c_transfer(5, 0x3c, &reg, 1, large, sizeof(large)) == TEGRA_I2C_OK,
+          "40-byte PIO read on non-chained I2C5 succeeds");
+    check((i2c5.everUnmasked & INT_RX_REQ) != 0, ">32-byte PIO read unmasks INT_RX_REQ");
+    for (unsigned i = 0; i < sizeof(large); ++i)
+        check(large[i] == static_cast<uint8_t>(0xa0 ^ i), "40-byte PIO data matches");
+}
+
+static void scenarioTimeoutQuiesceAndRecover()
+{
+    bringUp();
+    Controller &i2c5 = gControllers[5];
+    const uint8_t reg = 0x2f;
+    uint8_t val = 0;
+    i2c5.stall = true;
+    const int timedOut = tegra_i2c_transfer(5, 0x3c, &reg, 1, &val, 1);
+    check(timedOut == TEGRA_I2C_ETIMEDOUT, format("stalled bus returns ETIMEDOUT (got %d)", timedOut));
+    check(i2c5.filter && i2c5.filter->enabled, "interrupt re-enabled after timeout quiesce and recovery");
+    i2c5.stall = false;
+    // A spurious late interrupt while idle must be masked/cleared cleanly without affecting subsequent transfers.
+    i2c5.latched |= INT_PACKET_DONE;
+    i2c5.intMask = INT_PACKET_DONE;
+    deliver();
+    check(i2c5.intMask == 0, "stale filter masks INT_MASK");
+    check((i2c5.latched & INT_PACKET_DONE) == 0, "stale filter clears INT_STATUS");
+    check(tegra_i2c_transfer(5, 0x3c, &reg, 1, &val, 1) == TEGRA_I2C_OK && val == gPmic.regs[0x2f],
+          "transfer after timeout and stale IRQ succeeds");
+}
+
+static void scenarioJoyConTouchPreemptHook()
+{
+    bringUp();
+    check(gJoyConTouchMs.empty(), "bringUp never reports touch activity to SwitchJoyCon");
+
+    const size_t reportsBefore = gReports.size();
+    drag(1, 5, 10000000);  // enter, 5 moves, leave (10 ms apart -> every report dispatched)
+    const size_t dispatched = gReports.size() - reportsBefore;
+    check(dispatched == 7, format("7 live reports dispatched (got %zu)", dispatched));
+    check(gJoyConTouchMs.size() == dispatched,
+          format("switch_joycon_note_touch_ms called once per live dispatch (%zu vs %zu)", gJoyConTouchMs.size(),
+                 dispatched));
+    for (size_t i = 0; i < std::min(dispatched, gJoyConTouchMs.size()); ++i) {
+        check(gJoyConTouchMs[i] == gReports[reportsBefore + i].stamp / 1000000ULL,
+              format("touch ms %zu matches report stamp ms (got %" PRIu64 ", want %" PRIu64 ")", i, gJoyConTouchMs[i],
+                     gReports[reportsBefore + i].stamp / 1000000ULL));
+    }
+
+    // Contact down, then screen turns off (powerDown -> releaseAll): synthetic lift must NOT notify SwitchJoyCon.
+    gSchedule(gNow + 2000000, [] {
+        gFtm4.scan({contactEvent(3, 0, 500, 350)});
+    });
+    gRunUntil(gNow + 10000000);
+    const size_t reportsWhileDown = gReports.size();
+    const size_t hooksWhileDown = gJoyConTouchMs.size();
+    check(hooksWhileDown == dispatched + 1, "contact-down notified SwitchJoyCon");
+    switch_touch_display_power(false);
+    check(gReports.size() == reportsWhileDown + 1, "display off released held contact");
+    check(gJoyConTouchMs.size() == hooksWhileDown, "releaseAll on display off does not notify SwitchJoyCon");
+
+    // Display back on, panel brings up, contact down, then panel goes dark before IRQ (shown == false -> releaseAll).
+    switch_touch_display_power(true);
+    if (IOTimerEventSource::last && IOTimerEventSource::last->armed) {
+        IOTimerEventSource::last->armed = false;
+        IOTimerEventSource::last->action(IOTimerEventSource::last->owner, IOTimerEventSource::last);
+    }
+    gSchedule(gNow + 2000000, [] {
+        gFtm4.scan({contactEvent(3, 0, 520, 360)});
+    });
+    gRunUntil(gNow + 10000000);
+    const size_t hooksAfterReenter = gJoyConTouchMs.size();
+    check(hooksAfterReenter == hooksWhileDown + 1, "contact-down after wake notified SwitchJoyCon");
+    gDisplayOn = false;
+    gSchedule(gNow + 2000000, [] {
+        gFtm4.scan({contactEvent(5, 0, 540, 360)});
+    });
+    gRunUntil(gNow + 10000000);
+    check(gJoyConTouchMs.size() == hooksAfterReenter, "releaseAll on dark-screen IRQ does not notify SwitchJoyCon");
+
+    // ESD controller reset (EvReady -> releaseAll) while screen is lit must NOT notify SwitchJoyCon.
+    gDisplayOn = true;
+    gSchedule(gNow + 2000000, [] {
+        gFtm4.scan({contactEvent(3, 0, 560, 360)});
+    });
+    gRunUntil(gNow + 10000000);
+    const size_t hooksBeforeEsd = gJoyConTouchMs.size();
+    check(hooksBeforeEsd == hooksAfterReenter + 1, "contact-down before ESD notified SwitchJoyCon");
+    gSchedule(gNow + 2000000, [] {
+        gFtm4.scan({{0x10, 0, 0, 0, 0, 0, 0, 0}});
+    });
+    gRunUntil(gNow + 20000000);
+    check(gJoyConTouchMs.size() == hooksBeforeEsd, "releaseAll on EvReady reset does not notify SwitchJoyCon");
+}
+
+static void scenarioSharedWorkLoop()
+{
+    gControllers[3].devices[0x49] = &gFtm4;
+    gControllers[5].devices[0x3c] = &gPmic;
+    for (unsigned bus = 1; bus <= 5; ++bus)
+        gControllers[bus].bus = bus;
+    gAfterEvent = deliver;
+    gFtm4.fifo.push_back({0x10, 0, 0, 0, 0, 0, 0, 0});
+    check(switch_touch_start() == 0, "shared workloop: switch_touch_start");
+    check(IOWorkLoop::created == 1 && IOWorkLoop::last != nullptr,
+          format("shared workloop: SwitchTouch creates one IOWorkLoop (got %u)", IOWorkLoop::created));
+    check(gHidLoop == IOWorkLoop::last, "shared workloop: touch HID device shares SwitchTouch's IOWorkLoop");
+    fireWatchdog();
+    gRunUntil(gNow + 1000000);
+    const size_t before = gReports.size();
+    drag(1, 3, 10000000);
+    check(gReports.size() > before, "shared workloop: touch reports dispatch after bring-up");
+    switch_touch_display_power(false);
+    switch_touch_display_power(true);
+    fireWatchdog();
+    gRunUntil(gNow + 1000000);
 }
 
 // --- One process per scenario (the drivers keep boot-wide state) ------------------------------------------------------
@@ -1635,4 +1972,44 @@ TEST(SwitchTouch, Edge)
 TEST(SwitchTouch, FourFingers)
 {
     run(scenarioFourFingers);
+}
+
+TEST(SwitchTouch, Cadence200HzAndCompaction)
+{
+    run(scenarioCadence200Hz);
+}
+
+TEST(SwitchTouch, SingleReadFallback)
+{
+    run(scenarioSingleReadFallback);
+}
+
+TEST(SwitchTouch, FifoFlushBehavior)
+{
+    run(scenarioFifoFlushBehavior);
+}
+
+TEST(SwitchTouch, TegraI2CFilterOnlyNoWorkLoop)
+{
+    run(scenarioFilterOnlyNoWorkLoop);
+}
+
+TEST(SwitchTouch, TegraI2CDrainAtEndNonChained)
+{
+    run(scenarioDrainAtEndNonChained);
+}
+
+TEST(SwitchTouch, TegraI2CTimeoutQuiesceAndRecover)
+{
+    run(scenarioTimeoutQuiesceAndRecover);
+}
+
+TEST(SwitchTouch, JoyConTouchPreemptHook)
+{
+    run(scenarioJoyConTouchPreemptHook);
+}
+
+TEST(SwitchTouch, SharedWorkLoop)
+{
+    run(scenarioSharedWorkLoop);
 }

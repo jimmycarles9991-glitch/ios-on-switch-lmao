@@ -151,7 +151,7 @@ protected:
 			  0);
 		switch_gpu_backing_publish(&transaction);
 		EXPECT_EQ(transaction.ordered, 1u);
-		EXPECT_EQ(transaction.locked, 0u);
+		EXPECT_EQ(transaction.locked, uint32_t(uses.size()));
 		switch_gpu_backing_finish(&transaction);
 		const uint64_t taken = ioLockTakes().load() - all, ownTaken = own_takes() - own;
 		compositor.fence = frame - 1;
@@ -164,7 +164,7 @@ protected:
 
 	uint64_t ownership_takes() const
 	{
-		return own_takes() + switch_gpu_backing_order()->takes;
+		return own_takes();
 	}
 
 	// One compositor job, then one display period on its target: the swap's snapshot, and the interrupt pass's release
@@ -221,8 +221,8 @@ protected:
 	}
 };
 
-// A scroll's 6 shared uses and a scale animation's 60 (boot 21: 55-61) cost the same locks: the ownership order once,
-// none of the uses' own while nothing else claims them, and no timeline's once the compositor has recorded on each.
+// A scroll's 6 shared uses and a scale animation's 60 (boot 21: 55-61) take zero global ownership locks: each backing
+// takes only its own lock in sorted allocation-id order, and no timeline lock once the compositor has recorded on each.
 TEST_F(SubmitCost, GlobalLocksAJobDoNotGrowWithItsSharedUses)
 {
 	scene(6);
@@ -238,10 +238,10 @@ TEST_F(SubmitCost, GlobalLocksAJobDoNotGrowWithItsSharedUses)
 		"%.2f us of it the uses' own locks\n",
 		static_cast<unsigned long long>(scale.global),
 		static_cast<unsigned long long>(scale.own), mean_us(200), own_locks_us(200));
-	EXPECT_EQ(scale.global, scroll.global);
-	EXPECT_EQ(scale.global, 1u) << "the ownership order, once";
-	EXPECT_EQ(scroll.own, 0u);
-	EXPECT_EQ(scale.own, 0u);
+	EXPECT_EQ(scroll.global, 0u);
+	EXPECT_EQ(scale.global, 0u);
+	EXPECT_EQ(scroll.own, 7u);
+	EXPECT_EQ(scale.own, 61u);
 	EXPECT_EQ(scale.dependencies, 0u);
 }
 
@@ -263,11 +263,11 @@ TEST_F(SubmitCost, ANewTextureCostsOnlyItsFirstJobTheTimelineLocks)
 {
 	scene(60);
 	draw();
-	EXPECT_EQ(composite().global, 3u);
-	EXPECT_EQ(composite().global, 1u);
+	EXPECT_EQ(composite().global, 2u);
+	EXPECT_EQ(composite().global, 0u);
 }
 
-// An app still drawing one texture: the job waits for that app's channel, found in the ownership order.
+// An app still drawing one texture: the job waits for that app's channel with zero global ownership locks.
 TEST_F(SubmitCost, PendingProducerIsADependencyWithoutAGlobalLockPerUse)
 {
 	scene(60);
@@ -278,17 +278,15 @@ TEST_F(SubmitCost, PendingProducerIsADependencyWithoutAGlobalLockPerUse)
 	switch_gpu_backing_commit(&transaction);
 	Cost cost = composite();
 	EXPECT_EQ(cost.dependencies, 1u);
-	EXPECT_EQ(cost.global, 1u);
+	EXPECT_EQ(cost.global, 0u);
 	app(7).fence = 2;
 	cost = composite();
 	EXPECT_EQ(cost.dependencies, 0u);
 }
 
-// Every IOLock a compositor frame takes for its ownership, the order and the backings' own: its job, and a display
-// period on its target (the swap's snapshot, and the interrupt pass's release of its lease). A scroll and a scale
-// animation cost the same. The registry's and the timelines' locks (the snapshot's reference and its producer's) are
-// counted apart.
-TEST_F(SubmitCost, AFrameTakesTheSameOwnershipLocksForAnyNumberOfSharedUses)
+// Every IOLock a compositor frame takes for its ownership: each backing's own lock once for its job, and twice for a
+// display period on its target (the swap's snapshot and the interrupt pass's release), with zero global ownership locks.
+TEST_F(SubmitCost, AFrameTakesOnlyPerBackingOwnershipLocks)
 {
 	scene(6);
 	const Frame scroll = frame_takes();
@@ -305,15 +303,17 @@ TEST_F(SubmitCost, AFrameTakesTheSameOwnershipLocksForAnyNumberOfSharedUses)
 		static_cast<unsigned long long>(scale.jobOther),
 		static_cast<unsigned long long>(scale.display),
 		static_cast<unsigned long long>(scale.displayOther));
-	EXPECT_EQ(scroll.job, 1u);
-	EXPECT_EQ(scale.job, 1u);
+	EXPECT_EQ(scroll.job, 7u);
+	EXPECT_EQ(scale.job, 61u);
+	EXPECT_EQ(scroll.jobOther, 0u);
+	EXPECT_EQ(scale.jobOther, 0u);
 	EXPECT_EQ(scroll.display, 2u);
 	EXPECT_EQ(scale.display, 2u);
 }
 
-// An app holding a CPU write lock on one texture leaves it CPU-dirty: the job takes that texture's lock alone besides the
-// order, which it lets go while it cleans the texture (taken three times), and none of the other 59.
-TEST_F(SubmitCost, ACpuWriteLockedTextureCostsTheJobItsLockAlone)
+// An app holding a CPU write lock on one texture leaves it CPU-dirty: cleaning runs under that backing's own lock with
+// zero global order drops or re-acquires.
+TEST_F(SubmitCost, ACpuWriteLockedTextureCostsNoExtraOwnershipLocks)
 {
 	scene(60);
 	constexpr uint64_t kBytes = 16 * 4096;
@@ -322,14 +322,25 @@ TEST_F(SubmitCost, ACpuWriteLockedTextureCostsTheJobItsLockAlone)
 		  0);
 	const uint64_t owned = ownership_takes(), own = own_takes();
 	composite();
-	EXPECT_EQ(own_takes() - own, 1u);
-	EXPECT_EQ(ownership_takes() - owned, 4u);
+	EXPECT_EQ(own_takes() - own, 61u);
+	EXPECT_EQ(ownership_takes() - owned, 61u);
 	compositor.fence = frame;
 	EXPECT_EQ(switch_gpu_backing_cpu_release(textures[3], 0, kBytes, SWITCH_GPU_BACKING_WRITE),
 		  0);
 	const uint64_t after = ownership_takes();
 	composite();
-	EXPECT_EQ(ownership_takes() - after, 1u);
+	EXPECT_EQ(ownership_takes() - after, 61u);
+}
+
+TEST_F(SubmitCost, CompletedReadsReplaceInPlaceWithZeroTimelineLocks)
+{
+	scene(60);
+	const uint32_t held = compositor.timeline->refs;
+	compositor.fence = frame;
+	const Cost cost = composite();
+	EXPECT_EQ(cost.global, 0u);
+	EXPECT_EQ(cost.own, 61u);
+	EXPECT_EQ(compositor.timeline->refs, held);
 }
 
 // A job over its resource set alone, no shared use: no ownership lock.
@@ -352,18 +363,18 @@ TEST_F(SubmitCost, AJobWithNoSharedUseTakesNoOwnershipLock)
 	compositor.fence = frame;
 }
 
-TEST_F(SubmitCost, AnEmptyWaitBearingJobUsesTheExistingOrderOnce)
+TEST_F(SubmitCost, AnEmptyWaitBearingJobTakesNoOwnershipLock)
 {
 	switch_gpu_backing_transaction transaction = {};
-	const uint64_t owned = switch_gpu_backing_order()->takes;
+	const uint64_t all = ioLockTakes().load();
 	ASSERT_EQ(switch_gpu_backing_seal(&transaction), 0);
-	EXPECT_EQ(switch_gpu_backing_order()->takes - owned, 1u);
+	EXPECT_EQ(ioLockTakes().load() - all, 0u);
 	EXPECT_EQ(transaction.ordered, 1u);
 	switch_gpu_backing_publish(&transaction);
 	EXPECT_EQ(transaction.ordered, 1u);
 	switch_gpu_backing_finish(&transaction);
 	EXPECT_EQ(transaction.ordered, 0u);
-	EXPECT_EQ(switch_gpu_backing_order()->takes - owned, 1u);
+	EXPECT_EQ(ioLockTakes().load() - all, 0u);
 }
 
 TEST_F(SubmitCost, PartialBeginWithoutATimelineHasNoTimelineReferencesToAbort)

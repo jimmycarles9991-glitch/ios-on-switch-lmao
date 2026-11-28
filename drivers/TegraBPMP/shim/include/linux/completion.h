@@ -10,6 +10,7 @@
 struct completion {
 	spinlock_t lock;
 	unsigned int done;
+	unsigned int waiters;
 };
 void init_completion(struct completion *c);
 void complete(struct completion *c);

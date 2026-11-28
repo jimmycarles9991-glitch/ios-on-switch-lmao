@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A depth attachment whose store action the pass leaves Unknown and the encoder decides (setDepthStoreAction:): such a

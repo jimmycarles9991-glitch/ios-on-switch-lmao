@@ -62,10 +62,10 @@ inline bool sampleLayout(uint32_t samples, SampleLayout &out)
 }
 
 // The pack's resolve state into a target of MTLPixelFormat `format` from `samples` samples (pack/resolve.metal), keyed
-// "raw.resolve.<fragment function>"; null for a format it has none for. 8-bit unorm at 2 and 4 samples has entries of its
-// own with the count built in; every other takes the count from buffer 0. An 8-bit sRGB target's state writes codes, into
-// its UNORM twin (resolveTargetFormat). The 8-bit signed normalized formats resolve here, not on the 2D engine
-// (attachment_target.h codesResolvedByTwod).
+// "raw.resolve.<fragment function>"; null for a format it has none for. 8-bit unorm and sRGB at 2 and 4 samples have
+// entries of their own with the count built in; every other takes the count from buffer 0. An 8-bit sRGB target's state
+// writes codes, into its UNORM twin (resolveTargetFormat). The 8-bit signed normalized formats resolve here, not on the
+// 2D engine (attachment_target.h codesResolvedByTwod).
 inline const char *resolveState(uint32_t format, uint32_t samples)
 {
     const bool two = samples == 2, four = samples == 4;
@@ -78,6 +78,14 @@ inline const char *resolveState(uint32_t format, uint32_t samples)
         return four  ? "raw.resolve.resolve_bgra8_4x_frag"
                : two ? "raw.resolve.resolve_bgra8_2x_frag"
                      : "raw.resolve.resolve_bgra8_frag";
+    case 71:
+        return four  ? "raw.resolve.resolve_rgba8_srgb_4x_frag"
+               : two ? "raw.resolve.resolve_rgba8_srgb_2x_frag"
+                     : "raw.resolve.resolve_rgba8_srgb_frag";
+    case 81:
+        return four  ? "raw.resolve.resolve_bgra8_srgb_4x_frag"
+               : two ? "raw.resolve.resolve_bgra8_srgb_2x_frag"
+                     : "raw.resolve.resolve_bgra8_srgb_frag";
     default:
         break;
     }

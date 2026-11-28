@@ -49,6 +49,7 @@ struct switch_gm20b_2d_scale_op {
     uint64_t du, dv, src_x, src_y;
     bool bilinear, corner;
     uint8_t rop;
+    bool skip_tex_invalidate;
 };
 
 #define SWITCH_GM20B_2D_SCALE_WORDS 52u

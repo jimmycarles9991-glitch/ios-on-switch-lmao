@@ -5,7 +5,7 @@
 // those that did not by why (buffer_writes.h SplitWhole); nothing where there were none
 size_t metal_split_rates(char *out, size_t size)
 {
-#if SWITCH_METAL_DIAGNOSTICS
+#if SWITCH_METAL_STATS
     if (!gRM || !size)
         return 0;
     static const char *whys[] = {"forced", "box", "unbound", "written", "unmade"};

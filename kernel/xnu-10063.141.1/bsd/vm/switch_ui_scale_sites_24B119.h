@@ -9,7 +9,9 @@
  * - FrontBoardServices (.11), -[FBSDisplayConfiguration _initWithImmutableDisplay:originalDisplay:isMainDisplay:
  *   assertIfInvalid:] + 0x180: 21H461's site, the same seven instructions (movi v8.2d, #0 for fmov d8, xzr).
  * - libMobileGestalt (.13), MGIOMFBSupport.c's static screen info: 21H461's site. 27 still reads /chosen/display-scale
- *   as an integer and converts it (scvtf), so the ADT has no way to give a fractional answer.
+ *   as an integer and converts it (scvtf), so the ADT has no way to give a fractional answer. A main-screen-class miss
+ *   answers J181's class, 21 (264 ppi, 2x, 1620x2160), as 21H461's answers J120's. The class is this table's, not
+ *   /product artwork-device-subtype's (that function's switch only names subtypes for asset lookups).
  * - CoreUI (.15), the PDF and SVG vector rasterizers: 21H461's row bytes, unchanged in 27 (both now in d12/d11).
  * - ProgressUI (.65), -[PUIProgressWindow _layoutScreen]'s 239 x 4 point bar, the iPad (default) case: 21H461's site.
  * - CoverSheetKit (.13), +[CSDeviceDetermination categoryFromReferenceBounds:], the device row of every lock screen
@@ -57,16 +59,17 @@
  *   timestamp of every hang analysis watchdogd runs and leaves the times unconverted. The 24 MHz row becomes 19.2 MHz
  *   and 625/12; the block is the only reader of both. At every scale.
  * - CoreMotion (.11), CLPlatformInfo::queryMotionCaps()'s word for hardware type 225 (J181, from /product's
- *   product-id): J181's word says its motion coprocessor (the AOP) serves device motion, so CoreMotion opens the AOP's
- *   page-0xff0c services, which nothing on the Switch can publish, and retries until it gives up. The word becomes
- *   J181's without every bit whose reader takes a coprocessor service (1 CLSPU, 4 and 5 SPU and AP-with-AOP-bias
- *   6-axis, 6 compass through the SPU, 7 always-on, 9 3-axis and sideband, 11 MagicMount, 15 and 16 on-body,
- *   22 AOP2 transport, 26 activity, 33 sideband fusion, 36 pedometer events): bits 8 (the AOP orientation service,
- *   which SwitchMotion publishes), 21, 28 and 32 stay. Device motion then fuses on the CPU
- *   (CLSensorFusionServiceLegacy) from SwitchMotion's accelerometer and gyroscope. The case's mov w20, #0 repeats
- *   the dispatch's, so the case loads the low half in its three slots and branches to the hardware type case at
+ *   product-id): J181's word says its motion coprocessor (the AOP) serves its motion services, so CoreMotion opens the
+ *   AOP's page-0xff0c services and retries those nothing on the Switch publishes until it gives up. The word becomes
+ *   J181's without every bit whose reader takes a coprocessor service SwitchMotion does not publish (1 CLSPU, 5
+ *   AP-with-AOP-bias 6-axis, 6 compass through the SPU, 7 always-on, 9 3-axis and sideband, 11 MagicMount, 15 and 16
+ *   on-body, 22 AOP2 transport, 26 activity, 33 sideband fusion, 36 pedometer events): bits 4 (6-axis device motion,
+ *   CLSensorFusionService6AxisSPU on {0xff0c, 5}, which SwitchMotion fuses and publishes; its only readers are
+ *   CLDeviceMotion::enableSensorFusionWithMode at 0x1a87623c0 and the service's constructor at 0x1a892ae0c), 8 (the
+ *   AOP orientation service, which SwitchMotion publishes), 21, 28 and 32 stay. The case's mov w20, #0 repeats the
+ *   dispatch's, so the case loads the low half in its three slots and branches to the hardware type case at
  *   0x1a8771e40, whose movk x21, #0x1, lsl #32; b to the tail gives the upper half. locationd has its own copy of the
- *   table, outside the cache. At every scale.
+ *   table, outside the cache (translate/arm64e/pretranslate/edits_24B119.json). At every scale.
  * 21H461's other sites are not here. 27's -[_UIBatteryView _fillLayerFrame:cornerRadius:] fills the body's own
  * frame (no inset), so SpringBoard's and Control Center's batteries have no gap to even out. +[PKIconImageCache
  * settingsIconCacheWithScale:] returns nil at every scale and 24B119 ships no iconCache artwork. Control Center's
@@ -96,12 +99,14 @@ static const struct switch_us_site switch_us_sites_24B119[] = {
 			/* 0x1b07bfa08: mov w4, #1; bl (the display-scale read); mov x19, x0 */
 			{ 0x3bfa08ULL, 12, 4, 8, SWITCH_US_MG_SCALE,
 			  { 0x24, 0x00, 0x80, 0x52, 0x1f, 0x5c, 0xff, 0x97, 0xf3, 0x03, 0x00, 0xaa }, { 0 } },
-			/* 0x1b07bfbec: str w20, [sp, #0x68]; scvtf s0, w19; stp s0, s8, [sp, #0x6c] -> fmov s0, w19 */
-			{ 0x3bfbecULL, 12, 4, 4, SWITCH_US_FIXED,
-			  { 0xf4, 0x6b, 0x00, 0xb9, 0x60, 0x02, 0x22, 0x1e, 0xe0, 0xa3, 0x0d, 0x2d },
-			  { 0x60, 0x02, 0x27, 0x1e } },
+			/* 0x1b07bfbe4: mov w8, #-1 (no class); stp w22, w21, [sp, #0x60]; str w20, [sp, #0x68];
+			 * scvtf s0, w19; stp s0, s8, [sp, #0x6c] -> mov w8, #21; fmov s0, w19 */
+			{ 0x3bfbe4ULL, 20, 0, 16, SWITCH_US_FIXED,
+			  { 0x08, 0x00, 0x80, 0x12, 0xf6, 0x57, 0x0c, 0x29, 0xf4, 0x6b, 0x00, 0xb9, 0x60, 0x02, 0x22, 0x1e,
+			    0xe0, 0xa3, 0x0d, 0x2d },
+			  { 0xa8, 0x02, 0x80, 0x52, 0xf6, 0x57, 0x0c, 0x29, 0xf4, 0x6b, 0x00, 0xb9, 0x60, 0x02, 0x27, 0x1e } },
 		},
-		"MobileGestalt", "main-screen-scale", false,
+		"MobileGestalt", "main-screen-scale and screen class", true,
 	},
 	{   /* .15 (text 0x1b8400000, file 0) */
 		{ 0x4f, 0x44, 0xc1, 0x4a, 0x9b, 0x0b, 0x35, 0x03, 0xaa, 0x96, 0x94, 0xef, 0xd6, 0x5b, 0xca, 0x4e },
@@ -303,11 +308,12 @@ static const struct switch_us_site switch_us_sites_24B119[] = {
 		0x1a8770000ULL, 0x370000ULL, 0x1000ULL, 1, 2,
 		{
 			/* 0x1a8771e20, case 225: mov w20, #0; mov x21, #0x8bf2; movk x21, #0x1461, lsl #16; then the shared
-			 * movk x21, #0x13, lsl #32; b tail -> mov x21, #0x100; movk x21, #0x1020, lsl #16; b 0x1a8771e40 */
+			 * movk x21, #0x13, lsl #32; b tail -> mov x21, #0x110; movk x21, #0x1020, lsl #16; b 0x1a8771e40.
+			 * Bit 4 stays: SwitchMotion serves 6-axis device motion as the coprocessor does ({0xff0c, 5}). */
 			{ 0x371e20ULL, 20, 0, 12, SWITCH_US_FIXED,
 			  { 0x14, 0x00, 0x80, 0x52, 0x55, 0x7e, 0x91, 0xd2, 0x35, 0x8c, 0xa2, 0xf2, 0x75, 0x02, 0xc0, 0xf2,
 			    0x4e, 0x01, 0x00, 0x14 },
-			  { 0x15, 0x20, 0x80, 0xd2, 0x15, 0x04, 0xa2, 0xf2, 0x06, 0x00, 0x00, 0x14 } },
+			  { 0x15, 0x22, 0x80, 0xd2, 0x15, 0x04, 0xa2, 0xf2, 0x06, 0x00, 0x00, 0x14 } },
 			/* 0x1a8771e40: movk x21, #0x1, lsl #32; b tail. Checked, not written. */
 			{ 0x371e40ULL, 8, 0, 0, SWITCH_US_FIXED,
 			  { 0x35, 0x00, 0xc0, 0xf2, 0x49, 0x01, 0x00, 0x14 }, { 0 } },
@@ -318,7 +324,7 @@ static const struct switch_us_site switch_us_sites_24B119[] = {
 
 static const struct switch_us_cache switch_us_cache_24B119 = {
 	"24B119", "dyld_v1  arm64e", switch_us_sites_24B119,
-	sizeof(switch_us_sites_24B119) / sizeof(switch_us_sites_24B119[0]),
+	sizeof(switch_us_sites_24B119) / sizeof(switch_us_sites_24B119[0]), 21,
 };
 
 #endif /* _VM_SWITCH_UI_SCALE_SITES_24B119_H_ */

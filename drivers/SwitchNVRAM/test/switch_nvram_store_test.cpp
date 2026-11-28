@@ -177,7 +177,12 @@ TEST(SwitchNVRAMStore, StrideIsHeaderAndBankIn4kBlocks)
 TEST(SwitchNVRAMStore, SlotLayout)
 {
     const Bytes image = bank({{"boot-args", "-v"}}, 7);
-    EXPECT_EQ(fill(image, 0x100000002), slot(image, 0x100000002));
+    const Bytes expected = slot(image, 0x100000002);
+    EXPECT_EQ(fill(image, 0x100000002), expected);
+    Bytes inPlace(nv_stride((uint32_t)image.size()), 0xa5);
+    std::memcpy(inPlace.data() + kHeader, image.data(), image.size());
+    nv_fill(inPlace.data(), inPlace.data() + kHeader, (uint32_t)image.size(), 0x100000002);
+    EXPECT_EQ(inPlace, expected);
 }
 
 TEST(SwitchNVRAMStore, ChrpBanksIodtnvramAccepts)

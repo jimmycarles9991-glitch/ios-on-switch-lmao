@@ -117,21 +117,23 @@ constexpr uint32_t zcullCriterion(uint32_t sfunc, uint32_t sref, uint32_t smask)
 // nvk_CmdBeginRendering's zcull region, its direction `dir`, the region's storage [storage, storage + storageBytes)
 // where a pass stores or loads it (zcull_planes.h), else none; `criterion` its stencil criterion (NEVER: NVK's)
 inline void zcullRegionWords(Push &p, const ZcullRegion &r, uint32_t zetaFormat, uint8_t dir, uint64_t storage = 0,
-                             uint64_t storageBytes = 0, uint32_t criterion = 0)
+                             uint64_t storageBytes = 0, uint32_t criterion = 0, uint32_t regionFormat = 0,
+                             uint32_t zFormat = ~0u)
 {
     const uint64_t end = storage ? storage + storageBytes : 0;
     p.m(0x1590, 0);                                                    // SET_ACTIVE_ZCULL_REGION
     p.inc(0x07e0, {r.aliquotCount * r.layers << 16, r.aliquotCount});  // SET_ZCULL_REGION_LOCATION, _ALIQUOTS
     p.inc(0x07e8, {uint32_t(storage >> 32), uint32_t(storage), uint32_t(end >> 32), uint32_t(end)});  // _STORAGE_A..D
-    p.m(0x15c8, 0);                                           // SET_ZCULL_REGION_FORMAT Z_4X4
+    p.m(0x15c8, regionFormat);                                // SET_ZCULL_REGION_FORMAT, Z_4X4 unless a probe asks
     p.inc(0x07c0, {r.width, r.height, r.layers, 0});          // SET_ZCULL_REGION_SIZE_A..C, _PIXEL_OFFSET_C
     p.inc(0x15fc, {r.x, r.y});                                // SET_ZCULL_REGION_PIXEL_OFFSET_A, _B
     p.m(0x02e8, 1 | (r.normalizedAliquots & 0xffffff) << 4);  // SET_ZCULL_SUBREGION
     p.m(0x0dd8, criterion);                                   // SET_ZCULL_CRITERION
-    p.m(0x0dbc, (dir == kZcullGreater ? 1u : 0u) | zcullZFormat(zetaFormat) << 16);  // SET_ZCULL_DIR_FORMAT
-    p.nonInc(0x02f8, r.subregions, r.subregionCount);                                // SET_ZCULL_SUBREGION_ALLOCATION
-    p.m(0x02fc, r.algorithm);                                                        // ASSIGN_ZCULL_SUBREGIONS
-    p.m(0x0370, 1);  // SET_ZCULL_SUBREGION_REPORT_TYPE: DEPTH_TEST
+    p.m(0x0dbc, (dir == kZcullGreater ? 1u : 0u) | (zFormat != ~0u ? zFormat : zcullZFormat(zetaFormat))
+                                                       << 16);  // SET_ZCULL_DIR_FORMAT
+    p.nonInc(0x02f8, r.subregions, r.subregionCount);           // SET_ZCULL_SUBREGION_ALLOCATION
+    p.m(0x02fc, r.algorithm);                                   // ASSIGN_ZCULL_SUBREGIONS
+    p.m(0x0370, 1);                                             // SET_ZCULL_SUBREGION_REPORT_TYPE: DEPTH_TEST
 }
 
 inline void zcullOffWords(Push &p)
@@ -209,10 +211,14 @@ struct ZcullPass {
     bool candidate = false;
     uint8_t dir = 0;
     bool invalidated = false;
+    // gpu.perf.nvn's probes (nvn_probes.h): the bounds a depth-writing program opened, SET_ZCULL with stencil on; each
+    // put back at the pass end, as the channel keeps them
+    bool boundsOpen = false, stencilOn = false;
     ZcullRegion region;  // the region's layout, from the pass's begin
     bool load = false;   // LOAD_ZCULL from `storage` in the prologue, in place of the depth clear's region
     bool store = false;  // STORE_ZCULL into `storage` at the end
     uint64_t storage = 0, storageBytes = 0;
+    int slot = -1;  // the ZcullSlots slot `storage` is
 };
 
 inline uint8_t zcullDirection(uint8_t compare)
@@ -234,19 +240,30 @@ inline bool zcullStencilWrites(const StencilFace &s)
     return (s.compare != 7 && s.fail != 0) || s.depthFail != 0;  // a test that can fail, Keep
 }
 
+// gpu.perf.nvn's zcull rule probes (Device::probeZcullKeep, debug builds): each bit keeps the region past one rule below.
+// Always and NotEqual are the rules under test; FragmentDepth is known to be needed, the probe's positive control.
+enum : uint32_t {
+    kZcullKeepAlways = 1u << 0,
+    kZcullKeepNotEqual = 1u << 1,
+    kZcullKeepFragmentDepth = 1u << 2,
+};
+
 // Whether INVALIDATE_ZCULL goes before a draw under depth/stencil state `ds` (the pass's targets have depth `depth` and
 // stencil `stencil`) of a program that writes depth (`fragmentDepth`) or memory (`fragmentStores`, unless
-// `earlyFragmentTests` mandates early depth/stencil tests), or under the shader's tests; once per pass
+// `earlyFragmentTests` mandates early depth/stencil tests), or under the shader's tests; once per pass. `keep`: the
+// rules a probe skips (kZcullKeep*)
 inline bool zcullInvalidates(ZcullPass &z, const DepthStencilDesc &ds, bool depth, bool stencil, bool fragmentDepth,
-                             bool shaderTests, bool fragmentStores, bool earlyFragmentTests = false)
+                             bool shaderTests, bool fragmentStores, bool earlyFragmentTests = false, uint32_t keep = 0)
 {
     if (!z.candidate || z.invalidated)
         return false;
-    bool unsafe = fragmentDepth || shaderTests || (fragmentStores && !earlyFragmentTests);
+    bool unsafe =
+        (fragmentDepth && !(keep & kZcullKeepFragmentDepth)) || shaderTests || (fragmentStores && !earlyFragmentTests);
     if (stencil)
         unsafe |= zcullStencilWrites(ds.front) || zcullStencilWrites(ds.back);
     if (depth) {
-        unsafe |= ds.depthWrite && (ds.depthCompare == 7 || ds.depthCompare == 5);  // Always, NotEqual
+        unsafe |= ds.depthWrite && ((ds.depthCompare == 7 && !(keep & kZcullKeepAlways)) ||
+                                    (ds.depthCompare == 5 && !(keep & kZcullKeepNotEqual)));
         if (const uint8_t dir = zcullDirection(ds.depthCompare)) {
             unsafe |= z.dir && z.dir != dir;
             z.dir = z.dir ? z.dir : dir;

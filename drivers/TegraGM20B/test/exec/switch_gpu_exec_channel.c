@@ -212,6 +212,9 @@ void switch_exec_chan_count_wfis(struct switch_exec_chan *chan, uint32_t from_dw
 	const u64 stamps_end = stamps_base + (u64)CHAN_NSTAMPS * sizeof(struct tgm_stamps);
 	u32 sema_hi = 0;
 	u32 sema_lo = 0;
+	int fenced = 0;
+	int l2_flushed = 0;
+	int drained = 0;
 	u32 i = from_dword;
 
 	memset(out, 0, sizeof(*out));
@@ -239,13 +242,24 @@ void switch_exec_chan_count_wfis(struct switch_exec_chan *chan, uint32_t from_dw
 
 			if (subc != PUSH906F_SUBC_NV906F)
 				continue;
-			if (cur == NVB06F_WFI) {
+			if (cur == 0x0074 && (data & 0xfu) == 1u) { /* SYNCPOINTB, OPERATION INCR */
+				out->syncpt_incrs++;
+				out->syncpt_incrs_after_fence += fenced;
+				out->syncpt_incrs_after_drain += drained;
+				out->syncpt_id = (data >> 8) & 0xffu;
+			} else if (cur == NVB06F_WFI) {
 				out->method_wfis++;
 			} else if (cur == NVB06F_FB_FLUSH) {
 				out->fb_flushes++;
+				if (l2_flushed)
+					drained = 1;
 			} else if (cur == NVB06F_MEM_OP_D &&
 				   data == NVB06F_MEM_OP_D_OPERATION_L2_FLUSH_DIRTY) {
 				out->l2_flushes++;
+				l2_flushed = 1;
+			} else if (cur == NVB06F_MEM_OP_D &&
+				   data == NVB06F_MEM_OP_D_OPERATION_L2_SYSMEM_INVALIDATE) {
+				out->l2_invalidates++;
 			} else if (cur == NV906F_SEMAPHOREA) {
 				sema_hi = data & 0xffu;
 			} else if (cur == NV906F_SEMAPHOREB) {
@@ -272,6 +286,7 @@ void switch_exec_chan_count_wfis(struct switch_exec_chan *chan, uint32_t from_dw
 				} else if (chan->tgm.visible_cpu && va == chan->tgm.visible_gpu) {
 					dis ? out->visible_wfi_dis++ : out->visible_wfi_en++;
 				} else if (va == chan->tgm.fence_gpu) {
+					fenced = 1;
 					dis ? out->fence_wfi_dis++ : out->fence_wfi_en++;
 				} else {
 					dis ? out->extra_wfi_dis++ : out->extra_wfi_en++;
@@ -300,8 +315,16 @@ void switch_exec_chan_live(struct switch_exec_chan *chan, int live)
 {
 	mutex_lock(&tgm_live_lock);
 	list_del_init(&chan->tgm.live);
-	if (live)
+	if (live) {
+		const u32 fence_offset =
+			(u32)((uintptr_t)chan->tgm.fence_cpu - (uintptr_t)tgm_fence_pages.va);
+
 		list_add_tail(&chan->tgm.live, &tgm_live_chans);
+		switch_gpu_live_dir_set(&tgm_live_dir, chan->tgm.chid, chan->tgm.id, fence_offset,
+					chan->tgm.vm);
+	} else {
+		switch_gpu_live_dir_clear(&tgm_live_dir, chan->tgm.chid);
+	}
 	mutex_unlock(&tgm_live_lock);
 }
 

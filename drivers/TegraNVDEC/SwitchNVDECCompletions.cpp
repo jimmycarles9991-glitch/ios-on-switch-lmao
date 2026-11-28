@@ -16,6 +16,7 @@ struct Record {
     SwitchNVDECCompletions *owner;
     switch_gpu_backing *backing;  // null: free
     const volatile uint8_t *status;
+    size_t statusBytes;
 };
 }  // namespace
 
@@ -31,10 +32,7 @@ struct SwitchNVDECCompletions {
 namespace {
 void drop(SwitchNVDECCompletions *completions)
 {
-    IOLockLock(completions->lock);
-    const bool last = !--completions->references;
-    IOLockUnlock(completions->lock);
-    if (!last)
+    if (__atomic_sub_fetch(&completions->references, 1u, __ATOMIC_ACQ_REL))
         return;
     IOLockFree(completions->lock);
     IODelete(completions, SwitchNVDECCompletions, 1);
@@ -58,7 +56,7 @@ void completed(void *context, uint32_t fence, int result)
 {
     auto *record = static_cast<Record *>(context);
     nvdec_status_s status;
-    switch_dcache_clean_invalidate(record->status, sizeof(status));
+    switch_dcache_invalidate(record->status, record->statusBytes);
     memcpy(&status, const_cast<const uint8_t *>(record->status), sizeof(status));
     io_user_reference_t arguments[SWITCH_NVDEC_COMPLETION_ARGS] = {fence, status.error_status,
                                                                    status.mbs_correctly_decoded};
@@ -106,7 +104,7 @@ IOReturn switch_nvdec_completions_listen(SwitchNVDECCompletions *completions, ma
         return kIOReturnBadArgument;
     IOLockLock(completions->lock);
     const mach_port_t old = completions->port;
-    completions->port = port;
+    __atomic_store_n(&completions->port, port, __ATOMIC_RELEASE);
     completions->ops.refer(completions->reference, port, task);
     IOLockUnlock(completions->lock);
     // Each registration brings a send right of its own: the replaced port's, or this call's second one to the port
@@ -120,7 +118,7 @@ void switch_nvdec_completions_close(SwitchNVDECCompletions *completions)
 {
     IOLockLock(completions->lock);
     const mach_port_t old = completions->port;
-    completions->port = MACH_PORT_NULL;
+    __atomic_store_n(&completions->port, MACH_PORT_NULL, __ATOMIC_RELEASE);
     memset(completions->reference, 0, sizeof(completions->reference));
     IOLockUnlock(completions->lock);
     if (old != MACH_PORT_NULL)
@@ -131,11 +129,19 @@ int switch_nvdec_completions_arm(SwitchNVDECCompletions *completions, const Tegr
                                  TegraNVDECResolve resolve, void *context, SwitchNVDECCompletion *out)
 {
     *out = {};
+    if (!completions || __atomic_load_n(&completions->port, __ATOMIC_ACQUIRE) == MACH_PORT_NULL)
+        return 0;
     const TegraNVDECEntry *entry = submit ? statusEntry(*submit) : nullptr;
     TegraNVDECBlock block = {};
-    if (!completions || !entry || !resolve(context, entry->value, &block) || !block.backing ||
-        block.size < sizeof(nvdec_status_s) || entry->offset > block.size - sizeof(nvdec_status_s))
+    if (!entry || !resolve(context, entry->value, &block) || !block.backing || block.size < sizeof(nvdec_status_s) ||
+        entry->offset > block.size - sizeof(nvdec_status_s))
         return 0;
+    // nvdec_status_s is 56 bytes in a 256-byte-aligned slot; rounding up to a full 64-byte line lets
+    // switch_dcache_invalidate issue dc ivac instead of dc civac on the tail line.
+    const size_t statusBytes =
+        !(entry->offset & (SWITCH_DCACHE_LINE - 1)) && entry->offset + SWITCH_DCACHE_LINE <= block.size
+            ? SWITCH_DCACHE_LINE
+            : sizeof(nvdec_status_s);
     IOLockLock(completions->lock);
     Record *record = nullptr;
     for (uint32_t i = 0; completions->port != MACH_PORT_NULL && !record && i < kRecords; ++i)
@@ -145,8 +151,9 @@ int switch_nvdec_completions_arm(SwitchNVDECCompletions *completions, const Tegr
     if (record) {
         record->backing = block.backing;
         record->status = block.va + entry->offset;
+        record->statusBytes = statusBytes;
         switch_gpu_backing_retain(block.backing);
-        ++completions->references;
+        __atomic_fetch_add(&completions->references, 1u, __ATOMIC_RELAXED);
     }
     IOLockUnlock(completions->lock);
     if (record)

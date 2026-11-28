@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * UI main threads' busy stretches (busy.h), debug kernels: one "SwitchBusy:" line for each stretch of SpringBoard's,
- * backboardd's or the focal app's main thread of SWITCH_BUSY_MIN_MS or more between two waits in its run loop, the
+ * backboardd's or a focal app's main thread of SWITCH_BUSY_MIN_MS or more between two waits in its run loop, the
  * stretches hangtracer reports as hangs. The line splits the stretch into on a core, blocked by wait kind and waiting
  * for a core, and names its longest waits.
  *
@@ -11,6 +11,7 @@
  * on a thread call, since os_log cannot run under a thread lock.
  */
 
+#include <switch/focal.h>
 #include <switch/sched.h>
 #include <switch/xnu.h>
 
@@ -36,7 +37,8 @@
 #include <vm/vm_shared_region_xnu.h>
 #endif
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && \
+    ((defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED) || (defined(SWITCH_RECORDER) && SWITCH_RECORDER))
 
 #define BUSY_RING  4
 #define BUSY_LINE  900 /* under the 1 KiB os_log record */
@@ -54,13 +56,18 @@ struct busy_slot {
     uint32_t dropped;
 };
 
-static char busy_focal_name[32];
+static char busy_focal_name[SWITCH_FOCAL_PLACES][32];
 
+/* The focal apps' slots last, one per <switch/focal.h> place, in its order. */
 static struct busy_slot busy_slots[] = {
     {.name = "SpringBoard"},
     {.name = "backboardd"},
-    {.name = busy_focal_name, .focal = true},
+    {.name = busy_focal_name[0], .focal = true},
+    {.name = busy_focal_name[1], .focal = true},
+    {.name = busy_focal_name[2], .focal = true},
 };
+_Static_assert(SWITCH_FOCAL_PLACES == 3, "busy_slots has one focal slot per place");
+#define BUSY_FOCAL_FIRST (sizeof(busy_slots) / sizeof(busy_slots[0]) - SWITCH_FOCAL_PLACES)
 
 uint32_t switch_sched_busy_watching;
 static SIMPLE_LOCK_DECLARE(busy_lock, 0);
@@ -70,7 +77,8 @@ static uint64_t busy_min;
  * the last focal thread's departures finish before it reuses the slot. */
 static LCK_GRP_DECLARE(busy_focal_grp, "switch_busy_focal");
 static LCK_MTX_DECLARE(busy_focal_mtx, &busy_focal_grp);
-static thread_t busy_focal_thread; /* +1, under busy_focal_mtx */
+static thread_t busy_focal_thread[SWITCH_FOCAL_PLACES]; /* +1 each, under busy_focal_mtx */
+static struct switch_focal busy_focal;                  /* their tasks, under busy_focal_mtx */
 
 static void busy_write(thread_call_param_t p0, thread_call_param_t p1);
 
@@ -88,7 +96,7 @@ static void busy_start(void)
 {
     if (os_atomic_load(&busy_call, acquire) == NULL) {
         thread_call_t call =
-            thread_call_allocate_with_options(busy_write, NULL, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+            thread_call_allocate_with_options(busy_write, NULL, THREAD_CALL_PRIORITY_USER, THREAD_CALL_OPTIONS_ONCE);
 
         nanoseconds_to_absolutetime(SWITCH_BUSY_MIN_MS * NSEC_PER_MSEC, &busy_min);
         if (call != NULL && !os_atomic_cmpxchg(&busy_call, NULL, call, release)) {
@@ -115,6 +123,7 @@ void switch_sched_busy_exec(thread_t thread)
         os_atomic_store(&s->tid, 0, release);
         s->state = (struct switch_busy){0};
         s->pid = task_pid(get_threadtask(thread));
+        os_atomic_or(&thread->switch_watch_mask, SWITCH_WATCH_MASK_BUSY, relaxed);
         os_atomic_store(&s->tid, thread->thread_id, release);
         simple_unlock(&busy_lock);
         os_atomic_or(&switch_sched_busy_watching,
@@ -160,31 +169,39 @@ void switch_sched_wait_of(thread_t thread, struct switch_busy_wait *w)
 }
 
 /*
- * proc_set_darwin_role (through switch_sched_role): the focal app's main thread (main: the caller's reference), or none
- * once the task stops being focal. The last focal thread's lock is taken once its id is cleared, so no departure of it
- * still writes the slot when the new one's state starts.
+ * proc_set_darwin_role (through switch_sched_role): a focal app's main thread (main: the caller's reference), or none
+ * once the task stops being focal. Each focal app has its own slot (<switch/focal.h>), so one leaving the role leaves
+ * the others watched. A slot's last thread's lock is taken once its id is cleared, so no departure of it still writes
+ * the slot when the new one's state starts.
  */
 void switch_sched_busy_focal(task_t task, int role, thread_t main)
 {
-    struct busy_slot *s = &busy_slots[sizeof(busy_slots) / sizeof(busy_slots[0]) - 1];
+    const uint64_t key = (uint64_t)(uintptr_t)task;
     char name[32];
     bool focal = role == TASK_FOREGROUND_APPLICATION && main != THREAD_NULL;
     thread_t old = THREAD_NULL;
+    uint64_t evicted = 0;
+    unsigned place = SWITCH_FOCAL_PLACES;
+    struct busy_slot *s = NULL;
     spl_t spl;
 
     switch_task_name(task, name, sizeof(name));
     focal = focal && strcmp(name, "SpringBoard") != 0;
     lck_mtx_lock(&busy_focal_mtx);
-    old = busy_focal_thread;
-    if (focal ? old == main : (old == THREAD_NULL || get_threadtask(old) != task)) {
+    place = focal ? switch_focal_enter(&busy_focal, key, mach_absolute_time(), &evicted)
+                  : switch_focal_leave(&busy_focal, key);
+    if (place == SWITCH_FOCAL_PLACES || (focal && busy_focal_thread[place] == main)) {
         lck_mtx_unlock(&busy_focal_mtx);
         return;
     }
-    busy_focal_thread = THREAD_NULL;
+    s = &busy_slots[BUSY_FOCAL_FIRST + place];
+    old = busy_focal_thread[place];
+    busy_focal_thread[place] = THREAD_NULL;
     if (old != THREAD_NULL) {
         os_atomic_store(&s->tid, 0, release);
         spl = splsched();
         thread_lock(old);
+        os_atomic_and(&old->switch_watch_mask, (uint8_t)~SWITCH_WATCH_MASK_BUSY, relaxed);
         thread_unlock(old);
         splx(spl);
         thread_deallocate(old);
@@ -192,11 +209,12 @@ void switch_sched_busy_focal(task_t task, int role, thread_t main)
     if (focal) {
         busy_start();
         thread_reference(main);
-        busy_focal_thread = main;
+        busy_focal_thread[place] = main;
         simple_lock(&busy_lock, LCK_GRP_NULL);
         s->state = (struct switch_busy){0};
         s->pid = task_pid(task);
-        strlcpy(busy_focal_name, name, sizeof(busy_focal_name));
+        strlcpy(busy_focal_name[place], name, sizeof(busy_focal_name[place]));
+        os_atomic_or(&main->switch_watch_mask, SWITCH_WATCH_MASK_BUSY, relaxed);
         os_atomic_store(&s->tid, thread_tid(main), release);
         simple_unlock(&busy_lock);
         os_atomic_or(&switch_sched_busy_watching, SWITCH_SCHED_BUSY_WATCHING, relaxed);
@@ -214,6 +232,21 @@ bool switch_sched_busy_open(thread_t thread, uint64_t *woke)
     }
     *woke = s->state.e.woke;
     return true;
+}
+
+/* Under the thread's lock, which orders it against the thread's own departures and dispatches: its open stretch's time
+ * so far (mach ticks) on a core, blocked and waiting for a core, the segment it is in counted; zeros when it has none. */
+void switch_sched_busy_split(thread_t thread, uint64_t *cpu, uint64_t *blocked, uint64_t *runnable)
+{
+    const struct busy_slot *s = busy_slot_of(thread);
+    const uint64_t made = thread->last_made_runnable_time;
+
+    if (s == NULL) {
+        *cpu = *blocked = *runnable = 0;
+        return;
+    }
+    switch_busy_split_now(&s->state, mach_absolute_time(), recount_thread_time_mach(thread),
+                          made == THREAD_NOT_RUNNABLE ? 0 : made, cpu, blocked, runnable);
 }
 
 /* thread_dispatch, under the departing thread's lock: no lock, allocation or log here. */

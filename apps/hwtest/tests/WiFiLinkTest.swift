@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import HWTestCore
+import HWTestKit
 
 /// en0 as the kernel's interface list has it (getifaddrs): up and running, its IPv4 address, the link rate the
 /// Wi-Fi driver reports and its packet and error counters; and the association as the driver answers wifid's

@@ -83,15 +83,111 @@
 #include <arm/cpu_data_internal.h>
 #include <arm64/proc_reg.h>
 
+void switch_footprint_breakdown(task_t task, char *buf, size_t size);
+void
+switch_footprint_breakdown(task_t task, char *buf, size_t size)
+{
+	const struct {
+		const char *name;
+		int         entry;
+	} parts[] = {
+		{"footprint", task_ledgers.phys_footprint}, {"internal", task_ledgers.internal},
+		{"compressed", task_ledgers.internal_compressed}, {"iokit_mapped", task_ledgers.iokit_mapped},
+		{"alternate", task_ledgers.alternate_accounting}, {"alternate_compressed", task_ledgers.alternate_accounting_compressed},
+		{"page_table", task_ledgers.page_table}, {"purgeable_nonvolatile", task_ledgers.purgeable_nonvolatile},
+		{"tagged", task_ledgers.tagged_footprint}, {"network", task_ledgers.network_nonvolatile},
+		{"media", task_ledgers.media_footprint}, {"graphics", task_ledgers.graphics_footprint},
+		{"graphics_compressed", task_ledgers.graphics_footprint_compressed},
+	};
+	size_t len = 0;
+
+	buf[0] = '\0';
+	if (task == TASK_NULL || task->ledger == NULL) {
+		return;
+	}
+	for (unsigned int i = 0; i < sizeof(parts) / sizeof(parts[0]) && len < size; i++) {
+		ledger_amount_t balance = 0;
+		int             n;
+
+		if (parts[i].entry < 0 || ledger_get_balance(task->ledger, parts[i].entry, LEO_SETTLE, &balance) != KERN_SUCCESS) {
+			continue;
+		}
+		n = snprintf(buf + len, size - len, "%s%s %lld", len ? ", " : "", parts[i].name, (long long)(balance >> 10));
+		if (n > 0) {
+			len += (size_t)n;
+		}
+	}
+}
+
+#if DEVELOPMENT || DEBUG
+
+#define KPROF_TRAP_NAMES  32                /* processes whose first trap was printed */
+#define KPROF_U_DSC       (1ull << 62)      /* user key: unslid dyld shared cache address */
+#define KPROF_U_MAIN      (2ull << 62)      /* user key: offset from the main executable's Mach-O header */
+#define KPROF_U_OTHER     (3ull << 62)      /* user key: anywhere else (app frameworks, JIT), one bucket */
+#define KPROF_U_ADDR      ((1ull << 62) - 1)
+
+/* A user PC as something the host can name: the unslid shared cache address, or main executable + offset. */
+static uint64_t
+kprof_user_location(task_t task, uint64_t pc)
+{
+	const struct vm_shared_region *sr = task->shared_region;
+	uint64_t                       header = task->mach_header_vm_address;
+
+	if (sr != NULL && pc >= sr->sr_base_address && pc - sr->sr_base_address < sr->sr_size) {
+		return KPROF_U_DSC | (pc - sr->sr_slide);
+	}
+	if (header != 0 && pc >= header && pc - header < (256ull << 20)) {
+		return KPROF_U_MAIN | (pc - header);
+	}
+	return KPROF_U_OTHER | (pc & KPROF_U_ADDR);
+}
+
+/* sleh.c handle_breakpoint, EL0: one console line for a process's first trap (os_crash and friends end in brk). */
+void switch_kprof_user_trap(arm_saved_state_t *state, uint32_t esr);
+void
+switch_kprof_user_trap(arm_saved_state_t *state, uint32_t esr)
+{
+	static char         names[KPROF_TRAP_NAMES][32];
+	static uint8_t      ready[KPROF_TRAP_NAMES];
+	static unsigned int used;
+	task_t              task = current_task();
+	char                name[32];
+	uint64_t            pc, lr;
+	unsigned int        seen, slot;
+
+	strlcpy(name, task_best_name(task), sizeof(name));
+	seen = MIN(os_atomic_load(&used, acquire), KPROF_TRAP_NAMES);
+	for (unsigned int i = 0; i < seen; i++) {
+		if (os_atomic_load(&ready[i], acquire) && strncmp(names[i], name, sizeof(name)) == 0) {
+			return;
+		}
+	}
+	if (seen >= KPROF_TRAP_NAMES) {
+		return;
+	}
+	slot = os_atomic_inc_orig(&used, relaxed);
+	if (slot >= KPROF_TRAP_NAMES) {
+		return;
+	}
+	strlcpy(names[slot], name, sizeof(names[slot]));
+	os_atomic_store(&ready[slot], 1, release);
+	pc = kprof_user_location(task, get_saved_state_pc(state));
+	lr = kprof_user_location(task, get_saved_state_lr(state));
+	printf("SwitchTrap: %s[%d] brk #0x%x at %s%llx, lr %s%llx\n", name, task_pid(task), ISS_BRK_COMMENT(esr),
+	    (pc & ~KPROF_U_ADDR) == KPROF_U_DSC ? "dsc 0x" : (pc & ~KPROF_U_ADDR) == KPROF_U_MAIN ? "main+0x" : "0x",
+	    pc & KPROF_U_ADDR,
+	    (lr & ~KPROF_U_ADDR) == KPROF_U_DSC ? "dsc 0x" : (lr & ~KPROF_U_ADDR) == KPROF_U_MAIN ? "main+0x" : "0x",
+	    lr & KPROF_U_ADDR);
+}
+
+#if defined(SWITCH_KPROF) && SWITCH_KPROF
+
 extern void qsort(void *a, size_t n, size_t es, int (*cmp)(const void *, const void *));
 extern int  vsnprintf(char *, size_t, const char *, va_list);
 
-#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
 #define SWITCH_KPROF_ROLE_ON 1
 #include <switch/kprof_role.h>
-#else
-#define SWITCH_KPROF_ROLE_ON 0
-#endif
 
 #define KPROF_PERIOD_NS   4000000ull        /* one sample per 4 ms of CPU work */
 #define KPROF_WINDOW_NS   10000000000ull    /* one summary every 10 s */
@@ -116,14 +212,9 @@ extern int  vsnprintf(char *, size_t, const char *, va_list);
 #define KPROF_CPU_MASKED  256               /* per CPU and window: unmask-point call chains */
 #define KPROF_MASKED      1024              /* merged */
 #define KPROF_TOP_MASKED  10
-#define KPROF_TRAP_NAMES  32                /* processes whose first trap was printed */
 #define KPROF_LINE        900               /* under the 1 KiB os_log record */
 #define KPROF_TID         (1ull << 63)      /* owner is a kernel_task thread id, not a pid */
 #define KPROF_BUCKET      1ul               /* key is a 128-byte bucket, not a function start */
-#define KPROF_U_DSC       (1ull << 62)      /* user key: unslid dyld shared cache address */
-#define KPROF_U_MAIN      (2ull << 62)      /* user key: offset from the main executable's Mach-O header */
-#define KPROF_U_OTHER     (3ull << 62)      /* user key: anywhere else (app frameworks, JIT), one bucket */
-#define KPROF_U_ADDR      ((1ull << 62) - 1)
 #define KPROF_U_COPYIO    (1ull << 61)      /* zf site key: a kernel copyin/copyout's fault, keyed by the syscall's PC */
 #define KPROF_CPU_SITES   256               /* per CPU and window: (process, zero-fill PC bucket) pairs */
 #define KPROF_SITES       1024              /* merged */
@@ -237,8 +328,6 @@ struct kprof_cpu {
 	uint64_t          last_idle, last_irq;
 	uint64_t          last_irqs, last_ipis, last_exc;  /* cpu_stat counts at the last summary */
 	bool              primed;     /* last_idle/last_irq hold a previous summary's values */
-	uint64_t          probe_ticks; /* the clock probe's timebase ticks in the last cross-call (kprof_clock_probe) */
-	uint32_t          governor_khz; /* the CPU governor's clock at the probe (drivers/SwitchPower), 0: not governed */
 };
 
 /* drivers/SwitchPower/SwitchPerfGovernor.cpp: the clock the on-demand CPU governor last applied, in kHz (0: none). */
@@ -390,22 +479,6 @@ kprof_user_slot(struct kprof_user *table, unsigned int bits, int32_t pid, uint64
 	return NULL;
 }
 #endif
-
-/* A user PC as something the host can name: the unslid shared cache address, or main executable + offset. */
-static uint64_t
-kprof_user_location(task_t task, uint64_t pc)
-{
-	const struct vm_shared_region *sr = task->shared_region;
-	uint64_t                       header = task->mach_header_vm_address;
-
-	if (sr != NULL && pc >= sr->sr_base_address && pc - sr->sr_base_address < sr->sr_size) {
-		return KPROF_U_DSC | (pc - sr->sr_slide);
-	}
-	if (header != 0 && pc >= header && pc - header < (256ull << 20)) {
-		return KPROF_U_MAIN | (pc - header);
-	}
-	return KPROF_U_OTHER | (pc & KPROF_U_ADDR);
-}
 
 #if !SWITCH_KPROF_ROLE_ON
 static uint64_t
@@ -813,127 +886,7 @@ switch_kprof_fast_fault(bool access_flag)
 	ml_set_interrupts_enabled(istate);
 }
 
-/* sleh.c handle_breakpoint, EL0: one console line for a process's first trap (os_crash and friends end in brk). */
-void switch_kprof_user_trap(arm_saved_state_t *state, uint32_t esr);
-void
-switch_kprof_user_trap(arm_saved_state_t *state, uint32_t esr)
-{
-	static char         names[KPROF_TRAP_NAMES][32];
-	static unsigned int used;
-	task_t              task = current_task();
-	char                name[32];
-	uint64_t            pc, lr;
-	unsigned int        slot;
-
-	strlcpy(name, task_best_name(task), sizeof(name));
-	for (unsigned int i = 0; i < MIN(os_atomic_load(&used, acquire), KPROF_TRAP_NAMES); i++) {
-		if (strncmp(names[i], name, sizeof(name)) == 0) {
-			return;
-		}
-	}
-	slot = os_atomic_inc_orig(&used, relaxed);
-	if (slot >= KPROF_TRAP_NAMES) {
-		return;
-	}
-	strlcpy(names[slot], name, sizeof(names[slot]));
-	pc = kprof_user_location(task, get_saved_state_pc(state));
-	lr = kprof_user_location(task, get_saved_state_lr(state));
-	printf("SwitchTrap: %s[%d] brk #0x%x at %s%llx, lr %s%llx\n", name, task_pid(task), ISS_BRK_COMMENT(esr),
-	    (pc & ~KPROF_U_ADDR) == KPROF_U_DSC ? "dsc 0x" : (pc & ~KPROF_U_ADDR) == KPROF_U_MAIN ? "main+0x" : "0x",
-	    pc & KPROF_U_ADDR,
-	    (lr & ~KPROF_U_ADDR) == KPROF_U_DSC ? "dsc 0x" : (lr & ~KPROF_U_ADDR) == KPROF_U_MAIN ? "main+0x" : "0x",
-	    lr & KPROF_U_ADDR);
-}
-
-/*
- * kern_memorystatus.c memorystatus_log_exception: what a process's phys_footprint is made of when it crosses a memory
- * limit (KiB), so a jetsam loop names its memory: anonymous (internal + compressed), IOKit mappings (GPU buffers and
- * IOSurfaces mapped into it), alternate accounting, page tables, purgeable, and the tagged/network/media/graphics
- * ledgers that are charged to the footprint.
- */
-void switch_footprint_breakdown(task_t task, char *buf, size_t size);
-void
-switch_footprint_breakdown(task_t task, char *buf, size_t size)
-{
-	const struct {
-		const char *name;
-		int         entry;
-	} parts[] = {
-		{"footprint", task_ledgers.phys_footprint}, {"internal", task_ledgers.internal},
-		{"compressed", task_ledgers.internal_compressed}, {"iokit_mapped", task_ledgers.iokit_mapped},
-		{"alternate", task_ledgers.alternate_accounting}, {"alternate_compressed", task_ledgers.alternate_accounting_compressed},
-		{"page_table", task_ledgers.page_table}, {"purgeable_nonvolatile", task_ledgers.purgeable_nonvolatile},
-		{"tagged", task_ledgers.tagged_footprint}, {"network", task_ledgers.network_nonvolatile},
-		{"media", task_ledgers.media_footprint}, {"graphics", task_ledgers.graphics_footprint},
-		{"graphics_compressed", task_ledgers.graphics_footprint_compressed},
-	};
-	size_t len = 0;
-
-	buf[0] = '\0';
-	if (task == TASK_NULL || task->ledger == NULL) {
-		return;
-	}
-	for (unsigned int i = 0; i < sizeof(parts) / sizeof(parts[0]) && len < size; i++) {
-		ledger_amount_t balance = 0;
-		int             n;
-
-		if (parts[i].entry < 0 || ledger_get_balance(task->ledger, parts[i].entry, LEO_SETTLE, &balance) != KERN_SUCCESS) {
-			continue;
-		}
-		n = snprintf(buf + len, size - len, "%s%s %lld", len ? ", " : "", parts[i].name, (long long)(balance >> 10));
-		if (n > 0) {
-			len += (size_t)n;
-		}
-	}
-}
-
 /* --- summary (thread call) ---------------------------------------------------------------------------------------- */
-
-/*
- * The core clock as the cores see it: a chain of KPROF_PROBE_ADDS dependent adds (one cycle each on the A57, which
- * issues one dependent integer add per cycle; the loop counter and branch go down the other pipes), timed by the
- * generic timer. SwitchThermal/SwitchPerf report the PLLX rate they programmed; this shows the rate the cores
- * actually ran at, after any divider, skipper or throttle. Runs with interrupts masked (the summary's cross-call, and
- * kprof_init before the clock is raised, which calibrates it against hekate's 998.4 MHz): about 20 us per CPU per
- * window at 1.67 GHz. Returns timebase ticks.
- */
-#define KPROF_PROBE_LOOPS 4096
-#define KPROF_PROBE_ADDS  (KPROF_PROBE_LOOPS * 8)
-static uint64_t
-kprof_clock_probe(void)
-{
-	uint64_t n, x = 0, t0 = 0, t1 = 0;
-
-	for (int pass = 0; pass < 2; pass++) {  /* the first pass warms the branch predictor and the I-cache */
-		n = pass ? KPROF_PROBE_LOOPS : 64;
-		t0 = ml_get_timebase();
-		__asm__ volatile (
-		    "1:\n"
-		    "add %1, %1, #1\n"
-		    "add %1, %1, #1\n"
-		    "add %1, %1, #1\n"
-		    "add %1, %1, #1\n"
-		    "add %1, %1, #1\n"
-		    "add %1, %1, #1\n"
-		    "add %1, %1, #1\n"
-		    "add %1, %1, #1\n"
-		    "subs %0, %0, #1\n"
-		    "b.ne 1b\n"
-		    : "+r" (n), "+r" (x) : : "cc");
-		t1 = ml_get_timebase();
-	}
-	return t1 - t0;
-}
-
-/* MHz from a probe's ticks: KPROF_PROBE_ADDS cycles over the ticks' nanoseconds. */
-static uint64_t
-kprof_probe_mhz(uint64_t ticks)
-{
-	uint64_t ns;
-
-	absolutetime_to_nanoseconds(ticks, &ns);
-	return ns ? (uint64_t)KPROF_PROBE_ADDS * 1000 / ns : 0;
-}
 
 /* Cross-call on every CPU: the sampler moves to the other buffer; arm CPUs that have not left idle since boot. */
 static void
@@ -947,8 +900,6 @@ kprof_flip_cpu(__unused void *arg)
 		return;
 	}
 	kc->active ^= 1;
-	kc->governor_khz = switch_perf_cpu_khz();
-	kc->probe_ticks = kprof_clock_probe();
 	if (!kc->armed) {
 		kc->armed = true;
 		kc->deadline = now + kprof_period;
@@ -1601,60 +1552,39 @@ kprof_faults_lines(uint64_t window)
 	}
 }
 
-/*
- * r17-faults, once at the first summary: what zeroing a page and cleaning one out of the CPU caches cost these cores,
- * per 4 KiB, over 1 MiB of fresh kernel pages in 64 KiB chunks (interrupts off per chunk, ~0.2 ms each): clean and
- * invalidate as the pages come off the free list (what a GPU copy-engine zero would need first: the GPU does not snoop
- * the A57s' caches, so a dirty line of the old contents would later be written back over its zeros), bzero of the now
- * uncached pages (a zero-fill fault's bzero_phys), bzero again with the lines in L2, and clean and invalidate of the
- * dirty lines. Prices a pre-zeroed page pool with numbers instead of guesses.
- */
-static void
-kprof_zero_cost_line(void)
-{
-	const vm_size_t    chunk = 64 * 1024, size = 16 * chunk;
-	const unsigned int cpu = MIN((unsigned int)cpu_number(), kprof_ncpus - 1);
-	uint64_t           t[4] = {}, ns[4];
-	char              *buf = kalloc_data(size, Z_WAITOK);
+extern uint64_t switch_ipis_received[][6];   /* cpu_common.c */
+extern uint64_t switch_sched_ipis[7][2];     /* sched_prim.c, by sched_ipi_event_t */
 
-	if (buf == NULL) {
+static void
+kprof_ipis(uint64_t window)
+{
+	static const char *const events[7] = { "?", "bound", "preempt", "smt", "spill", "rebalance", "rt" };
+	static uint64_t last_received[KPROF_MAX_CPUS][6], last_sched[7][2];
+
+	if (window == 0) {
 		return;
 	}
-	for (vm_size_t c = 0; c < size; c += chunk) {
-		char      *p = buf + c;
-		uint64_t   s[5];
-		boolean_t  istate = ml_set_interrupts_enabled(FALSE);
-
-		s[0] = mach_absolute_time();
-		for (vm_size_t a = 0; a < chunk; a += 64) {
-			__asm__ volatile ("dc civac, %0" : : "r"(p + a) : "memory");
-		}
-		__asm__ volatile ("dsb sy" : : : "memory");
-		s[1] = mach_absolute_time();
-		bzero(p, chunk);
-		__asm__ volatile ("dsb sy" : : : "memory");
-		s[2] = mach_absolute_time();
-		bzero(p, chunk);
-		__asm__ volatile ("dsb sy" : : : "memory");
-		s[3] = mach_absolute_time();
-		for (vm_size_t a = 0; a < chunk; a += 64) {
-			__asm__ volatile ("dc civac, %0" : : "r"(p + a) : "memory");
-		}
-		__asm__ volatile ("dsb sy" : : : "memory");
-		s[4] = mach_absolute_time();
-		ml_set_interrupts_enabled(istate);
-		for (unsigned int i = 0; i < 4; i++) {
-			t[i] += s[i + 1] - s[i];
+	kprof_put("SwitchKprof ipis per s, taken (ast/xcall/timer/wake/maint/other):");
+	for (unsigned int c = 0; c < kprof_ncpus; c++) {
+		kprof_put("%s", c ? "," : "");
+		for (unsigned int k = 0; k < 6; k++) {
+			const uint64_t n = os_atomic_load(&switch_ipis_received[c][k], relaxed);
+			kprof_put("%s%llu", k ? "/" : " ", (n - last_received[c][k]) * NSEC_PER_SEC / window);
+			last_received[c][k] = n;
 		}
 	}
-	kfree_data(buf, size);
-	for (unsigned int i = 0; i < 4; i++) {
-		absolutetime_to_nanoseconds(t[i], &ns[i]);
-		ns[i] /= size / 4096;
+	kprof_put("; scheduler sent to running/idle CPUs:");
+	for (unsigned int e = 0; e < 7; e++) {
+		const uint64_t running = os_atomic_load(&switch_sched_ipis[e][0], relaxed);
+		const uint64_t idle = os_atomic_load(&switch_sched_ipis[e][1], relaxed);
+		if (running != last_sched[e][0] || idle != last_sched[e][1]) {
+			kprof_put(" %s %llu/%llu", events[e], (running - last_sched[e][0]) * NSEC_PER_SEC / window,
+			    (idle - last_sched[e][1]) * NSEC_PER_SEC / window);
+		}
+		last_sched[e][0] = running;
+		last_sched[e][1] = idle;
 	}
-	os_log(OS_LOG_DEFAULT, "SwitchKprof zero cost (once; ns per 4 KiB, 1 MiB of fresh kernel pages): clean+invalidate "
-	    "fresh %llu, bzero uncached %llu, bzero in L2 %llu, clean+invalidate dirty %llu; core %llu MHz (probe, cpu %u)", ns[0],
-	    ns[1], ns[2], ns[3], kprof_probe_mhz(kprof_cpus[cpu].probe_ticks), cpu);
+	kprof_flush();
 }
 
 static void
@@ -1849,18 +1779,12 @@ kprof_summary(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 	}
 	kprof_put("; samples %llu (%llu ms each): user %llu, kernel %llu (kernel_task %llu), lost %llu", samples,
 	    KPROF_PERIOD_NS / NSEC_PER_MSEC, user, kernel, kernel_task_samples, lost);
-	kprof_put("; core MHz (probe):");
-	for (unsigned int c = 0; c < kprof_ncpus; c++) {
-		kprof_put(" %llu", kprof_probe_mhz(kprof_cpus[c].probe_ticks));
-	}
-	/* the governed DFLL's clock as each CPU saw it just before its probe: the probe should read the same (+-1 %) */
-	if (kprof_cpus[0].governor_khz) {
-		kprof_put("; governor MHz:");
-		for (unsigned int c = 0; c < kprof_ncpus; c++) {
-			kprof_put(" %u", kprof_cpus[c].governor_khz / 1000);
-		}
+	const uint32_t gov_khz = switch_perf_cpu_khz();
+	if (gov_khz) {
+		kprof_put("; governor MHz: %u", gov_khz / 1000);
 	}
 	kprof_flush();
+	kprof_ipis(window);
 
 	for (unsigned int i = 0; i < KPROF_TASKS; i++) {
 		kprof_vals[i] = kprof_tasks[i].used ? (uint64_t)kprof_tasks[i].user + kprof_tasks[i].kernel : 0;
@@ -1918,14 +1842,6 @@ kprof_summary(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 	kprof_kernel_task_threads(window);
 	kprof_user_hot_spots();
 	kprof_user_images();
-	{
-		static bool zero_cost_done;
-
-		if (!zero_cost_done) {
-			zero_cost_done = true;
-			kprof_zero_cost_line();
-		}
-	}
 	thread_call_enter_delayed_with_leeway(kprof_call, NULL, now + kprof_window, kprof_window / 10,
 	    THREAD_CALL_DELAY_LEEWAY);
 }
@@ -2001,26 +1917,9 @@ kprof_function_starts(void)
 	kprof_nstarts = n;
 }
 
-/*
- * r16-idle: off unless a measuring build sets this. Running, kprof costs a timer interrupt per 4 ms of CPU work, and
- * every 10 s a cross-call to every CPU (each runs the clock probe with interrupts masked), the merge and about 14 log
- * lines, the one periodic wakeup an idle system would take from this file. Off, the hooks (running timer, page-in
- * waits) see kprof_ready false and return; the user trap line and the footprint breakdown below are per event and stay
- * on. Not a boot-arg: a release must not be able to turn it on.
- */
-#if defined(SWITCH_KPROF) && SWITCH_KPROF
-static bool kprof_wanted = true;
-#else
-static bool kprof_wanted = false;
-#endif
-
 static void
 kprof_init(void)
 {
-	if (!kprof_wanted) {
-		os_log(OS_LOG_DEFAULT, "SwitchKprof: off");
-		return;
-	}
 	kprof_ncpus = MIN((unsigned int)ml_get_max_cpu_number() + 1, KPROF_MAX_CPUS);
 	nanoseconds_to_absolutetime(KPROF_PERIOD_NS, &kprof_period);
 	nanoseconds_to_absolutetime(KPROF_WINDOW_NS, &kprof_window);
@@ -2061,13 +1960,26 @@ kprof_init(void)
 	os_atomic_store(&kprof_ready, true, release);
 	thread_call_enter_delayed_with_leeway(kprof_call, NULL, kprof_last_summary + kprof_window, kprof_window / 10,
 	    THREAD_CALL_DELAY_LEEWAY);
-	boolean_t istate = ml_set_interrupts_enabled(FALSE);
-	uint64_t  boot_probe = kprof_clock_probe();
-
-	ml_set_interrupts_enabled(istate);
-	os_log(OS_LOG_DEFAULT, "SwitchKprof: sampling every %llu ms of CPU work, %u kernel functions%s, summary every %llu s; "
-	    "core %llu MHz by the probe (boot clock, before SwitchPerf)",
+	os_log(OS_LOG_DEFAULT, "SwitchKprof: sampling every %llu ms of CPU work, %u kernel functions%s, summary every %llu s",
 	    KPROF_PERIOD_NS / NSEC_PER_MSEC, kprof_nstarts, kprof_nstarts ? "" : " (no LC_FUNCTION_STARTS: 128-byte buckets)",
-	    KPROF_WINDOW_NS / NSEC_PER_SEC, kprof_probe_mhz(boot_probe));
+	    KPROF_WINDOW_NS / NSEC_PER_SEC);
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, kprof_init);
+
+#else /* SWITCH_KPROF */
+
+void
+switch_kprof_expire(__unused void *param0, __unused void *param1)
+{
+}
+
+static void
+kprof_init(void)
+{
+	os_log(OS_LOG_DEFAULT, "SwitchKprof: off");
+}
+STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, kprof_init);
+
+#endif /* SWITCH_KPROF */
+
+#endif /* DEVELOPMENT || DEBUG */

@@ -80,6 +80,18 @@ impl NativeShaderTarget {
         self == Self::Sm53
     }
 
+    /// Whether the device's `exp2(y · log2(x))`, its `MUFU.LG2`, an `FMUL` and its `MUFU.EX2` with
+    /// nothing between them, is Metal's `fast::powr` of `half` operands held in `f32` at every
+    /// special operand, so that the composition needs none of the selects of
+    /// `math::fast_powr_special` and `math::infinite_product`. IEEE arithmetic gives Metal's value
+    /// at each: `log2` of a negative half is a NaN, of `±0` is `-inf` and of `+inf` is `+inf`,
+    /// of `1` is `0`, and `0 · inf` is a NaN. A half widened to `f32` is never an `f32` denormal,
+    /// so `MUFU`'s flush of one cannot reach it. That GM20B's `MUFU.LG2` and `MUFU.EX2` give IEEE
+    /// values there is not measured: it rests on HW Test `gpu.gm20b.powr_specials`.
+    pub(crate) fn ieee_half_powr(self) -> bool {
+        self == Self::Sm53
+    }
+
     pub(crate) fn half(self, operation: HalfOperation) -> bool {
         self.half_rules(operation).is_some()
     }

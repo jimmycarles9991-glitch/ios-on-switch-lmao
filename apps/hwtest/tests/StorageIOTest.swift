@@ -1,6 +1,8 @@
 import Darwin
 import Foundation
 import HWTestCore
+import HWTestKit
+import HWTestShared
 
 /// The SD driver's own accounting (kern.switch_sd, debug kernels; drivers/NativeSwitchBlock/SwitchSdIo.h) around this
 /// test's reads: random 4 KiB pages of a 16 MiB file with F_NOCACHE into page-aligned memory, one reader at a time and
@@ -28,7 +30,7 @@ struct StorageIOTest: HWTest {
         guard case .value(let boot) = read, boot != "down" else {
             var metrics = Metrics()
             metrics.set("sysctl", KernelSysctl.code(read.error))
-            return .skip(KernelSysctl.unreadable(Self.sysctl, read.error), metrics)
+            return .skip(KernelSysctl.unreadable(Self.sysctl, read.error, flag: "--//bazel:stats_io"), metrics)
         }
         let url = Disk.file("io.bin")
         defer { try? FileManager.default.removeItem(at: url) }

@@ -43,9 +43,9 @@ constexpr uint32_t kProvenUnits = ProvenFixedBlend;
 // us_rung3_<mode> against us_rung4_<mode>, "slower" and "proven". It put llt (9 passes) off the model: 1,841.6 us
 // against its storage form's 1,629.8 on 23 Nov (1,841.9 against 1,640.1 on 22 Nov), 204.6 us a pass where mpy, pld, dso,
 // lso and dlc run 151.6 to 155.5, so llt stays on the interlock.
-inline constexpr std::array<std::string_view, 19> kIteratedProven = {
-    "mpy", "pdi", "lbn",   "drk", "ltn", "sbt.u", "llt.u", "pld",   "sds",   "div.u",
-    "dif", "ovl", "cdg.u", "pin", "sbt", "hlt",   "sbt.x", "llt.x", "dlc.u",
+inline constexpr std::array<std::string_view, 17> kIteratedProven = {
+    "mpy",   "pdi", "lbn", "drk",   "ltn", "sbt.u", "llt.u", "pld",   "sds",
+    "div.u", "dif", "ovl", "cdg.u", "pin", "sbt.x", "llt.x", "dlc.u",
 };
 
 }  // namespace gm20b

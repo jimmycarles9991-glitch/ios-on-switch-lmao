@@ -95,15 +95,62 @@ public:
         return true;
     }
 
+    // Whether a fence is queued on syncpoint `id`.
+    bool names(uint32_t id) const
+    {
+        return id < kSyncpts && head[id] != nullptr;
+    }
+
+    bool hasBounded() const
+    {
+        return boundedCount != 0;
+    }
+
+    void setDeadline(switch_host1x_fence *fence, uint64_t deadline)
+    {
+        if (fence->state == SWITCH_HOST1X_FENCE_QUEUED) {
+            if (!fence->deadline && deadline)
+                ++boundedCount;
+            else if (fence->deadline && !deadline)
+                --boundedCount;
+        }
+        fence->deadline = deadline;
+    }
+
+    // What a bound would fail on syncpoint `id`, failed now with `status`: its bounded fences and the CPU's waits not
+    // yet reached. A fence with neither (a consumer's, a filter waiter's) ends as it would have, by the release the
+    // failed engine's cancellation makes.
+    uint32_t fail(Registers &r, uint32_t id, int status, SwitchHost1xExpired &done)
+    {
+        uint32_t failed = 0;
+        for (bool removed = true; removed;) {
+            removed = false;
+            const uint32_t current = value(r, id);
+            for (auto *fence = head[id]; fence && !removed; fence = fence->next) {
+                if (switch_host1x_reached(current, fence->threshold) || (!fence->deadline && fence->signaled))
+                    continue;
+                remove(r, fence, done);
+                expire(fence, status, done);
+                removed = true;
+                ++failed;
+            }
+        }
+        return failed;
+    }
+
     // syncpt_thresh_isr: each armed syncpoint whose status is set has its interrupt disabled and cleared, then its
     // reached fences expire and the next one is armed. Status bits of syncpoints nobody armed are sticky but do not
     // drive the line, and are left alone.
-    void interrupt(Registers &r, SwitchHost1xExpired &done)
+    bool interrupt(Registers &r, SwitchHost1xExpired &done)
     {
+        bool any = false;
         for (uint32_t word = 0; word < kSyncpts / 32; ++word) {
+            if (!armed[word])
+                continue;
             const uint32_t status = r.read(kIntStatus + 4 * word) & armed[word];
             if (!status)
                 continue;
+            any = true;
             r.write(kIntDisable + 4 * word, status);
             r.write(kIntStatus + 4 * word, status);
             armed[word] &= ~status;
@@ -113,6 +160,7 @@ public:
                 update(r, id, done);
             }
         }
+        return any;
     }
 
     // The sync unit came back from a reset with every threshold interrupt off.
@@ -120,9 +168,13 @@ public:
     {
         for (uint32_t &word : armed)
             word = 0;
-        for (uint32_t id = 0; id < kSyncpts; ++id)
-            if (head[id])
-                update(r, id, done);
+        for (uint32_t word = 0; word < kSyncpts / 32; ++word) {
+            for (uint32_t bits = active[word]; bits; bits &= bits - 1) {
+                const uint32_t id = word * 32 + static_cast<uint32_t>(__builtin_ctz(bits));
+                if (head[id])
+                    update(r, id, done);
+            }
+        }
     }
 
     // Fences past their deadline: one its syncpoint has not reached fails with timedOut. One it has reached was missed
@@ -132,29 +184,32 @@ public:
                                  SwitchHost1xExpired &done, uint64_t *next)
     {
         *next = 0;
-        for (uint32_t id = 0; id < kSyncpts; ++id) {
-            // A removal re-arms the syncpoint, which may expire the fences after it: the walk starts again.
-            for (bool removed = true; removed;) {
-                removed = false;
-                for (auto *fence = head[id]; fence && !removed; fence = fence->next) {
-                    if (!fence->deadline || fence->deadline > now)
-                        continue;
-                    const bool reached = switch_host1x_reached(value(r, id), fence->threshold);
-                    if (reached && !fence->graced) {
-                        fence->graced = 1;
-                        fence->deadline = now + grace;
-                        continue;
+        for (uint32_t word = 0; word < kSyncpts / 32; ++word) {
+            for (uint32_t bits = active[word]; bits; bits &= bits - 1) {
+                const uint32_t id = word * 32 + static_cast<uint32_t>(__builtin_ctz(bits));
+                // A removal re-arms the syncpoint, which may expire the fences after it: the walk starts again.
+                for (bool removed = true; removed;) {
+                    removed = false;
+                    for (auto *fence = head[id]; fence && !removed; fence = fence->next) {
+                        if (!fence->deadline || fence->deadline > now)
+                            continue;
+                        const bool reached = switch_host1x_reached(value(r, id), fence->threshold);
+                        if (reached && !fence->graced) {
+                            fence->graced = 1;
+                            fence->deadline = now + grace;
+                            continue;
+                        }
+                        if (reached && strict)
+                            return fence;
+                        remove(r, fence, done);
+                        expire(fence, reached ? lost : timedOut, done);
+                        removed = true;
                     }
-                    if (reached && strict)
-                        return fence;
-                    remove(r, fence, done);
-                    expire(fence, reached ? lost : timedOut, done);
-                    removed = true;
                 }
+                for (auto *fence = head[id]; fence; fence = fence->next)
+                    if (fence->deadline && (!*next || fence->deadline < *next))
+                        *next = fence->deadline;
             }
-            for (auto *fence = head[id]; fence; fence = fence->next)
-                if (fence->deadline && (!*next || fence->deadline < *next))
-                    *next = fence->deadline;
         }
         return nullptr;
     }
@@ -186,6 +241,8 @@ private:
 
     switch_host1x_fence *head[kSyncpts] = {}, *tail[kSyncpts] = {};
     uint32_t armed[kSyncpts / 32] = {};
+    uint32_t active[kSyncpts / 32] = {};
+    uint32_t boundedCount = 0;
 
     static void expire(switch_host1x_fence *fence, int status, SwitchHost1xExpired &done)
     {
@@ -211,6 +268,9 @@ private:
             before->next = fence;
         else
             head[id] = fence;
+        active[id / 32] |= 1u << (id % 32);
+        if (fence->deadline)
+            ++boundedCount;
         fence->state = SWITCH_HOST1X_FENCE_QUEUED;
     }
 
@@ -225,6 +285,10 @@ private:
             fence->next->prev = fence->prev;
         else
             tail[id] = fence->prev;
+        if (!head[id])
+            active[id / 32] &= ~(1u << (id % 32));
+        if (fence->deadline)
+            --boundedCount;
         fence->prev = fence->next = nullptr;
     }
 

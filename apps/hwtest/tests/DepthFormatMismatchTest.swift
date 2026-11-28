@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Render states whose declared depth or stencil format is not their pass's draw as Apple's GPU draws them (an M4 Max

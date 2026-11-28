@@ -154,12 +154,11 @@ impl FunctionStage {
     }
 }
 
-/// [`parse`] of a metallib read from a sealed system volume: its functions' `HASH` tags are taken as stated, not
-/// verified against their bitcode, so a parse reads the function list alone. Anything but a metallib is refused.
+/// [`parse`] of a metallib read from a sealed system volume. Anything but a metallib is refused.
 pub fn parse_sealed(bytes: &[u8]) -> Result<Metallib<'_>, Error> {
     match bytes.get(..4) {
-        Some(m) if m == MTLB_MAGIC => mtlb::parse_hashes(bytes, false),
-        Some(m) if m == UNIVERSAL_MAGIC => mtlb::parse_hashes(air_slice(bytes)?, false),
+        Some(m) if m == MTLB_MAGIC => mtlb::parse(bytes),
+        Some(m) if m == UNIVERSAL_MAGIC => mtlb::parse(air_slice(bytes)?),
         _ => Err(container_error(ContainerError::BadMagic, 0)),
     }
 }

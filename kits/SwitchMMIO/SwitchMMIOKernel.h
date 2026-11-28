@@ -33,9 +33,13 @@ static inline bool switch_mmio_wait32(const volatile uint8_t *base, uint32_t off
         return true;
     uint64_t deadline = 0;
     clock_interval_to_deadline(timeout_us, NSEC_PER_USEC, &deadline);
-    while (mach_absolute_time() < deadline) {
-        if ((switch_mmio_read32(base, offset) & mask) == value)
-            return true;
+    for (;;) {
+        for (unsigned poll = 0; poll < 8; ++poll) {
+            if ((switch_mmio_read32(base, offset) & mask) == value)
+                return true;
+        }
+        if (mach_absolute_time() >= deadline)
+            break;
     }
     return (switch_mmio_read32(base, offset) & mask) == value;
 }

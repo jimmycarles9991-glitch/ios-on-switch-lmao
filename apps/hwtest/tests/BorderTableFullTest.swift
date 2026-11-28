@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// An opaque border's header for a texture whose border texel is not the sampler's own (samplers.cpp borderVariant)

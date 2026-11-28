@@ -3,6 +3,7 @@
 #include "SwitchGpuShaderCompiler.h"
 #include <IOKit/IOMemoryDescriptor.h>
 #include <pexpert/pexpert.h>
+#include "SwitchGpuCompilerScope.h"
 #include "SwitchGpuShaderCompilerPolicy.h"
 #include "SwitchGpuShaderCompilerQueue.h"
 #include "TegraGM20BCompilerABI.h"
@@ -32,14 +33,16 @@ bool compilerMayCome()
 
 IOReturn info(TegraGM20BAbiCompilerInfoReply *out)
 {
+	TegraGM20BAbiCompilerScope scope;
+	switch_gpu_compiler_scope(scope);
 	IOLockLock(gBroker.lock);
 	*out = {gBroker.store ? gBroker.storeBytes : 0, gBroker.stack,
-		TegraGM20BCompilerCapable |
+		TegraGM20BCompilerCapable | TegraGM20BCompilerLibraries |
 			(gBroker.compiler ? uint32_t(TegraGM20BCompilerRegistered) : 0u) |
 			(gBroker.store ? uint32_t(TegraGM20BCompilerStore) : 0u) |
 			(compilerMayCome() ? uint32_t(TegraGM20BCompilerExpected) : 0u) |
 			(gBroker.declined ? uint32_t(TegraGM20BCompilerDeclined) : 0u),
-		gBroker.generation};
+		gBroker.generation, scope};
 	IOLockUnlock(gBroker.lock);
 	return kIOReturnSuccess;
 }
@@ -119,6 +122,7 @@ IOReturn compile(const void *owner, task_t task, const TegraGM20BAbiCompile *in,
 	request->qos = in->qos;
 	request->flags = in->flags;
 	request->pid = proc_selfpid();
+	switch_gpu_compiler_scope(request->scope);
 	request->async = async;
 	request->waiters = async ? 0u : 1u;
 	IOLockLock(gBroker.lock);
@@ -218,7 +222,8 @@ IOReturn take(const void *owner, task_t task, const TegraGM20BAbiCompilerTake *i
 		request->qos,
 		request->flags,
 		request->pid,
-		0};
+		0,
+		request->scope};
 	if (request->size > in->buffer_bytes) {
 		out->id = 0;
 		IOLockUnlock(gBroker.lock);
@@ -373,7 +378,20 @@ IOReturn decline(task_t task)
 
 bool switch_gpu_compiler_method(uint32_t method)
 {
-	return method >= TegraGM20BMethodCompilerInfo && method <= TegraGM20BMethodCompileWait;
+	return method >= TegraGM20BMethodCompilerInfo &&
+	       method <= TegraGM20BMethodCompilerUnmapLibrary;
+}
+
+// A caller whose reply size is not this kext's is of another build (a fast deploy of one side): said once, and refused
+static IOReturn otherBuild(const char *method, uint32_t asked, size_t answered)
+{
+	static bool said = false;
+	if (!__atomic_exchange_n(&said, true, __ATOMIC_RELAXED))
+		IOLog("SwitchShaderCompiler: pid %d asked %s for a %u-byte reply where this kext "
+		      "answers %zu: that process and this kext are of different builds, and no "
+		      "state the pack lacks is compiled until both are one build\n",
+		      proc_selfpid(), method, asked, answered);
+	return kIOReturnBadArgument;
 }
 
 IOReturn switch_gpu_compiler_call(const void *owner, task_t task, uint32_t method, const void *in,
@@ -389,7 +407,8 @@ IOReturn switch_gpu_compiler_call(const void *owner, task_t task, uint32_t metho
 	switch (method) {
 	case TegraGM20BMethodCompilerInfo:
 		if (inSize || outSize != sizeof(TegraGM20BAbiCompilerInfoReply))
-			return kIOReturnBadArgument;
+			return otherBuild("CompilerInfo", outSize,
+					  sizeof(TegraGM20BAbiCompilerInfoReply));
 		return info(static_cast<TegraGM20BAbiCompilerInfoReply *>(out));
 	case TegraGM20BMethodCompile:
 		if (inSize != sizeof(TegraGM20BAbiCompile))
@@ -406,7 +425,8 @@ IOReturn switch_gpu_compiler_call(const void *owner, task_t task, uint32_t metho
 	case TegraGM20BMethodCompilerTake:
 		if (inSize != sizeof(TegraGM20BAbiCompilerTake) ||
 		    outSize != sizeof(TegraGM20BAbiCompilerTakeReply))
-			return kIOReturnBadArgument;
+			return otherBuild("CompilerTake", outSize,
+					  sizeof(TegraGM20BAbiCompilerTakeReply));
 		return take(owner, task, static_cast<const TegraGM20BAbiCompilerTake *>(in),
 			    static_cast<TegraGM20BAbiCompilerTakeReply *>(out));
 	case TegraGM20BMethodCompilerComplete:
@@ -431,6 +451,25 @@ IOReturn switch_gpu_compiler_call(const void *owner, task_t task, uint32_t metho
 		if (inSize != sizeof(TegraGM20BAbiCompileWait) || outSize)
 			return kIOReturnBadArgument;
 		return compileWait(owner, static_cast<const TegraGM20BAbiCompileWait *>(in));
+	case TegraGM20BMethodCompilerRegisterLibrary:
+		if (inSize != sizeof(TegraGM20BAbiCompilerRegisterLibrary) ||
+		    outSize != sizeof(TegraGM20BAbiCompilerRegisterLibraryReply))
+			return kIOReturnBadArgument;
+		return registerLibrary(
+			owner, task, static_cast<const TegraGM20BAbiCompilerRegisterLibrary *>(in),
+			static_cast<TegraGM20BAbiCompilerRegisterLibraryReply *>(out));
+	case TegraGM20BMethodCompilerMapLibrary:
+		if (inSize != sizeof(TegraGM20BAbiCompilerMapLibrary) ||
+		    outSize != sizeof(TegraGM20BAbiCompilerMapLibraryReply))
+			return kIOReturnBadArgument;
+		return mapLibrary(owner, task,
+				  static_cast<const TegraGM20BAbiCompilerMapLibrary *>(in),
+				  static_cast<TegraGM20BAbiCompilerMapLibraryReply *>(out));
+	case TegraGM20BMethodCompilerUnmapLibrary:
+		if (inSize != sizeof(TegraGM20BAbiCompilerUnmapLibrary) || outSize)
+			return kIOReturnBadArgument;
+		return unmapLibrary(owner,
+				    static_cast<const TegraGM20BAbiCompilerUnmapLibrary *>(in));
 	default:
 		return kIOReturnUnsupported;
 	}
@@ -523,11 +562,15 @@ void switch_gpu_compiler_close(const void *owner)
 	for (Client &c : gBroker.clients)
 		if (c.owner == owner)
 			c = {};
+	CompilerLibraryMap *droppedMaps = compiler ? takeLibraryMaps() : nullptr;
+	ClientLibrary *droppedLibraries = takeLibraries(owner);
 	if (compiler)
 		IOLockWakeup(gBroker.lock, &gBroker.requests, false);
 	const uint32_t generation = gBroker.generation;
 	const bool declined = gBroker.declined;
 	IOLockUnlock(gBroker.lock);
+	dropLibraryMaps(droppedMaps);
+	dropLibraries(droppedLibraries);
 	send(sends, generation);
 	if (lost)
 		IOLog("SwitchShaderCompiler: the compiler's connection closed; "

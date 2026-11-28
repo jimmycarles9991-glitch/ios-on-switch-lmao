@@ -133,9 +133,13 @@ vectorize_filter_cb(const nir_instr *instr, const void *data)
    case nir_op_ffma:
    case nir_op_fsign:
    case nir_op_fsat:
+      return bit_size == 16 ? 2 : 1;
+   /* ios-on-switch-lmao: SM53's half min and max select a register, one
+    * half at a time (nak/from_nir.rs)
+    */
    case nir_op_fmax:
    case nir_op_fmin:
-      return bit_size == 16 ? 2 : 1;
+      return bit_size == 16 && (nak->sm < 53 || nak->sm >= 70) ? 2 : 1;
    default:
       return 1;
    }
@@ -280,6 +284,9 @@ lower_bit_size_cb(const nir_instr *instr, void *data)
       case nir_op_fltu:
       case nir_op_fneo:
       case nir_op_fneu:
+      /* HSETP2 and SEL (nak/from_nir.rs) */
+      case nir_op_fmax:
+      case nir_op_fmin:
       /* a half moved, selected or paired stays a half: SEL and PRMT
        * carry it in the register that holds it
        */

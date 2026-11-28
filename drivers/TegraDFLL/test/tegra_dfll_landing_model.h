@@ -28,8 +28,9 @@ void tegra_dfll_landing_set_slew(unsigned long steps_per_s);
 unsigned long tegra_dfll_landing_cpu_hz(void);
 bool tegra_dfll_landing_pinned(void);  // at OUTPUT_CFG MIN with the oscillator over its target
 unsigned long tegra_dfll_landing_dvco_rate_min(void);
-// Allocations, sleeps or mutexes taken with interrupts off (the DFLL lock is spin_lock_irqsave)
+// Allocations, sleeps or mutexes taken with interrupts off
 unsigned int tegra_dfll_landing_irqs_off_blocking(void);
+unsigned int tegra_dfll_landing_timer_fires(void);
 
 #ifdef __cplusplus
 }

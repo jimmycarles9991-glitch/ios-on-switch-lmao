@@ -11,7 +11,7 @@
 
 namespace
 {
-constexpr uint32_t kDefault = 0x10003080, kHigh = 0x10005080;
+constexpr uint32_t kDefault = 0x10003080, kHigh = 0x100080c3;
 
 struct Host {
 	uint32_t memory = kDefault; /* RAMFC 0xf8 in the instance block */

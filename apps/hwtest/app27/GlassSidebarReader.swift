@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import os
 import UIKit
 
@@ -43,7 +44,6 @@ final class SidebarReader {
     }
 
     var partial: Int { Set(frames.flatMap { $0.sightings("partial") }).subtracting(black).count }
-    var pools: [UInt64] { frames.map(\.pool) }
 
     func run(until deadline: Date) async {
         await withCheckedContinuation { done in
@@ -84,7 +84,7 @@ final class SidebarReader {
         }
         let record = SidebarFrame(
             sequence: frame.sequence, ticks: frame.ticks, ms: ms, turned: turned, a: .init(image.glass(a)),
-            b: .init(image.glass(b)), pool: GlassMemWords.pool(), previous: frame.previous,
+            b: .init(image.glass(b)), previous: frame.previous,
             endA: end.map { .init($0.0) }, endB: end.map { .init($0.1) }
         )
         frames.append(record)
@@ -95,8 +95,7 @@ final class SidebarReader {
         save(frame, record, image)
     }
 
-    /// The join key with the render server's per-command-buffer lines: the frame's offer sequence and the mach time it
-    /// was read at, whole and as GlassProbe's 40 low bits.
+    /// The frame's offer sequence and the mach time it was read at, whole and its 40 low bits.
     private func log(_ sequence: UInt64, ticks: UInt64, at: String, _ a: SidebarFrame.Band, _ b: SidebarFrame.Band) {
         let low = ticks & ((1 << 40) - 1)
         Self.logger.notice(
@@ -161,8 +160,6 @@ struct SidebarFrame: Codable {
     let turned: Bool
     let a: Band
     let b: Band
-    /// The glass-mem.pool word the render server last published (at its commits) when this frame was read.
-    let pool: UInt64
     /// Live: the offer sequence (low 32 bits) of the frame before, and its bands at the end of its time on screen.
     let previous: UInt32?
     let endA: Band?

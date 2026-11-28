@@ -156,7 +156,7 @@ TEST(Emit2D, AScaledBlitIsTheProbesScaleOp)
     dst.address = 0x0200000000ull;
     dst.width = 256;
     dst.height = 128;
-    switch_gm20b_2d_scale_op s = {0, 0, 256, 128, 2ull << 32, 2ull << 32, 1ull << 32, 1ull << 32, true, true, 0};
+    switch_gm20b_2d_scale_op s = {0, 0, 256, 128, 2ull << 32, 2ull << 32, 1ull << 32, 1ull << 32, true, true, 0, false};
     std::vector<uint32_t> words(64);
     nv_push p;
     nv_push_init(&p, words.data(), words.size(), SUBC_MASK_ALL);
@@ -251,7 +251,7 @@ TEST(Emit2D, ARopScaleSetsTheRopBeforeTheLaunchAndSrccopyAfter)
     dst.width = 720;
     dst.height = 1280;
     const switch_gm20b_2d_scale_op plain = {0,          0,          720,  1280, 2ull << 32, 2ull << 32,
-                                            1ull << 32, 1ull << 32, true, true, 0};
+                                            1ull << 32, 1ull << 32, true, true, 0,          false};
     switch_gm20b_2d_scale_op inverted = plain;
     inverted.rop = SWITCH_GM20B_2D_ROP_NOTSRCCOPY;
     std::vector<uint32_t> a(64), b(64);
@@ -268,6 +268,26 @@ TEST(Emit2D, ARopScaleSetsTheRopBeforeTheLaunchAndSrccopyAfter)
     expected.insert(expected.begin() + 19, rop.begin(), rop.end());
     expected.push_back({k2D, NV902D_SET_OPERATION, NV902D_SET_OPERATION_V_SRCCOPY});
     EXPECT_EQ(Methods(b), expected);
+}
+
+TEST(Emit2D, SkipTexInvalidateOmitsPerSliceL1Invalidate)
+{
+    switch_gm20b_2d_surface src = {}, dst = {};
+    src.format = NV902D_SET_SRC_FORMAT_V_A8R8G8B8;
+    src.block_height_log2 = 4;
+    src.width = 128;
+    src.height = 128;
+    dst = src;
+    dst.width = 64;
+    dst.height = 64;
+    switch_gm20b_2d_scale_op s = {0, 0, 64, 64, 2ull << 32, 2ull << 32, 1ull << 32, 1ull << 32, true, true, 0, true};
+    std::vector<uint32_t> words(64);
+    nv_push p;
+    nv_push_init(&p, words.data(), words.size(), SUBC_MASK_ALL);
+    switch_gm20b_2d_scale(&p, &src, &dst, &s);
+    words.resize(nv_push_dw_count(&p));
+    for (const Method &m : Methods(words))
+        EXPECT_NE(m.method, uint32_t(NV902D_TWOD_INVALIDATE_TEXTURE_DATA_CACHE));
 }
 
 }  // namespace

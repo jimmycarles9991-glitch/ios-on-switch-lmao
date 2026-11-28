@@ -41,6 +41,9 @@ if sys.argv[1] == 'pretranslate':
             sys.exit(2)
     src, out = Path(args[i]), Path(args[i + 1])
     raw = src.read_bytes()
+    if b'FALLBACK' in raw:
+        Path(report).write_text(json.dumps(dict(slices=[dict(status='fallback', why='synthetic fallback')])))
+        sys.exit(0)
     buf = bytearray(raw)
     for spec in edits:
         off_s, stock_h, at_s, patched_h = spec.split(':')
@@ -310,6 +313,15 @@ class WarmThenColdTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 translate_tree.load_edits(p)
 
+    def test_fallback_slices_are_reported_to_stderr(self):
+        (self.volume / 'usr/bin/fb').write_bytes(MACHO + b'FALLBACK')
+        out_dir = self.dir / 'fb_out'
+        command = [sys.executable, str(DRIVER), '--role', 'os', '--tool', str(self.tool), '--volume', str(self.volume)]
+        res = subprocess.run([*command, '--out', str(out_dir)], check=True, capture_output=True, text=True)
+        self.assertIn('os: fallback /usr/bin/fb: synthetic fallback', res.stderr)
+        self.assertIn('WARNING 1 slices fell back', res.stderr)
+        self.assertFalse((out_dir / 'files/usr/bin/fb').exists())
+
 
 class Locationd24B119EditTest(unittest.TestCase):
     @staticmethod
@@ -353,6 +365,7 @@ class Locationd24B119EditTest(unittest.TestCase):
         return pc, x19, x21
 
     def test_24b119_locationd_edit_clears_exact_coprocessor_bits(self):
+        # Bit 4, 6-axis device motion, stays: SwitchMotion publishes {0xff0c, 5}, as for CoreMotion's word in the cache.
         edits = translate_tree.load_edits(EDITS_24B119)
         self.assertIn('/usr/libexec/locationd', edits)
         entries = edits['/usr/libexec/locationd']
@@ -363,10 +376,10 @@ class Locationd24B119EditTest(unittest.TestCase):
         self.assertEqual((end_patched, x19_patched), (0x7F0F1C, 0))
         self.assertEqual(x21_patched & ~0x0000001314618BF2, 0)
         cleared = 0
-        for bit in (1, 4, 5, 6, 7, 9, 11, 15, 16, 22, 26, 33, 36):
+        for bit in (1, 5, 6, 7, 9, 11, 15, 16, 22, 26, 33, 36):
             cleared |= 1 << bit
         self.assertEqual(0x0000001314618BF2 & ~x21_patched, cleared)
-        self.assertEqual(x21_patched, (1 << 8) | (1 << 21) | (1 << 28) | (1 << 32))
+        self.assertEqual(x21_patched, (1 << 4) | (1 << 8) | (1 << 21) | (1 << 28) | (1 << 32))
 
 
 if __name__ == '__main__':

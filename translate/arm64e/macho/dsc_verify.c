@@ -240,8 +240,8 @@ static bool is_stub_class(enum a64x_class c, uint32_t w)
 {
     uint32_t one;
     return c == A64X_LSE_CAS || c == A64X_LSE_CASP || c == A64X_LSE_LDOP || c == A64X_LSE_SWP || c == A64X_JSCVT ||
-           c == A64X_FCMA || c == A64X_FP16 || c == A64X_RDM || c == A64X_SB ||
-           (c == A64X_PAC_LDRA && !a64x_rewrite1(w, &one));
+           c == A64X_FCMA || c == A64X_RDM || c == A64X_SB ||
+           ((c == A64X_PAC_LDRA || c == A64X_FP16) && !a64x_rewrite1(w, &one));
 }
 
 static int check_code(const struct cache *c, const struct xmap *m, struct a64x_dsc_verify *v, char *err, size_t errlen)
@@ -355,6 +355,28 @@ int a64x_dsc_verify(const struct a64x_plan *plan, const struct a64x_dsc_file *or
             memcpy(in, c.maps[i].in + k, PAGE);
             struct hole_ctx h = {c.maps[i].freed, k / 4};
             a64x_dead_checks(in, scratch, WORDS, c.maps[i].addr + k, &code, mark_hole, &h);
+        }
+        /* contiguous zero-padding islands inside code after an unconditional terminator (a64plan2.c) */
+        uint64_t nw = c.maps[i].size / 4;
+        for (uint64_t k = 1; k < nw;) {
+            if (rd32(c.maps[i].in + 4 * k) != 0 ||
+                (!c.maps[i].all_code && !a64x_plan_is_code(plan, c.maps[i].addr + 4 * k))) {
+                k++;
+                continue;
+            }
+            uint64_t end = k;
+            bool entered = false;
+            while (end < nw && rd32(c.maps[i].in + 4 * end) == 0 &&
+                   (c.maps[i].all_code || a64x_plan_is_code(plan, c.maps[i].addr + 4 * end))) {
+                entered |= (c.maps[i].entered[end >> 3] >> (end & 7)) & 1;
+                end++;
+            }
+            bool prev_code = c.maps[i].all_code || a64x_plan_is_code(plan, c.maps[i].addr + 4 * (k - 1));
+            if (!entered && end - k >= 16 && prev_code && a64x_ends_code(rd32(c.maps[i].in + 4 * (k - 1)))) {
+                for (uint64_t z = k; z < end; z++)
+                    c.maps[i].freed[z >> 3] |= (uint8_t)(1u << (z & 7));
+            }
+            k = end;
         }
     }
     for (int f = 0; f < nfiles && !rc; f++) {

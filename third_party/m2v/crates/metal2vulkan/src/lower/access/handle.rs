@@ -369,7 +369,7 @@ pub fn lowered_pointer(cx: &SelectCx<'_>, v: Value) -> Result<Option<DemoteTy>, 
     handle_domain(cx, v, class)?;
     // A phi's incoming constant would need a pointer constant's materialization, which the
     // emitter's operands do not provide.
-    if super::phis::incoming(cx, v)?.is_some_and(|i| i.constant) {
+    if super::phis::incoming(cx, v)?.is_some_and(|i| i.defined_constant) {
         return Err(refuse());
     }
     Ok(Some(DemoteTy::HandleIndex))

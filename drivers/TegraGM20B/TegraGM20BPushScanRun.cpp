@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
-// The stats' push scan (TegraGM20BUserClientInternal.h kScanEvery), debug kernels: a submission's pushes read and
-// counted for the "push" lines, and its process's largest colour target. A profiled submission is read before its kick,
-// which stamps it; the others are read on a thread call (SwitchGpuPushScanQueue.h), off the submitting thread.
+// The stats' push scan (TegraGM20BUserClientInternal.h kScanFirst, kScanEvery), debug kernels: a submission's pushes
+// read and counted for the "push" lines, and its process's largest colour target. A profiled submission, and each of an
+// app connection's first kScanFirst, is read before its kick (a profiled one's kick stamps it); the others are read on a
+// thread call (SwitchGpuPushScanQueue.h), off the submitting thread.
 #include "TegraGM20BUserClientInternal.h"
 #include "SwitchGpuPushScanQueue.h"
 #include <kern/thread_call.h>
@@ -83,11 +84,12 @@ void logWindow(const PushOwner (&window)[kPushOwners])
 }
 
 // Count a submission's read into `owner`'s window and its largest target into the peaks; every 5 s the window's lines.
-void scanCount(const tgm_scan::SubmissionRead &read, const char *owner, bool compositor)
+void scanCount(const tgm_scan::SubmissionRead &read, const char *owner, bool compositor,
+	       uint32_t submits)
 {
 	tgm_scan::PushCounts c = read.c;
 	const tgm_scan::TargetImage largest = read.largest;
-	c.submits = kScanEvery;  // this connection's submissions since its last one read
+	c.submits = submits;
 	if (compositor)
 		switch_gpu_compositor_scanned(c.passes, c.draws, c.interlocks, c.twinDraws);
 	if (!pushLockMade())
@@ -164,7 +166,7 @@ void deferredWork(thread_call_param_t param, thread_call_param_t)
 								record.metalMacros, kScanMaxBytes);
 			});
 		if (kept)
-			scanCount(read, r->owner, r->compositor);
+			scanCount(read, r->owner, r->compositor, r->submits);
 		IOLockLock(d->lock);
 		gQueue.late += !kept;
 		gQueue.done();
@@ -199,47 +201,59 @@ Deferral *deferral()
 }
 }  // namespace
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 void tgm_uc::tgm_target_peaks_line(char *line, size_t size)
 {
 	if (size)
 		line[0] = 0;
+#if TGM_PROF
 	IOLock *held = __atomic_load_n(&gPushLock, __ATOMIC_ACQUIRE);
 	if (!held)
 		return;
 	IOLockLock(held);
 	switch_gpu_peaks::line(gTargetPeaks, line, size);
 	IOLockUnlock(held);
+#endif
 }
 #endif
 
-// By every submission path (exec, SubmitJob), before its kick: every kScanEvery-th submission is read, every
-// kProfileEvery-th of those profiled, whose profile the kick stamps. Channels of one connection submit at once with no
-// connection lock: the counts are atomic.
+// By every submission path (exec, SubmitJob), before its kick: the submissions tgm_scan::scanWeight picks are read,
+// every kProfileEvery-th of those profiled, whose profile the kick stamps. An app connection's first kScanFirst are read
+// here, once a connection: a process that submits a few times (a lock screen poster, whose first is an upload and whose
+// draws follow) may finish before a thread call reads them or drops them, and its pushes may lie outside the pool. The
+// render server's are not: it waits for this thread. Those reads (write-combined, up to kScanMaxBytes each) are a debug
+// kernel's launch-time cost; a release kernel returns at its first line. Channels of one connection submit at once with
+// no connection lock: the counts are atomic.
 const tgm_prof *AGXDeviceUserClient::scanSubmission(uint32_t slot, uint32_t fences,
 						    const tgm_push *pushes, uint32_t count,
 						    tgm_prof &prof, bool metalMacros)
 {
-	if (!TGM_STATS || !count ||
-	    __atomic_fetch_add(&pushSubmits_, 1u, __ATOMIC_RELAXED) % kScanEvery)
+	if (!TGM_PROF || !count)
+		return nullptr;
+	const uint32_t n = __atomic_fetch_add(&pushSubmits_, 1u, __ATOMIC_RELAXED);
+	const uint32_t submits = tgm_scan::scanWeight(n, kScanFirst, kScanEvery);
+	if (!submits)
 		return nullptr;
 	const bool profiled =
 		count <= TGM_PROF_MAX &&
 		__atomic_fetch_add(&pushScans_, 1u, __ATOMIC_RELAXED) % kProfileEvery == 0;
-	if (!profiled) {
-		deferScan(slot, fences, pushes, count, metalMacros);
-		return nullptr;
+	if (profiled) {
+		scanPushes(pushes, count, &prof, metalMacros, submits);
+		return &prof;
 	}
-	scanPushes(pushes, count, &prof, metalMacros);
-	return &prof;
+	if (n < kScanFirst && !critical_ && count <= TGM_PROF_MAX)
+		scanPushes(pushes, count, nullptr, metalMacros, submits);
+	else
+		deferScan(slot, fences, pushes, count, metalMacros, submits);
+	return nullptr;
 }
 
 // A profiled submission's read, now: its pushes through the kernel's view of the BOs they lie in (pool BOs
 // write-combined, cached BOs their kernel mapping)
 void AGXDeviceUserClient::scanPushes(const tgm_push *pushes, uint32_t count, tgm_prof *prof,
-				     bool metalMacros)
+				     bool metalMacros, uint32_t submits)
 {
-	if (!TGM_STATS || count > TGM_PROF_MAX)
+	if (!TGM_PROF || count > TGM_PROF_MAX)
 		return;
 	switch_gpu_scan_words words[TGM_PROF_MAX];
 	const BindingTable::Entry *hit = nullptr;
@@ -248,7 +262,7 @@ void AGXDeviceUserClient::scanPushes(const tgm_push *pushes, uint32_t count, tgm
 			pushView(pushes[i].va, static_cast<uint64_t>(pushes[i].dwords) * 4, hit),
 			pushes[i].dwords};
 	scanCount(tgm_scan::readSubmission(words, count, prof, metalMacros, kScanMaxBytes), owner_,
-		  critical_);
+		  critical_, submits);
 }
 
 // Inside the channel's submit lock (the published bindings it reads stay until it leaves): where each push's words lie in
@@ -256,7 +270,7 @@ void AGXDeviceUserClient::scanPushes(const tgm_push *pushes, uint32_t count, tgm
 // The record names the submission's last seqno on its channel's fence (its `fences` internal ones come before it),
 // past which its words may be another's.
 void AGXDeviceUserClient::deferScan(uint32_t slot, uint32_t fences, const tgm_push *pushes,
-				    uint32_t count, bool metalMacros)
+				    uint32_t count, bool metalMacros, uint32_t submits)
 {
 	Deferral *d = deferral();
 	if (!d)
@@ -275,6 +289,7 @@ void AGXDeviceUserClient::deferScan(uint32_t slot, uint32_t fences, const tgm_pu
 					pushes[i].dwords};
 			});
 		r->compositor = critical_;
+		r->submits = submits;
 		r->fence = tgm_fence_offset(fence_va_ + static_cast<size_t>(slot) * 16);
 		r->fenceOwner = tgm_fence_owner(r->fence);
 		r->seqno = tgm_chan_submitted(chans_[slot]) + fences + 1;

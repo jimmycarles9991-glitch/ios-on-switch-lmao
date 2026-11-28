@@ -1,5 +1,7 @@
 """What a deploy asks of the next boot when the overlay's /Applications changes: a registration or a migration."""
 
+import hashlib
+import json
 import os
 import plistlib
 import struct
@@ -83,6 +85,67 @@ def package(root: Path, app: dict | None) -> Path:
             (bundle_root / name).parent.mkdir(parents=True, exist_ok=True)
             (bundle_root / name).write_bytes(data)
     return root
+
+
+def _hwtest_package(root: Path, *, with_hwtest: bool, include_27e: bool) -> Path:
+    tool = root / 'overlay/usr/sbin/BlueTool'
+    tool.parent.mkdir(parents=True, exist_ok=True)
+    tool.write_bytes(b'tool')
+    installer = root / 'overlay/Applications/SwitchInstaller.app'
+    installer.mkdir(parents=True)
+    installer_info = plistlib.dumps(
+        {
+            'CFBundleIdentifier': 'com.brunostjohn.switch.installer',
+            'CFBundleExecutable': 'SwitchInstaller',
+            'CFBundleVersion': '1',
+        }
+    )
+    installer_bin = signed(b'inst', identifier='com.brunostjohn.switch.installer')
+    (installer / 'Info.plist').write_bytes(installer_info)
+    (installer / 'SwitchInstaller').write_bytes(installer_bin)
+    (root / 'installer-bundle.json').write_text(
+        json.dumps(
+            {
+                'schema': 1,
+                'identifier': 'com.brunostjohn.switch.installer',
+                'version': '1',
+                'files': {
+                    'Info.plist': hashlib.sha256(installer_info).hexdigest(),
+                    'SwitchInstaller': hashlib.sha256(installer_bin).hexdigest(),
+                },
+            }
+        )
+    )
+    if with_hwtest:
+        peer = root / 'overlay/usr/bin/switch-texpeer'
+        peer.parent.mkdir(parents=True, exist_ok=True)
+        peer.write_bytes(b'peer')
+        apps_to_add = [('SwitchHWTest', 'com.brunostjohn.switch.hwtest')]
+        if include_27e:
+            apps_to_add.append(('SwitchHWTest27e', 'com.brunostjohn.switch.hwtest27e'))
+            plist = (
+                root
+                / 'overlay/private/preboot/Cryptexes/Supplemental/System/Library/LaunchDaemons'
+                / 'com.brunostjohn.switch.texpeer.plist'
+            )
+            plist.parent.mkdir(parents=True, exist_ok=True)
+            plist.write_bytes(b'<plist/>')
+        for app_name, bundle_id in apps_to_add:
+            app_dir = root / 'overlay/Applications' / f'{app_name}.app'
+            app_dir.mkdir(parents=True)
+            (app_dir / 'Info.plist').write_bytes(
+                plistlib.dumps({'CFBundleIdentifier': bundle_id, 'CFBundleExecutable': app_name})
+            )
+            (app_dir / app_name).write_bytes(signed(b'hw', identifier=bundle_id))
+    return root
+
+
+def _mark_applied(data: Path) -> None:
+    pending = app_journal.pending(data)
+    tokens = [entry[app_journal.TOKEN] for stage in pending.values() for entry in stage.values()]
+    applied = data / app_journal.APPLIED
+    applied.parent.mkdir(parents=True, exist_ok=True)
+    applied.write_bytes(plistlib.dumps(tokens))
 
 
 class SystemAppsTest(unittest.TestCase):
@@ -170,6 +233,58 @@ class SystemAppsTest(unittest.TestCase):
             {'/Applications/SwitchHWTest.app': 'com.brunostjohn.switch.hwtest'},
         )
         self.assertFalse(self.sentinel.exists())
+
+    def test_release_over_debug_prunes_hwtest_and_keeps_installer(self):
+        texpeer_plist = (
+            'private/preboot/Cryptexes/Supplemental/System/Library/LaunchDaemons/com.brunostjohn.switch.texpeer.plist'
+        )
+        for ios, include_27e in (('17.7.11', False), ('27.2', True)):
+            with self.subTest(ios=ios):
+                data = self.tmp / f'release-over-debug-{ios}'
+                data.mkdir()
+                debug_pkg = _hwtest_package(self.tmp / f'debug-{ios}', with_hwtest=True, include_27e=include_27e)
+                release_pkg = _hwtest_package(self.tmp / f'release-{ios}', with_hwtest=False, include_27e=include_27e)
+                optin_pkg = _hwtest_package(
+                    self.tmp / f'release-hwtest-{ios}', with_hwtest=True, include_27e=include_27e
+                )
+
+                before = system_apps.apps(data)
+                cards.sync_overlay(data, debug_pkg, Log())
+                self.assertFalse(system_apps.register(data, before, Log(), app_journal.NextBoot(ios)))
+                _mark_applied(data)
+
+                before = system_apps.apps(data)
+                cards.sync_overlay(data, release_pkg, Log())
+                self.assertFalse(system_apps.register(data, before, Log(), app_journal.NextBoot(ios)))
+
+                overlay = data / 'Switch/overlay'
+                self.assertTrue((overlay / 'Applications/SwitchInstaller.app').is_dir())
+                self.assertFalse((overlay / 'Applications/SwitchHWTest.app').exists())
+                self.assertFalse((overlay / 'Applications/SwitchHWTest27e.app').exists())
+                self.assertFalse((overlay / 'usr/bin/switch-texpeer').exists())
+                self.assertFalse((overlay / texpeer_plist).exists())
+
+                expected = {'/Applications/SwitchHWTest.app': 'com.brunostjohn.switch.hwtest'}
+                if include_27e:
+                    expected['/Applications/SwitchHWTest27e.app'] = 'com.brunostjohn.switch.hwtest27e'
+                pending = app_journal.pending(data)
+                self.assertEqual(
+                    {p: e[app_journal.IDENTIFIER] for p, e in pending[app_journal.UNREGISTER].items()}, expected
+                )
+                self.assertEqual(pending[app_journal.REGISTER], {})
+                _mark_applied(data)
+
+                before = system_apps.apps(data)
+                cards.sync_overlay(data, optin_pkg, Log())
+                self.assertFalse(system_apps.register(data, before, Log(), app_journal.NextBoot(ios)))
+                self.assertTrue((overlay / 'Applications/SwitchHWTest.app').is_dir())
+                self.assertEqual((overlay / 'Applications/SwitchHWTest27e.app').is_dir(), include_27e)
+                self.assertTrue((overlay / 'usr/bin/switch-texpeer').is_file())
+                pending = app_journal.pending(data)
+                self.assertEqual(
+                    {p: e[app_journal.IDENTIFIER] for p, e in pending[app_journal.REGISTER].items()}, expected
+                )
+                self.assertEqual(pending[app_journal.UNREGISTER], {})
 
     def test_no_apps_ever_leaves_everything_alone(self):
         self.assertFalse(self.deploy(None))
@@ -347,13 +462,28 @@ class RestageTest(unittest.TestCase):
         system_apps.restage(self.system, self.data, Log())
         self.assertFalse((self.data / system_apps.STAGED / 'Fitness.app').exists())
 
-    def test_restaging_twice_copies_once_and_asks_again(self):
+    def test_restaging_the_same_apps_twice_asks_for_one_migration(self):
         self.assertTrue(system_apps.restage(self.system, self.data, Log()))
+        system_apps.request_migration(self.data, Log())
         stamp = (self.data / system_apps.STAGED / 'FaceTime.app/FaceTime').stat().st_ino
         log = Log()
-        self.assertTrue(system_apps.restage(self.system, self.data, log))
+        self.assertFalse(system_apps.restage(self.system, self.data, log))
         self.assertEqual((self.data / system_apps.STAGED / 'FaceTime.app/FaceTime').stat().st_ino, stamp)
-        self.assertIn('0 restaged', log.lines[0])
+        self.assertIn('not migrating again', log.lines[0])
+
+    def test_a_set_no_migration_was_asked_for_is_asked_for_again(self):
+        self.assertTrue(system_apps.restage(self.system, self.data, Log()))
+        self.assertTrue(system_apps.restage(self.system, self.data, Log()))
+        self.assertFalse((self.data / system_apps.RESTAGED).exists())
+
+    def test_a_different_set_of_missing_apps_asks_again(self):
+        self.assertTrue(system_apps.restage(self.system, self.data, Log()))
+        system_apps.request_migration(self.data, Log())
+        self.install('Files.app', b'arm64e')
+        self.assertTrue(system_apps.restage(self.system, self.data, Log()))
+        self.install('FaceTime.app', b'arm64e')
+        self.assertFalse(system_apps.restage(self.system, self.data, Log()))
+        self.assertFalse((self.data / system_apps.RESTAGED).exists())
 
     def test_installed_apps_need_nothing(self):
         self.install('FaceTime.app', b'arm64e')

@@ -58,10 +58,12 @@ pub(super) fn expand<'a>(
             ParamRole::Sampler { location } => (AddrSpace::Constant, *location),
             _ => continue,
         };
-        let thread = params
-            .get(b.param as usize)
-            .and_then(|&t| parts.types.ptr_space(t))
-            == Some(AddrSpace::Thread);
+        let thread = matches!(
+            params
+                .get(b.param as usize)
+                .and_then(|&t| parts.types.ptr_space(t)),
+            Some(AddrSpace::Thread | AddrSpace::ArrayRef)
+        );
         if let (true, AbiInt::Const(count)) = (thread, location.count) {
             m.reserve(&mut found, 1)?;
             found.push((ArgIdx::new(b.param), space, u64::from(count)));
@@ -146,12 +148,12 @@ fn table_copy(
         op:
             LlvmIntrinsic::Memcpy {
                 dst: AddrSpace::Thread,
-                src: AddrSpace::Thread,
+                src: AddrSpace::Thread | AddrSpace::ArrayRef,
                 ..
             }
             | LlvmIntrinsic::Memmove {
                 dst: AddrSpace::Thread,
-                src: AddrSpace::Thread,
+                src: AddrSpace::Thread | AddrSpace::ArrayRef,
                 ..
             },
         ..

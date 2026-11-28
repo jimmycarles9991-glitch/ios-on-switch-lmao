@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Zcull (drivers/TegraGM20BMetal/zcull.h, drivers/TegraGM20B/TegraGM20BZcull.h): passes that clear a

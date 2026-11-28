@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// DynamicStrides.swift on the driver, which once refused strides past 4095 (gm20b:draw.stride_twin, its own refusal

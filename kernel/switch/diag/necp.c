@@ -14,7 +14,7 @@
 #include <sys/proc_internal.h>
 #include <sys/vm.h>
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_DIAG_NECP) && SWITCH_DIAG_NECP
 
 static int32_t switch_necp_pids[SWITCH_NECP_PROBE_PIDS];
 
@@ -81,4 +81,4 @@ void switch_necp_local_drop(const struct switch_necp_drop *drop)
     switch_necp_table_dump(drop);
 }
 
-#endif /* DEVELOPMENT || DEBUG */
+#endif /* (DEVELOPMENT || DEBUG) && SWITCH_DIAG_NECP */

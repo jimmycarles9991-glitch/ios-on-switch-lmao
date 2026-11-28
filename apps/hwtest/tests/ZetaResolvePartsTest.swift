@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Depth and stencil resolves into a part or another format: a 4x 32x32 depth drawn 0.2, 0.3, 0.4, 0.5 in samples 0-3

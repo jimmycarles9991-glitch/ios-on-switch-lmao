@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A compute kernel reading a '2vuy' surface as YCBCR8_422_1P (501), whose kernel the shader compiler once refused

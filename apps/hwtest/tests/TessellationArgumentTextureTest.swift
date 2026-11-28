@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A post-tessellation vertex function that reads a texture through an argument buffer, on the driver: its program

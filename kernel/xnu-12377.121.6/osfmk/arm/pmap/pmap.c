@@ -4169,16 +4169,108 @@ pmap_set_ptov_ap(unsigned int pai __unused, unsigned int ap __unused, boolean_t 
 }
 #endif /* defined(PVH_FLAG_EXEC) */
 
+#if !__ARM_IC_NOALIAS_ICACHE__
+/* Two-phase I-cache generation: started increments before ic ialluis (ordered by CleanPoU's dsb ish),
+ * done advances after ic ialluis; dsb ish; isb. Unmaps stamp pp_icache_gen[pai] with started only after
+ * TLB invalidation completes, so page_gen < done proves an ic ialluis evicted all L1Is after teardown. */
+static uint32_t pmap_ic_ialluis_started MARK_AS_PMAP_DATA = 1;
+static uint32_t pmap_ic_ialluis_done MARK_AS_PMAP_DATA = 1;
 
-MARK_AS_PMAP_TEXT int
-pmap_remove_range_options(
+static inline bool
+pmap_pte_is_exec(pt_entry_t pte)
+{
+	return (pte & (ARM_PTE_NX | ARM_PTE_PNX)) != (ARM_PTE_NX | ARM_PTE_PNX);
+}
+
+static inline void
+pmap_icache_mark_exec_enter(unsigned int pai)
+{
+	if (__probable(pp_icache_gen != NULL)) {
+		os_atomic_store(&pp_icache_gen[pai], PMAP_ICACHE_EXEC_ACTIVE, release);
+	}
+}
+
+static inline void
+pmap_icache_mark_exec_unmapped_locked(unsigned int pai)
+{
+	if (__probable(pp_icache_gen != NULL) &&
+	    os_atomic_load(&pp_icache_gen[pai], relaxed) == PMAP_ICACHE_EXEC_ACTIVE) {
+		uint32_t gen = os_atomic_load(&pmap_ic_ialluis_started, acquire);
+		os_atomic_store(&pp_icache_gen[pai], gen, release);
+	}
+}
+
+static void
+pmap_icache_advance_done(uint32_t ticket)
+{
+	if (__probable(ticket < PMAP_ICACHE_GEN_MAX)) {
+		uint32_t cur = os_atomic_load(&pmap_ic_ialluis_done, relaxed);
+		while (cur < ticket) {
+			if (os_atomic_cmpxchgv(&pmap_ic_ialluis_done, cur, ticket, &cur, release)) {
+				break;
+			}
+		}
+	}
+}
+
+static uint32_t
+pmap_icache_claim_ticket(void)
+{
+	if (__probable(os_atomic_load(&pmap_ic_ialluis_started, relaxed) < PMAP_ICACHE_GEN_MAX)) {
+		return os_atomic_inc(&pmap_ic_ialluis_started, acq_rel);
+	}
+	return PMAP_ICACHE_GEN_MAX;
+}
+
+static void
+pmap_icache_sync_phys(ppnum_t pp, bool force_icache)
+{
+	pmap_paddr_t paddr = ptoa(pp);
+
+	if (__improbable(!isphysmem(paddr))) {
+#ifndef __ARM_COHERENT_IO__
+		uint32_t ticket = pmap_icache_claim_ticket();
+		FlushPoC_Dcache();
+		InvalidatePoU_Icache();
+		pmap_icache_advance_done(ticket);
+#endif
+		return;
+	}
+
+	vm_offset_t vaddr = phystokv(paddr);
+	bool need_icache = force_icache || __improbable(pp_icache_gen == NULL || !pa_valid(paddr));
+	if (!need_icache) {
+		unsigned int pai = pa_index(paddr);
+		uint32_t page_gen = os_atomic_load(&pp_icache_gen[pai], acquire);
+		if (page_gen != 0) {
+			need_icache = (page_gen == PMAP_ICACHE_EXEC_ACTIVE) ||
+			    (page_gen >= os_atomic_load(&pmap_ic_ialluis_done, acquire));
+		}
+	}
+
+	if (!need_icache) {
+		CleanPoU_DcacheRegion(vaddr, PAGE_SIZE);
+		return;
+	}
+
+	uint32_t ticket = pmap_icache_claim_ticket();
+	InvalidatePoU_IcacheRegion(vaddr, PAGE_SIZE);
+	pmap_icache_advance_done(ticket);
+}
+#endif /* !__ARM_IC_NOALIAS_ICACHE__ */
+
+static MARK_AS_PMAP_TEXT int
+pmap_remove_range_options_icache(
 	pmap_t pmap,
 	vm_map_address_t va,
 	pt_entry_t *bpte,
 	pt_entry_t *epte,
 	vm_map_address_t *eva,
 	bool *need_strong_sync __unused,
-	int options)
+	int options,
+	uint32_t *exec_freed __unused,
+	unsigned int *exec_freed_count __unused,
+	unsigned int exec_freed_cap __unused)
 {
 	pt_entry_t     *cpte;
 	size_t          npages = 0;
@@ -4380,6 +4472,15 @@ pmap_remove_range_options(
 		} else {
 			num_external++;
 		}
+#if !__ARM_IC_NOALIAS_ICACHE__
+		if (exec_freed != NULL &&
+		    pvh_test_type(pai_to_pvh(pai), PVH_TYPE_NULL) &&
+		    pp_icache_gen != NULL &&
+		    os_atomic_load(&pp_icache_gen[pai], relaxed) == PMAP_ICACHE_EXEC_ACTIVE &&
+		    *exec_freed_count < exec_freed_cap) {
+			exec_freed[(*exec_freed_count)++] = pai;
+		}
+#endif
 		pvh_unlock(pai);
 		num_removed++;
 	}
@@ -4418,6 +4519,20 @@ pmap_remove_range_options(
 	return num_pte_changed;
 }
 
+MARK_AS_PMAP_TEXT int
+pmap_remove_range_options(
+	pmap_t pmap,
+	vm_map_address_t va,
+	pt_entry_t *bpte,
+	pt_entry_t *epte,
+	vm_map_address_t *eva,
+	bool *need_strong_sync,
+	int options)
+{
+	return pmap_remove_range_options_icache(pmap, va, bpte, epte, eva, need_strong_sync, options,
+	           NULL, NULL, 0);
+}
+
 
 /*
  *	Remove the given range of addresses
@@ -4449,6 +4564,10 @@ pmap_remove_options_internal(
 	int             remove_count = 0;
 	bool            need_strong_sync = false;
 	bool            unlock = true;
+#if !__ARM_IC_NOALIAS_ICACHE__
+	uint32_t        exec_freed[64];
+	unsigned int    exec_freed_count = 0;
+#endif
 
 	validate_pmap_mutable(pmap);
 
@@ -4481,8 +4600,14 @@ pmap_remove_options_internal(
 			    __func__, ptep_get_pmap(bpte), pmap, bpte);
 		}
 
+#if !__ARM_IC_NOALIAS_ICACHE__
+		remove_count = pmap_remove_range_options_icache(pmap, start, bpte, epte, &eva,
+		    &need_strong_sync, options, exec_freed, &exec_freed_count,
+		    (unsigned int)(sizeof(exec_freed) / sizeof(exec_freed[0])));
+#else
 		remove_count = pmap_remove_range_options(pmap, start, bpte, epte, &eva,
 		    &need_strong_sync, options);
+#endif
 
 		if ((pmap->type == PMAP_TYPE_USER) && (ptep_get_info(pte_p)->refcnt == 0)) {
 			pmap_tte_deallocate(pmap, start, eva, need_strong_sync, tte_p, pt_attr_twig_level(pt_attr));
@@ -4499,6 +4624,16 @@ done:
 	if (remove_count > 0) {
 		PMAP_UPDATE_TLBS(pmap, start, eva, need_strong_sync, true);
 	}
+#if !__ARM_IC_NOALIAS_ICACHE__
+	for (unsigned int i = 0; i < exec_freed_count; i++) {
+		unsigned int pai = exec_freed[i];
+		pvh_lock(pai);
+		if (pvh_test_type(pai_to_pvh(pai), PVH_TYPE_NULL)) {
+			pmap_icache_mark_exec_unmapped_locked(pai);
+		}
+		pvh_unlock(pai);
+	}
+#endif
 	return eva;
 }
 
@@ -5347,6 +5482,12 @@ protect_finish:
 	if (remove && tlb_flush_needed) {
 		sync_tlb_flush();
 	}
+
+#if !__ARM_IC_NOALIAS_ICACHE__
+	if (remove && !(options & PMAP_OPTIONS_NOFLUSH) && pvh_test_type(pv_h, PVH_TYPE_NULL)) {
+		pmap_icache_mark_exec_unmapped_locked(pai);
+	}
+#endif
 
 	pvh_unlock(pai);
 
@@ -6504,6 +6645,12 @@ pmap_enter_options_internal(
 #endif
 
 
+#if !__ARM_IC_NOALIAS_ICACHE__
+			if (pmap_pte_is_exec(pte)) {
+				pmap_icache_mark_exec_enter(pai);
+			}
+#endif
+
 			committed = pmap_enter_pte(pmap, pte_p, &spte, pte, v);
 			if (!committed) {
 				pvh_unlock(pai);
@@ -7237,7 +7384,11 @@ pmap_attribute_cache_sync(
 	if (size > PAGE_SIZE) {
 		panic("pmap_attribute_cache_sync size: 0x%llx", (uint64_t)size);
 	} else {
+#if !__ARM_IC_NOALIAS_ICACHE__
+		pmap_icache_sync_phys(pp, true);
+#else
 		cache_sync_page(pp);
+#endif
 	}
 
 	return KERN_SUCCESS;
@@ -7253,7 +7404,11 @@ void
 pmap_sync_page_data_phys(
 	ppnum_t pp)
 {
+#if !__ARM_IC_NOALIAS_ICACHE__
+	pmap_icache_sync_phys(pp, false);
+#else
 	cache_sync_page(pp);
+#endif
 }
 
 /*

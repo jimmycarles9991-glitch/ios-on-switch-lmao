@@ -16,47 +16,57 @@
 // buffer does again: the objects it names retained, its targets' GPU writes declared, their compression as it is now. A kept
 // shape's key names only this device's textures and buffers (gm20bPassKey), so its objects' classes are known; the cache
 // and the command buffer hold every object it names.
-static id<MTLRenderCommandEncoder> openKeptPass(SwitchMetalCommandBuffer *cb, SwitchMetalRenderEncoder *e,
+static id<MTLRenderCommandEncoder> openKeptPass(__unsafe_unretained SwitchMetalCommandBuffer *cb,
+                                                __unsafe_unretained SwitchMetalRenderEncoder *e,
                                                 const SwitchMetalPassEntry &kept)
 {
     __unsafe_unretained MTLRenderPassDescriptor *pass = kept.pass;
-    [cb retain:pass];
+    gm20bRetain(cb, pass);
     e->_pass = pass;
     e->_passShared = true;
     e->_passAt = uint32_t(cb->_passes.size());
     SwitchMetalPass &facts = cb->_passes.emplace_back(kept.facts);
     facts.compressed = 0;
-    for (unsigned c = 0; c < 8; c++) {
+    for (uint8_t mask = kept.colorMask; mask; mask &= uint8_t(mask - 1)) {
+        const unsigned c = unsigned(__builtin_ctz(mask));
         __unsafe_unretained SwitchMetalTexture *x = (SwitchMetalTexture *)facts.color[c].texture;
-        if (!x)
-            continue;
-        [cb retain:x];
-        declareGpuWrites(x);
-        if (x->_gm20bOk && gm20b::xrForm(x->_raw.format) != gm20b::XrForm::None && x->_raw.comptags)
+        gm20bRetain(cb, x);
+        if (x->_surface && !x->_gpuWrites.load(std::memory_order_relaxed))
+            declareGpuWrites(x);
+        if (kept.hasXr && x->_gm20bOk && gm20b::xrForm(x->_raw.format) != gm20b::XrForm::None && x->_raw.comptags)
             facts.compressed |= uint8_t(1u << c);
-        if (__unsafe_unretained SwitchMetalTexture *r = (SwitchMetalTexture *)facts.color[c].resolve) {
-            [cb retain:r];
-            declareGpuWrites(r);
-        }
+        if (kept.hasResolve)
+            if (__unsafe_unretained SwitchMetalTexture *r = (SwitchMetalTexture *)facts.color[c].resolve) {
+                gm20bRetain(cb, r);
+                if (r->_surface && !r->_gpuWrites.load(std::memory_order_relaxed))
+                    declareGpuWrites(r);
+            }
     }
-    for (const SwitchMetalPass::Zeta &z : facts.zeta)
-        if (z.texture)
-            [cb retain:z.texture];
-    for (unsigned i = 0; i < 2; i++)
-        if (__unsafe_unretained SwitchMetalTexture *r =
-                (SwitchMetalTexture *)(i ? facts.stencilResolve : facts.depthResolve)) {
-            [cb retain:r];
-            declareGpuWrites(r);
-        }
+    if (kept.hasZeta)
+        for (const SwitchMetalPass::Zeta &z : facts.zeta)
+            if (z.texture)
+                gm20bRetain(cb, z.texture);
+    if (kept.hasResolve)
+        for (unsigned i = 0; i < 2; i++)
+            if (__unsafe_unretained SwitchMetalTexture *r =
+                    (SwitchMetalTexture *)(i ? facts.stencilResolve : facts.depthResolve)) {
+                gm20bRetain(cb, r);
+                if (r->_surface && !r->_gpuWrites.load(std::memory_order_relaxed))
+                    declareGpuWrites(r);
+            }
     e->_visibility = kept.visibility;
     if (kept.visibility)
-        [cb retain:kept.visibility];
+        gm20bRetain(cb, kept.visibility);
     std::copy(kept.formats.begin(), kept.formats.end(), e->_formats);
     e->_count = kept.count;
     e->_zeta = kept.zeta;
     e->_samples = kept.samples;
     e->_turn = kept.turn;
     e->_renderAt = cb->_plan.size();
+    if (!cb->_commandLog) {
+        gm20bBeginKeptRender(cb, pass, e->_passAt);
+        return (id<MTLRenderCommandEncoder>)e;
+    }
     Cmd m = cmd(OpRender);
     m.obj = (__bridge void *)pass;
     m.x = e->_passAt;
@@ -69,7 +79,7 @@ void gm20bOwnPass(SwitchMetalRenderEncoder *e)
 {
     if (!e->_passShared)
         return;
-    SWITCH_METAL_DIAGNOSTIC(gm20b::frameCpuCounts().passOwned.fetch_add(1, std::memory_order_relaxed));
+    SWITCH_METAL_STAT(gm20b::frameCpuCounts().passOwned.fetch_add(1, std::memory_order_relaxed));
     gm20bPassBind(e->_cb, e->_pass);
     MTLRenderPassDescriptor *own = [e->_pass copy];
     [e->_cb retain:own];
@@ -80,40 +90,43 @@ void gm20bOwnPass(SwitchMetalRenderEncoder *e)
 
 @implementation SwitchMetalCommandBuffer (Encoders)
 
-- (void)begin:(SwitchMetalEncoder *)e
+- (void)begin:(__unsafe_unretained SwitchMetalEncoder *)e
 {
     if (_active)
         [(SwitchMetalEncoder *)_active endEncoding];  // Metal: one encoder at a time
+    _renderSlots.reset();
     e->_device = _device;
     e->_cb = self;
     _active = e;
-    [self closeEncoder];
+    _encOpen = false;
     _encAt = _plan.size();  // its first command is the next one recorded
     _encOpen = true;
     _encFailed = false;
 }
 
-- (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)d
+- (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor:(__unsafe_unretained MTLRenderPassDescriptor *)d
 {
     SWITCH_API(ApiEncoder);
     SwitchMetalRenderEncoder *e =
         (__bridge_transfer SwitchMetalRenderEncoder *)gm20bPoolNew([SwitchMetalRenderEncoder class]);
     [self begin:e];
-    thread_local std::vector<uint8_t> key;
+    std::vector<uint8_t> &key = _passKey;
     uint64_t hash = 0;
-    const bool counters = gm20bCounterBuffersMade();
-    const bool keyed = !counters && gm20bPassKey(d, key, hash);
+    bool counters = false;
+    const bool keyed = gm20bPassKey(d, key, hash, &counters);
     if (keyed)
         if (const SwitchMetalPassEntry *kept = gm20bPassFind(self, key, hash)) {
-            SWITCH_METAL_DIAGNOSTIC(gm20b::countPass(gm20b::PassOpen::Hit));
+            SWITCH_METAL_STAT(gm20b::countPass(gm20b::PassOpen::Hit));
             return openKeptPass(self, e, *kept);
         }
+    const uint8_t zetaAspects = (d.depthAttachment.texture ? 1u : 0u) | (d.stencilAttachment.texture ? 2u : 0u);
     MTLRenderPassDescriptor *pass = [d copy];
     bool skipped = gm20bPassAsApple(self, pass);
-    [self retain:pass];
+    gm20bRetain(self, pass);
     e->_pass = pass;
     e->_passAt = uint32_t(_passes.size());
     SwitchMetalPass &facts = _passes.emplace_back();
+    facts.zetaAspects = zetaAspects;
     e->_samples = 1;
     if (const char *rule = gm20bPassShapeInvalid(pass))
         gm20bPassInvalid(self, PredPassAttLevel, pass.renderTargetArrayLength, 0, rule);
@@ -122,28 +135,26 @@ void gm20bOwnPass(SwitchMetalRenderEncoder *e)
         id<MTLTexture> t = a.texture;
         if (!t)
             continue;
+        facts.colorMask |= uint8_t(1u << c);
         id<MTLTexture> resolve = a.resolveTexture;
         const bool volume = t.textureType == MTLTextureType3D;
         const NSUInteger slice = volume ? a.depthPlane : a.slice;
         facts.color[c] = {t, a.level, slice, a.loadAction, a.storeAction, a.clearColor, resolve, 0, 0};
         // an extended-range texture's alone: no texture of another form may be moving on the submit worker, whose
         // memory and comptags this thread may not read (private_comp.h)
-        if (SwitchMetalTexture *x = (SwitchMetalTexture *)t;
-            [(id)x isKindOfClass:[SwitchMetalTexture class]] && x->_gm20bOk &&
-            gm20b::xrForm(x->_raw.format) != gm20b::XrForm::None && x->_raw.comptags)
+        __unsafe_unretained SwitchMetalTexture *x = gm20bAsTexture(t);
+        if (x && x->_gm20bOk && gm20b::xrForm(x->_raw.format) != gm20b::XrForm::None && x->_raw.comptags)
             facts.compressed |= uint8_t(1u << c);
-        [self retain:t];
-        [self retain:resolve];
-        SwitchMetalTexture *x = (SwitchMetalTexture *)t;
-        if ([(id)x isKindOfClass:[SwitchMetalTexture class]])
+        gm20bRetain(self, t);
+        gm20bRetain(self, resolve);
+        if (x)
             declareGpuWrites(x);
-        if (SwitchMetalTexture *r = (SwitchMetalTexture *)resolve; [(id)r isKindOfClass:[SwitchMetalTexture class]])
+        if (SwitchMetalTexture *r = gm20bAsTexture(resolve))
             declareGpuWrites(r);
-        const bool standsIn = [(id)x isKindOfClass:[SwitchMetalTexture class]] && gm20bFormatTarget(x);
+        const bool standsIn = x && gm20bFormatTarget(x);
         const bool resolving = resolve && (gm20bResolvesStore(a.storeAction) || a.storeAction == MTLStoreActionUnknown);
         // a whole one-sample Depth32Float or Depth16Unorm draws as its colour twin (zeta_colour.h)
-        const uint32_t depthColour = [(id)x isKindOfClass:[SwitchMetalTexture class]] && x->_gm20bOk && x->_raw.zeta &&
-                                             x->_raw.samples <= 1 && !a.level && !slice
+        const uint32_t depthColour = x && x->_gm20bOk && x->_raw.zeta && x->_raw.samples <= 1 && !a.level && !slice
                                          ? gm20b::depthAsColourFormat(x->_raw.format)
                                          : 0;
         if (const char *rule = gm20bColorTargetInvalid(a)) {
@@ -201,8 +212,7 @@ void gm20bOwnPass(SwitchMetalRenderEncoder *e)
         facts.depthResolveSlice = depth.resolveSlice;
         facts.zeta[0].store = gm20bKeptStore(depth.storeAction);
         [self retain:facts.depthResolve];
-        if (SwitchMetalTexture *r = (SwitchMetalTexture *)facts.depthResolve;
-            [(id)r isKindOfClass:[SwitchMetalTexture class]])
+        if (SwitchMetalTexture *r = gm20bAsTexture(facts.depthResolve))
             declareGpuWrites(r);
     }
     if (stencil.texture && gm20bResolvesStore(stencil.storeAction) && stencil.resolveTexture) {
@@ -212,8 +222,7 @@ void gm20bOwnPass(SwitchMetalRenderEncoder *e)
         facts.stencilResolveSlice = stencil.resolveSlice;
         facts.zeta[1].store = gm20bKeptStore(stencil.storeAction);
         [self retain:facts.stencilResolve];
-        if (SwitchMetalTexture *r = (SwitchMetalTexture *)facts.stencilResolve;
-            [(id)r isKindOfClass:[SwitchMetalTexture class]])
+        if (SwitchMetalTexture *r = gm20bAsTexture(facts.stencilResolve))
             declareGpuWrites(r);
     }
     facts.clearDepth = pass.depthAttachment.clearDepth;
@@ -319,10 +328,10 @@ void gm20bOwnPass(SwitchMetalRenderEncoder *e)
         });
     // a pass whose making counted a skip is made again at each call, which counts it again
     const bool keeps = keyed && !_encFailed && !resolves && !skipped;
-    SWITCH_METAL_DIAGNOSTIC(gm20b::countPass(keeps      ? gm20b::PassOpen::Kept
-                                             : keyed    ? gm20b::PassOpen::Unkept
-                                             : counters ? gm20b::PassOpen::Counters
-                                                        : gm20b::PassOpen::Unkeyed));
+    SWITCH_METAL_STAT(gm20b::countPass(keeps      ? gm20b::PassOpen::Kept
+                                       : keyed    ? gm20b::PassOpen::Unkept
+                                       : counters ? gm20b::PassOpen::Counters
+                                                  : gm20b::PassOpen::Unkeyed));
     if (keeps) {
         // what the raw encode reads of it made now, so the copy is read, never changed, after this
         for (unsigned c = 0; c < 8; c++)
@@ -336,7 +345,8 @@ void gm20bOwnPass(SwitchMetalRenderEncoder *e)
 
 - (id<MTLBlitCommandEncoder>)blitCommandEncoder
 {
-    SwitchMetalBlitEncoder *e = [SwitchMetalBlitEncoder new];
+    SwitchMetalBlitEncoder *e =
+        (__bridge_transfer SwitchMetalBlitEncoder *)gm20bPoolNew([SwitchMetalBlitEncoder class]);
     [self begin:e];
     [self record:cmd(OpBlit)];
     return (id<MTLBlitCommandEncoder>)e;
@@ -352,7 +362,8 @@ void gm20bOwnPass(SwitchMetalRenderEncoder *e)
 
 - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDispatchType:(MTLDispatchType)type
 {
-    SwitchMetalComputeEncoder *e = [SwitchMetalComputeEncoder new];
+    SwitchMetalComputeEncoder *e =
+        (__bridge_transfer SwitchMetalComputeEncoder *)gm20bPoolNew([SwitchMetalComputeEncoder class]);
     e->_type = type;
     [self begin:e];
     Cmd m = cmd(OpCompute);

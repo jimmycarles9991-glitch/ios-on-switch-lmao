@@ -3,10 +3,12 @@
 #include "compiler_debug.h"
 
 #if SWITCH_DEBUG
+#if SWITCH_METAL_STATS
 #include <mach/mach.h>
 #include <malloc/malloc.h>
 #include <algorithm>
 #include "compiler_times.h"
+#endif
 #include <notify.h>
 #include <signal.h>
 #include <unistd.h>
@@ -19,6 +21,7 @@ int gDeathToken = -1;
 
 }  // namespace
 
+#if SWITCH_METAL_STATS
 const char *resultName(int32_t result)
 {
     static const char *names[] = {"made", "refused", "not made", "not taken"};
@@ -62,6 +65,7 @@ void logFootprint(os_log_t log, const char *when)
         (unsigned long long)(vm.internal >> 10), (unsigned long long)(vm.compressed >> 10),
         (unsigned long long)(heap.size_in_use >> 10), (unsigned long long)(heap.size_allocated >> 10));
 }
+#endif
 
 void armDeath()
 {

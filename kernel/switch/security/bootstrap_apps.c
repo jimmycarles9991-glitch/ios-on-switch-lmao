@@ -28,7 +28,7 @@ static bool switch_bootstrap_native_service(proc_t p)
 
 static bool switch_bootstrap_app_vnode(vnode_t vp, bool executable)
 {
-    if (!vp || (executable && !vnode_isreg(vp))) return false;
+    if (!switch_bootstrap_on_data(vp) || (executable && !vnode_isreg(vp))) return false;
     char *path = zalloc(ZV_NAMEI);
     int length = MAXPATHLEN;
     const bool matched = !vn_getpath(vp, path, &length) &&
@@ -41,12 +41,14 @@ static bool switch_bootstrap_app_vnode(vnode_t vp, bool executable)
 bool switch_bootstrap_app_access(vnode_t vp, int mode)
 {
     return !(mode & (FWRITE | O_TRUNC | O_APPEND | FEXEC)) &&
+        switch_bootstrap_on_data(vp) &&
         switch_bootstrap_native_service(current_proc()) &&
         (switch_bootstrap_alias(vp) || switch_bootstrap_app_vnode(vp, false));
 }
 
 bool switch_bootstrap_read_access(vnode_t vp, int mode)
 {
+    if (!switch_bootstrap_on_data(vp) || (mode & (FWRITE | O_TRUNC | O_APPEND))) return false;
     return switch_bootstrap_access(vp, mode) || switch_bootstrap_app_access(vp, mode);
 }
 
@@ -72,7 +74,8 @@ static bool switch_bootstrap_exec_file(vnode_t vp)
 
 unsigned int switch_bootstrap_exec_preflight(proc_t p, struct image_params *imgp)
 {
-    if (!p || !p->p_textvp || !switch_bootstrap_exec_file(imgp->ip_vp)) return 0;
+    vnode_t target = (imgp->ip_flags & IMGPF_INTERPRET) ? imgp->ip_scriptvp : imgp->ip_vp;
+    if (!p || !p->p_textvp || !switch_bootstrap_on_data(target) || !switch_bootstrap_exec_file(imgp->ip_vp)) return 0;
     unsigned int caller = 0;
     if (switch_bootstrap_native_service(p)) {
         char *path = zalloc(ZV_NAMEI);
@@ -132,35 +135,47 @@ static bool switch_bootstrap_app_route(const char *path)
 
 bool switch_bootstrap_app_preflight(vnode_t directory, const char *path, size_t length)
 {
-    if (!directory || !path || !length || length >= MAXPATHLEN ||
+    if (!switch_bootstrap_active() || !directory || !path || !length || length >= MAXPATHLEN ||
         !switch_bootstrap_native_service(current_proc())) return false;
     const size_t size = strnlen(path, MAXPATHLEN);
     if (!size || size == MAXPATHLEN) return false;
+    if (*path == '/') return switch_bootstrap_app_route(path);
     char *absolute = zalloc(ZV_NAMEI);
     bool allowed = false;
-    if (*path == '/') {
-        memcpy(absolute, path, size + 1);
-    } else {
-        int capacity = MAXPATHLEN;
-        if (vn_getpath(directory, absolute, &capacity)) goto done;
+    int capacity = MAXPATHLEN;
+    if (!vn_getpath(directory, absolute, &capacity)) {
         const size_t prefix = strlen(absolute);
-        if (prefix + size + 2 > MAXPATHLEN) goto done;
-        if (prefix > 1) strlcat(absolute, "/", MAXPATHLEN);
-        strlcat(absolute, path, MAXPATHLEN);
+        if (prefix + size + 2 <= MAXPATHLEN) {
+            if (prefix > 1) strlcat(absolute, "/", MAXPATHLEN);
+            strlcat(absolute, path, MAXPATHLEN);
+            allowed = switch_bootstrap_app_route(absolute);
+        }
     }
-    allowed = switch_bootstrap_app_route(absolute);
-done:
     zfree(ZV_NAMEI, absolute);
     return allowed;
 }
 
 bool switch_bootstrap_app_lookup(vnode_t directory, const char *name, size_t length)
 {
-    if (!name || !length || length >= MAXPATHLEN || memchr(name, '/', length) || memchr(name, '\0', length)) return false;
-    char *component = zalloc(ZV_NAMEI);
-    memcpy(component, name, length);
-    component[length] = '\0';
-    const bool allowed = switch_bootstrap_app_preflight(directory, component, length);
-    zfree(ZV_NAMEI, component);
+    if (!switch_bootstrap_active() || !directory || !name || !length || length >= MAXPATHLEN ||
+        (length == 1 && name[0] == '.') || (length == 2 && name[0] == '.' && name[1] == '.') ||
+        memchr(name, '/', length) || memchr(name, '\0', length)) return false;
+    if (!switch_bootstrap_on_data(directory) &&
+        !(length == 7 && !memcmp(name, "private", 7)) && !(length == 3 && !memcmp(name, "var", 3))) return false;
+    if (!switch_bootstrap_native_service(current_proc())) return false;
+    char *absolute = zalloc(ZV_NAMEI);
+    bool allowed = false;
+    int capacity = MAXPATHLEN;
+    if (!vn_getpath(directory, absolute, &capacity)) {
+        const size_t prefix = strlen(absolute);
+        if (prefix + length + 2 <= MAXPATHLEN) {
+            if (prefix > 1) absolute[prefix] = '/';
+            const size_t start = prefix + (prefix > 1);
+            memcpy(absolute + start, name, length);
+            absolute[start + length] = '\0';
+            allowed = switch_bootstrap_app_route(absolute);
+        }
+    }
+    zfree(ZV_NAMEI, absolute);
     return allowed;
 }

@@ -48,6 +48,13 @@ public:
         stamp_ = 1;
     }
 
+    void swap(StampMap &other) noexcept
+    {
+        slots_.swap(other.slots_);
+        std::swap(stamp_, other.stamp_);
+        std::swap(size_, other.size_);
+    }
+
     size_t size() const
     {
         return size_;

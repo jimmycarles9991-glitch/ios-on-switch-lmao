@@ -8,8 +8,10 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <mutex>
+#include <thread>
 
 namespace {
 
@@ -350,6 +352,100 @@ TEST_F(DeviceClearBox, AStoredClearKeepsMetalsReach)
     EXPECT_EQ(pass(gm20b::ColorAttachment::Clear, true, true, card), (Clears{{0, 0, 0, kW, kH}, {1, 0, 0, kW, kH}}));
     EXPECT_EQ(pass(gm20b::ColorAttachment::Clear, false, true, card), kCardClears)
         << "a DontCare store: nothing after the pass reads it";
+}
+
+class CompIoctlGate {
+public:
+    explicit CompIoctlGate(uint32_t method) : method_(method)
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        active_ = this;
+        kernel_model::arriving.store(&arrive, std::memory_order_release);
+    }
+
+    ~CompIoctlGate()
+    {
+        release();
+        kernel_model::arriving.store(nullptr, std::memory_order_release);
+        std::lock_guard<std::mutex> l(mu_);
+        if (active_ == this)
+            active_ = nullptr;
+    }
+
+    bool waitHeld()
+    {
+        std::unique_lock<std::mutex> l(mu_);
+        return cv_.wait_for(l, std::chrono::seconds(5), [&] {
+            return held_;
+        });
+    }
+
+    void release()
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        released_ = true;
+        cv_.notify_all();
+    }
+
+private:
+    static int arrive(uint32_t method, const void *input)
+    {
+        std::unique_lock<std::mutex> l(mu_);
+        CompIoctlGate *g = active_;
+        if (!g || method != g->method_ || g->matched_)
+            return KERN_SUCCESS;
+        if (method == TegraGM20BMethodVmBind) {
+            const auto *b = static_cast<const TegraGM20BAbiVmBind *>(input);
+            if (!b || !b->count || b->ops[0].kind != gm20b::kCompKindC32)
+                return KERN_SUCCESS;
+        }
+        g->matched_ = true;
+        g->held_ = true;
+        g->cv_.notify_all();
+        g->cv_.wait(l, [&] {
+            return g->released_;
+        });
+        return KERN_SUCCESS;
+    }
+
+    uint32_t method_ = 0;
+    bool matched_ = false, held_ = false, released_ = false;
+    std::condition_variable cv_;
+    static inline std::mutex mu_;
+    static inline CompIoctlGate *active_ = nullptr;
+};
+
+TEST_F(DevicePrivateComp, CompMakeDropsDeviceLockDuringBindCompressedAndSetAdd)
+{
+    gm20b::Buffer warm;
+    ASSERT_TRUE(dev.createBuffer(4096, warm));
+    dev.destroyBuffer(warm);
+
+    {
+        CompIoctlGate bindGate(TegraGM20BMethodVmBind);
+        gm20b::Texture first;
+        ASSERT_FALSE(dev.createCompressedTexture(128, 128, kBGRA8, gm20b::kCompKindC32, first));
+        ASSERT_TRUE(bindGate.waitHeld());
+        EXPECT_TRUE(dev.lockFree());
+        gm20b::Buffer probe;
+        ASSERT_TRUE(dev.createBuffer(4096, probe));
+        dev.destroyBuffer(probe);
+        bindGate.release();
+        awaitMade();
+    }
+
+    {
+        CompIoctlGate setGate(TegraGM20BMethodResourceSetCreate);
+        gm20b::Texture second;
+        ASSERT_FALSE(dev.createCompressedTexture(256, 256, kBGRA8, gm20b::kCompKindC32, second));
+        ASSERT_TRUE(setGate.waitHeld());
+        EXPECT_TRUE(dev.lockFree());
+        gm20b::Buffer probe;
+        ASSERT_TRUE(dev.createBuffer(4096, probe));
+        dev.destroyBuffer(probe);
+        setGate.release();
+        awaitMade();
+    }
 }
 
 }  // namespace

@@ -50,12 +50,14 @@ constexpr uint32_t kHidrev = 0x804;
 inline bool b01()
 {
     static int known = -1;
-    if (known < 0) {
+    int value = __atomic_load_n(&known, __ATOMIC_ACQUIRE);
+    if (value < 0) {
         const volatile uint8_t *apb = switch_mmio_map(kApbMiscPA, 0x1000);
         const uint32_t hidrev = apb ? switch_mmio_read32(apb, kHidrev) : 0;
-        known = ((hidrev >> 8) & 0xff) == 0x21 && ((hidrev >> 4) & 0xf) >= 2;
+        value = ((hidrev >> 8) & 0xff) == 0x21 && ((hidrev >> 4) & 0xf) >= 2;
+        __atomic_store_n(&known, value, __ATOMIC_RELEASE);
     }
-    return known == 1;
+    return value == 1;
 }
 
 // mc.c tegra_mc_flush: the client's requests stop and those in flight drain; its STATUS bit then holds set. STATUS also

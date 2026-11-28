@@ -47,9 +47,9 @@ TEST(GM20BSpanMarks, AMarkIsAFourWordTimestampReportAfterEveryWrite)
     EXPECT_EQ(words[1], 0x12u);
     EXPECT_EQ(words[2], 0x34567890u);
     EXPECT_EQ(words[3], 9u);
-    // SET_REPORT_SEMAPHORE_D: OPERATION 1:0 RELEASE, RELEASE 4:4 after writes, PIPELINE_LOCATION 15:12 ALL, STRUCTURE_SIZE
-    // 28:28 four words (clb197.h): no wait for idle, unlike the stamps' host release
-    EXPECT_EQ(words[4], 0u | 1u << 4 | 0xfu << 12);
+    // SET_REPORT_SEMAPHORE_D: OPERATION 1:0 RELEASE, FLUSH_DISABLE 2:2 TRUE, RELEASE 4:4 after writes,
+    // PIPELINE_LOCATION 15:12 ALL, STRUCTURE_SIZE 28:28 four words (clb197.h): no wait for idle or L2 flush
+    EXPECT_EQ(words[4], 0u | 1u << 2 | 1u << 4 | 0xfu << 12);
 }
 
 TEST(GM20BSpanMarks, ConsecutiveDrawsOfOneStateAreOneSpanAndTheTailEndsAtTheEndStamp)

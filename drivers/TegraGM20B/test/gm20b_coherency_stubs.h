@@ -17,11 +17,55 @@
 #include <utility>
 #include <vector>
 
+class IOService;
+using IOServiceInterestHandler = int (*)(void *target, void *refCon, uint32_t messageType,
+					 IOService *provider, void *messageArgument,
+					 size_t argSize);
+constexpr uint32_t kIOMessageServiceIsTerminated = 0xe0000010u;
+inline const void *gIOGeneralInterest = &kIOMessageServiceIsTerminated;
+
+class IONotifier
+{
+public:
+	virtual ~IONotifier() = default;
+	virtual void remove() = 0;
+};
+
 class IOUserClient
 {
 public:
+	struct HostNotifier : IONotifier {
+		IOUserClient *owner;
+		IOServiceInterestHandler handler;
+		void *target;
+		void *refCon;
+
+		void remove() override
+		{
+			if (owner) {
+				std::lock_guard<std::mutex> hold(owner->notifierLock);
+				auto &list = owner->notifiers;
+				const auto at = std::find(list.begin(), list.end(), this);
+				if (at != list.end())
+					list.erase(at);
+				owner = nullptr;
+			}
+			delete this;
+		}
+	};
+
 	bool inactive = false;
 	unsigned refs = 1;
+	std::mutex notifierLock;
+	std::vector<HostNotifier *> notifiers;
+
+	~IOUserClient()
+	{
+		std::lock_guard<std::mutex> hold(notifierLock);
+		for (auto *n : notifiers)
+			n->owner = nullptr;
+		notifiers.clear();
+	}
 
 	bool isInactive() const
 	{
@@ -36,6 +80,35 @@ public:
 	void release()
 	{
 		--refs;
+	}
+
+	IONotifier *registerInterest(const void *, IOServiceInterestHandler handler, void *target,
+				     void *ref = nullptr)
+	{
+		std::lock_guard<std::mutex> hold(notifierLock);
+		if (inactive)
+			return nullptr;
+		auto *n = new HostNotifier;
+		n->owner = this;
+		n->handler = handler;
+		n->target = target;
+		n->refCon = ref;
+		notifiers.push_back(n);
+		return n;
+	}
+
+	void terminate()
+	{
+		std::vector<std::tuple<IOServiceInterestHandler, void *, void *>> callbacks;
+		{
+			std::lock_guard<std::mutex> hold(notifierLock);
+			inactive = true;
+			for (auto *n : notifiers)
+				callbacks.emplace_back(n->handler, n->target, n->refCon);
+		}
+		for (const auto &cb : callbacks)
+			std::get<0>(cb)(std::get<1>(cb), std::get<2>(cb),
+					kIOMessageServiceIsTerminated, nullptr, nullptr, 0);
 	}
 };
 

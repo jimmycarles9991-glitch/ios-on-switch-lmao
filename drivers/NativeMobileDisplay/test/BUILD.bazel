@@ -1,6 +1,7 @@
 # drivers/NativeMobileDisplay on the host:
 #   switch_interaction_test             SwitchInteraction.h: the presents of a touch interaction window, its line
 #   switch_slow_present_test            SwitchSlowPresent.h: the cause a present two or more periods late is charged to
+#   switch_frame_end_holder_test        SwitchFrameEndHolder.h: what kept FRAME_END routed, and which of it is debug-only
 #   switch_frame_stall_test             SwitchFrameStall.h: the frame ends at which the screen stopped mid-animation
 #   switch_sbim_test                    SwitchSBIM.h: libEDR's enableSBIM dictionaries (iOS 27), as
 #                                       AppleMobileDispH12P answers them for a display without SBIM statistics
@@ -99,6 +100,15 @@ host_test(
 )
 
 host_test(
+    name = "switch_frame_end_holder_test",
+    srcs = [
+        "switch_frame_end_holder_test.cpp",
+        "//drivers/NativeMobileDisplay:SwitchFrameEndHolder.h",
+    ],
+    data = ["//drivers/NativeMobileDisplay:NativeLegacyDisplay.cpp"],
+)
+
+host_test(
     name = "switch_slow_present_test",
     srcs = [
         "switch_slow_present_test.cpp",
@@ -113,6 +123,14 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchSBIM.h",
     ],
     linkopts = ["-framework CoreFoundation"],
+)
+
+host_test(
+    name = "switch_swap_zero_layer_test",
+    srcs = [
+        "switch_swap_zero_layer_test.cpp",
+        "//drivers/NativeMobileDisplay:SwitchSwapZeroLayer.h",
+    ],
 )
 
 host_test(
@@ -133,6 +151,7 @@ host_test(
     ],
     defines = [
         "DEVELOPMENT=1",
+        "SWITCH_STATS_FRAME=1",
         "SWITCH_IPSW_BUILD=\\\"21H461\\\"",
         "SWITCH_IPSW_DEVICE_J120AP=1",
     ],
@@ -148,6 +167,7 @@ host_test(
     ],
     defines = [
         "DEVELOPMENT=1",
+        "SWITCH_STATS_FRAME=1",
         "SWITCH_IPSW_BUILD=\\\"24B119\\\"",
         "SWITCH_IPSW_DEVICE_J181AP=1",
     ],
@@ -160,7 +180,10 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchFrameTickets.h",
         "//drivers/TegraDisplayFlip:SwitchFrameTimeline.h",
     ],
-    defines = ["DEVELOPMENT=1"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_FRAME=1",
+    ],
 )
 
 host_test(
@@ -175,6 +198,7 @@ host_test(
         "-DDEVELOPMENT=0",
         "-UDEBUG",
         "-DDEBUG=0",
+        "-DSWITCH_STATS_FRAME=0",
     ],
 )
 
@@ -290,6 +314,7 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchScanoutSetup.h",
         "//drivers/NativeMobileDisplay:SwitchLandscapeSelection.h",
         "//kits/SwitchABI:kinds/21H461/IOMobileFramebufferLegacy.json",
+        "//kits/SwitchABI:kinds/24B119/IOMobileFramebufferLegacy.json",
     ],
 )
 
@@ -298,6 +323,7 @@ host_test(
     srcs = [
         "display_planes_test.cpp",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -307,6 +333,32 @@ host_test(
         "-O1",
         "-Wno-unused-parameter",
     ],
+)
+
+host_test(
+    name = "turned_conversion_vic_test",
+    srcs = [
+        "turned_conversion_vic_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:SwitchNativeVICImage.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:TegraVICSurface.h",
+        "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
+        "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
+        "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC/test:TegraVICProbe.h",
+        "//drivers/TegraVIC/test:vic_model.h",
+        "//drivers/TegraVIC/test:vic_model_color.h",
+    ],
+    deps = [":native_scanout_kernel"],
 )
 
 host_test(
@@ -322,6 +374,7 @@ host_test(
     srcs = [
         "tegra_display_palette_test.cpp",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/NativeMobileDisplay:TegraDisplayColorMath.h",
@@ -337,6 +390,7 @@ host_test(
     srcs = [
         "switch_window_caps_test.cpp",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -350,6 +404,7 @@ host_test(
     srcs = [
         "display_planes_block_test.cpp",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -363,6 +418,7 @@ host_test(
     srcs = [
         "display_blend_test.cpp",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -415,6 +471,7 @@ host_test(
         "//drivers/NativeMobileDisplay:DisplayWindowProbeRun.h",
         "//drivers/NativeMobileDisplay:NativeColumnScan.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -434,6 +491,7 @@ host_test(
         "//drivers/NativeMobileDisplay:DisplayWindowProbeRun.h",
         "//drivers/NativeMobileDisplay:NativeColumnScan.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -453,6 +511,7 @@ host_test(
         "//drivers/TegraVIC:TegraVICFormats.h",
         "//drivers/NativeMobileDisplay:NativeColumnScan.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/NativeMobileDisplay:SwitchDisplayTraits.h",
@@ -471,6 +530,7 @@ host_test(
         "display_column_scan_test.cpp",
         "//drivers/NativeMobileDisplay:NativeColumnScan.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -590,6 +650,7 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchCompletionFlipDisplay.h",
         "//drivers/NativeMobileDisplay:SwitchCompletionFlipFilter.h",
         "//drivers/NativeMobileDisplay:SwitchMediaCompletionFlipDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchGpuPlaneStream.h",
         "//drivers/NativeMobileDisplay:SwitchGpuDoneDisplay.h",
         "//drivers/NativeMobileDisplay:NativeLegacyDisplay.cpp",
         "//drivers/NativeMobileDisplay:SwitchVICScanoutDisplay.h",
@@ -649,6 +710,7 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchNativePlane.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
@@ -679,6 +741,7 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchNativePlane.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraDisplayFlip:TegraScanoutCopy.h",
@@ -713,6 +776,7 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchNativePlane.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraDisplayFlip:TegraScanoutCopy.h",
@@ -746,6 +810,7 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchNativePlane.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraDisplayFlip:TegraScanoutCopy.h",
@@ -798,6 +863,7 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchDisplayMemoryEnvelope.h",
         "//drivers/SwitchPower:SwitchDisplayMemory.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -854,6 +920,7 @@ host_test(
         "switch_composition_test.cpp",
         "//drivers/NativeMobileDisplay:SwitchDisplayComposition.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -870,6 +937,7 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchDisplayComposition.h",
         "//drivers/NativeMobileDisplay:SwitchCompositionRegisters.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -890,12 +958,44 @@ host_test(
 host_test(
     name = "switch_plane_conversion_test",
     srcs = [
+        "switch_plane_conversion_harness.h",
         "switch_plane_conversion_test.cpp",
         "//drivers/NativeMobileDisplay:SwitchUnshownSource.h",
         "//drivers/TegraDisplayFlip:TegraScanoutCopy.h",
         "//drivers/NativeMobileDisplay:SwitchPlaneConversionDisplay.h",
         "//drivers/NativeMobileDisplay:SwitchScanoutBuffer.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
+        "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
+        "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:SwitchNativeVICImage.h",
+        "//drivers/TegraVIC:SwitchVICScanoutConvert.h",
+        "//drivers/TegraVIC:SwitchNativeScanout.h",
+        "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
+        "//drivers/TegraVIC:TegraVICSurface.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+    ],
+    deps = [":native_scanout_kernel"],
+)
+
+host_test(
+    name = "switch_plane_conversion_size_test",
+    srcs = [
+        "switch_plane_conversion_harness.h",
+        "switch_plane_conversion_size_test.cpp",
+        "//drivers/NativeMobileDisplay:SwitchUnshownSource.h",
+        "//drivers/TegraDisplayFlip:TegraScanoutCopy.h",
+        "//drivers/NativeMobileDisplay:SwitchPlaneConversionDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchScanoutBuffer.h",
+        "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -942,6 +1042,7 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchCompositionRegisters.h",
         "//drivers/NativeMobileDisplay:SwitchDisplayComposition.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -956,6 +1057,7 @@ host_test(
         "switch_landscape_display_test.cpp",
         "//drivers/NativeMobileDisplay:NativeColumnScan.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/NativeMobileDisplay:SwitchCompositionRegisters.h",
@@ -988,6 +1090,7 @@ host_test(
     data = [
         "//drivers/NativeMobileDisplay:NativeLegacyDisplay.cpp",
         "//drivers/NativeMobileDisplay:SwitchDcHost1xClassProbe.h",
+        "//drivers/NativeMobileDisplay:SwitchMediaCompletionFlipDisplay.h",
     ],
 )
 
@@ -1012,6 +1115,7 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchHost1xFlipDisplay.h",
         "//drivers/NativeMobileDisplay:SwitchLandscapeDisplay.h",
         "//drivers/NativeMobileDisplay:SwitchMediaCompletionFlipDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchGpuPlaneStream.h",
     ],
 )
 
@@ -1024,6 +1128,7 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchLandscapeState.h",
         "//drivers/NativeMobileDisplay:SwitchLandscapeWindows.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchCompletionFlip.h",
         "//drivers/NativeMobileDisplay:SwitchCompositionRegisters.h",
         "//drivers/NativeMobileDisplay:SwitchDisplayBandwidthDisplay.h",
@@ -1032,6 +1137,7 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchSuspendRetire.h",
         "//drivers/NativeMobileDisplay:SwitchDisplayMemoryEnvelope.h",
         "//drivers/NativeMobileDisplay:SwitchMediaCompletionFlipDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchGpuPlaneStream.h",
         "//drivers/NativeMobileDisplay:SwitchHostMediaFlipDisplay.h",
         "//drivers/NativeMobileDisplay:SwitchOverlayRecovery.h",
         "//drivers/NativeMobileDisplay:SwitchOverlayRegisters.h",
@@ -1045,6 +1151,7 @@ host_test(
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
         "//drivers/TegraHost1x:SwitchHost1xFence.h",
         "//drivers/TegraHost1x:SwitchHost1xDisplay.h",
+        "//drivers/TegraGM20B:SwitchGpuBridge.h",
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
     ],
@@ -1052,6 +1159,58 @@ host_test(
         "//drivers/NativeMobileDisplay:DisplayWindowProbeDisplay.h",
         "//drivers/NativeMobileDisplay:SwitchLandscapeDisplay.h",
         "//drivers/NativeMobileDisplay:SwitchMediaCompletionFlipDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchGpuPlaneStream.h",
+        "//drivers/NativeMobileDisplay:NativeLegacyDisplay.cpp",
+        "//drivers/NativeMobileDisplay:NativePlaneFenceDisplay.h",
+        "//drivers/NativeMobileDisplay:NativePlanesDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchCompletionFlipDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchMediaPlaneFence.h",
+        "//drivers/NativeMobileDisplay:SwitchOverlayRecovery.h",
+        "//drivers/NativeMobileDisplay:SwitchOverlayRegisters.h",
+    ],
+)
+
+host_test(
+    name = "switch_gpu_plane_stream_flip_test",
+    srcs = [
+        "display_filter_context.h",
+        "switch_media_completion_flip_harness.h",
+        "switch_gpu_plane_stream_flip_test.cpp",
+        "//drivers/NativeMobileDisplay:SwitchLandscapeState.h",
+        "//drivers/NativeMobileDisplay:SwitchLandscapeWindows.h",
+        "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
+        "//drivers/NativeMobileDisplay:SwitchCompletionFlip.h",
+        "//drivers/NativeMobileDisplay:SwitchCompositionRegisters.h",
+        "//drivers/NativeMobileDisplay:SwitchDisplayBandwidthDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchDisplayComposition.h",
+        "//drivers/NativeMobileDisplay:SwitchDisplayRetirement.h",
+        "//drivers/NativeMobileDisplay:SwitchSuspendRetire.h",
+        "//drivers/NativeMobileDisplay:SwitchDisplayMemoryEnvelope.h",
+        "//drivers/NativeMobileDisplay:SwitchMediaCompletionFlipDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchGpuPlaneStream.h",
+        "//drivers/NativeMobileDisplay:SwitchHostMediaFlipDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchOverlayRecovery.h",
+        "//drivers/NativeMobileDisplay:SwitchOverlayRegisters.h",
+        "//drivers/NativeMobileDisplay:SwitchPlaneAdmissionDrop.h",
+        "//drivers/NativeMobileDisplay:SwitchPlaneSelection.h",
+        "//drivers/NativeMobileDisplay:SwitchPlanesResume.h",
+        "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
+        "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
+        "//drivers/SwitchPower:SwitchDisplayBandwidth.h",
+        "//drivers/SwitchPower:SwitchDisplayMemory.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraHost1x:SwitchHost1xFence.h",
+        "//drivers/TegraHost1x:SwitchHost1xDisplay.h",
+        "//drivers/TegraGM20B:SwitchGpuBridge.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+    ],
+    data = [
+        "//drivers/NativeMobileDisplay:DisplayWindowProbeDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchLandscapeDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchMediaCompletionFlipDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchGpuPlaneStream.h",
         "//drivers/NativeMobileDisplay:NativeLegacyDisplay.cpp",
         "//drivers/NativeMobileDisplay:NativePlaneFenceDisplay.h",
         "//drivers/NativeMobileDisplay:NativePlanesDisplay.h",
@@ -1071,6 +1230,7 @@ host_test(
         "switch_media_completion_flip_harness.h",
         "switch_media_completion_flip_filter_test.cpp",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchCompletionFlip.h",
         "//drivers/NativeMobileDisplay:SwitchCompositionRegisters.h",
         "//drivers/NativeMobileDisplay:SwitchDisplayBandwidthDisplay.h",
@@ -1079,6 +1239,7 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchSuspendRetire.h",
         "//drivers/NativeMobileDisplay:SwitchDisplayMemoryEnvelope.h",
         "//drivers/NativeMobileDisplay:SwitchMediaCompletionFlipDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchGpuPlaneStream.h",
         "//drivers/NativeMobileDisplay:SwitchHostMediaFlipDisplay.h",
         "//drivers/NativeMobileDisplay:SwitchOverlayRecovery.h",
         "//drivers/NativeMobileDisplay:SwitchOverlayRegisters.h",
@@ -1092,6 +1253,7 @@ host_test(
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
         "//drivers/TegraHost1x:SwitchHost1xFence.h",
         "//drivers/TegraHost1x:SwitchHost1xDisplay.h",
+        "//drivers/TegraGM20B:SwitchGpuBridge.h",
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
     ],
@@ -1116,6 +1278,7 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchCompositionRegisters.h",
         "//drivers/NativeMobileDisplay:SwitchDisplayComposition.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/SwitchPower:SwitchDisplayBandwidth.h",
@@ -1147,6 +1310,7 @@ host_test(
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
         "//drivers/NativeMobileDisplay:SwitchDisplayComposition.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -1162,6 +1326,7 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchCopiedPlanes.h",
         "//drivers/NativeMobileDisplay:SwitchDisplayComposition.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -1176,6 +1341,7 @@ host_test(
         "switch_scanout_retirement_test.cpp",
         "//drivers/NativeMobileDisplay:SwitchScanoutRetirement.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTurn.h",
         "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
         "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -1210,6 +1376,16 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchDisplayMemoryTiming.h",
         "//drivers/SwitchPower:SwitchDisplayMemory.h",
         "//drivers/TegraSMMU:TegraSMMU.h",
+    ],
+)
+
+# SwitchGpuPlaneStream.h: GPU-rendered window B/C sets flip by display stream over the GPU-to-host1x bridge.
+host_test(
+    name = "switch_gpu_plane_stream_test",
+    srcs = [
+        "switch_gpu_plane_stream_test.cpp",
+        "//drivers/NativeMobileDisplay:SwitchGpuPlaneStream.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
     ],
 )
 

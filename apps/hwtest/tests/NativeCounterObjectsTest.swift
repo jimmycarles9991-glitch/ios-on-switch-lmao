@@ -1,4 +1,5 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
 import Metal

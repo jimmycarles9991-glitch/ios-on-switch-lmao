@@ -107,6 +107,8 @@ inline NSArray<NSMutableDictionary *> *computeRows(const std::string &line, uint
     std::string why;
     if (!probe::parse(line, shape, why))
         return @[ computeRow(line, stack, direct, cache, output) ];
+    if (shape.factsOnly)
+        return @[];
     NSMutableArray *rows = [NSMutableArray new];
     probe::eachRegionShape(shape, [&](const probe::Shape &region, uint8_t mask) {
         auto row = computeRow(line, stack, direct, cache, output, &region);

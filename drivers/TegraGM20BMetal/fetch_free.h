@@ -137,6 +137,15 @@ inline void iteratedBlendWords(const PackIteratedBlend &b, uint8_t colour, uint3
     }
 }
 
+inline void iteratedBlendRestore(uint32_t format, std::vector<uint32_t> &off)
+{
+    fetch_free::emit(off, switch_gm20b_iterated_blend_off);
+    if (format == 70 || format == 80) {
+        off.push_back(Push::hdr(1, SUBC_3D, fetch_free::kPsSaturate, 1));
+        off.push_back(0);
+    }
+}
+
 // SET_CT_SELECT of `count` colour targets, each slot mapped to itself: a pass's, and one for a rung-3 form's draws
 inline uint32_t targetSelect(uint32_t count)
 {

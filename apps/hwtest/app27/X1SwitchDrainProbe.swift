@@ -15,7 +15,8 @@ import Metal
 /// probe saw corrupt at these sizes; a cell judges the switch arms only once hazard differed there. Every forced arm
 /// keeps today's pass barrier and job entry; rule forces nothing, so production's rules (barrier_forms.h) pick every barrier, and
 /// rule_switches= counts the engine changes they relaxed. Every arm draws pass A with the same spins, so the control's
-/// race is the arms' race.
+/// race is the arms' race. Run All runs `quick` trials an arm a cell, whose clean claim is PASS_QUICK, not proof; Long
+/// runs (LongRuns) run 1,504 (600 at 1280 x 720) within the cell's budget. hazard_cells_trials= each cell's hazard trials and how many differed.
 enum X1SwitchDrainProbe {
     static let probe = X1Probe(
         id: "gpu.x1.subchannel_switch_drain", name: "A subchannel change drains the engine left behind",
@@ -28,6 +29,7 @@ enum X1SwitchDrainProbe {
         ("none", "switch=none pass=today entry=today"), ("rule", ""),
     ]
     static let batch = 8
+    static let quick = ["s": 128, "m": 64, "f": 64]
 
     static func spins(from trial: Int, size: Int) -> [Int] {
         (0 ..< batch).map { [0, 3, 17, 40][(trial + $0) % 4] * (size == 1280 ? 1 : 2) }
@@ -41,6 +43,11 @@ enum X1SwitchDrainProbe {
         let engine: Engine
         let format: MTLPixelFormat
         let width: Int, height: Int
+
+        var size: String { width == 1280 ? "f" : width == 64 ? "s" : "m" }
+        var target: Int {
+            LongRuns.on ? (width == 1280 ? 600 : 1504) : X1SwitchDrainProbe.quick[size] ?? 1504
+        }
     }
 
     static var cells: [Cell] {
@@ -64,13 +71,13 @@ enum X1SwitchDrainProbe {
         for (index, cell) in cells.enumerated() {
             let kit = try kits[cell.format] ?? BarrierKit(gpu, cell.format)
             kits[cell.format] = kit
-            let size = cell.width == 1280 ? "f" : cell.width == 64 ? "s" : "m"
-            let name = "\(cell.engine.rawValue)_\(kit.name)_\(size)"
+            let name = "\(cell.engine.rawValue)_\(kit.name)_\(cell.size)"
             let work = try Work(kit, cell)
             journal.starting("\(name) arms=\(arms.map(\.0).joined(separator: "/"))")
             var expected: [Int: [UInt8]] = [:]
+            var tapExpected: [Int: [UInt8]] = [:]
             let started = Date()
-            let plan = IterationPlan(cells: arms.count, target: cell.width == 1280 ? 600 : 1504, batch: batch)
+            let plan = IterationPlan(cells: arms.count, target: cell.target, batch: batch)
             var trial = [Int](repeating: 0, count: arms.count)
             for step in plan.order {
                 if Date().timeIntervalSince(started) > (cell.width == 1280 ? 9 : 5) && step.cell == 0 { break }
@@ -80,19 +87,32 @@ enum X1SwitchDrainProbe {
                 let seeds = (0 ..< batch).map { probeSeed(trial: first + $0, cell: index, seeds: 16) }
                 let spins = spins(from: first, size: cell.width)
                 let hazard = arm == "hazard"
-                let ran = try await gpu.run(forms: forms) { commands in
-                    try work.encode(commands, seeds: seeds, spins: spins, hazard: hazard)
-                }
-                ops += ran.taken["ops"] ?? 0
+                let ran: ArmBatch
                 if hazard || cell.engine != .compute {
-                    _ = try await gpu.run { commands in
+                    let workCB = try gpu.commit { commands in
+                        if !forms.isEmpty { try GM20BProbe.forms(commands, forms) }
+                        try work.encode(commands, seeds: seeds, spins: spins, hazard: hazard)
+                    }
+                    let readCB = try gpu.commit { commands in
                         kit.readback(commands, work.atlas, into: hazard ? work.hazardOut : work.out)
                     }
+                    try gpu.finish([workCB, readCB])
+                    ran = ArmBatch(
+                        gpuMilliseconds: max(0, workCB.gpuEndTime - workCB.gpuStartTime) * 1000,
+                        path: GM20BFacade.path(of: workCB),
+                        taken: try GM20BProbe.taken(workCB)
+                    )
+                } else {
+                    ran = try await gpu.run(forms: forms) { commands in
+                        try work.encode(commands, seeds: seeds, spins: spins, hazard: false)
+                    }
                 }
+                ops += ran.taken["ops"] ?? 0
                 var tally = ledger.tally(name, arm)
                 for (k, seed) in seeds.enumerated() {
                     if hazard {
-                        work.tapExpected(seed).withUnsafeBytes {
+                        if tapExpected[seed] == nil { tapExpected[seed] = work.tapExpected(seed) }
+                        tapExpected[seed]!.withUnsafeBytes {
                             tally.compare(
                                 kit.tile(work.hazardOut, k), $0, trial: first + k, width: BarrierKit.tile,
                                 bytesPerTexel: kit.bytesPerTexel
@@ -122,6 +142,10 @@ enum X1SwitchDrainProbe {
         }
         let fired = ledger.cells.filter { !(ledger.tallies[$0]?["hazard"]?.clean ?? true) }
         finding.metrics.set("hazard_cells", fired.count)
+        let hazard = ledger.cells.compactMap { cell in
+            ledger.tallies[cell]?["hazard"].map { "\(cell):\($0.trials):\($0.mismatchedTrials)" }
+        }
+        finding.metrics.set("hazard_cells_trials", hazard.joined(separator: ","))
         if fired.isEmpty {
             finding.verdict = .inconclusive
             finding.note = "the positive control never differed: no cell could see a race"
@@ -136,6 +160,7 @@ enum X1SwitchDrainProbe {
             finding.verdict = .inconclusive
             finding.note = "today's barriers gave texels other than the CPU's reading"
         }
+        finding.quick(unless: LongRuns.on)
         return finding
     }
 
@@ -184,16 +209,16 @@ enum X1SwitchDrainProbe {
 
         func expected(_ seed: Int) -> [UInt8] {
             guard cell.engine == .compute else { return tapExpected(seed) }
-            var bytes: [UInt8] = []
-            bytes.reserveCapacity(resultBytes)
-            for y in 0 ..< cell.height {
-                for x in 0 ..< cell.width {
-                    if cell.format == .rgba16Float {
-                        bytes += kit.texel(x, y, seed: seed)
-                    } else {
-                        bytes += withUnsafeBytes(
-                            of: probeHash(UInt32(x), UInt32(y), UInt32(seed)).littleEndian, Array.init
-                        )
+            if cell.format == .rgba16Float {
+                return kit.pattern.image(width: cell.width, height: cell.height, seed: seed)
+            }
+            var bytes = [UInt8](repeating: 0, count: resultBytes)
+            bytes.withUnsafeMutableBytes { out in
+                for y in 0 ..< cell.height {
+                    let row = y * cell.width
+                    for x in 0 ..< cell.width {
+                        let word = probeHash(UInt32(x), UInt32(y), UInt32(seed)).littleEndian
+                        out.storeBytes(of: word, toByteOffset: (row + x) * 4, as: UInt32.self)
                     }
                 }
             }

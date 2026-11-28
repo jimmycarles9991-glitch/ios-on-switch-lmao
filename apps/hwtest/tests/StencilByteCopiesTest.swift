@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// X32_Stencil8 copied into R8Uint and back with the blit encoder (StencilByteCopies.swift): out_wrong= R8Uint bytes

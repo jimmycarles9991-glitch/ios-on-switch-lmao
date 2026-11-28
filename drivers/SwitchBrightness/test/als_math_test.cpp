@@ -468,3 +468,56 @@ TEST(SwitchBacklightMath, MarketingTableAsDisplayCreateWithIDReadsIt)
     EXPECT_LT(std::fabs(curve[0] - 12.506), 0.01);
     EXPECT_EQ(curve[100], 400.0f);
 }
+
+TEST(SwitchALSMath, SteadyStateLeewayStaysWellUnderFirstSampleTimeout)
+{
+    constexpr uint32_t kFirstALSSampleTimeoutUs = 250000;
+    const uint32_t leeway = switch_als::leewayUS(switch_als::kSampleUS);
+    EXPECT_LE(leeway, switch_als::kMaxLeewayUS);
+    EXPECT_LE(switch_als::kMaxLeewayUS, 10000u);
+    EXPECT_LT(switch_als::kSampleUS + leeway, kFirstALSSampleTimeoutUs);
+    EXPECT_EQ(switch_als::leewayUS(1000000), switch_als::kMaxLeewayUS);
+}
+
+TEST(SwitchALSMath, DeadbandSuppressesSteadyReadingsAndReportsChanges)
+{
+    using switch_als::shouldReport;
+    EXPECT_TRUE(shouldReport(false, 0, 0));
+    EXPECT_TRUE(shouldReport(false, 100, 100));
+    EXPECT_FALSE(shouldReport(true, 0, 0));
+    EXPECT_TRUE(shouldReport(true, 0, 1));
+    EXPECT_TRUE(shouldReport(true, 1, 0));
+    EXPECT_FALSE(shouldReport(true, 15, 15));
+    EXPECT_TRUE(shouldReport(true, 15, 16));
+    EXPECT_FALSE(shouldReport(true, 100, 100));
+    EXPECT_FALSE(shouldReport(true, 100, 103));
+    EXPECT_TRUE(shouldReport(true, 100, 104));
+    EXPECT_FALSE(shouldReport(true, 100, 97));
+    EXPECT_TRUE(shouldReport(true, 100, 96));
+}
+
+TEST(SwitchBacklightMath, PackedRequestAndRampDeadline)
+{
+    using namespace switch_backlight;
+    const uint64_t packed = packRequest(32768, 2500000000ULL);
+    EXPECT_NE(packed & kRequestPending, 0ULL);
+    EXPECT_EQ(unpackRequestValue(packed), 32768u);
+    EXPECT_EQ(unpackRequestFadeNS(packed), 2500000000ULL);
+
+    const uint64_t clamped = packRequest(kMax + 500, 99000000000ULL);
+    EXPECT_EQ(unpackRequestValue(clamped), kMax);
+    EXPECT_EQ(unpackRequestFadeNS(clamped), static_cast<uint64_t>(kRequestMaxFadeMS) * 1000000ULL);
+
+    constexpr uint64_t kMs = 1000000ULL;
+    constexpr uint64_t kInterval = 50 * kMs;
+    // Slow DCS (67 ms >= 50 ms): next step is already due (0 => kickSource, no 1 ms timer).
+    EXPECT_EQ(nextRampDeadline(1000 * kMs + 67 * kMs, 1000 * kMs, 500 * kMs, 1000 * kMs, kInterval, true), 0ULL);
+    // Fast DCS (10 ms < 50 ms): arm directly for lastSend + 50 ms (no spurious 1 ms wakeup).
+    EXPECT_EQ(nextRampDeadline(1000 * kMs + 10 * kMs, 1000 * kMs, 500 * kMs, 1000 * kMs, kInterval, true),
+              1000 * kMs + 50 * kMs);
+    // Slow fade where raw == sentRaw (didSend == false): arm for real 50 ms interval, clamped at rampEnd.
+    EXPECT_EQ(nextRampDeadline(1000 * kMs + 10 * kMs, 1000 * kMs, 500 * kMs, 0, kInterval, false),
+              1000 * kMs + 60 * kMs);
+    EXPECT_EQ(nextRampDeadline(1480 * kMs, 1000 * kMs, 500 * kMs, 0, kInterval, false), 1500 * kMs);
+    EXPECT_EQ(nextRampDeadline(1500 * kMs, 1000 * kMs, 500 * kMs, 0, kInterval, false), 0ULL);
+}

@@ -38,6 +38,7 @@
 #include <mutex>
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
+#include <mach/mach_time.h>
 #include <notify.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -46,6 +47,7 @@
 #include <sys/stat.h>
 #include <string.h>
 #include <unistd.h>
+#include <xpc/xpc.h>
 #include "TegraGM20BMetal.h"
 #include "device_open.h"
 
@@ -137,6 +139,45 @@ bool writable(const char *dir)
     return wrote;
 }
 
+extern "C" XPC_RETURNS_RETAINED xpc_object_t xpc_copy_entitlement_for_self(const char *key);
+
+bool entitledToSystemContainer(const char *identifier)
+{
+    const auto matches = [&](const char *key, bool allowWildcard) -> bool {
+        xpc_object_t value = xpc_copy_entitlement_for_self(key);
+        if (!value)
+            return false;
+        __block bool ok = false;
+        const xpc_type_t type = xpc_get_type(value);
+        if (type == XPC_TYPE_BOOL) {
+            ok = xpc_bool_get_value(value);
+        } else if (type == XPC_TYPE_STRING) {
+            const char *s = xpc_string_get_string_ptr(value);
+            ok = s && (!strcmp(s, identifier) || (allowWildcard && !strcmp(s, "*")));
+        } else if (type == XPC_TYPE_ARRAY) {
+            xpc_array_apply(value, ^bool(size_t, xpc_object_t item) {
+                if (xpc_get_type(item) == XPC_TYPE_STRING) {
+                    const char *s = xpc_string_get_string_ptr(item);
+                    if (s && (!strcmp(s, identifier) || (allowWildcard && !strcmp(s, "*")))) {
+                        ok = true;
+                        return false;
+                    }
+                }
+                return true;
+            });
+        }
+#if !__has_feature(objc_arc)
+        xpc_release(value);
+#endif
+        return ok;
+    };
+    return matches("com.apple.security.system-container", false) ||
+           matches("com.apple.private.security.system-container", false) ||
+           matches("com.apple.security.system-containers", true) ||
+           matches("com.apple.private.security.storage.SystemContainers", false) ||
+           matches("com.apple.private.MobileContainerManager.allowed", false);
+}
+
 // <process system container>/Library/Caches/TegraGM20BMetal. The container survives reboots and the process's sandbox writes it once
 // container_system_path_for_identifier (libsystem_containermanager: identifier, error out; a malloc'd path) has consumed its
 // extension; backboardd's StartWindowServer makes the same lookup for Core Animation's shader cache before Metal opens. The
@@ -154,6 +195,10 @@ bool systemContainerCache(char *out, size_t size)
     CFStringRef bundle = CFBundleGetIdentifier(CFBundleGetMainBundle());
     if (!bundle || !CFStringGetCString(bundle, identifier, sizeof identifier, kCFStringEncodingUTF8))
         snprintf(identifier, sizeof identifier, "com.apple.%s", getprogname());
+    // Unentitled daemons such as iconservicesagent and cameracaptured can reach containermanagerd.system over Mach,
+    // which triggers a containermanagerd fault if they ask for a systemData container without the entitlement.
+    if (!entitledToSystemContainer(identifier))
+        return false;
     uint64_t error = 0;
     char *container = lookup(identifier, &error);
     if (!container)
@@ -173,29 +218,36 @@ bool systemContainerCache(char *out, size_t size)
 //  - /private/var/tmp/TegraGM20BMetal-<process> (iconservicesagent, whose home is /var/empty), then the user temp directory, then $TMPDIR (WebKit's
 //    GPU process: its per-user temp directory is the one its sandbox extension covers).
 // One the sandbox would refuse is left out, asked without a report (sandboxMayCreate): the order of the others is unchanged.
-unsigned cacheCandidates(char candidates[][512], unsigned most)
+// First writable record cache directory in priority order, short-circuiting before containermanagerd or temp probing
+// when an earlier candidate is already writable.
+bool findRecordCacheDir(char *out, size_t size)
 {
+    char tried[7][512];
     unsigned count = 0;
-    auto add = [&](const char *format, const char *a, const char *b) {
-        if (count >= most)
-            return;
-        snprintf(candidates[count], 512, format, a, b);
+    auto tryDir = [&](const char *format, const char *a, const char *b) -> bool {
+        if (count >= 7)
+            return false;
+        char candidate[512];
+        snprintf(candidate, sizeof candidate, format, a, b);
         for (unsigned i = 0; i < count; ++i)
-            if (!strcmp(candidates[i], candidates[count]))
-                return;
-        if (sandboxMayCreate(candidates[count]))
-            ++count;
+            if (!strcmp(tried[i], candidate))
+                return false;
+        strlcpy(tried[count++], candidate, sizeof tried[0]);
+        if (!sandboxMayCreate(candidate) || !writable(candidate))
+            return false;
+        strlcpy(out, candidate, size);
+        return true;
     };
     char user[512] = {}, temp[512] = {}, container[512] = {};
     if (!confstr(_CS_DARWIN_USER_CACHE_DIR, user, sizeof user))
         user[0] = 0;
     const bool appContainer = strstr(user, "/Containers/Data/") != nullptr;
-    if (user[0] && appContainer)
-        add("%s%s", user, "TegraGM20BMetal");
-    if (!appContainer && systemContainerCache(container, sizeof container))
-        add("%s%s", container, "");
-    if (user[0] && !appContainer)
-        add("%s%s", user, "TegraGM20BMetal");
+    if (user[0] && appContainer && tryDir("%s%s", user, "TegraGM20BMetal"))
+        return true;
+    if (!appContainer && systemContainerCache(container, sizeof container) && tryDir("%s%s", container, ""))
+        return true;
+    if (user[0] && !appContainer && tryDir("%s%s", user, "TegraGM20BMetal"))
+        return true;
     const bool haveTemp = confstr(_CS_DARWIN_USER_TEMP_DIR, temp, sizeof temp) != 0;
     for (const char *dir : {haveTemp ? (const char *)temp : nullptr, (const char *)getenv("TMPDIR")}) {
         // <...>/Containers/Data/<kind>/<UUID>/tmp/... -> <...>/Containers/Data/<kind>/<UUID>/Library/Caches/TegraGM20BMetal-<process>
@@ -207,14 +259,17 @@ unsigned cacheCandidates(char candidates[][512], unsigned most)
             continue;
         char root[512];
         snprintf(root, sizeof root, "%.*s/Library/Caches/TegraGM20BMetal-", (int)(tmp - dir), dir);
-        add("%s%s", root, getprogname());
+        if (tryDir("%s%s", root, getprogname()))
+            return true;
     }
-    add("%s%s", "/private/var/tmp/TegraGM20BMetal-", getprogname());
-    if (haveTemp)
-        add("%s%s", temp, "TegraGM20BMetal");
+    if (tryDir("%s%s", "/private/var/tmp/TegraGM20BMetal-", getprogname()))
+        return true;
+    if (haveTemp && tryDir("%s%s", temp, "TegraGM20BMetal"))
+        return true;
     if (const char *tmpdir = getenv("TMPDIR"); tmpdir && *tmpdir == '/')
-        add(tmpdir[strlen(tmpdir) - 1] == '/' ? "%s%s" : "%s/%s", tmpdir, "TegraGM20BMetal");
-    return count;
+        if (tryDir(tmpdir[strlen(tmpdir) - 1] == '/' ? "%s%s" : "%s/%s", tmpdir, "TegraGM20BMetal"))
+            return true;
+    return false;
 }
 
 // <Extensions>/TegraGM20BMetal.pack/pack.bin, beside the bundle: the driver's pipeline pack. Null if this process
@@ -247,242 +302,56 @@ bool gm20bNativeSeed(const char *pack, char *seed, size_t size)
     return sandboxAllows("file-read-data", kSandboxFilterPath, index);
 }
 
-#if SWITCH_DEBUG
-// r17-widgets: the frame rates this process's display links are asked for. Each distinct request (a CAFrameRateRange or a
-// preferredFramesPerSecond, with the image+offset that made it) is logged once, up to 8 per process, and passed on unchanged.
-// With the commit stack line this tells where WidgetRenderer's steady 20 commits/s (the clock widget) come from: a rate SwiftUI
-// or RenderBox asks the display link for (quantised to 60/3 on this 60 Hz panel) or a cadence of their own.
-struct FrameRateRange {  // CAFrameRateRange's layout
-    float minimum, maximum, preferred;
-};
+#if SWITCH_DEBUG && defined(SWITCH_STATS_FRAME) && SWITCH_STATS_FRAME
+#define SWITCH_PLUGIN_FRAME 1
+#else
+#define SWITCH_PLUGIN_FRAME 0
+#endif
 
-using SetRange = void (*)(id, SEL, FrameRateRange);
-using SetFps = void (*)(id, SEL, NSInteger);
-SetRange gSetRange;
-SetFps gSetFps;
+#if SWITCH_DEBUG && ((defined(SWITCH_STATS_GPU) && SWITCH_STATS_GPU) || (defined(SWITCH_PROF_GPU) && SWITCH_PROF_GPU))
+#define SWITCH_PLUGIN_RATES 1
+#else
+#define SWITCH_PLUGIN_RATES 0
+#endif
 
-void callerName(const void *pc, char *out, size_t size)
+#if SWITCH_PLUGIN_FRAME
+// SpringBoard's Home Screen labels arrive 50-80 s after its icons at boot (perf1/icon-labels, 25 Nov) and no Apple line
+// says when a label's image is set: one line for each of the first kLabelLines images set on an icon label's
+// legibility view, with its mach time, for tools/perf's labels row. It logs and calls through, nothing else.
+using SetLabelImage = void (*)(id, SEL, id);
+SetLabelImage gSetLabelImage;
+Class gIconLabelView;
+std::atomic<uint32_t> gLabelImages{0};
+constexpr uint32_t kLabelLines = 64;
+
+void observedSetLabelImage(id view, SEL cmd, id image)
 {
-    Dl_info info = {};
-    if (dladdr(pc, &info) && info.dli_fname && info.dli_fbase) {
-        const char *name = strrchr(info.dli_fname, '/');
-        snprintf(out, size, "%s+0x%lx", name ? name + 1 : info.dli_fname,
-                 (unsigned long)((uintptr_t)pc - (uintptr_t)info.dli_fbase));
-    } else {
-        snprintf(out, size, "0x%lx", (unsigned long)(uintptr_t)pc);
+    if (image && [view isKindOfClass:gIconLabelView]) {
+        const uint32_t n = gLabelImages.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= kLabelLines)
+            os_log(logger(), "SwitchLabels: icon label image %u set at %llu", n, mach_absolute_time());
     }
+    gSetLabelImage(view, cmd, image);
 }
 
-bool firstRequest(uint64_t key)
-{
-    static std::mutex lock;
-    static uint64_t seen[8];
-    static unsigned count;
-    std::lock_guard<std::mutex> guard(lock);
-    for (unsigned i = 0; i < count; i++)
-        if (seen[i] == key)
-            return false;
-    if (count == 8)
-        return false;
-    seen[count++] = key;
-    return true;
-}
-
-void observedSetRange(id link, SEL cmd, FrameRateRange range)
-{
-    const void *pc = __builtin_return_address(0);
-    uint32_t bits[3];
-    memcpy(bits, &range, sizeof bits);
-    if (firstRequest(((uint64_t)bits[0] * 31 + bits[1]) * 31 + bits[2] + ((uint64_t)(uintptr_t)pc << 20))) {
-        char who[128];
-        callerName(pc, who, sizeof who);
-        os_log(logger(),
-               "TegraGM20BMetal: %{public}s display link frame rate range min %.1f max %.1f preferred %.1f from "
-               "%{public}s",
-               getprogname(), (double)range.minimum, (double)range.maximum, (double)range.preferred, who);
-    }
-    gSetRange(link, cmd, range);
-}
-
-void observedSetFps(id link, SEL cmd, NSInteger fps)
-{
-    const void *pc = __builtin_return_address(0);
-    if (firstRequest(((uint64_t)fps << 1 | 1) + ((uint64_t)(uintptr_t)pc << 20))) {
-        char who[128];
-        callerName(pc, who, sizeof who);
-        os_log(logger(), "TegraGM20BMetal: %{public}s display link preferredFramesPerSecond %ld from %{public}s",
-               getprogname(), (long)fps, who);
-    }
-    gSetFps(link, cmd, fps);
-}
-
-void observeDisplayLinkRates()
-{
-    static std::atomic<bool> done;  // swapped once per process: a second swap would make the observer its own original
-    if (done.exchange(true))
-        return;
-    if (!strcmp(getprogname(), "backboardd"))
-        return;  // the render server's own display links stay untouched
-    Class cls = objc_getClass("CADisplayLink");
-    if (!cls)
-        return;  // no QuartzCore in this process
-    if (Method m = class_getInstanceMethod(cls, sel_registerName("setPreferredFrameRateRange:"))) {
-        // The original first: a call may land as soon as the method is swapped.
-        gSetRange = (SetRange)method_getImplementation(m);
-        method_setImplementation(m, (IMP)observedSetRange);
-    }
-    if (Method m = class_getInstanceMethod(cls, sel_registerName("setPreferredFramesPerSecond:"))) {
-        gSetFps = (SetFps)method_getImplementation(m);
-        method_setImplementation(m, (IMP)observedSetFps);
-    }
-}
-
-// r31-rawds: what makes WidgetRenderer redraw (a steady 20 commits/s on the Home Screen, each a Core Animation transaction
-// displaying a RenderBox layer: CA::Layer::layout_and_display_if_needed in the commit stack, with no display link rate asked
-// for). In WidgetRenderer_* processes, each distinct caller (image+offset) of -[CALayer setNeedsDisplay] with the layer's class,
-// and each display link made with the target's class and selector, once, up to 8 lines in all.
-using SetNeedsDisplay = void (*)(id, SEL);
-using MakeDisplayLink = id (*)(id, SEL, id, SEL);
-SetNeedsDisplay gSetNeedsDisplay;
-MakeDisplayLink gMakeDisplayLink;
-
-bool firstRedrawCause(uint64_t key)
-{
-    static std::mutex lock;
-    static uint64_t seen[8];
-    static unsigned count;
-    std::lock_guard<std::mutex> guard(lock);
-    for (unsigned i = 0; i < count; i++)
-        if (seen[i] == key)
-            return false;
-    if (count == 8)
-        return false;
-    seen[count++] = key;
-    return true;
-}
-
-void observedSetNeedsDisplay(id layer, SEL cmd)
-{
-    const void *pc = __builtin_return_address(0);
-    Class cls = object_getClass(layer);
-    if (firstRedrawCause((uint64_t)(uintptr_t)pc ^ ((uint64_t)(uintptr_t)cls << 1))) {
-        char who[128];
-        callerName(pc, who, sizeof who);
-        os_log(logger(), "TegraGM20BMetal: %{public}s setNeedsDisplay of a %{public}s from %{public}s", getprogname(),
-               class_getName(cls), who);
-    }
-    gSetNeedsDisplay(layer, cmd);
-}
-
-id observedMakeDisplayLink(id cls, SEL cmd, id target, SEL selector)
-{
-    const void *pc = __builtin_return_address(0);
-    if (firstRedrawCause((uint64_t)(uintptr_t)selector ^ ((uint64_t)(uintptr_t)object_getClass(target) << 1) ^ 1)) {
-        char who[128];
-        callerName(pc, who, sizeof who);
-        os_log(logger(), "TegraGM20BMetal: %{public}s display link to -[%{public}s %{public}s] from %{public}s",
-               getprogname(), class_getName(object_getClass(target)), sel_getName(selector), who);
-    }
-    return gMakeDisplayLink(cls, cmd, target, selector);
-}
-
-void observeRedrawCauses()
+void observeLabelImages()
 {
     static std::atomic<bool> done;
-    if (strncmp(getprogname(), "WidgetRenderer", 14) || done.exchange(true))
+    if (strcmp(getprogname(), "SpringBoard") || done.exchange(true, std::memory_order_relaxed))
         return;
-    if (Method m = class_getInstanceMethod(objc_getClass("CALayer"), sel_registerName("setNeedsDisplay"))) {
-        gSetNeedsDisplay = (SetNeedsDisplay)method_getImplementation(m);
-        method_setImplementation(m, (IMP)observedSetNeedsDisplay);
-    }
-    if (Method m =
-            class_getClassMethod(objc_getClass("CADisplayLink"), sel_registerName("displayLinkWithTarget:selector:"))) {
-        gMakeDisplayLink = (MakeDisplayLink)method_getImplementation(m);
-        method_setImplementation(m, (IMP)observedMakeDisplayLink);
-    }
-}
-
-// How this GPU rounds a float fragment into an RGBA16Float target, which Apple's GPU stores rounded toward zero at
-// textureWriteRoundingMode 0 and 1, the default. On com.brunostjohn.switch.debug.rf16-rounding a WidgetRenderer_*
-// process draws four floats into a 4x1 RGBA16Float target through its device and logs the halves it holds ("rf16" category):
-// just above, on and just below the midpoint of 0x37ff and 0x3800, and on the midpoint of 0x3800 and 0x3801. Nearest even:
-// 3800 3800 37ff 3800; toward zero: 37ff 37ff 37ff 3800; ties away: 3800 3800 37ff 3801.
-void checkRf16Rounding()
-{
-    static os_log_t log = os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "rf16");
-    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-    NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\n"
-                       @"struct V { float4 p [[position]]; };\n"
-                       @"vertex V cover(uint i [[vertex_id]]) { float2 c = float2((i << 1) & 2, i & 2); V v;"
-                       @" v.p = float4(c * 2 - 1, 0, 1); return v; }\n"
-                       @"fragment float4 values(V in [[stage_in]], constant float4 *k [[buffer(0)]]) {"
-                       @" return k[uint(in.p.x)]; }\n";
-    NSError *error = nil;
-    id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
-    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
-    d.vertexFunction = [library newFunctionWithName:@"cover"];
-    d.fragmentFunction = [library newFunctionWithName:@"values"];
-    d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
-    id<MTLRenderPipelineState> state = library ? [device newRenderPipelineStateWithDescriptor:d error:&error] : nil;
-    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
-                                                                                  width:4
-                                                                                 height:1
-                                                                              mipmapped:NO];
-    td.usage = MTLTextureUsageRenderTarget;
-    td.storageMode = MTLStorageModePrivate;
-    id<MTLTexture> target = [device newTextureWithDescriptor:td];
-    id<MTLBuffer> out = [device newBufferWithLength:32 options:MTLResourceStorageModeShared];
-    if (!state || !target || !out) {
-        os_log_error(log, "TegraGM20BMetal: %{public}s rf16 rounding: no state or target (%{public}@)", getprogname(),
-                     error.localizedDescription);
+    gIconLabelView = objc_getClass("SBIconPLKLegibilityView");
+    Method m = gIconLabelView ? class_getInstanceMethod(gIconLabelView, sel_registerName("setImage:")) : nullptr;
+    if (!m) {
+        os_log(logger(), "SwitchLabels: no -[SBIconPLKLegibilityView setImage:] in this SpringBoard: no label times");
         return;
     }
-    const uint32_t bits[4] = {0x3efff001u, 0x3efff000u, 0x3effefffu, 0x3f001000u};
-    float values[16] = {};
-    for (int i = 0; i < 4; i++)
-        for (int c = 0; c < 4; c++)
-            memcpy(&values[4 * i + c], &bits[i], 4);
-    id<MTLCommandQueue> queue = [device newCommandQueue];
-    id<MTLCommandBuffer> cb = [queue commandBuffer];
-    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
-    pass.colorAttachments[0].texture = target;
-    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-    id<MTLRenderCommandEncoder> render = [cb renderCommandEncoderWithDescriptor:pass];
-    [render setRenderPipelineState:state];
-    [render setFragmentBytes:values length:sizeof values atIndex:0];
-    [render drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-    [render endEncoding];
-    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-    [blit copyFromTexture:target
-                     sourceSlice:0
-                     sourceLevel:0
-                    sourceOrigin:MTLOriginMake(0, 0, 0)
-                      sourceSize:MTLSizeMake(4, 1, 1)
-                        toBuffer:out
-               destinationOffset:0
-          destinationBytesPerRow:32
-        destinationBytesPerImage:32];
-    [blit endEncoding];
-    [cb commit];
-    [cb waitUntilCompleted];
-    const uint16_t *h = static_cast<const uint16_t *>(out.contents);
-    os_log(log, "TegraGM20BMetal: %{public}s rf16 rounding: %04x %04x %04x %04x (toward zero 37ff 37ff 37ff 3800)",
-           getprogname(), h[0], h[4], h[8], h[12]);
+    // The original first: a call may land as soon as the method is swapped.
+    gSetLabelImage = (SetLabelImage)method_getImplementation(m);
+    method_setImplementation(m, (IMP)observedSetLabelImage);
 }
+#endif
 
-void observeRf16Request()
-{
-    static std::atomic<bool> done;
-    if (strncmp(getprogname(), "WidgetRenderer", 14) || done.exchange(true))
-        return;
-    int token;
-    notify_register_dispatch("com.brunostjohn.switch.debug.rf16-rounding", &token,
-                             dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(int) {
-                                 checkRf16Rounding();
-                             });
-}
-
+#if SWITCH_PLUGIN_RATES
 // This process's name as one word for the rates lines (an app's executable may have spaces), which tools/devicerun reads per
 // process
 const char *processWord()
@@ -503,9 +372,6 @@ const char *processWord()
 // Metal process every 5 s; each rates function measures its own window, so a late tick only makes a longer one.
 void startRates()
 {
-    observeDisplayLinkRates();
-    observeRedrawCauses();
-    observeRf16Request();
     // kprof keys a user PC as main+<offset from the process's main header> within 256 MiB of it, else as "other": the
     // plugin's base beside its main header turns a main+ sample into an offset in this bundle's binary
     if (Dl_info self = {}; dladdr(reinterpret_cast<const void *>(&startRates), &self) && self.dli_fbase)
@@ -535,18 +401,6 @@ void startRates()
     dispatch_resume(timer);
 }
 #endif
-
-// The first record cache directory this process can write (cacheCandidates), for the driver's records; null: none, and
-// they stay in its memory
-const char *recordCacheDir()
-{
-    static char candidates[6][512];
-    const unsigned count = cacheCandidates(candidates, 6);
-    for (unsigned i = 0; i < count; i++)
-        if (writable(candidates[i]))
-            return candidates[i];
-    return nullptr;
-}
 
 // One open of the process's device; nil with what it met in `failure` (device_open.h) and in `why`
 id openOnce(unsigned port, gm20b::OpenFailure &failure, NSString *__strong &why)
@@ -578,12 +432,11 @@ id openOnce(unsigned port, gm20b::OpenFailure &failure, NSString *__strong &why)
         CFPreferencesSetAppValue(CFSTR("CAEnableIOSurfaceCompression"), kCFBooleanFalse,
                                  kCFPreferencesCurrentApplication);
     }
+#if SWITCH_DEBUG
     const uint64_t openBegan = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    // The render server's raw GM20B path's own setup (its pack, channel and context, the first pool chunk) starts now on a
-    // thread of its own, beside the cache directory search below; metal_device_open takes what it made.
+#endif
     if (renderServer)
         metal_prepare(pack, uint64_t(TEGRA_STACK_KEY));
-    const char *records = recordCacheDir();
 #if SWITCH_DEBUG
     const uint64_t searched = renderServer ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
 #endif
@@ -594,15 +447,16 @@ id openOnce(unsigned port, gm20b::OpenFailure &failure, NSString *__strong &why)
     }
 #if SWITCH_DEBUG
     const uint64_t opened = renderServer ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
-#endif
     os_log(logger(), "TegraGM20BMetal: raw GM20B path on in %{public}s (pack %{public}s, stack %016llx)", getprogname(),
            pack, (unsigned long long)TEGRA_STACK_KEY);
+#endif
     char nativeSeed[1100];
-    metal_complete_states(records, gm20bNativeSeed(pack, nativeSeed, sizeof nativeSeed) ? nativeSeed : nullptr);
+    metal_complete_states_lazy(&findRecordCacheDir,
+                               gm20bNativeSeed(pack, nativeSeed, sizeof nativeSeed) ? nativeSeed : nullptr);
+#if SWITCH_DEBUG
     const uint64_t openNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - openBegan;
     os_log(logger(), "TegraGM20BMetal: device %{public}s ready in %{public}s, open %llu ms",
            [[(id<MTLDevice>)device name] UTF8String], getprogname(), (unsigned long long)(openNs / 1000000));
-#if SWITCH_DEBUG
     if (renderServer) {
         uint64_t prepOpenNs = 0, prepWarmNs = 0, waitedNs = 0;
         metal_prepare_split(&prepOpenNs, &prepWarmNs, &waitedNs);
@@ -612,6 +466,11 @@ id openOnce(unsigned port, gm20b::OpenFailure &failure, NSString *__strong &why)
                getprogname(), (searched - openBegan) / 1000000, (opened - searched) / 1000000, waitedNs / 1000000,
                prepOpenNs / 1000000, prepWarmNs / 1000000, (openBegan + openNs - opened) / 1000000);
     }
+#endif
+#if SWITCH_PLUGIN_FRAME
+    observeLabelImages();
+#endif
+#if SWITCH_PLUGIN_RATES
     startRates();
 #endif
     return device;
@@ -620,17 +479,17 @@ id openOnce(unsigned port, gm20b::OpenFailure &failure, NSString *__strong &why)
 id openDevice(unsigned port)
 {
     static id device;
-    @synchronized([TegraGM20BMetalDevice class]) {
-        if (device)
-            return device;
-        gm20b::OpenFailure failure = gm20b::OpenFailure::Structural;
-        NSString *why = nil;
-        device = openOnce(port, failure, why);
-        if (!device)
-            os_log_error(logger(), "TegraGM20BMetal: no device in %{public}s (%{public}s): %{public}@", getprogname(),
-                         gm20b::openFailureText(failure), why);
+    static std::mutex lock;
+    std::lock_guard<std::mutex> hold(lock);
+    if (device)
         return device;
-    }
+    gm20b::OpenFailure failure = gm20b::OpenFailure::Structural;
+    NSString *why = nil;
+    device = openOnce(port, failure, why);
+    if (!device)
+        os_log_error(logger(), "TegraGM20BMetal: no device in %{public}s (%{public}s): %{public}@", getprogname(),
+                     gm20b::openFailureText(failure), why);
+    return device;
 }
 }  // namespace
 

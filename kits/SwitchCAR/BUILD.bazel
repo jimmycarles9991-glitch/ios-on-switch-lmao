@@ -1,6 +1,7 @@
 # Tegra210 CAR clocks and resets and PMC power partitions and pads, one copy of their registers and lock; the UPHY PLL's
 # calibration announcements between PCIe and SuperSpeed USB (SwitchUPHY.h) and the XUSB pad controller's lock they and
-# USB's two controllers share (SwitchPadctl.h); the PLLs L4T clocks NVDEC, NVENC and NVJPG from (SwitchEngineClock.h).
+# USB's two controllers share (SwitchPadctl.h); the PLLs L4T clocks NVDEC, NVENC, NVJPG and VIC from
+# (SwitchEngineClock.h).
 #
 #   bazel test //kits/SwitchCAR/test:all
 load("//bazel/lint:defs.bzl", "lint_files")

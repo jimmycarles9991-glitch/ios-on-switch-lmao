@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -301,6 +302,7 @@ TEST(SwitchGpuParkedConcurrency, ParkUnparkReclaimAndFreeRespectLockOrder)
 		std::atomic<uint64_t> unparkResidentCount{0};
 		std::atomic<uint64_t> unparkReclaimedCount{0};
 		std::atomic<uint64_t> reclaimedCount{0};
+		std::condition_variable reclaimed;
 	} global;
 
 	constexpr uint32_t kClients = 4;
@@ -439,8 +441,12 @@ TEST(SwitchGpuParkedConcurrency, ParkUnparkReclaimAndFreeRespectLockOrder)
 						EXPECT_EQ(switch_gpu_park_finish_reclaim(bo.state),
 							  SwitchGpuParkAction::Ok);
 						bo.state = SwitchGpuParkState::Reclaimed;
-						global.reclaimedCount.fetch_add(
-							1, std::memory_order_relaxed);
+						{
+							std::lock_guard<std::mutex> pg(global.lock);
+							global.reclaimedCount.fetch_add(
+								1, std::memory_order_relaxed);
+						}
+						global.reclaimed.notify_all();
 					}
 				}
 				pickedClient->refs.fetch_sub(1, std::memory_order_acq_rel);
@@ -457,6 +463,15 @@ TEST(SwitchGpuParkedConcurrency, ParkUnparkReclaimAndFreeRespectLockOrder)
 	std::thread reaper1(runReaper, 1);
 	for (auto &t : threads)
 		t.join();
+	// The clients can finish before either reaper gets a turn on a loaded machine: the reapers go on until one reclaim
+	// has raced the clients' parks, or nothing is left to reclaim.
+	{
+		std::unique_lock<std::mutex> pg(global.lock);
+		global.reclaimed.wait_for(pg, std::chrono::seconds(5), [&] {
+			return global.reclaimedCount.load(std::memory_order_relaxed) > 0 ||
+			       global.lru.empty();
+		});
+	}
 	global.stop.store(true, std::memory_order_release);
 	reaper0.join();
 	reaper1.join();

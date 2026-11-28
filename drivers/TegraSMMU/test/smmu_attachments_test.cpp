@@ -9,23 +9,19 @@ constexpr struct {
     enum tegra_smmu_asid asid;
     enum tegra_smmu_register reg;
 } kAllSwgroups[] = {
-    {TEGRA_SMMU_ASID_VIC, TEGRA_SMMU_VIC_ASID},
-    {TEGRA_SMMU_ASID_DISPLAY, TEGRA_SMMU_DC_ASID},
-    {TEGRA_SMMU_ASID_NVJPG, TEGRA_SMMU_NVJPG_ASID},
-    {TEGRA_SMMU_ASID_XUSB_HOST, TEGRA_SMMU_XUSB_HOST_ASID},
-    {TEGRA_SMMU_ASID_NVDEC, TEGRA_SMMU_NVDEC_ASID},
-    {TEGRA_SMMU_ASID_NVENC, TEGRA_SMMU_NVENC_ASID},
-    {TEGRA_SMMU_ASID_XUSB_DEV, TEGRA_SMMU_XUSB_DEV_ASID},
-    {TEGRA_SMMU_ASID_DISPLAY_B, TEGRA_SMMU_DCB_ASID},
-    {TEGRA_SMMU_ASID_HDA, TEGRA_SMMU_HDA_ASID},
-    {TEGRA_SMMU_ASID_AFI, TEGRA_SMMU_AFI_ASID},
-    {TEGRA_SMMU_ASID_GPU, TEGRA_SMMU_GPU_ASID},
+    {TEGRA_SMMU_ASID_VIC, TEGRA_SMMU_VIC_ASID},           {TEGRA_SMMU_ASID_DISPLAY, TEGRA_SMMU_DC_ASID},
+    {TEGRA_SMMU_ASID_NVJPG, TEGRA_SMMU_NVJPG_ASID},       {TEGRA_SMMU_ASID_XUSB_HOST, TEGRA_SMMU_XUSB_HOST_ASID},
+    {TEGRA_SMMU_ASID_NVDEC, TEGRA_SMMU_NVDEC_ASID},       {TEGRA_SMMU_ASID_NVENC, TEGRA_SMMU_NVENC_ASID},
+    {TEGRA_SMMU_ASID_XUSB_DEV, TEGRA_SMMU_XUSB_DEV_ASID}, {TEGRA_SMMU_ASID_DISPLAY_B, TEGRA_SMMU_DCB_ASID},
+    {TEGRA_SMMU_ASID_HDA, TEGRA_SMMU_HDA_ASID},           {TEGRA_SMMU_ASID_AFI, TEGRA_SMMU_AFI_ASID},
+    {TEGRA_SMMU_ASID_GPU, TEGRA_SMMU_GPUB_ASID},
 };
+
 static_assert(sizeof(kAllSwgroups) / sizeof(kAllSwgroups[0]) <= TEGRA_SMMU_ATTACHMENTS);
 
 tegra_smmu_attachment entry(uint32_t asid, uint32_t ptb, uint32_t asidReg)
 {
-    return {asid, ptb, asidReg, 0x234, 1u << 30, false};
+    return tegra_smmu_attachment_of(asid, ptb, asidReg, 0x234, 1u << 30, false);
 }
 }  // namespace
 
@@ -77,11 +73,12 @@ TEST(SmmuAttachments, FullTableRefusesANewSwgroupButStillUpdatesAKnownOne)
     EXPECT_TRUE(tegra_smmu_attachments_note(&t, &known));
     EXPECT_EQ(t.entry[0].ptb, 0xabcu);
 }
+
 TEST(SmmuAttachments, RetainsBothAfiClientRegistersAndMergesTheirBits)
 {
     tegra_smmu_attachments t = {};
-    tegra_smmu_attachment read{118, 0xe009a000, 0x238, 0x228, 1u << 14, false};
-    tegra_smmu_attachment write{read.asid, read.ptb, read.asidReg, 0x22c, 1u << 17, false};
+    tegra_smmu_attachment read = tegra_smmu_attachment_of(118, 0xe009a000, 0x238, 0x228, 1u << 14, false);
+    tegra_smmu_attachment write = tegra_smmu_attachment_of(read.asid, read.ptb, read.asidReg, 0x22c, 1u << 17, false);
     ASSERT_TRUE(tegra_smmu_attachments_note(&t, &read));
     ASSERT_TRUE(tegra_smmu_attachments_note(&t, &write));
     read.translationBits |= 1u << 15;
@@ -100,8 +97,10 @@ TEST(SmmuAttachments, RetainsBothAfiClientRegistersAndMergesTheirBits)
 TEST(SmmuAttachments, RetainsBothGpuTranslationRegistersForSameSwgroup)
 {
     tegra_smmu_attachments t = {};
-    const tegra_smmu_attachment gpu0 = {117, 0x8000e000, 0xaac, 0x230, (1u << 24) | (1u << 25), false};
-    const tegra_smmu_attachment gpu1 = {117, 0x8000e000, 0xaac, 0xb98, (1u << 8) | (1u << 9), false};
+    const tegra_smmu_attachment gpu0 =
+        tegra_smmu_attachment_of(117, 0x8000e000, 0xaac, 0x230, (1u << 24) | (1u << 25), false);
+    const tegra_smmu_attachment gpu1 =
+        tegra_smmu_attachment_of(117, 0x8000e000, 0xaac, 0xb98, (1u << 8) | (1u << 9), false);
     ASSERT_TRUE(tegra_smmu_attachments_note(&t, &gpu0));
     ASSERT_TRUE(tegra_smmu_attachments_note(&t, &gpu1));
     ASSERT_EQ(t.count, 2u);
@@ -129,4 +128,14 @@ TEST(SmmuAttachments, HoldsEveryDefinedSwgroupSimultaneously)
         ptb += 0x1000u;
     }
     EXPECT_EQ(t.count, sizeof(kAllSwgroups) / sizeof(kAllSwgroups[0]) + 3u);
+}
+
+// SE2's swgroups, settled 25 Nov: L4T's tegra210b01-soc-base.dtsi gives tegra_se2 (0x70412000) iommus ISP2B (29) and
+// ISP2B1 (53); L4T's tegra-swgroup.h gives 29 MC 0xaa4 (the T210 TRM's MC_SMMU_ISP2B_ASID) and 53 MC 0x808.
+TEST(SmmuSwgroups, EachSecurityEngineNamesBothOfItsSwgroupRegisters)
+{
+    EXPECT_EQ(tegra_smmu_se_swgroups[0][0], 0xabcu);
+    EXPECT_EQ(tegra_smmu_se_swgroups[0][1], 0xac8u);
+    EXPECT_EQ(tegra_smmu_se_swgroups[1][0], 0xaa4u);
+    EXPECT_EQ(tegra_smmu_se_swgroups[1][1], 0x808u);
 }

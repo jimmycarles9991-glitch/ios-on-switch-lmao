@@ -380,6 +380,18 @@ TEST_F(DeviceShapes, AnSrgbExtendedRangeTextureIsRawsOwn)
     }
 }
 
+// BGRA10_XR and BGR10_XR resolve by the mean of their codes; their sRGB twins by their stand-in's resolve, which is within
+// one code of an M4 Max at every compared texel of gpu.gm20b.standin_ms_resolve, where the codes' mean was up to 258 off
+TEST_F(DeviceShapes, ExtendedRangeSrgbTwinsResolveThroughTheirStandIn)
+{
+    EXPECT_STREQ(gm20b::formatResolveState(552), "raw.xr_target.xr_target_resolve_bgra10_frag");
+    EXPECT_STREQ(gm20b::formatResolveState(554), "raw.xr_target.xr_target_resolve_bgr10_frag");
+    for (uint32_t twin : {gm20b::kBgra10XrSrgb, gm20b::kBgr10XrSrgb}) {
+        EXPECT_EQ(gm20b::formatResolveState(twin), nullptr) << twin;
+        EXPECT_EQ(gm20b::formatStandIn(twin), gm20b::kXrStandInFormat) << twin;
+    }
+}
+
 // A pass into a level and slice of an extended-range array renders its codes there (attachmentTarget), as a pass into a
 // whole extended-range texture does; the encoder draws the stand-in again before the next draw samples it
 TEST_F(DeviceShapes, APassIntoAnExtendedRangeLevelAndSliceRendersItsCodes)

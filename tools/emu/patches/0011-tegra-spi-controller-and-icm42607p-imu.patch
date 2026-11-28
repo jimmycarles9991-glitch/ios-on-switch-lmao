@@ -442,7 +442,7 @@ diff --git a/hw/arm/tegra2/apb/spi/spi.c b/hw/arm/tegra2/apb/spi/spi.c
 index 1aa0e93..f888c13 100644
 --- a/hw/arm/tegra2/apb/spi/spi.c
 +++ b/hw/arm/tegra2/apb/spi/spi.c
-@@ -22,113 +22,321 @@
+@@ -22,113 +22,328 @@
  #include "tegra_common.h"
  
  #include "hw/sysbus.h"
@@ -652,34 +652,41 @@ index 1aa0e93..f888c13 100644
 +    TEGRA_SPI(dev)->clock_source = car_offset;
 +}
 +
++/* Packed, a FIFO word holds 32 / BIT_LENGTH 8- or 16-bit packets, packet 0 in its low bits (TRM 37.2.1, as
++ * spi-tegra114 fills and drains the FIFO); DMA_BLK counts packets either way. */
 +static void tegra_spi_run_block(tegra_spi *s)
 +{
 +    uint32_t cmd = REG(s, SPI_COMMAND_OFFSET);
-+    uint32_t words = (REG(s, SPI_DMA_BLK_SIZE_OFFSET) & 0xffff) + 1;
++    uint32_t packets = (REG(s, SPI_DMA_BLK_SIZE_OFFSET) & 0xffff) + 1;
 +    uint32_t bits = CMD1_BIT_LENGTH(cmd) + 1;
 +    uint32_t mask = bits >= 32 ? UINT32_MAX : (1u << bits) - 1;
++    uint32_t per_word = (cmd & CMD1_PACKED) && (bits == 8 || bits == 16) ? 32 / bits : 1;
 +    bool hardware_cs = !(cmd & CMD1_CS_SW_HW);
++    uint32_t out = 0, in = 0;
 +
-+    if (cmd & CMD1_PACKED) {
-+        qemu_log_mask(LOG_UNIMP, "tegra.spi: packed mode is not modelled; words are sent unpacked\n");
++    if ((cmd & CMD1_PACKED) && per_word == 1) {
++        qemu_log_mask(LOG_UNIMP, "tegra.spi: packed %u-bit packets are not modelled; sent unpacked\n", bits);
 +    }
 +    if (hardware_cs) {
 +        tegra_spi_select(s, CMD1_CS_SEL(cmd));
 +    }
-+    for (uint32_t i = 0; i < words; i++) {
-+        uint32_t out = 0, in;
++    for (uint32_t i = 0; i < packets; i++) {
++        uint32_t slot = i % per_word;
 +
-+        if (cmd & CMD1_TX_EN) {
-+            if (s->tx_len) {
-+                out = s->tx_fifo[s->tx_head];
-+                s->tx_head = (s->tx_head + 1) % SPI_FIFO_DEPTH;
-+                s->tx_len--;
-+            } else {
-+                s->errors |= FIFO_TX_UNF;
++        if (slot == 0) {
++            out = in = 0;
++            if (cmd & CMD1_TX_EN) {
++                if (s->tx_len) {
++                    out = s->tx_fifo[s->tx_head];
++                    s->tx_head = (s->tx_head + 1) % SPI_FIFO_DEPTH;
++                    s->tx_len--;
++                } else {
++                    s->errors |= FIFO_TX_UNF;
++                }
 +            }
 +        }
-+        in = ssi_transfer(s->bus, out & mask) & mask;
-+        if (cmd & CMD1_RX_EN) {
++        in |= (ssi_transfer(s->bus, (out >> (slot * bits)) & mask) & mask) << (slot * bits);
++        if ((cmd & CMD1_RX_EN) && (slot == per_word - 1 || i == packets - 1)) {
 +            if (s->rx_len < SPI_FIFO_DEPTH) {
 +                s->rx_fifo[(s->rx_head + s->rx_len) % SPI_FIFO_DEPTH] = in;
 +                s->rx_len++;
@@ -691,8 +698,8 @@ index 1aa0e93..f888c13 100644
 +    if (hardware_cs) {
 +        tegra_spi_select(s, -1);
 +    }
-+    s->block_words = words;
-+    timer_mod(s->done, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + tegra_spi_block_ns(s, words * bits));
++    s->block_words = packets;
++    timer_mod(s->done, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + tegra_spi_block_ns(s, (uint64_t)packets * bits));
 +}
 +
 +static void tegra_spi_block_done(void *opaque)
@@ -823,7 +830,7 @@ index 1aa0e93..f888c13 100644
      }
  }
  
-@@ -137,11 +345,20 @@ static void tegra_spi_priv_reset(DeviceState *dev)
+@@ -137,11 +352,20 @@ static void tegra_spi_priv_reset(DeviceState *dev)
      tegra_spi *s = TEGRA_SPI(dev);
  
      memset(s->regs, 0, sizeof(s->regs));
@@ -849,7 +856,7 @@ index 1aa0e93..f888c13 100644
  }
  
  static const MemoryRegionOps tegra_spi_mem_ops = {
-@@ -155,7 +372,9 @@ static void tegra_spi_priv_realize(DeviceState *dev, Error **errp)
+@@ -155,7 +379,9 @@ static void tegra_spi_priv_realize(DeviceState *dev, Error **errp)
      tegra_spi *s = TEGRA_SPI(dev);
  
      sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);

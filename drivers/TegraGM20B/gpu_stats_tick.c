@@ -31,22 +31,27 @@ static void stats_exec_owners(char *line, unsigned int len, u64 rate)
 	static struct {
 		char name[17];
 		u64 sum, max;
-		u32 n, subs, stamped, stamps, spans;
+		u32 n;
+		struct switch_gpu_job_window jobs;
+#if TGM_PROF
+		u32 subs, stamped, stamps, spans;
 		u64 span;
 		u64 prof_ns[TGM_PC_COUNT];
 		u32 prof_n[TGM_PC_COUNT];
 		u64 prof_dn[TGM_PC_COUNT], prof_sdn[TGM_PC_COUNT];
-		struct switch_gpu_job_window jobs;
 		struct switch_gpu_prof_seq seq;
+#endif
 	} o[EXEC_OWNERS];
 	struct switch_gpu_job_window taken;
+#if TGM_PROF
 	static struct switch_gpu_prof_seq seq; /* one caller at a time, as o */
+	unsigned int c = 0;
+	char name[32];
+#endif
 	struct tgm_chan *chan = NULL;
 	unsigned int used = 0;
 	unsigned int i = 0;
-	unsigned int c = 0;
 	unsigned int at = 0;
-	char name[32];
 
 	memset(o, 0, sizeof(o));
 	mutex_lock(&tgm_live_lock);
@@ -55,11 +60,16 @@ static void stats_exec_owners(char *line, unsigned int len, u64 rate)
 		u32 n = __atomic_exchange_n(&chan->stat_exec_n, 0, __ATOMIC_RELAXED);
 		u64 sum = __atomic_exchange_n(&chan->stat_exec, 0, __ATOMIC_RELAXED);
 		u64 max = __atomic_exchange_n(&chan->stat_exec_max, 0, __ATOMIC_RELAXED);
+#if TGM_PROF
 		u32 subs = __atomic_exchange_n(&chan->prof_subs, 0, __ATOMIC_RELAXED);
 		u32 stamped = __atomic_exchange_n(&chan->prof_stamped, 0, __ATOMIC_RELAXED);
 
 		if ((!n && !subs && !stamped) || chan->kernel)
 			continue;
+#else
+		if (!n || chan->kernel)
+			continue;
+#endif
 		for (i = 0; i < used && strncmp(o[i].name, chan->owner, sizeof(o[i].name)); i++)
 			;
 		if (i == used && used < EXEC_OWNERS - 1) {
@@ -72,13 +82,14 @@ static void stats_exec_owners(char *line, unsigned int len, u64 rate)
 		o[i].sum += sum;
 		if (max > o[i].max)
 			o[i].max = max;
+		switch_gpu_job_take(&chan->stat_jobs, &taken);
+		switch_gpu_job_merge(&o[i].jobs, &taken);
+#if TGM_PROF
 		o[i].subs += subs;
 		o[i].stamped += stamped;
 		o[i].stamps += __atomic_exchange_n(&chan->prof_stamps, 0, __ATOMIC_RELAXED);
 		o[i].spans += __atomic_exchange_n(&chan->prof_spans, 0, __ATOMIC_RELAXED);
 		o[i].span += __atomic_exchange_n(&chan->prof_span, 0, __ATOMIC_RELAXED);
-		switch_gpu_job_take(&chan->stat_jobs, &taken);
-		switch_gpu_job_merge(&o[i].jobs, &taken);
 		switch_gpu_prof_seq_take(&chan->prof_slow, &seq);
 		if (seq.n && seq.ns > o[i].seq.ns)
 			o[i].seq = seq;
@@ -92,6 +103,7 @@ static void stats_exec_owners(char *line, unsigned int len, u64 rate)
 			o[i].prof_sdn[c] +=
 				__atomic_exchange_n(&chan->prof_sdn[c], 0, __ATOMIC_RELAXED);
 		}
+#endif
 	}
 	mutex_unlock(&tgm_live_lock);
 	line[0] = 0;
@@ -109,6 +121,7 @@ static void stats_exec_owners(char *line, unsigned int len, u64 rate)
 		if (o[i].jobs.batches > o[i].jobs.jobs &&
 		    switch_gpu_job_format(line, len, o[i].name, &o[i].jobs))
 			nvxnu_stats("tegra-gm20b: jobs %s", line);
+#if TGM_PROF
 	/* each process's profiled submissions: their GPU time by push class, the largest first, per submission */
 	for (i = 0; i < EXEC_OWNERS; i++) {
 		u64 total = 0;
@@ -161,6 +174,7 @@ static void stats_exec_owners(char *line, unsigned int len, u64 rate)
 		if (switch_gpu_prof_cost_format(line, len, &cost))
 			nvxnu_stats("tegra-gm20b: gpuprof cost %s:%s", o[i].name, line);
 	}
+#endif
 }
 
 static void deadline_print(const char *line)
@@ -198,8 +212,15 @@ static void stats_deadline(char *buf, unsigned int len)
 	tgm_latency_end(&latencies);
 }
 
-/* Run by each submission: the first one after a window's end logs it. */
+static void *stats_work;
+static int stats_armed;
+
 void tgm_stats_tick(void)
+{
+	__atomic_fetch_add(&tgm_stats.submits, 1, __ATOMIC_RELAXED);
+}
+
+static void stats_emit_window(void)
 {
 	u64 now = nvxnu_nanotime();
 	u64 since = __atomic_load_n(&tgm_stats.since, __ATOMIC_RELAXED);
@@ -264,7 +285,8 @@ void tgm_stats_tick(void)
 	char recov[128];
 	char load[160];
 
-	__atomic_fetch_add(&tgm_stats.submits, 1, __ATOMIC_RELAXED);
+	if (!__atomic_load_n(&tgm_stats.submits, __ATOMIC_RELAXED))
+		return;
 	tgm_load_sample(now);
 	if (!since) {
 		if (__atomic_compare_exchange_n(&tgm_stats.since, &since, now, false,
@@ -374,12 +396,6 @@ void tgm_stats_tick(void)
 			    foreign_timed ? PT_NS(foreign_qs) / foreign_timed / 1000 : 0,
 			    PT_NS(foreign_qm) / 1000, foreign_timed);
 	stats_deadline(line, sizeof(line));
-	tgm_acquire_probe_window(line, sizeof(line), now);
-	if (line[0])
-		nvxnu_stats("tegra-gm20b: acquire probe: %s", line);
-	switch_gpu_compositor_sync_window(line, sizeof(line));
-	if (line[0])
-		nvxnu_stats("tegra-gm20b: compositor sync pushes in profiled frames: %s", line);
 	/* the pool by holder, so no share of it goes unnamed */
 	uint64_t pool_clients = 0;
 	uint64_t pool_orphan_bytes = 0;
@@ -417,6 +433,21 @@ void tgm_stats_tick(void)
 		lfm / 1000, lfree);
 	nvxnu_stats("tegra-gm20b: stats2 %s", line);
 	{
+		const u64 invalidates =
+			__atomic_exchange_n(&tgm_retire_invalidates, 0, __ATOMIC_RELAXED);
+		const u64 objects = __atomic_exchange_n(&tgm_retire_objects, 0, __ATOMIC_RELAXED);
+		const u64 invalidate_ns =
+			__atomic_exchange_n(&tgm_retire_invalidate_ns, 0, __ATOMIC_RELAXED);
+		const u64 gpu_flushes =
+			__atomic_exchange_n(&tgm_retire_gpu_flushes, 0, __ATOMIC_RELAXED);
+
+		switch_gpu_smmu_stats(line, sizeof(line));
+		nvxnu_stats(
+			"tegra-gm20b: smmu %s; retirement: %llu objects, %llu GPU-ordered flushes, "
+			"%llu CPU-waited fallbacks (%llu us)",
+			line, objects, gpu_flushes, invalidates, invalidate_ns / 1000);
+	}
+	{
 		uint64_t held = 0;
 		const unsigned long written = tgm_owner_memory(line, sizeof(line), &held);
 		const s64 live = __atomic_load_n(&tgm_stats.live_bytes, __ATOMIC_RELAXED);
@@ -447,7 +478,6 @@ void tgm_stats_tick(void)
 	stats_exec_owners(line, sizeof(line), rate);
 	tgm_stats_mem(ms);
 	tgm_stats_waits(ms);
-	tgm_stats_unlocked_window();
 	/* The IOSurface lock/unlock traps' cache maintenance this window (TegraGM20BCoherency.cpp): GPU-written imports
 	 * invalidated at a CPU lock, CPU-written imports cleaned at an unlock. */
 	{
@@ -495,6 +525,41 @@ void tgm_stats_tick(void)
 		}
 	}
 	tgm_stats_l2_inval_window();
+	idle_stats();
 #undef PT_NS
+}
+
+static void stats_work_run(void *unused)
+{
+	(void)unused;
+	if (!__atomic_load_n(&stats_armed, __ATOMIC_ACQUIRE))
+		return;
+	if (!gate_try())
+		return;
+	stats_emit_window();
+	gate_leave();
+	if (__atomic_load_n(&stats_armed, __ATOMIC_ACQUIRE))
+		nvxnu_work_schedule_after(stats_work, STATS_WINDOW_NS);
+}
+
+void tgm_stats_init(void)
+{
+	if (!stats_work)
+		stats_work = nvxnu_work_alloc_low(stats_work_run, NULL);
+	tgm_stats_resume();
+}
+
+void tgm_stats_suspend(void)
+{
+	__atomic_store_n(&stats_armed, 0, __ATOMIC_RELEASE);
+	nvxnu_work_cancel_wait(stats_work);
+}
+
+void tgm_stats_resume(void)
+{
+	if (!stats_work)
+		return;
+	__atomic_store_n(&stats_armed, 1, __ATOMIC_RELEASE);
+	nvxnu_work_schedule_after(stats_work, STATS_WINDOW_NS);
 }
 #endif

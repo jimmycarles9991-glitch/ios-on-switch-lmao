@@ -32,6 +32,7 @@
 __BEGIN_DECLS
 #include <kern/thread_call.h>
 __END_DECLS
+#include <switch/callouts.h>
 
 #include <IOKit/assert.h>
 #include <IOKit/system.h>
@@ -120,11 +121,13 @@ IOTimerEventSource::invokeAction(IOEventSource::Action _action, IOTimerEventSour
 		    VM_KERNEL_ADDRHIDE(_owner));
 	}
 
+	const uint64_t switch_begin = switch_callout_begin();
 	if (kActionBlock & flags) {
 		((IOTimerEventSource::ActionBlock) actionBlock)(ts);
 	} else {
 		((IOTimerEventSource::Action)_action)(_owner, ts);
 	}
+	switch_callout_end(address, NULL, switch_begin);
 
 #if CONFIG_DTRACE
 	DTRACE_TMR3(iotescallout__expire, Action, address, OSObject, _owner, void, _workLoop);

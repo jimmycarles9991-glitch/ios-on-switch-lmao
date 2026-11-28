@@ -275,6 +275,20 @@ static inline struct tgm_chan *live_by_uid(u32 uid)
 	return NULL;
 }
 
+/* Per-VM GMMU TLB invalidate (PDB_ONE + GPC enabled), falling back to PDB_ALL if PDB wasn't cached. */
+static inline void chan_push_tlb_inval(struct nvif_push *push, const struct tgm_vm *vm)
+{
+	const u32 op_c = (vm && vm->tlb_mem_op_d) ? vm->tlb_mem_op_c
+						  : NVB06F_MEM_OP_C_TLB_INVALIDATE_PDB_ALL;
+	const u32 op_d = (vm && vm->tlb_mem_op_d) ? vm->tlb_mem_op_d
+						  : NVB06F_MEM_OP_D_OPERATION_MMU_TLB_INVALIDATE;
+
+	/* nouveau's NVDEF/NVVAL/PUSH_* macros compute in int and repeat their branches. */
+	/* NOLINTBEGIN(bugprone-signed-bitwise,bugprone-branch-clone) */
+	PUSH_NVSQ(push, NV906F, NVB06F_MEM_OP_C, op_c, NVB06F_MEM_OP_D, op_d);
+	/* NOLINTEND(bugprone-signed-bitwise,bugprone-branch-clone) */
+}
+
 /* One 16-byte semaphore release (writes payload and the GPU's PTIMER ns), after wait-for-idle */
 static inline void push_stamp(struct nvif_push *push, u64 va, u32 payload)
 {

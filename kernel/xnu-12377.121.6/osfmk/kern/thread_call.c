@@ -42,6 +42,7 @@
 #include <vm/vm_pageout_xnu.h>
 
 #include <kern/thread_call.h>
+#include <switch/callouts.h>
 #include <kern/timer_call.h>
 
 #include <libkern/OSAtomic.h>
@@ -1675,7 +1676,8 @@ static void __attribute__((noinline))
 thread_call_invoke(thread_call_func_t func,
     thread_call_param_t param0,
     thread_call_param_t param1,
-    __unused thread_call_t call)
+    __unused thread_call_t call,
+    __unused thread_call_group_t group)
 {
 #if DEVELOPMENT || DEBUG
 	KERNEL_DEBUG_CONSTANT(
@@ -1690,7 +1692,13 @@ thread_call_invoke(thread_call_func_t func,
 	    (unsigned) (tc_ttd & 0xFFFFFFFF), is_delayed, call);
 #endif
 
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED
+	const uint64_t switch_begin = switch_callout_begin();
+#endif
 	(*func)(param0, param1);
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED
+	switch_callout_end((const void *)func, group->tcg_name, switch_begin);
+#endif
 
 #if CONFIG_DTRACE
 	DTRACE_TMR6(thread_callout__end, thread_call_func_t, func, int, 0, int, (tc_ttd >> 32),
@@ -1805,7 +1813,7 @@ thread_call_thread(
 
 		thc_state.thc_call_start = mach_absolute_time();
 
-		thread_call_invoke(func, param0, param1, call);
+		thread_call_invoke(func, param0, param1, call, group);
 
 		thc_state.thc_call = NULL;
 
@@ -2059,7 +2067,7 @@ thread_call_delayed_timer(timer_call_param_t p0, timer_call_param_t p1)
 				call->tc_flags |= THREAD_CALL_RUNNING;
 
 				thread_call_unlock(group);
-				thread_call_invoke(func, param0, param1, call);
+				thread_call_invoke(func, param0, param1, call, group);
 				thread_call_lock_spin(group);
 
 				/* finish may detect that the call has been re-pended */

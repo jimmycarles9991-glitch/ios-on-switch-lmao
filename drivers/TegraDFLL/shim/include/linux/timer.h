@@ -12,9 +12,10 @@ struct timer_list {
 	void (*function)(unsigned long);
 	unsigned long data;
 	void *tdfll_call;
+	bool tdfll_deferrable;
 };
 void init_timer(struct timer_list *timer);
-#define init_timer_deferrable(t) init_timer(t)
+void init_timer_deferrable(struct timer_list *timer);
 int mod_timer(struct timer_list *timer, unsigned long expires);
 int del_timer(struct timer_list *timer);
 int del_timer_sync(struct timer_list *timer);

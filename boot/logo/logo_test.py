@@ -201,6 +201,15 @@ class BootLogo(unittest.TestCase):
             self.assertEqual(overlay.get(first), LOGO_SOURCE, f'{first} is the first name tried at scale {scale}')
         self.assertEqual(overlay.get(f'{PROGRESSUI}/apple-logo~ipad.png'), LOGO_SOURCE)
 
+    def test_progressui_finds_this_logo_for_j120s_class_with_usb_c(self) -> None:
+        manifest = json.loads(Path(runfiles.Create().Rlocation('_main/overlay/manifest.json')).read_text())
+        j320 = {e['path']: e for e in manifest['files'] if '/apple-logo-j320' in e['path']}
+        for name in ('apple-logo-j320@1x~ipad.png', 'apple-logo-j320@2x~ipad.png', 'apple-logo-j320~ipad.png'):
+            entry = j320.get(f'{PROGRESSUI}/{name}')
+            self.assertIsNotNone(entry, name)
+            self.assertEqual(entry['source'], LOGO_SOURCE)
+            self.assertEqual(entry.get('kind'), '21H461')
+
     def test_loader_hands_xnu_graphics_mode(self) -> None:
         self.assertEqual(VIDEO[1], 1, 'Video.v_display 0 is text mode: XNU clears the panel for its console')
 

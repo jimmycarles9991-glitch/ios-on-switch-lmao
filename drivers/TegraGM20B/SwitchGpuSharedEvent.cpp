@@ -45,7 +45,8 @@ void retire(thread_call_param_t, thread_call_param_t)
 			ready = signal;
 			progress = true;
 			--event->reservations;
-			__atomic_sub_fetch(&s->pendingSignals, 1u, __ATOMIC_RELEASE);
+			__atomic_store_n(&s->pendingSignals, s->pendingSignals - 1u,
+					 __ATOMIC_RELEASE);
 		}
 	}
 	auto **wait = &s->waits;
@@ -66,7 +67,7 @@ void retire(thread_call_param_t, thread_call_param_t)
 			s->waitsTail = previous;
 		batch->next = consumed;
 		consumed = batch;
-		__atomic_sub_fetch(&s->pendingSignals, 1u, __ATOMIC_RELEASE);
+		__atomic_store_n(&s->pendingSignals, s->pendingSignals - 1u, __ATOMIC_RELEASE);
 	}
 	IOLockUnlock(s->lock);
 	while (consumed) {
@@ -321,7 +322,7 @@ extern "C" void switch_gpu_event_signal_commit(switch_gpu_event_signal **owned)
 	signal->next = signal->event->signals;
 	signal->event->signals = signal;
 	switch_gpu_event_watches_bind_locked(signal->event);
-	__atomic_add_fetch(&state->pendingSignals, 1u, __ATOMIC_RELEASE);
+	__atomic_store_n(&state->pendingSignals, state->pendingSignals + 1u, __ATOMIC_RELEASE);
 	IOLockUnlock(state->lock);
 	switch_gpu_events_schedule();
 }

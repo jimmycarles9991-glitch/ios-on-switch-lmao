@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Array slices, cube faces and 3D depth planes through the blit engine alone, raw's path: each slice, face or plane

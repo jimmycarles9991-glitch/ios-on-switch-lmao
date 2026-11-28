@@ -762,6 +762,7 @@ struct thread {
 	timer_call_t            wait_timer;
 	uint16_t                wait_timer_active; /* is the call running */
 	bool                    wait_timer_armed; /* should the wait be cleared */
+	uint8_t                 switch_watch_mask; /* <switch/sched.h> watched-thread bits (1-byte padding slot) */
 
 	/* Miscellaneous bits guarded by mutex */
 	uint32_t

@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// The shader compiler starts and answers a request at its waiter's class while lower classes hold every core.

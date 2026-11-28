@@ -22,6 +22,7 @@
 // Nothing here allocates, submits or keeps state: rawca's gpu/TegraGM20BMetal own memory, rings and lifetimes; these functions
 // compute layouts and headers and write push words into a gm20b::Push the caller reserved (the *Words() bounds).
 #pragma once
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>  // push.h uses it without including it
@@ -99,6 +100,12 @@ constexpr uint32_t kTexOneD = 0, kTexTwoD = 1, kTexThreeD = 2, kTexCube = 3, kTe
 void mipChainTic(const MipChain &c, uint64_t va, uint32_t tic0, bool srgb, uint32_t baseLevel, uint32_t levelCount,
                  uint32_t out[8], uint32_t textureType = kTexTwoD);
 
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+// SECTOR_PROMOTION of the headers mipChainTic writes from now on (TegraGM20BMetalProbe.mm, gpu.perf.knobs); NIL's
+// NO_PROMOTION otherwise
+extern std::atomic<uint8_t> probeSectorPromotion;
+#endif
+
 // The texture header of `elements` texels from GPU address `va` as a texel buffer (NIL nvb097_nil_fill_buffer_desc:
 // TEXHEAD_1D, HEADER_VERSION SELECT_ONE_D_BUFFER, TEXTURE_TYPE ONE_D_BUFFER), word 0 from `tic0`
 void bufferTic(uint64_t va, uint32_t tic0, bool srgb, uint32_t elements, uint32_t out[8]);
@@ -161,6 +168,9 @@ uint32_t twodPointFormat(uint32_t bpp);
 // (twodPointFormat); in generateWords
 void emitPointGenerate(Push &p, const MipChain &c, uint64_t chainVa, uint32_t fmt2d, uint32_t firstLevel,
                        uint32_t lastLevel);
+void emitGenerateLayersRange(Push &p, const MipChain &c, uint64_t chainVa, uint32_t fmt2d, uint32_t firstLevel,
+                             uint32_t lastLevel, uint32_t firstLayer, uint32_t layers, bool point = false,
+                             Sampling sampling = kGm20bSampling);
 
 // A 1:1 copy of [sx, sx + w) x [sy, sy + h) of a pitch surface into level `level` of the chain at (dx, dy): a copy into a level
 // (copyFromTexture/copyFromBuffer ... destinationLevel:), with the same waits as emitGenerate.

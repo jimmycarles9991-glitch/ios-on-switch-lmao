@@ -1,5 +1,7 @@
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 import QuartzCore
 import UIKit
@@ -69,7 +71,9 @@ struct SmallDrawableTest: HWTest {
         guard !before.isEmpty else {
             var metrics = Metrics()
             metrics.set("sysctl", KernelSysctl.code(unread))
-            return .skip(KernelSysctl.unreadable("kern.switch_planes_*", unread), metrics)
+            return .skip(
+                KernelSysctl.unreadable("kern.switch_planes_*", unread, flag: "--//bazel:stats_frame"), metrics
+            )
         }
         let done = Waiter<Bool>()
         let (run, pixels, drawable) = await context.onStage(fullScreen: true) {

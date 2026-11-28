@@ -46,7 +46,8 @@ bool mediaFlipMay(const PlaneSet &p, PlaneSet &assigned)
     if (!planesOn || !planesAttached || planeRecovering || planeHeldSet || planeProbe.active() || copyPlaneJoined ||
         hwSuspended || gPanicRestore.panicking || ring.held != kNoBuffer || !planeLatch.mayWrite() ||
         !planeLatch.armedRequested || p.on() != planeBlending || !completionFlipIdle() || !mediaFlipIdle() ||
-        p.landscape || landscapeOn() || landscapeHoldsKicks() || windowProbeBusy() || host1xFlipBusy())
+        p.landscape || landscapeOn() || landscapeHoldsKicks() || windowProbeBusy() || host1xFlipBusy() ||
+        dcChannelProbed())
         return false;
     const switch_display::WindowState windows[2] = {planeWindowState(switch_landscape::kB),
                                                     planeWindowState(switch_landscape::kC)};
@@ -123,27 +124,44 @@ void writeEarlyMediaFlip(uint32_t generation)
         noteMediaFlipTotal(5, 1);
 }
 
-// completionFlipVerdict's: a set host1x's filter wrote is on screen. A producer's client's failure dated back to its job
-// leaves it shown with one line; a lost producer, or a failure none of them reports, is the kernel's own.
+// completionFlipVerdict's: a set the stream wrote (host1x's filter early, or the stream's completion with no filter) is
+// on screen, whatever its producers say by now. A client's failure dated after the writes reached DRAM (its kill or
+// close, GONE; a refused write) leaves it shown with one line: a GPU producer's by the reason its bridge gave before it
+// went (SwitchHost1xDisplay.h), else a VIC or NVDEC producer's. A written set with no failure reported, or any
+// producer's compositor kill (FAILED: a contract our driver breaks), is the kernel's own.
 int mediaFlipVerdict(int status)
 {
-    if (!status || !mediaFlip.early())
+    if (!status || !(mediaFlip.early() || mediaFlipWrittenByStream()))
         return status;
-    const int why = switch_gpu_backing_tokens_failure(mediaHostStream.producers, mediaHostStream.count);
+    const int bridgeWhy = mediaHostStream.bridgeWhy;
+    const int why =
+        bridgeWhy ? bridgeWhy : switch_gpu_backing_tokens_failure(mediaHostStream.producers, mediaHostStream.count);
     if (!why || why == SWITCH_GPU_BACKING_WRITER_FAILED)
-        panic("SwitchDisplay: windows B and C's set was written from host1x's syncpoint filter, and its frame was then "
-              "lost (%d, its producers' %d)",
+        panic("SwitchDisplay: windows B and C's set was written by host1x, and its frame was then lost (%d, its "
+              "producers' %d)",
               status, why);
-    IOLog(
-        "SwitchDisplay: windows B and C's set was written from host1x's syncpoint filter, whose completion then failed "
-        "(%d): shown as done\n",
-        status);
+    IOLog("SwitchDisplay: windows B and C's set was written by host1x, whose completion then failed (%d, its %s "
+          "producers' %d): shown as done\n",
+          status, bridgeWhy ? "GPU" : "engine", why);
     return 0;
 }
 
-// writeCompletionFlip's, on the completion's thread with interrupts off.
+bool mediaFlipWrittenByStream() const
+{
+    const uint32_t generation = mediaFlip.generation();
+    return generation && __atomic_load_n(&mediaHostWrote, __ATOMIC_RELAXED) == generation;
+}
+
+// writeCompletionFlip's, on the completion's thread with interrupts off: the set the stream wrote is claimed here.
 void writeMediaFlip(int status)
 {
+    if (mediaFlipWrittenByStream()) {
+        __atomic_store_n(&mediaHostWrote, 0u, __ATOMIC_RELAXED);
+        if (!gPanicRestore.panicking && mediaFlip.claim(0)) {
+            stampMediaHostFlip();
+            mediaFlip.claimed(SwitchCompletionFlip::kWritten);
+        }
+    }
     if (status || gPanicRestore.panicking)
         mediaFlip.withdraw();
 }

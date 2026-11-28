@@ -77,6 +77,14 @@ b197	SET_ATTRIBUTE_DEFAULT	0xe	-	unwritten vertex attributes read (0,0,0,1)
 b197	SET_DA_OUTPUT	0x1000	-	the vertex id counts from the draw's first vertex, as Metal's vertex_id
 b197	SET_RENDER_ENABLE_CONTROL	0x0	-	LOAD_CONSTANT_BUFFER never depends on the render enable
 b197	SET_PS_OUTPUT_SAMPLE_MASK_USAGE	0x3	-	the fragment shader's sample mask output is used, qualified by anti-aliasing
+b197	SET_SAMPLE_MASK	0x1	-	the raster sample masks apply and the colour target's does not, as the golden context (sw_method_init.bin) sets it; a probe draw sets it back (probe_restores.h)
+b197	SET_COLOR_TARGET_SAMPLE_MASK	0xffff	-	every colour sample, as the golden context; a probe draw sets it back
+b197	SET_CONSTANT_COLOR_RENDERING	0x0	-	the pixel program writes the colour (GM20B writes 0,0,0,1 with it on: HW Test gpu.x1.constant_colour); a probe draw sets it back
+b197	SET_CONSTANT_COLOR_RENDERING_RED	0x0	-	the golden context's; a probe draw sets it back
+b197	SET_CONSTANT_COLOR_RENDERING_GREEN	0x0	-	the golden context's; a probe draw sets it back
+b197	SET_CONSTANT_COLOR_RENDERING_BLUE	0x0	-	the golden context's; a probe draw sets it back
+b197	SET_CONSTANT_COLOR_RENDERING_ALPHA	0x0	-	the golden context's; a probe draw sets it back
+b197	SET_PIPELINE_SHADER(5)	0x51	-	the pixel stage on, as the golden context; a stage-off state turns it off and back (its restore words), as does a probe draw
 b197	SET_PRIM_CIRCULAR_BUFFER_THROTTLE	0x3fffff	-	pre-Volta primitive buffer throttle NVK takes from nvc0
 b197	SET_BLEND_OPT_CONTROL	0x1	-	float pixels whose blend leaves the target unchanged may be killed
 b197	SET_BLEND_FLOAT_OPTION	0x1	-	0 * anything is 0 in float blends, as Metal's (the golden context holds 0)

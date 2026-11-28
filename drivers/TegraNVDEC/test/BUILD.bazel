@@ -240,6 +240,12 @@ host_test(
     ],
 )
 
+host_test(
+    name = "tegra_nvdec_lock_scope_source_test",
+    srcs = ["tegra_nvdec_lock_scope_source_test.cpp"],
+    data = ["//drivers/TegraNVDEC:TegraNVDECUserClient.cpp"],
+)
+
 # TegraNVDECCancel.cpp on threads: NVJPG's gate takes the shared power lock while NVDEC's falcon reboots and proves
 # itself after a cancellation, under a hold of NVDEC's gate; parking an engine that did not come back takes the lock.
 host_shims(

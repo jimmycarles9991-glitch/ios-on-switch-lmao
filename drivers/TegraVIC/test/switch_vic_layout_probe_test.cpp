@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 #include <vector>
 #include "../SwitchVICLayoutProbe.h"
+#include "vic_model.h"
 extern "C" {
 #include "../../SwitchVideoDecoders/AVD/BlockLinear.h"
 }
@@ -21,6 +22,7 @@ std::vector<uint8_t> engine(const Case &c, uint32_t law, bool wholeBlocks = fals
     std::vector<uint8_t> source(kBufferBytes), destination(kBufferBytes, kPoison);
     fillSource(source.data(), c);
     const Layout s = layout(c, false), d = layout(c, true);
+    const uint32_t sourceLaw = c.sourceBlockHeightLog2 == kPitch ? kPitchLaw : c.sourceBlockHeightLog2;
     for (uint32_t p = 0; p < d.planes; p++) {
         const Plane &from = s.plane[p], &to = d.plane[p];
         if (wholeBlocks)
@@ -29,7 +31,7 @@ std::vector<uint8_t> engine(const Case &c, uint32_t law, bool wholeBlocks = fals
             for (uint32_t x = 0; x < to.rowBytes; x++) {
                 const uint64_t at = to.offset + offsetUnder(law, x, y, to.pitch);
                 if (at < kBufferBytes)
-                    destination[at] = source[from.offset + uint64_t(y) * from.pitch + x];
+                    destination[at] = source[from.offset + offsetUnder(sourceLaw, x, y, from.pitch)];
             }
         }
     }
@@ -74,7 +76,7 @@ TEST(SwitchVICLayoutProbe, EveryCaseFitsItsBuffersAndBuildsWithTheShippedTraits)
 {
     for (uint32_t i = 0; i < SWITCH_VIC_LAYOUT_PROBE_CASES; i++) {
         const Case &c = kCases[i];
-        EXPECT_EQ(c.blockHeightLog2 == kPitch, i < kControls) << i;
+        EXPECT_EQ(c.blockHeightLog2 == kPitch && c.sourceBlockHeightLog2 == kPitch, i < kControls) << i;
         for (const bool destination : {false, true}) {
             const Layout l = layout(c, destination);
             const Plane &last = l.plane[l.planes - 1];
@@ -94,6 +96,37 @@ TEST(SwitchVICLayoutProbe, EveryCaseFitsItsBuffersAndBuildsWithTheShippedTraits)
         EXPECT_EQ(TEGRA_VIC_GET(job.config, TEGRA_VIC_OUTPUT_SURFACE, SURF_BLK_KIND),
                   c.blockHeightLog2 == kPitch ? uint64_t(TEGRA_VIC_BLK_PITCH) : uint64_t(TEGRA_VIC_BLK_16Bx2));
     }
+}
+
+// The read case through VIC's builder and the unit's model: the 16-GOB BGRA source, read in place by the GOB law, lands
+// in the pitch destination byte for byte.
+TEST(SwitchVICLayoutProbe, TheBlockLinearReadCaseCopiesByteForByteInTheModel)
+{
+    const Case &c = kCases[SWITCH_VIC_LAYOUT_PROBE_CASES - 1];
+    ASSERT_EQ(c.sourceBlockHeightLog2, 4u);
+    std::vector<uint8_t> source(kBufferBytes), destination(kBufferBytes, kPoison);
+    fillSource(source.data(), c);
+    constexpr uint64_t kIn = 0x40000000, kOut = 0x40100000;
+    const TegraVICImage in = image(c, false, kIn), out = image(c, true, kOut);
+    ASSERT_TRUE(in.blockLinear);
+    TegraVICOp op = {};
+    op.srcW = uint64_t(c.width) << 16;
+    op.srcH = uint64_t(c.height) << 16;
+    op.dstW = c.width;
+    op.dstH = c.height;
+    op.nearest = 1;
+    TegraVICJob job;
+    ASSERT_EQ(tegra_vic_build(&in, &out, &op, &kTegraVICTraits, 0x1000, 0x2000, &job), nullptr);
+    VicModel model{};
+    model.region[0] = {kIn, source.data(), source.size()};
+    model.region[1] = {kOut, destination.data(), destination.size()};
+    model.regions = 2;
+    vic_model_run(&model, &job);
+    EXPECT_EQ(model.faults + model.clipped, 0u);
+    const SwitchVICLayoutResult r = judge(c, destination);
+    EXPECT_EQ(r.mismatches, 0u);
+    EXPECT_EQ(r.outsideWritten, 0u);
+    EXPECT_TRUE(r.matchedLaws >> kPitchLaw & 1);
 }
 
 TEST(SwitchVICLayoutProbe, ARightEngineReadsBackUnderItsLawAlone)
@@ -148,9 +181,9 @@ TEST(SwitchVICLayoutProbe, AFailedControlMarksTheProbeBroken)
     reply.results[3].mismatches = 1;
     summarise(&reply);
     EXPECT_EQ(reply.controlsClean, 1u);
-    EXPECT_EQ(reply.cleanCases, 0x37u);
+    EXPECT_EQ(reply.cleanCases, 0x77u);
     reply.results[1].status = -5;
     summarise(&reply);
     EXPECT_EQ(reply.controlsClean, 0u);
-    EXPECT_EQ(reply.cleanCases, 0x35u);
+    EXPECT_EQ(reply.cleanCases, 0x75u);
 }

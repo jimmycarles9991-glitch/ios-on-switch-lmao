@@ -38,6 +38,21 @@ int check_bootstrap17(kauth_cred_t credential, int sandbox_result)
     SWITCH_BOOTSTRAP_MAC_CHECK_WITH_CRED_17(false, credential, false, file_check_mmap, sandbox_result);
     return error;
 }
+
+int skip_sandbox_evals;
+bool skip_sandbox_result;
+bool eval_skip_sandbox()
+{
+    ++skip_sandbox_evals;
+    return skip_sandbox_result;
+}
+
+int check_lazy17(int sandbox_result)
+{
+    int error = 0;
+    SWITCH_BOOTSTRAP_MAC_CHECK_17(eval_skip_sandbox(), false, file_check_mmap, sandbox_result);
+    return error;
+}
 #define MAC_CHECK_CALL(...) ((void)0)
 #define MAC_CHECK_RSLT(...) ((void)0)
 #include "app_code_mac_27.h"
@@ -53,6 +68,13 @@ int check_bootstrap27(kauth_cred_t credential, int sandbox_result)
 {
     int error = 0;
     SWITCH_BOOTSTRAP_MAC_CHECK_WITH_CRED_27(false, credential, false, file_check_mmap, sandbox_result);
+    return error;
+}
+
+int check_lazy27(int sandbox_result)
+{
+    int error = 0;
+    SWITCH_BOOTSTRAP_MAC_CHECK_27(eval_skip_sandbox(), false, file_check_mmap, sandbox_result);
     return error;
 }
 }
@@ -101,5 +123,32 @@ TEST(SwitchAppCodeMac, SignedMappingOnlySkipsSandboxForAnEmptyRegisteredSlot)
         EXPECT_EQ(sandbox_calls, 3);
         EXPECT_EQ(amfi_calls, 5);
         EXPECT_EQ(other_calls, 5);
+    }
+}
+
+TEST(SwitchAppCodeMac, BootstrapMacCheckEvaluatesSkipSandboxLazilyOnDenialOnly)
+{
+    for (auto check : {check_lazy17, check_lazy27}) {
+        amfi_calls = sandbox_calls = other_calls = skip_sandbox_evals = 0;
+        skip_sandbox_result = true;
+        other_result = 0;
+        EXPECT_EQ(check(0), 80);
+        EXPECT_EQ(sandbox_calls, 1);
+        EXPECT_EQ(skip_sandbox_evals, 0);
+
+        EXPECT_EQ(check(13), 80);
+        EXPECT_EQ(sandbox_calls, 2);
+        EXPECT_EQ(skip_sandbox_evals, 1);
+
+        skip_sandbox_result = false;
+        EXPECT_EQ(check(13), 13);
+        EXPECT_EQ(sandbox_calls, 3);
+        EXPECT_EQ(skip_sandbox_evals, 2);
+
+        skip_sandbox_result = true;
+        other_result = 22;
+        EXPECT_EQ(check(13), 22);
+        EXPECT_EQ(skip_sandbox_evals, 3);
+        other_result = 0;
     }
 }

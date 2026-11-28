@@ -123,16 +123,17 @@ class SwitchPD : public IOService {
 
     IOWorkLoop *loop = nullptr;
     IOInterruptEventSource *alert = nullptr;
-    IOTimerEventSource *window = nullptr, *negoTimer = nullptr;
+    IOTimerEventSource *window = nullptr, *negoTimer = nullptr, *railTimer = nullptr;
     switchpd::Listener listeners[switchpd::kMaxListeners] = {};
     unsigned listenerCount = 0;
     SwitchPDState state = {};
     switch_pd_phase phase = SWITCH_PD_EMPTY;
     bool allowSource = false, switchesOn = false, vbusRailOn = false, vconnOn = false, vconnSwap = false,
          sawDetach = false, stuck = false;
+    bool railRampPending = false, railRampVconn = false, railRampSwitches = false;
     bool reportedReadFailure = false, reportedSwitchFailure = false;
     bool asleepSinkOnly = false;  // SC7 holds an empty or canceled startup sink-only until resume
-    bool resetPending = false, explicitContract = false;
+    bool resetPending = false, startResetPending = false, explicitContract = false;
     enum class PrSwap : uint8_t { None, WaitingReady, Sent, RetryWait, Done };
     PrSwap prSwap = PrSwap::None;
     bool prSwapRetried = false;
@@ -160,12 +161,13 @@ class SwitchPD : public IOService {
     void enter(switch_pd_phase next, const char *why);
     void setSwitches(bool on);
     bool setRails(bool vbus, bool vconn);
+    void cancelRailRamp();
     void startSourcing();
     void sendPrSwap();
     void notifyAlt(uint16_t alertBits);
     void notify();
     void stopEvents();
-    void systemReset(uint32_t settleMS, const char *why) const;
+    bool systemReset(uint32_t settleMS, const char *why);
     static int enableOcp();
     void configureRoleSwaps(bool announce);
     void setVconnSwap(bool accept);
@@ -184,6 +186,7 @@ class SwitchPD : public IOService {
     static void alertFired(OSObject *owner, IOInterruptEventSource *, int);
     static void windowFired(OSObject *owner, IOTimerEventSource *);
     static void negoFired(OSObject *owner, IOTimerEventSource *);
+    static void railRampFired(OSObject *owner, IOTimerEventSource *);
 
 public:
     IOWorkLoop *getWorkLoop() const override

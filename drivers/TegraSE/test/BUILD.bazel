@@ -1,0 +1,82 @@
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_shims", "host_test")
+
+lint_files()
+
+host_test(
+    name = "tegra_se_source_test",
+    srcs = ["tegra_se_source_test.cpp"],
+    data = [
+        "//drivers/TegraSE:TegraSE.cpp",
+        "//drivers/TegraSE:TegraSESmmu.cpp",
+    ],
+)
+
+host_shims(
+    name = "kernel",
+    headers = [
+        "IOKit/IOBufferMemoryDescriptor.h",
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "IOKit/IOService.h",
+        "corecrypto/ccdigest.h",
+        "corecrypto/ccmode_impl.h",
+        "kern/clock.h",
+        "kern/sched_prim.h",
+        "kern/thread.h",
+        "libkern/crypto/aes.h",
+        "libkern/crypto/crypto_internal.h",
+        "libkern/crypto/sha2.h",
+        "machine/machine_routines.h",
+        "os/log.h",
+    ],
+    stubs = "tegra_se_stubs.h",
+)
+
+# Bring-up against a register model of both engines: an engine that never ends an operation is off for the boot and
+# nothing after it waits for it.
+host_test(
+    name = "tegra_se_bringup_test",
+    srcs = [
+        "tegra_se_bringup_test.cpp",
+        "tegra_se_model.h",
+        "//drivers/ArmGIC:SwitchInterrupts.h",
+        "//drivers/TegraSE:TegraSE.h",
+        "//drivers/TegraSE:TegraSESmmu.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchDMA:SwitchDMABuffer.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+        "//kits/SwitchRefusal:SwitchRefusal.h",
+        "//kits/SwitchTime:SwitchTime.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraSE:TegraSE.cpp"],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+    deps = [":kernel"],
+)
+
+# A debug kernel's timing run against the same model: an engine that never ends one of the run's operations is off and
+# the run goes on without it.
+host_test(
+    name = "tegra_se_timing_test",
+    srcs = [
+        "tegra_se_timing_test.cpp",
+        "tegra_se_model.h",
+        "//drivers/ArmGIC:SwitchInterrupts.h",
+        "//drivers/TegraSE:TegraSE.h",
+        "//drivers/TegraSE:TegraSESmmu.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchDMA:SwitchDMABuffer.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+        "//kits/SwitchRefusal:SwitchRefusal.h",
+        "//kits/SwitchTime:SwitchTime.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraSE:TegraSE.cpp"],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+    deps = [":kernel"],
+)

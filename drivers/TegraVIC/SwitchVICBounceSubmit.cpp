@@ -4,6 +4,7 @@
 #include "SwitchVICBouncePool.h"
 #include "SwitchVICOverwrite.h"
 #include "SwitchVICSurfaceAccess.h"
+#include "SwitchVICTiledDst.h"
 #include "SwitchNativeVICImage.h"
 #include "SwitchVICEvents.h"
 #include "SwitchVICJobs.h"
@@ -146,7 +147,7 @@ int switch_vic_bounce_submit(const TegraVICSurface *source, const TegraVICSurfac
     const bool sharedDescriptor = plan->readsSource && source->memory == destination->memory;
     const bool alias = sharedDescriptor && source->baseOffset == destination->baseOffset &&
                        source->desc.length <= destination->desc.length;
-    int error = switch_vic_surface_access(destination, true, &work->access[1]);
+    int error = switch_vic_surface_access_destination(destination, &work->access[1], dstReserve);
     if (!error && plan->readsSource && !alias) {
         const int native = switch_native_surface_acquire(source, &work->native, false);
         if (native == -2 || native == -95 || native == SWITCH_GPU_BACKING_STALE)
@@ -160,22 +161,33 @@ int switch_vic_bounce_submit(const TegraVICSurface *source, const TegraVICSurfac
     }
     auto &sourceAccess = work->access[alias ? 1 : 0];
     const TegraVICTraits *traits = tegra_vic_traits();
+    SwitchVICTiledDst tiledSrc = {};
+    const bool directTiledSrc =
+        plan->readsSource && !work->native.owner && !sharedDescriptor &&
+        switch_vic_tiled_src(source, sourceAccess.backing, sourceAccess.offset, traits, &tiledSrc);
     const bool bounceSrc =
-        plan->readsSource && !work->native.owner &&
+        plan->readsSource && !work->native.owner && !directTiledSrc &&
         (sharedDescriptor || tegra_vic_bounce_needed(&source->desc, tegra_vic_pitch_align(traits, true)) == 0 ||
          tiled(sourceAccess.backing));
-    const bool bounceDst = tegra_vic_bounce_needed(&destination->desc, tegra_vic_pitch_align(traits, false)) == 0 ||
-                           tiled(work->access[1].backing);
-    error = switch_vic_bounce_acquire(bounceSrc ? &source->desc : nullptr, bounceDst ? &destination->desc : nullptr,
-                                      &work->slot);
-    if (error) {
-        release(work);
-        return error;
+    SwitchVICTiledDst tiledDst = {};
+    const bool directTiledDst =
+        !sharedDescriptor &&
+        switch_vic_tiled_dst(destination, work->access[1].backing, work->access[1].offset, plan, traits, &tiledDst);
+    const bool bounceDst =
+        !directTiledDst && (tegra_vic_bounce_needed(&destination->desc, tegra_vic_pitch_align(traits, false)) == 0 ||
+                            tiled(work->access[1].backing));
+    if (bounceSrc || bounceDst) {
+        error = switch_vic_bounce_acquire(bounceSrc ? &source->desc : nullptr, bounceDst ? &destination->desc : nullptr,
+                                          &work->slot);
+        if (error) {
+            release(work);
+            return error;
+        }
     }
-    auto &sourceBuffer = work->slot->buffers[0];
-    auto &destinationBuffer = work->slot->buffers[1];
-    auto *input = work->native.owner ? work->native.native : bounceSrc ? sourceBuffer.backing : sourceAccess.backing;
-    auto *output = bounceDst ? destinationBuffer.backing : work->access[1].backing;
+    auto *sourceBuffer = work->slot ? &work->slot->buffers[0] : nullptr;
+    auto *destinationBuffer = work->slot ? &work->slot->buffers[1] : nullptr;
+    auto *input = work->native.owner ? work->native.native : bounceSrc ? sourceBuffer->backing : sourceAccess.backing;
+    auto *output = bounceDst ? destinationBuffer->backing : work->access[1].backing;
     work->maps[1] = bounceDst ? nullptr : switch_vic_mapping_acquire(output, true);
     if (plan->readsSource && !bounceSrc)
         work->maps[0] = switch_vic_mapping_acquire(input, false);
@@ -183,17 +195,23 @@ int switch_vic_bounce_submit(const TegraVICSurface *source, const TegraVICSurfac
         release(work);
         return -12;
     }
-    const uint64_t dstAddress = switch_vic_mapping_address(bounceDst ? destinationBuffer.mapping : work->maps[1]);
+    const uint64_t dstAddress = switch_vic_mapping_address(bounceDst ? destinationBuffer->mapping : work->maps[1]);
     TegraVICImage src = {}, dst = {};
-    const char *why = tegra_vic_image_from(bounceDst ? &destinationBuffer.desc : &destination->desc,
-                                           dstAddress + (bounceDst ? 0 : work->access[1].offset), &dst);
+    const char *why = bounceDst ? tegra_vic_image_from(&destinationBuffer->desc, dstAddress, &dst)
+                      : directTiledDst
+                          ? switch_vic_tiled_image(destination, tiledDst, dstAddress, &dst)
+                          : tegra_vic_image_from(&destination->desc, dstAddress + work->access[1].offset, &dst);
     if (chromaSite)
         dst.chromaSite = chromaSite;
     if (!why && plan->readsSource) {
-        const uint64_t address = switch_vic_mapping_address(bounceSrc ? sourceBuffer.mapping : work->maps[0]);
-        why = work->native.owner ? switch_native_vic_image(work->native, address, &src)
-                                 : tegra_vic_image_from(bounceSrc ? &sourceBuffer.desc : &source->desc,
-                                                        address + (bounceSrc ? 0 : sourceAccess.offset), &src);
+        const uint64_t address = switch_vic_mapping_address(bounceSrc ? sourceBuffer->mapping : work->maps[0]);
+        if (work->native.owner)
+            why = switch_native_vic_image(work->native, address, &src);
+        else if (directTiledSrc)
+            why = switch_vic_tiled_image(source, tiledSrc, address, &src);
+        else
+            why = tegra_vic_image_from(bounceSrc ? &sourceBuffer->desc : &source->desc,
+                                       address + (bounceSrc ? 0 : sourceAccess.offset), &src);
     }
     for (uint32_t i = 0; !why && i < plan->count; ++i) {
         auto operation = plan->op[i];
@@ -226,10 +244,10 @@ int switch_vic_bounce_submit(const TegraVICSurface *source, const TegraVICSurfac
     switch_gpu_event_submission dependencies = {};
     switch_vic_events_submission(events, false, &dependencies);
     if (bounceSrc)
-        error = copy(original(*source, sourceAccess), scratch(sourceBuffer), work, dependencies, dstReserve);
+        error = copy(original(*source, sourceAccess), scratch(*sourceBuffer), work, dependencies, dstReserve);
     if (!error && bounceDst && !switch_vic_overwrites(*plan, destination->desc))
         error =
-            copy(original(*destination, work->access[1]), scratch(destinationBuffer), work, dependencies, dstReserve);
+            copy(original(*destination, work->access[1]), scratch(*destinationBuffer), work, dependencies, dstReserve);
     switch_gpu_backing_use uses[4] = {{output, SWITCH_GPU_BACKING_WRITE, 0}};
     uint32_t useCount = 1;
     if (plan->readsSource)
@@ -256,7 +274,7 @@ int switch_vic_bounce_submit(const TegraVICSurface *source, const TegraVICSurfac
     if (!error && bounceDst) {
         switch_gpu_event_submission final = {};
         switch_vic_events_submission(events, true, &final);
-        error = copy(scratch(destinationBuffer), original(*destination, work->access[1]), work, final, dstReserve);
+        error = copy(scratch(*destinationBuffer), original(*destination, work->access[1]), work, final, dstReserve);
         if (!error)
             switch_vic_events_commit(events);
     }

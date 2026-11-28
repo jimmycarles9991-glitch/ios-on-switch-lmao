@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Tessellated draws whose fragment function reads the colour it writes keep Metal's order on the driver: patch order,

@@ -13,9 +13,6 @@ __attribute__((objc_externally_retained)) void useTexture(gm20b::CommandBuffer *
         t = t->_levelsOwner;
     if (!t)
         return;
-#if SWITCH_METAL_DIAGNOSTICS
-    t->_raw.probeWritten |= write;
-#endif
     rc->use(t->_raw, write);
     if (t->_buffer)
         rc->use(t->_buffer->_raw, write);

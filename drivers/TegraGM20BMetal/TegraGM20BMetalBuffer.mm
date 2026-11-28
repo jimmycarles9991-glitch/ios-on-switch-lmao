@@ -16,7 +16,7 @@
     void *bytes = _raw.cpu;
     const NSUInteger length = NSUInteger(_raw.length);
     if (_heap && !_raw.arena) {
-        _heap->_used -= _heapBytes;
+        _heap->_used.fetch_sub(_heapBytes, std::memory_order_relaxed);
         gm20bHeapForget(_heap, _raw.va);
     }
     if (gRM)
@@ -40,7 +40,10 @@
 {
     if (!_raw.hostVisible)
         return nullptr;
-    return [self invalidateForCpu] ? _raw.cpu : nullptr;
+    if (![self invalidateForCpu])
+        return nullptr;
+    _raw.markCpuDirty();
+    return _raw.cpu;
 }
 
 - (NSUInteger)length
@@ -86,6 +89,7 @@
 - (void)didModifyRange:(NSRange)range
 {
     (void)range;  // the draws that read it clean what they read (command_buffer.h CommandBuffer::clean)
+    _raw.markCpuDirty();
 }
 
 // A buffer of its own keeps its pages while it lives: Volatile and Empty keep the contents (a later NonVolatile answers what
@@ -112,7 +116,7 @@
     _aliasable = true;
     if (_raw.arena)
         gRM->raw->makeArenaAliasable(_raw.span, _raw.lease);
-    _heap->_used -= _heapBytes;
+    _heap->_used.fetch_sub(_heapBytes, std::memory_order_relaxed);
     _heapBytes = 0;
 }
 
@@ -125,6 +129,15 @@
 {
     return nullptr;
 }
+
+#if SWITCH_METAL_DIAGNOSTICS
+// hw_test_app's gpu.path.use_ranges: whether the buffer lives in a VOL=1 write-combined chunk, a resource-set member no
+// CPU lease takes out, which no job lists as a use of its own
+- (NSNumber *)switchMetalBypassesL2
+{
+    return @(_raw.wc && _raw.gpuVolatile);
+}
+#endif
 
 @end
 

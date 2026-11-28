@@ -256,4 +256,44 @@ static inline size_t switch_cpu_tasks_format(char *out, size_t size, const struc
     return switch_cpu_put(size, at, snprintf(out + at, size - at, "), untracked %u", e->untracked));
 }
 
+/* Most user + system first (insertion sort: a boot's few hundred processes, once). */
+static inline void switch_cpu_tasks_sort(struct switch_cpu_task *tasks, uint32_t count)
+{
+    for (uint32_t i = 1; i < count; i++) {
+        const struct switch_cpu_task t = tasks[i];
+        uint32_t j = i;
+
+        for (; j > 0 && tasks[j - 1].user + tasks[j - 1].sys < t.user + t.sys; j--) {
+            tasks[j] = tasks[j - 1];
+        }
+        tasks[j] = t;
+    }
+}
+
+/* "SpringBoard[30] 1200+300, ..." from tasks[first] on, as many as fit in `size`; returns the first one left out. */
+static inline uint32_t switch_cpu_totals_format(char *out, size_t size, const struct switch_cpu_task *tasks,
+                                                uint32_t count, uint32_t first, uint32_t numer, uint32_t denom)
+{
+    size_t at = 0;
+    uint32_t i = first;
+
+    if (size == 0) {
+        return first;
+    }
+    out[0] = '\0';
+    for (; i < count; i++) {
+        char entry[64];
+        const int n = snprintf(entry, sizeof(entry), "%s%s[%d] %llu+%llu", i > first ? ", " : "", tasks[i].name,
+                               tasks[i].pid, (unsigned long long)switch_cpu_ms(tasks[i].user, numer, denom),
+                               (unsigned long long)switch_cpu_ms(tasks[i].sys, numer, denom));
+
+        if (n < 0 || at + (size_t)n >= size) {
+            break;
+        }
+        __builtin_memcpy(out + at, entry, (size_t)n + 1);
+        at += (size_t)n;
+    }
+    return i;
+}
+
 #endif /* SWITCH_SCHED_CPU_H */

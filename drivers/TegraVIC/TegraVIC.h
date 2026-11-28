@@ -84,7 +84,12 @@ struct SwitchVICPowerUse {
 
 #if TEGRA_VIC_STATS
 struct IOExternalMethodArguments;
+struct task;
 int switch_vic_kernel_test_call(const IOExternalMethodArguments *arguments);  // an IOReturn
+// The probes run only for a process holding this entitlement (big/frame's SWITCH_GPU_PROBES_ENTITLEMENT, which HW
+// Test's apps hold): the MC fault probe arms the MC error filter, so any other app must not reach it.
+#define SWITCH_VIC_PROBES_ENTITLEMENT "com.brunostjohn.switch.gpu-probes"
+bool switch_vic_probes_entitled(struct task *task);
 #endif
 
 #endif

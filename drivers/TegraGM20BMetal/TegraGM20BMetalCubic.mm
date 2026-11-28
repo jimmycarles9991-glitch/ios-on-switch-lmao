@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 #import "TegraGM20BMetalInternal.h"
-#import "TegraGM20BMetalStatesKey.h"
+#import "TegraGM20BMetalPipelineVariants.h"
 #include "fragment_tests.h"
 #include "render_variant.h"
 #include "shader_test_push.h"
@@ -8,6 +8,7 @@
 static void cubicBinds(__unsafe_unretained SwitchMetalRenderEncoder *encoder, const gm20b::Pipeline &pl,
                        gm20b::CubicBinds &b)
 {
+    SwitchMetalRenderSlots &slots = encoder->_cb->_renderSlots;
     b.samplers.clear();
     b.textures.clear();
     encoder->_cubicTextures[0] = {};
@@ -19,7 +20,7 @@ static void cubicBinds(__unsafe_unretained SwitchMetalRenderEncoder *encoder, co
             e.samplerKind != gm20b::SamplerSlot || (e.stage != 1 && e.stage != 2) || e.sampler >= 16)
             continue;
         encoder->_formSamplers[e.stage - 1] |= uint16_t(1u << e.sampler);
-        __unsafe_unretained SwitchMetalSampler *s = encoder->_samp[e.stage - 1][e.sampler];
+        __unsafe_unretained SwitchMetalSampler *s = slots.samp[e.stage - 1][e.sampler];
         if (!s || !s->_raw.desc.cubic)
             continue;
         const gm20b::SamplerDesc &d = s->_raw.desc;
@@ -31,7 +32,7 @@ static void cubicBinds(__unsafe_unretained SwitchMetalRenderEncoder *encoder, co
         if (e.kind != gm20b::EntryTexture || e.slot >= gm20b::kStageTextures)
             continue;
         gm20b::addSlot(encoder->_cubicTextures[e.stage - 1], e.slot);
-        __unsafe_unretained SwitchMetalTexture *t = encoder->_tex[e.stage - 1][e.slot];
+        __unsafe_unretained SwitchMetalTexture *t = slots.tex[e.stage - 1][e.slot];
         if (t && std::none_of(b.textures.begin(), b.textures.end(), [&](const auto &c) {
                 return c.slot == e.slot && c.stage == e.stage;
             }))
@@ -47,71 +48,33 @@ static void cubicBinds(__unsafe_unretained SwitchMetalRenderEncoder *encoder, co
 
 void packedVariants(SwitchMetalPipeline *p, const gm20b::PackRun &run)
 {
-    std::lock_guard<gm20b::Mutex> lock(p->_variantLock);
-    for (const auto &[name, pl] : gRM->raw->variantPipelines(run, p->_caTransform)) {
-        auto variant = std::make_shared<gm20b::Variant<gm20b::Pipeline>>();
-        variant->publish(pl);
-        p->_variants.emplace(name, std::move(variant));
+    // p is unshared until gm20bPipelineShell returns it; a variant is placed when a draw first selects its name.
+    p->_packRun = run;
+    p->_hasPackVariants = false;
+    for (uint32_t i = 0; i < run.records; ++i) {
+        if (run.first[i].flags & gm20b::PipelineVariantRecord) {
+            p->_hasPackVariants = true;
+            break;
+        }
     }
 }
 
-// A variant the compiler refused (`failure` empty) or no compiler made: the command buffers that draw it fail, and its
-// key is named once
-static void settleUnmade(gm20b::Variant<gm20b::Pipeline> &variant, const std::string &key, const std::string &failure)
-{
-    SWITCH_REFUSE_DETAIL("gm20b", "state.variant", gm20b::Pack::fnv(key.data(), key.size()),
-                         "the shader compiler %s the variant %s%s%s: the command buffers that draw it fail",
-                         failure.empty() ? "refused" : "made none of", key.c_str(), failure.empty() ? "" : ": ",
-                         failure.c_str());
-    if (failure.empty())
-        variant.publish(nullptr);
-    else
-        variant.fail();
-}
-
-// Binding and pass preparation starts asynchronous variant work. Sampled variants can use stand-ins while
-// pending; other variants hold the queue head until they publish or fail (TegraGM20BMetalSchedule.mm variantReadiness).
-// A compiler's answer about a key holds for the process: refused or not made, the variant stays so, and keeps the
-// object plans name. An ask that found no compiler to ask is no answer: the next pass that needs the variant asks
-// again, and that ask checks the compiler as a state's creation does (TegraGM20BMetalComplete.mm Completion::request).
+// A draw's first select of a name places a tier-0 record there and queues any other to the placer
+// (TegraGM20BMetalPipelineVariants.mm). Sampled variants can use stand-ins while pending; other variants hold the queue head until they publish or fail (TegraGM20BMetalSchedule.mm
+// variantReadiness). A variant failed for want of a compiler is asked again by the next pass that needs it (reopen).
 static gm20b::Variant<gm20b::Pipeline> *renderVariant(SwitchMetalPipeline *p, const gm20b::RenderVariant &forms)
 {
-    const std::string name = forms.name();
     std::shared_ptr<gm20b::Variant<gm20b::Pipeline>> variant;
     {
-        std::lock_guard<gm20b::Mutex> lock(p->_variantLock);
-        auto [at, inserted] = p->_variants.try_emplace(name);
+        std::lock_guard<gm20b::UnfairMutex> lock(p->_variantLock);
+        auto [at, inserted] = p->_variants.try_emplace(forms.name());
         if (inserted)
             at->second = std::make_shared<gm20b::Variant<gm20b::Pipeline>>();
         else if (!at->second->reopen())
             return at->second.get();
         variant = at->second;
     }
-    const std::string key = gm20bStateKey(p) + name;
-    gm20b::Completion *completion = gRM->completion.get();
-    if (!completion) {
-        variant->failUnserved();
-        return variant.get();
-    }
-    gm20b::Completion::Ask request;
-    request.descriptor = gm20bMadeFrom(p);
-    request.facade = request.descriptor;
-    request.key = key;
-    request.caTransform = p->_caTransform;
-    request.own = !p->_packable;
-    request.variant = forms;
-    request.resolveDescriptor = true;
-    request.bindWait = [variant](std::function<bool()> wait) {
-        variant->setWait(std::move(wait));
-    };
-    completion->askVariant(std::move(request), [variant, key](gm20b::Pipeline *made, const std::string &failure) {
-        if (made)
-            variant->publish(made);
-        else if (failure == gm20b::Completion::kNoCompilerComes)
-            variant->failUnserved();
-        else
-            settleUnmade(*variant, key, failure);
-    });
+    gm20bPlaceVariant(p, variant, forms);
     return variant.get();
 }
 
@@ -252,10 +215,13 @@ static bool sameForms(const gm20b::RenderVariant &a, const gm20b::RenderVariant 
 static gm20b::Variant<gm20b::Pipeline> *preparedVariant(__unsafe_unretained SwitchMetalRenderEncoder *e,
                                                         const gm20b::RenderVariant &forms)
 {
-    for (const SwitchMetalPreparedVariant &prepared : e->_prepared)
-        if (prepared.pipe == e->_pipe && sameForms(prepared.forms, forms))
-            return prepared.variant;
-    SwitchMetalPreparedVariant &slot = e->_prepared[e->_preparedNext++ % e->_prepared.size()];
+    SwitchMetalRenderSlots &slots = e->_cb->_renderSlots;
+    if (slots.preparedUsed)
+        for (const SwitchMetalPreparedVariant &prepared : slots.prepared)
+            if (prepared.pipe == e->_pipe && sameForms(prepared.forms, forms))
+                return prepared.variant;
+    slots.preparedUsed = true;
+    SwitchMetalPreparedVariant &slot = slots.prepared[slots.preparedNext++ % slots.prepared.size()];
     slot.pipe = e->_pipe;
     slot.forms = forms;
     slot.variant = renderVariant(e->_pipe, forms);
@@ -266,49 +232,61 @@ static gm20b::Variant<gm20b::Pipeline> *preparedVariant(__unsafe_unretained Swit
 
 - (void)prepareDrawnRecord
 {
+    SwitchMetalRenderSlots &slots = _cb->_renderSlots;
+    gm20b::RenderVariant &forms = slots.forms;
     gm20b::Pipeline *base = !_cb->_encFailed && _pipe ? _pipe->_raw : nullptr;
     _formVariant = _sampledVariant = nullptr;
     _sampledSlots = {};
     if (!base || !(_cubicMask[0] | _cubicMask[1])) {
-        _forms.cubic.samplers.clear();
-        _forms.cubic.textures.clear();
+        forms.cubic.samplers.clear();
+        forms.cubic.textures.clear();
         _cubicTextures[0] = {};
         _cubicTextures[1] = {};
     } else {
-        cubicBinds(self, *base, _forms.cubic);
+        cubicBinds(self, *base, forms.cubic);
     }
-    _forms.written.clear();
-    _forms.fragmentTests = 0;
-    _forms.xrSlots = 0;
+    forms.written.clear();
+    forms.fragmentTests = 0;
+    forms.xrSlots = 0;
     if (!base) {
         _formSamplers[0] = _formSamplers[1] = 0;
+        _hasForms = false;
         return;
     }
+    SwitchMetalPass &pass = _cb->_passes.own(_passAt);
     // the pass's depth/stencil attachment the draw is tested against: its own, or the hidden one a pass of none is given
     // where a state set in it tests depth or stencil (depth_stencil_state.h testsHiddenZeta)
-    const uint32_t zeta = _zeta ? _zeta : _cb->_passes[_passAt].testsHiddenZeta ? gm20b::kZetaFormat : 0;
-    _forms.fragmentTests = gm20b::drawnTests(base->fetchBits && base->depthFormat && !base->storageBits,
-                                             base->rec->shaderTests, _ds, gm20b::testedZeta(zeta));
+    const uint32_t zeta = _zeta ? _zeta : pass.testsHiddenZeta ? gm20b::kZetaFormat : 0;
+    forms.fragmentTests = gm20b::drawnTests(base->fetchBits && base->depthFormat && !base->storageBits,
+                                            base->rec->shaderTests, _ds, gm20b::testedZeta(zeta));
     // a Depth16Unorm a draw tests in its shader renders converted (TegraGM20BMetalRangeForms.mm depth16Tested)
-    if ((_forms.fragmentTests && gm20b::zetaHasDepth(zeta)) || (base->rec->shaderTests.flags & gm20b::kShaderTestDepth))
-        _cb->_passes[_passAt].shaderTestsDepth = true;
-    reboundTextures(*base, _tex[1], _forms.written);
-    if (!_forms.cubic.empty() || _forms.fragmentTests || !_forms.written.empty())
-        _formVariant = preparedVariant(self, _forms);
-    if (_cb->_passes[_passAt].xrPlaneBinds)
-        _sampledSlots = xrSampledSlots(*base, _tex);
-    _forms.xrSlots = gm20b::xrPairSlots(_sampledSlots[1]);
-    if (_forms.xrSlots)
-        _sampledVariant = preparedVariant(self, _forms);
+    if ((forms.fragmentTests && gm20b::zetaHasDepth(zeta)) || (base->rec->shaderTests.flags & gm20b::kShaderTestDepth))
+        pass.shaderTestsDepth = true;
+    if (forms.fragmentTests == uint8_t(gm20b::FragmentTests::StencilWrite) ||
+        (base->rec->shaderTests.flags & gm20b::kShaderTestStencil))
+        pass.testsStencil = true;
+    if (base->writtenSlots)
+        reboundTextures(*base, slots.tex[1], forms.written);
+    if (!forms.cubic.empty() || forms.fragmentTests || !forms.written.empty())
+        _formVariant = preparedVariant(self, forms);
+    if (pass.xrPlaneBinds)
+        _sampledSlots = xrSampledSlots(*base, slots.tex);
+    forms.xrSlots = gm20b::xrPairSlots(_sampledSlots[1]);
+    if (forms.xrSlots)
+        _sampledVariant = preparedVariant(self, forms);
+    _hasForms = _formVariant != nullptr || _sampledVariant != nullptr || !forms.cubic.empty() ||
+                forms.fragmentTests != 0 || !forms.written.empty() || forms.xrSlots != 0 ||
+                gm20b::anySlot(_sampledSlots[0]) || gm20b::anySlot(_sampledSlots[1]);
 }
 
 - (const gm20b::Pipeline *)drawnRecord
 {
+    SwitchMetalRenderSlots &slots = _cb->_renderSlots;
     gm20b::Pipeline *base = _pipe->_raw;
     auto *variant = _formVariant;
     std::array<gm20b::StageTextureMask, 2> standIns = {_sampledSlots[0], gm20b::pastXrPairSlots(_sampledSlots[1])};
-    if (_cb->_passes[_passAt].xrPlaneBinds) {
-        const std::array<gm20b::StageTextureMask, 2> srgb = xrSampledSlots(*base, _tex, true);
+    if (_cb->_passes.own(_passAt).xrPlaneBinds) {
+        const std::array<gm20b::StageTextureMask, 2> srgb = xrSampledSlots(*base, slots.tex, true);
         for (uint32_t stage = 0; stage < 2; stage++)
             gm20b::forEachSlot(srgb[stage], [&](uint32_t slot) {
                 gm20b::addSlot(standIns[stage], slot);
@@ -321,15 +299,17 @@ static gm20b::Variant<gm20b::Pipeline> *preparedVariant(__unsafe_unretained Swit
             standIns[1] = _sampledSlots[1];
         }
     }
-    if (gm20b::anySlot(standIns[0]) || gm20b::anySlot(standIns[1]))
+    if (gm20b::anySlot(standIns[0]) || gm20b::anySlot(standIns[1])) {
         gm20bPipelineStop(_cb, VetoShadows);
-    for (uint32_t stage = 0; stage < 2; stage++)
-        gm20b::forEachSlot(standIns[stage], [&](uint32_t slot) {
-            _cb->_xrStandIns.insert(_tex[stage][slot]);
-        });
+        for (uint32_t stage = 0; stage < 2; stage++)
+            gm20b::forEachSlot(standIns[stage], [&](uint32_t slot) {
+                _cb->_xrStandIns.insert(slots.tex[stage][slot]);
+            });
+    }
     if (base != _drawn || variant != _drawnVariant) {
         Cmd state = cmd(OpPipeline);
         state.obj = (__bridge void *)_pipe;
+        state.c = variant ? 0 : uintptr_t(base);
         state.obj2 = variant;
         [_cb record:state];
         _drawn = base;

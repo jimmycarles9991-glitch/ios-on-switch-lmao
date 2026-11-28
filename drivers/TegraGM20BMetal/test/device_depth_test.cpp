@@ -151,7 +151,7 @@ protected:
         gm20b::PassDesc pass;
         pass.color[0].texture = &target;
         pass.count = 1;
-        pass.metalDepth = metal;
+        pass.metalDraws = metal;
         gm20b::RenderEncoder *e = cb ? cb->render(pass) : nullptr;
         if (!e)
             return "no pass";
@@ -191,12 +191,12 @@ TEST_F(DeviceDepthClamp, AClampedDrawWritesNvksClampOverItsStatesClipControl)
     const size_t first = kernel_model::model.jobs.size();
     EXPECT_EQ(draw(pl, {false, true, true, false, false}), "");
     EXPECT_EQ(writes(first, kClipControl), (std::vector<uint32_t>{kClip, kClamped, kClip}));
-    EXPECT_EQ(writes(first, kClipMinZ), (std::vector<uint32_t>{kZero, kMinusInf}));
-    EXPECT_EQ(writes(first, kClipMaxZ), (std::vector<uint32_t>{kOne, kPlusInf}));
+    EXPECT_EQ(writes(first, kClipMinZ), (std::vector<uint32_t>{kZero}));
+    EXPECT_EQ(writes(first, kClipMaxZ), (std::vector<uint32_t>{kOne}));
 }
 
 // A later pass binds the state again from its registers and clips at Metal's 0 to 1, whatever the pass before clamped;
-// each pass leaves the range unbounded for the device's own passes after it
+// the channel shadows the clip depth range across passes without thrashing back to (-inf, +inf) at pass end.
 TEST_F(DeviceDepthClamp, TheNextPassStartsFromItsStatesClipControl)
 {
     gm20b::Pipeline *pl = state({0x1a00, 0x1111, kClipControl, kClip});
@@ -205,8 +205,8 @@ TEST_F(DeviceDepthClamp, TheNextPassStartsFromItsStatesClipControl)
     EXPECT_EQ(draw(pl, {true}), "");
     EXPECT_EQ(draw(pl, {false}), "");
     EXPECT_EQ(writes(first, kClipControl), (std::vector<uint32_t>{kClip, kClamped, kClip}));
-    EXPECT_EQ(writes(first, kClipMinZ), (std::vector<uint32_t>{kZero, kMinusInf, kZero, kMinusInf}));
-    EXPECT_EQ(writes(first, kClipMaxZ), (std::vector<uint32_t>{kOne, kPlusInf, kOne, kPlusInf}));
+    EXPECT_EQ(writes(first, kClipMinZ), (std::vector<uint32_t>{kZero}));
+    EXPECT_EQ(writes(first, kClipMaxZ), (std::vector<uint32_t>{kOne}));
 }
 
 constexpr uint32_t bitsOf(float f)
@@ -220,12 +220,11 @@ TEST_F(DeviceDepthClamp, AMetalPassClipsEveryDepthAtZeroToOne)
 {
     gm20b::Pipeline *pl = state({0x1a00, 0x1111, kClipControl, kClip});
     ASSERT_NE(pl, nullptr);
-    for (const auto &[near, far, bias] : {std::tuple{0.0, 1.0, 1e7f}, std::tuple{0.25, 1.75, 0.0f}}) {
-        const size_t first = kernel_model::model.jobs.size();
+    const size_t first = kernel_model::model.jobs.size();
+    for (const auto &[near, far, bias] : {std::tuple{0.0, 1.0, 1e7f}, std::tuple{0.25, 1.75, 0.0f}})
         EXPECT_EQ(draw(pl, {false}, true, near, far, bias), "");
-        EXPECT_EQ(writes(first, kClipMinZ), (std::vector<uint32_t>{kZero, kMinusInf})) << far;
-        EXPECT_EQ(writes(first, kClipMaxZ), (std::vector<uint32_t>{kOne, kPlusInf})) << far;
-    }
+    EXPECT_EQ(writes(first, kClipMinZ), (std::vector<uint32_t>{kZero}));
+    EXPECT_EQ(writes(first, kClipMaxZ), (std::vector<uint32_t>{kOne}));
 }
 
 // In clamp mode an M4 Max bounds a depth from the viewport's lower depth but at least 0 to its higher, which an unbiased
@@ -236,19 +235,19 @@ TEST_F(DeviceDepthClamp, AClampedMetalPassBoundsFromNearAtLeastZero)
     ASSERT_NE(pl, nullptr);
     size_t first = kernel_model::model.jobs.size();
     EXPECT_EQ(draw(pl, {true}, true, -0.5, 1.5), "");
-    EXPECT_EQ(writes(first, kClipMinZ), (std::vector<uint32_t>{kZero, kMinusInf}));
-    EXPECT_EQ(writes(first, kClipMaxZ), (std::vector<uint32_t>{kOne, kPlusInf}));
+    EXPECT_EQ(writes(first, kClipMinZ), (std::vector<uint32_t>{kZero}));
+    EXPECT_EQ(writes(first, kClipMaxZ), (std::vector<uint32_t>{kOne}));
     first = kernel_model::model.jobs.size();
     EXPECT_EQ(draw(pl, {true}, true, 1.75, 0.25), "");
-    EXPECT_EQ(writes(first, kClipMinZ), (std::vector<uint32_t>{bitsOf(0.25f), kMinusInf}));
-    EXPECT_EQ(writes(first, kClipMaxZ), (std::vector<uint32_t>{kOne, kPlusInf}));
+    EXPECT_EQ(writes(first, kClipMinZ), (std::vector<uint32_t>{bitsOf(0.25f)}));
+    EXPECT_EQ(writes(first, kClipMaxZ), (std::vector<uint32_t>{kOne}));
     first = kernel_model::model.jobs.size();
     EXPECT_EQ(draw(pl, {true}, true, 0.25, 0.75), "");
-    EXPECT_EQ(writes(first, kClipMaxZ), (std::vector<uint32_t>{bitsOf(0.75f), kPlusInf}));
+    EXPECT_EQ(writes(first, kClipMaxZ), (std::vector<uint32_t>{bitsOf(0.75f)}));
     pl->fragmentDepth = true;
     first = kernel_model::model.jobs.size();
     EXPECT_EQ(draw(pl, {true}, true, 0.25, 1.75), "");
-    EXPECT_EQ(writes(first, kClipMaxZ), (std::vector<uint32_t>{kOne, kPlusInf}));
+    EXPECT_EQ(writes(first, kClipMaxZ), (std::vector<uint32_t>{kOne}));
 }
 
 // An M4 Max clamps each vertex's depth to 0..1 before the bias in clamp mode, so the deepest depth it stores is 1 plus the
@@ -260,14 +259,20 @@ TEST_F(DeviceDepthClamp, AClampedMetalPassBoundsDepthAtOnePlusTheMostItsBiasAdds
     gm20b::Pipeline *pl = state({0x1a00, 0x1111, kClipControl, kClip});
     ASSERT_NE(pl, nullptr);
     const float most = 1.0f + 3e6f * 0x1p-23f;
+    uint32_t heldMin = ~0u, heldMax = ~0u;
     for (const auto &[bias, slope, clamp, top] :
          {std::tuple{0.0f, 0.0f, 0.0f, kOne}, std::tuple{3e6f, 0.0f, 0.0f, bitsOf(most)},
           std::tuple{1e7f, 0.0f, 0.25f, bitsOf(1.25f)}, std::tuple{-1e7f, 0.0f, 0.0f, bitsOf(1.75f)},
           std::tuple{0.0f, 4.0f, 0.0f, bitsOf(1.75f)}, std::tuple{1e9f, 0.0f, 0.0f, bitsOf(1.75f)}}) {
         const size_t first = kernel_model::model.jobs.size();
         EXPECT_EQ(draw(pl, {true}, true, 0.25, 1.75, bias, slope, clamp), "");
-        EXPECT_EQ(writes(first, kClipMinZ), (std::vector<uint32_t>{bitsOf(0.25f), kMinusInf})) << bias;
-        EXPECT_EQ(writes(first, kClipMaxZ), (std::vector<uint32_t>{top, kPlusInf})) << bias << " " << slope;
+        const bool same = heldMin == bitsOf(0.25f) && heldMax == top;
+        const std::vector<uint32_t> wantMin = same ? std::vector<uint32_t>{} : std::vector<uint32_t>{bitsOf(0.25f)};
+        const std::vector<uint32_t> wantMax = same ? std::vector<uint32_t>{} : std::vector<uint32_t>{top};
+        EXPECT_EQ(writes(first, kClipMinZ), wantMin) << bias;
+        EXPECT_EQ(writes(first, kClipMaxZ), wantMax) << bias << " " << slope;
+        heldMin = bitsOf(0.25f);
+        heldMax = top;
     }
 }
 
@@ -293,7 +298,7 @@ TEST_F(DeviceDepthClamp, AMetalPassBoundsDepthWithoutBindingItsStateAgain)
             gm20b::PassDesc p;
             p.color[0].texture = &target;
             p.count = 1;
-            p.metalDepth = true;
+            p.metalDraws = true;
             gm20b::RenderEncoder *e = cb->render(p);
             ASSERT_NE(e, nullptr);
             e->setPipeline(pl);
@@ -307,15 +312,21 @@ TEST_F(DeviceDepthClamp, AMetalPassBoundsDepthWithoutBindingItsStateAgain)
     }
 }
 
-// The device's own passes copy depth as it is: no bound whatever their depth range
+// The device's own passes copy depth as it is: no bound whatever their depth range, and a device pass after a Metal
+// pass unclamps the shadowed range back to (-inf, +inf)
 TEST_F(DeviceDepthClamp, TheDevicesOwnPassesStoreDepthUnbounded)
 {
     gm20b::Pipeline *pl = state({0x1a00, 0x1111, kClipControl, kClip});
     ASSERT_NE(pl, nullptr);
-    const size_t first = kernel_model::model.jobs.size();
+    size_t first = kernel_model::model.jobs.size();
     EXPECT_EQ(draw(pl, {false}, false, 0.25, 1.75), "");
     EXPECT_EQ(writes(first, kClipMinZ), std::vector<uint32_t>{});
     EXPECT_EQ(writes(first, kClipMaxZ), std::vector<uint32_t>{});
+    EXPECT_EQ(draw(pl, {false}, true, 0.0, 1.0), "");
+    first = kernel_model::model.jobs.size();
+    EXPECT_EQ(draw(pl, {false}, false, 0.25, 1.75), "");
+    EXPECT_EQ(writes(first, kClipMinZ), (std::vector<uint32_t>{kMinusInf}));
+    EXPECT_EQ(writes(first, kClipMaxZ), (std::vector<uint32_t>{kPlusInf}));
 }
 
 TEST_F(DeviceDepthClamp, AStateThatSetsNoClipControlCannotClamp)

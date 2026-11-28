@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #import "SwitchSharedEvent.h"
 #import <objc/runtime.h>
+#include <os/lock.h>
 
 @interface NSObject (SwitchSurfaceEventABI)
 - (instancetype)initWithOptions:(NSUInteger)options;
@@ -114,14 +115,15 @@
     static char listenerKey;
     id nativeListener = objc_getAssociatedObject(listener, &listenerKey);
     if (!nativeListener) {
-        @synchronized(listener) {
-            nativeListener = objc_getAssociatedObject(listener, &listenerKey);
-            if (!nativeListener) {
-                Class cls = NSClassFromString(@"IOSurfaceSharedEventListener");
-                nativeListener = [[cls alloc] initWithDispatchQueue:listener.dispatchQueue];
-                objc_setAssociatedObject(listener, &listenerKey, nativeListener, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            }
+        static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
+        os_unfair_lock_lock(&lock);
+        nativeListener = objc_getAssociatedObject(listener, &listenerKey);
+        if (!nativeListener) {
+            Class cls = NSClassFromString(@"IOSurfaceSharedEventListener");
+            nativeListener = [[cls alloc] initWithDispatchQueue:listener.dispatchQueue];
+            objc_setAssociatedObject(listener, &listenerKey, nativeListener, OBJC_ASSOCIATION_RETAIN);
         }
+        os_unfair_lock_unlock(&lock);
     }
     [_surfaceEvent notifyListener:nativeListener
                           atValue:value

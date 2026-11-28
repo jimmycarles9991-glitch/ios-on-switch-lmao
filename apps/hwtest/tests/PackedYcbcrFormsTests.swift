@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// replaceRegion and getBytes of a 500 8x8 over a '420v' of rows 8 at offset 8 in 8 MiB + 16 KiB, every byte 0xee

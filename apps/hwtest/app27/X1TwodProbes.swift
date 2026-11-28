@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestX1
 import Metal
 
 /// The 2D engine (FERMI_TWOD_A) per (format, operation), held to CPU rules: each cell's texels against the exact
@@ -69,20 +70,41 @@ enum X1TwodProbes {
         }
     }
 
+    /// A w x h source of `format` from per-texel hashed codes; its codes packed in SIMD4 (RGBA order), texel by texel
+    static func sourceFlat(
+        _ gpu: GPU, _ format: X1Format, _ w: Int, _ h: Int
+    ) async throws -> (MTLTexture, [SIMD4<UInt32>]) {
+        let t = try gpu.texture(format.pixelFormat, w, h, usage: [.renderTarget, .shaderRead])
+        let count = w * h, bpt = format.bytesPerTexel
+        let channels = format.channels, chCount = channels.count
+        var codes = [SIMD4<UInt32>](repeating: .zero, count: count)
+        var bytes = [UInt8](repeating: 0, count: count * bpt)
+        codes.withUnsafeMutableBufferPointer { cp in
+            bytes.withUnsafeMutableBytes { bp in
+                let dstCodes = cp.baseAddress!
+                for y in 0 ..< h {
+                    let row = y * w
+                    for x in 0 ..< w {
+                        var v = SIMD4<UInt32>.zero
+                        for c in 0 ..< chCount {
+                            v[c] = code(channels[c], probeHash(UInt32(x), UInt32(y), UInt32(7 + c)))
+                        }
+                        let i = row + x
+                        dstCodes[i] = v
+                        format.writeBytes(v, into: bp, at: i * bpt)
+                    }
+                }
+            }
+        }
+        try await gpu.upload(bytes, to: t, bytesPerRow: w * bpt)
+        return (t, codes)
+    }
+
     /// A w x h source of `format` from per-texel hashed codes; its codes, RGBA order, texel by texel
     static func source(_ gpu: GPU, _ format: X1Format, _ w: Int, _ h: Int) async throws -> (MTLTexture, [[UInt32]]) {
-        let t = try gpu.texture(format.pixelFormat, w, h, usage: [.renderTarget, .shaderRead])
-        var codes: [[UInt32]] = []
-        var bytes: [UInt8] = []
-        for i in 0 ..< w * h {
-            let texel = format.channels.enumerated().map { c, channel in
-                code(channel, probeHash(UInt32(i % w), UInt32(i / w), UInt32(7 + c)))
-            }
-            codes.append(texel)
-            bytes += format.bytes(texel)
-        }
-        try await gpu.upload(bytes, to: t, bytesPerRow: w * format.bytesPerTexel)
-        return (t, codes)
+        let (t, flat) = try await sourceFlat(gpu, format, w, h)
+        let chCount = format.channels.count
+        return (t, flat.map { v in (0 ..< chCount).map { v[$0] } })
     }
 }
 
@@ -92,5 +114,11 @@ extension X1Format {
         channels.contains {
             if case .float = $0 { return true }; return $0 == .float32
         } ? .tiesEven : .nearest
+    }
+
+    /// Metal's rounding for a resolve's mean: an M4 Max rounds RGBA16Float's to nearest with ties up, every other
+    /// format's as it stores (tests/ResolveFormatArms.swift)
+    var metalResolveRounding: X1Rounding {
+        channels.contains(.float(mantissa: 10)) ? .nearest : metalRounding
     }
 }

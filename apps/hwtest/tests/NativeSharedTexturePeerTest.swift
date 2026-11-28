@@ -10,7 +10,7 @@ import XPC
 /// What the texture peer (peer/texpeer.mm) does for the app: opens a handle with its own device and writes every texel
 /// of it on the GPU, answering "ok pid=<pid> registry=<id> path=<its command buffer's path> shareable=<0|1>
 /// footprint_kb=<now> peak_kb=<its peak>" once that work completed, or "fail=<why> ...".
-@objc protocol SharedTexturePeer {
+@objc public protocol SharedTexturePeer {
     func write(_ handle: MTLSharedTextureHandle, reply: @escaping (String) -> Void)
     func renderSurface(_ surface: IOSurface, keep: Bool, reply: @escaping (String) -> Void)
     func makeSurfaceWidth(_ width: Int, height: Int, keep: Bool, reply: @escaping (IOSurface?, String) -> Void)
@@ -19,7 +19,7 @@ import XPC
 
 /// The peer's first message, which brings its connection to the app's listener (an NSXPC connection reaches the listener
 /// only with one)
-@objc protocol SharedTexturePeerHost {
+@objc public protocol SharedTexturePeerHost {
     func ready(_ pid: Int32)
 }
 
@@ -31,16 +31,18 @@ import XPC
 /// mipmapped RGBA8 one's level 1 and into the multisampled one; every ASTC level by a blit, as Metal renders into no
 /// block-compressed format). The app then reads every texel back in its own texture of the same pages: no texel was
 /// copied between the processes. iOS 17 has the BlueTool stand-in start the peer, iOS 27 launchd for its Mach service.
-struct NativeSharedTexturePeerTest: NativeObjectTest {
-    let id = "metal.native.shared_texture_peer"
-    let name = "Shared textures of every shape written by a second process and read back by the app"
+public struct NativeSharedTexturePeerTest: NativeObjectTest {
+    public let id = "metal.native.shared_texture_peer"
+    public let name = "Shared textures of every shape written by a second process and read back by the app"
 
-    struct Shape {
-        let name: String
-        let descriptor: MTLTextureDescriptor
+    public init() {}
+
+    public struct Shape {
+        public let name: String
+        public let descriptor: MTLTextureDescriptor
     }
 
-    static func descriptor(
+    public static func descriptor(
         _ type: MTLTextureType, _ format: MTLPixelFormat, _ width: Int, _ height: Int = 1, depth: Int = 1,
         levels: Int = 1, layers: Int = 1, samples: Int = 1, usage: MTLTextureUsage = .shaderRead
     ) -> MTLTextureDescriptor {
@@ -58,7 +60,7 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
         return d
     }
 
-    static let shapes: [Shape] = [
+    public static let shapes: [Shape] = [
         Shape(
             name: "chain",
             descriptor: descriptor(.type2D, .rgba8Unorm, 64, 48, levels: 7, usage: [.shaderRead, .renderTarget])
@@ -76,7 +78,7 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
         Shape(name: "astc1", descriptor: descriptor(.type2D, .astc_4x4_ldr, 64, 40)),
     ]
 
-    static func slices(_ t: MTLTexture) -> Int {
+    public static func slices(_ t: MTLTexture) -> Int {
         switch t.textureType {
         case .typeCube: return 6
         case .typeCubeArray: return 6 * t.arrayLength
@@ -86,7 +88,7 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
     }
 
     /// The peer's process, started for the app's listener: nil, or why it was not
-    static func startPeer(_ endpoint: NSXPCListenerEndpoint) -> String? {
+    public static func startPeer(_ endpoint: NSXPCListenerEndpoint) -> String? {
         typealias Create = @convention(c) (UnsafePointer<CChar>, DispatchQueue?, UInt64) -> xpc_connection_t
         let get = NSSelectorFromString("_endpoint")
         guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "xpc_connection_create_mach_service"),
@@ -107,13 +109,13 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
         return result == 0 ? nil : "\(service) answered \(result)"
     }
 
-    static func offThread<T: Sendable>(_ body: @escaping @Sendable () -> T) async -> T {
+    public static func offThread<T: Sendable>(_ body: @escaping @Sendable () -> T) async -> T {
         await withCheckedContinuation { continuation in
             DispatchQueue.global().async { continuation.resume(returning: body()) }
         }
     }
 
-    static func write(_ connection: NSXPCConnection, _ handle: MTLSharedTextureHandle) async -> String? {
+    public static func write(_ connection: NSXPCConnection, _ handle: MTLSharedTextureHandle) async -> String? {
         let answer = HandlerValue<String?>(nil)
         let done = DispatchSemaphore(value: 0)
         let proxy = connection.remoteObjectProxyWithErrorHandler { _ in done.signal() } as? SharedTexturePeer
@@ -126,7 +128,7 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
     }
 
     /// The answer's fields after its first word
-    static func fields(_ answer: String) -> [String: String] {
+    public static func fields(_ answer: String) -> [String: String] {
         Dictionary(
             answer.split(separator: " ").dropFirst().compactMap { field -> (String, String)? in
                 let parts = field.split(separator: "=", maxSplits: 1)
@@ -136,7 +138,7 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
     }
 
     /// Level `level` of slice `slice` (every plane of a 3D one), its rows packed: texels, or a block-compressed one's blocks
-    static func readBack(
+    public static func readBack(
         _ gpu: GPU, _ t: MTLTexture, level: Int, slice: Int, paths: inout [String]
     ) async throws -> [UInt8] {
         let blocks = t.pixelFormat == .astc_4x4_ldr
@@ -158,7 +160,7 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
     }
 
     /// The bytes the peer wrote into `level` of `slice`, as readBack returns them
-    static func expected(_ t: MTLTexture, level: Int, slice: Int) -> [UInt8] {
+    public static func expected(_ t: MTLTexture, level: Int, slice: Int) -> [UInt8] {
         let blocks = t.pixelFormat == .astc_4x4_ldr
         let w = max(t.width >> level, 1), h = max(t.height >> level, 1)
         let d = t.textureType == .type3D ? max(t.depth >> level, 1) : 1
@@ -190,7 +192,7 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
     }
 
     /// A multisampled texture's samples resolved by a pass that loads them, into a one-sample texture of its format
-    static func resolved(_ gpu: GPU, _ t: MTLTexture, paths: inout [String]) async throws -> MTLTexture {
+    public static func resolved(_ gpu: GPU, _ t: MTLTexture, paths: inout [String]) async throws -> MTLTexture {
         let one = try gpu.texture(t.pixelFormat, t.width, t.height)
         let timing = try await gpu.run { commands in
             let pass = MTLRenderPassDescriptor()
@@ -204,7 +206,7 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
         return one
     }
 
-    func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
+    public func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         let device = gpu.device
         var work = NativeWork()
         var made: [(String, MTLTexture, MTLSharedTextureHandle)] = []

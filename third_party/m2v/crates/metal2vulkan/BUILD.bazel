@@ -74,6 +74,26 @@ filegroup(
     ] + glob(["src/**"]),
 )
 
+# The pixel-format tables (metal::format, metal::texel_format): every format's representation, raw twin and conversion.
+# Three tests read upstream profiles this import leaves out (translation_test_inputs holds five), so they are skipped.
+rust_test(
+    name = "format_tables_test",
+    args = [
+        "metal::format::",
+        "metal::texel_format::",
+        "--skip",
+        "bgr10a2_storage_takes_the_rgb10a2_view_where_its_own_format_is_not_stored",
+        "--skip",
+        "mandatory_formats_map_on_every_committed_profile",
+        "--skip",
+        "refused_formats_are_exactly_the_documented_set",
+    ],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = ["//third_party/m2v:translation_test_inputs"],
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
 rust_test(
     name = "bound_alignment_test",
     args = [
@@ -201,11 +221,64 @@ rust_test(
     deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
 )
 
+# Metal's sRGB decode of every byte and encode at every threshold, run on the interpreter, and the words each charges
+rust_test(
+    name = "srgb_conversions_test",
+    args = [
+        "lower::arith::tests::narrow::srgb_conversions_",
+        "lower::arith::srgb_conversions::",
+    ],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = [
+        "//third_party/m2v:translation_test_inputs",
+        "@spirv_tools//:spirv-val",
+    ],
+    env = {"METAL2VULKAN_SPIRV_VAL": "$(rootpath @spirv_tools//:spirv-val)"},
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
 rust_test(
     name = "store_code_test",
     args = ["lower::arith::tests::store_code::"],
     compile_data = glob(["tests/**"]),
     crate = ":metal2vulkan",
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+rust_test(
+    name = "fast_fabs_cmp_test",
+    args = ["tests::engine_arith::fast_fabs_gt_zero_nan_matches_apple_fast_math"],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = [
+        "@gpu_llvm_as//:bin/llvm-as",
+        "@spirv_tools//:spirv-dis",
+        "@spirv_tools//:spirv-val",
+    ],
+    env = {
+        "METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)",
+        "METAL2VULKAN_SPIRV_DIS": "$(rootpath @spirv_tools//:spirv-dis)",
+        "METAL2VULKAN_SPIRV_VAL": "$(rootpath @spirv_tools//:spirv-val)",
+    },
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+rust_test(
+    name = "array_ref_space_test",
+    args = ["tests::engine_buffer_table::array_ref_addrspace_8_table_through_stack_cell_lowers_and_runs"],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = [
+        "@gpu_llvm_as//:bin/llvm-as",
+        "@spirv_tools//:spirv-dis",
+        "@spirv_tools//:spirv-val",
+    ],
+    env = {
+        "METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)",
+        "METAL2VULKAN_SPIRV_DIS": "$(rootpath @spirv_tools//:spirv-dis)",
+        "METAL2VULKAN_SPIRV_VAL": "$(rootpath @spirv_tools//:spirv-val)",
+    },
     deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
 )
 
@@ -220,13 +293,51 @@ rust_test(
 )
 
 # A slice-choosing vertex function links with the layered storage form, and a slice-reading fragment function compiled
-# for another vertex function stays refused (pipeline/link/varyings.rs)
+# for another vertex function stays refused (pipeline/link/varyings.rs); an amplified draw takes the storage form one
+# amplification at a time (tests/engine_amplified_storage.rs)
 rust_test(
     name = "layered_storage_link_test",
-    args = ["tests::engine_layered_storage_link::"],
+    args = [
+        "tests::engine_amplified_storage::",
+        "tests::engine_layered_storage_link::",
+    ],
     compile_data = glob(["tests/**"]),
     crate = ":metal2vulkan",
     data = ["@gpu_llvm_as//:bin/llvm-as"],
+    env = {"METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)"},
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+# The storage form's choice (lower/fragment/fetch/tests.rs): what blocks it and how it declares an attachment, on the
+# committed profiles it names
+rust_test(
+    name = "fetch_form_test",
+    args = ["lower::fragment::fetch::tests::"],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = [
+        "//third_party/m2v:fetch_test_inputs",
+        "//third_party/m2v:translation_test_inputs",
+    ],
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+# The binder's storage attachments on MoltenVK's M3 profile (tests/engine_fragment.rs): the attachment's own storage
+# view, the layered variant in a pass of layers, an amplified draw drawn one amplification at a time, refused as views.
+# The file's other tests need fixtures this import leaves out.
+rust_test(
+    name = "storage_binder_test",
+    args = [
+        "--exact",
+        "tests::engine_fragment::the_binder_writes_storage_attachments_and_layers_them_in_layered_passes",
+    ],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = [
+        "//third_party/m2v:fetch_test_inputs",
+        "//third_party/m2v:translation_test_inputs",
+        "@gpu_llvm_as//:bin/llvm-as",
+    ],
     env = {"METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)"},
     deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
 )
@@ -367,3 +478,66 @@ rust_test(
     ("group_linking_test", "tests::engine_linking::groups::"),
     ("signed_linking_test", "tests::engine_linking::signed::"),
 ]]
+
+rust_test(
+    name = "spirv_edit_test",
+    args = [
+        "spirv::dead::tests::",
+        "spirv::ir::edit::tests::",
+        "spirv::roll::tests::",
+    ],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = [
+        "//third_party/m2v:translation_test_inputs",
+        "@spirv_tools//:spirv-dis",
+        "@spirv_tools//:spirv-val",
+    ],
+    env = {
+        "METAL2VULKAN_SPIRV_DIS": "$(rootpath @spirv_tools//:spirv-dis)",
+        "METAL2VULKAN_SPIRV_VAL": "$(rootpath @spirv_tools//:spirv-val)",
+    },
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+rust_test(
+    name = "fragment_read_inputs_test",
+    args = [
+        "pipeline::compile::tests::read_inputs::",
+        "pipeline::link::tests::render::color_writes_are_the_pipelines",
+    ],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = [
+        "//third_party/m2v:fetch_test_inputs",
+        "//third_party/m2v:translation_test_inputs",
+        "@gpu_llvm_as//:bin/llvm-as",
+        "@spirv_tools//:spirv-dis",
+        "@spirv_tools//:spirv-val",
+    ],
+    env = {
+        "METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)",
+        "METAL2VULKAN_SPIRV_DIS": "$(rootpath @spirv_tools//:spirv-dis)",
+        "METAL2VULKAN_SPIRV_VAL": "$(rootpath @spirv_tools//:spirv-val)",
+    },
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+rust_test(
+    name = "undef_pointer_phi_test",
+    args = ["tests::engine_arena::undef_pointer_phi::"],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = [
+        "//third_party/m2v:translation_test_inputs",
+        "@gpu_llvm_as//:bin/llvm-as",
+        "@spirv_tools//:spirv-dis",
+        "@spirv_tools//:spirv-val",
+    ],
+    env = {
+        "METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)",
+        "METAL2VULKAN_SPIRV_DIS": "$(rootpath @spirv_tools//:spirv-dis)",
+        "METAL2VULKAN_SPIRV_VAL": "$(rootpath @spirv_tools//:spirv-val)",
+    },
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)

@@ -6,11 +6,20 @@ from 0 down stores 0, a value from 1 up the maximum, and any other is truncated 
 product with the maximum 2^n - 1 rounded to nearest, ties down. RGB10A2's two-bit alpha is the top two bits of the
 10-bit code. 16-bit channels follow the rule in a cross-check against an independent probe, not a direct sweep.
 A half-float channel stores the f32 rounded toward zero (a finite value past the largest as the largest, infinities
-and -0 kept) and a NaN as 0x7e00 (rop1: 54,467 of 54,468 readings, the other the NaN).
+and -0 kept) and a NaN as 0x7e00 (rop1: 54,467 of 54,468 readings, the other the NaN). An 8-bit sRGB channel is
+modelled as the sRGB curve's value rounded to the nearest code (a NaN or a value from 0 down 0, from 1 up 255): GM20B's
+own encode is within one code of Metal's (HW Test gpu.gm20b.srgb_encode), not measured against this, so two programs
+compared through it agree on the code wherever their outputs do, not necessarily on the device's code.
 """
+
+import math
+import struct
 
 ALPHA2 = 'a2'
 HALF = 'h'
+SRGB8 = 's8'
+# a component the target's format has no channel for: the ROP stores nothing of it
+UNSTORED = 'x'
 
 # Metal pixel formats whose channels store as unorm codes, each channel's width (the shader's RGBA order)
 UNORM = {
@@ -23,6 +32,10 @@ UNORM = {
     110: (16, 16, 16, 16),
     90: (10, 10, 10, ALPHA2),
     94: (10, 10, 10, ALPHA2),
+    11: (SRGB8,),
+    31: (SRGB8, SRGB8),
+    71: (SRGB8, SRGB8, SRGB8, 8),
+    81: (SRGB8, SRGB8, SRGB8, 8),
     25: (HALF,),
     65: (HALF, HALF),
     115: (HALF, HALF, HALF, HALF),
@@ -44,10 +57,8 @@ def half_toward_zero(bits: int) -> int:
 
 def store_code(bits: int, width: int | str) -> int:
     """Give the code GM20B stores for the f32 `bits` in a channel of `width` (unorm bits, RGB10A2's alpha, a half)."""
-    if width == HALF:
-        return half_toward_zero(bits)
-    if width == ALPHA2:
-        return store_code(bits, 10) >> 8
+    if isinstance(width, str):
+        return _STORE[width](bits)
     exponent = bits >> 23 & 0xFF
     if bits >> 31 or bits & 0x7FFFFFFF == 0 or (exponent == 0xFF and bits & 0x7FFFFF):
         return 0
@@ -58,6 +69,26 @@ def store_code(bits: int, width: int | str) -> int:
     shift = max(exponent, 1) - 127 - 23 + width + 4
     u = mantissa << shift if shift >= 0 else mantissa >> -shift
     return (u * top + (1 << (width + 3)) - 1) >> (width + 4)
+
+
+def srgb_code(bits: int) -> int:
+    """Give the 8-bit sRGB code of the f32 `bits` by the sRGB curve, rounded to nearest."""
+    exponent = bits >> 23 & 0xFF
+    if bits >> 31 or bits & 0x7FFFFFFF == 0 or (exponent == 0xFF and bits & 0x7FFFFF):
+        return 0
+    x = struct.unpack('<f', struct.pack('<I', bits))[0]
+    if x >= 1.0:
+        return 255
+    encoded = 12.92 * x if x <= 0.0031308 else 1.055 * math.pow(x, 1 / 2.4) - 0.055
+    return min(255, math.floor(encoded * 255 + 0.5))
+
+
+_STORE = {
+    UNSTORED: lambda _: 0,
+    HALF: half_toward_zero,
+    ALPHA2: lambda bits: store_code(bits, 10) >> 8,
+    SRGB8: srgb_code,
+}
 
 
 def widths(key: str, omap: int) -> list[int | str | None]:
@@ -75,5 +106,8 @@ def widths(key: str, omap: int) -> list[int | str | None]:
         for component in range(4):
             if omap >> (4 * target + component) & 1:
                 channels = UNORM.get(formats.get(target, -1), ())
-                out.append(channels[component] if component < len(channels) else None)
+                if component < len(channels):
+                    out.append(channels[component])
+                else:
+                    out.append(UNSTORED if channels else None)
     return out

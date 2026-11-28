@@ -567,7 +567,7 @@ MTLDevice	-	supportsUnalignedVertexFetch	-	21H461,24B119	base
 MTLDevice	-	supportsWritableArrayOfTextures	-	21H461,24B119	base
 MTLDevice	-	supportsYCBCRFormats12	-	21H461,24B119	raw
 MTLDevice	-	supportsYCBCRPackedFormats12	-	21H461,24B119	raw
-MTLDevice	-	targetDeviceArchitecture	-	24B119	base
+MTLDevice	-	targetDeviceArchitecture	-	24B119	raw
 MTLDevice	-	unloadShaderCaches	-	21H461,24B119	base
 MTLDevice	-	unmapShaderSampleBuffer	-	21H461,24B119	none
 MTLDevice	-	vendorName	-	21H461,24B119	raw

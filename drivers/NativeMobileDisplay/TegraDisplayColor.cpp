@@ -11,7 +11,7 @@ static constexpr uint32_t kLocationAccessibility = 2, kLocationHarmony = 9;
 extern "C" void native_legacy_frame_end_hold(void);
 extern "C" void native_legacy_frame_end_release(void);
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_FRAME) && SWITCH_STATS_FRAME
 // The first matrices IOMobileFramebuffer hands over, in thousandths, rows as received: what Core Animation's colour
 // requests become before the CSC (one line each, the first kLoggedMatrices of a boot).
 static void logMatrix(const char *call, uint32_t location, const Matrix &m)
@@ -79,6 +79,10 @@ bool TegraDisplayColor::init()
 {
     inputs = Inputs();
     __atomic_store_n(&edrScaleCached, inputs.edrScale, __ATOMIC_RELAXED);
+    __atomic_store_n(&correctionCached, inputs.correction, __ATOMIC_RELAXED);
+    __atomic_store_n(&accessibilityScaleCached, inputs.accessibilityScale, __ATOMIC_RELAXED);
+    __atomic_store_n(&remapModeCached, inputs.remapMode, __ATOMIC_RELAXED);
+    __atomic_store_n(&contrastCached, inputs.contrast, __ATOMIC_RELAXED);
     identityGamma(inputs.gamma);
     for (unsigned point = 0; point < kGammaPoints; ++point) {
         for (unsigned channel = 0; channel < 3; ++channel)
@@ -116,13 +120,16 @@ void TegraDisplayColor::detach()
     IOLockUnlock(lock);
 }
 
-// Under the lock: the inputs' tables go to the filter as the newest snapshot.
-void TegraDisplayColor::commit(bool paletteChanged)
+// Under the lock: the inputs' tables go to the filter and action as the newest snapshot.
+void TegraDisplayColor::commit(bool paletteChanged, const uint32_t *newPalette)
 {
     Snapshot &next = unit.spare();
     build(inputs, next.tables);
-    memcpy(next.palette, palette, sizeof(palette));
-#if DEVELOPMENT || DEBUG
+    if (paletteChanged && newPalette)
+        memcpy(next.palette, newPalette, sizeof(next.palette));
+    else if (paletteOn)
+        memcpy(next.palette, unit.newest().palette, sizeof(next.palette));
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_FRAME) && SWITCH_STATS_FRAME
     if (memcmp(loggedCsc, next.tables.csc, sizeof(loggedCsc)) != 0) {
         memcpy(loggedCsc, next.tables.csc, sizeof(loggedCsc));
         logCsc(next.tables, inputs);
@@ -162,23 +169,23 @@ IOReturn TegraDisplayColor::setGammaTable(const void *table)
 {
     if (!table)
         return kIOReturnBadArgument;
-    const bool perChannel = switch_color::channelsDiffer(table);
-    uint8_t curve[256];
-    uint32_t words[switch_color::kPaletteWords];
-    if (perChannel) {
-        identityGamma(curve);
-        switch_color::paletteOf(table, words);
-    } else {
-        for (unsigned i = 0; i < 256; ++i)
-            curve[i] = switch_color::gammaByte(gammaWord(table, i));
-    }
     return change([&] {
+        if (memcmp(gammaTable, table, sizeof(gammaTable)) == 0)
+            return kIOReturnSuccess;
+        const bool perChannel = switch_color::channelsDiffer(table);
+        uint8_t curve[256];
+        uint32_t words[switch_color::kPaletteWords];
+        if (perChannel) {
+            identityGamma(curve);
+            switch_color::paletteOf(table, words);
+        } else {
+            for (unsigned i = 0; i < 256; ++i)
+                curve[i] = switch_color::gammaByte(gammaWord(table, i));
+        }
         memcpy(gammaTable, table, sizeof(gammaTable));
         memcpy(inputs.gamma, curve, sizeof(curve));
-        if (perChannel)
-            memcpy(palette, words, sizeof(palette));
         paletteOn = perChannel;
-        commit(perChannel);
+        commit(perChannel, perChannel ? words : nullptr);
         return kIOReturnSuccess;
     });
 }
@@ -199,11 +206,14 @@ IOReturn TegraDisplayColor::setMatrix(uint32_t location, const void *matrix)
         return kIOReturnBadArgument;
     Matrix value;
     memcpy(&value, matrix, sizeof(value));
-#if DEVELOPMENT || DEBUG
-    logMatrix("setMatrix", location, value);
-#endif
     return change([&] {
-        (location == kLocationHarmony ? inputs.harmony : inputs.accessibility) = value;
+        Matrix &target = location == kLocationHarmony ? inputs.harmony : inputs.accessibility;
+        if (memcmp(&target, &value, sizeof(value)) == 0)
+            return kIOReturnSuccess;
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_FRAME) && SWITCH_STATS_FRAME
+        logMatrix("setMatrix", location, value);
+#endif
+        target = value;
         commit(false);
         return kIOReturnSuccess;
     });
@@ -218,8 +228,13 @@ IOReturn TegraDisplayColor::setContrast(const void *contrast)
     memcpy(&bits, contrast, sizeof(bits));
     if (!floatToUnity16(bits, &value))
         return kIOReturnBadArgument;
+    if (__atomic_load_n(&contrastCached, __ATOMIC_ACQUIRE) == value)
+        return kIOReturnSuccess;
     return change([&] {
+        if (inputs.contrast == value)
+            return kIOReturnSuccess;
         inputs.contrast = value;
+        __atomic_store_n(&contrastCached, value, __ATOMIC_RELEASE);
         commit(false);
         return kIOReturnSuccess;
     });
@@ -229,10 +244,15 @@ IOReturn TegraDisplayColor::setColorRemapMode(uint32_t mode)
 {
     if (mode >= kRemapModes)
         return kIOReturnBadArgument;
+    if (__atomic_load_n(&remapModeCached, __ATOMIC_ACQUIRE) == mode)
+        return kIOReturnSuccess;
     uint32_t previous = 0;
     const IOReturn status = change([&] {
         previous = inputs.remapMode;
+        if (previous == mode)
+            return kIOReturnSuccess;
         inputs.remapMode = mode;
+        __atomic_store_n(&remapModeCached, mode, __ATOMIC_RELEASE);
         commit(false);
         return kIOReturnSuccess;
     });
@@ -253,8 +273,13 @@ IOReturn TegraDisplayColor::getColorRemapMode(uint32_t *mode)
 
 IOReturn TegraDisplayColor::setBrightnessCorrection(uint32_t correction)
 {
+    if (__atomic_load_n(&correctionCached, __ATOMIC_ACQUIRE) == correction)
+        return kIOReturnSuccess;
     return change([&] {
+        if (inputs.correction == correction)
+            return kIOReturnSuccess;
         inputs.correction = correction;
+        __atomic_store_n(&correctionCached, correction, __ATOMIC_RELEASE);
         commit(false);
         return kIOReturnSuccess;
     });
@@ -274,10 +299,12 @@ IOReturn TegraDisplayColor::swapSetColorMatrix(const void *matrix, uint32_t loca
             return kIOReturnUnsupported;
         memcpy(&value, &words[3], sizeof(value));
     }
-#if DEVELOPMENT || DEBUG
-    logMatrix("swapSetColorMatrix", location, value);
-#endif
     return change([&] {
+        if (memcmp(&inputs.accessibility, &value, sizeof(value)) == 0)
+            return kIOReturnSuccess;
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_FRAME) && SWITCH_STATS_FRAME
+        logMatrix("swapSetColorMatrix", location, value);
+#endif
         inputs.accessibility = value;
         commit(false);
         return kIOReturnSuccess;
@@ -297,8 +324,13 @@ void TegraDisplayColor::setBlank(bool blank)
 
 IOReturn TegraDisplayColor::setAccessibilityScale(uint32_t scale)
 {
+    if (__atomic_load_n(&accessibilityScaleCached, __ATOMIC_ACQUIRE) == scale)
+        return kIOReturnSuccess;
     return change([&] {
+        if (inputs.accessibilityScale == scale)
+            return kIOReturnSuccess;
         inputs.accessibilityScale = scale;
+        __atomic_store_n(&accessibilityScaleCached, scale, __ATOMIC_RELEASE);
         commit(false);
         return kIOReturnSuccess;
     });

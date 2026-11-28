@@ -67,8 +67,6 @@ SWITCH_COPTS = {
     "iokit/KernelConfigTables.cpp": [
         "-D",
         "XNU_NATIVE_AES=1",
-        "-D",
-        "XNU_NATIVE_RAM_BLOCK=1",
     ],
     "iokit/bsddev/IOKitBSDInit.cpp": [
         "-D",

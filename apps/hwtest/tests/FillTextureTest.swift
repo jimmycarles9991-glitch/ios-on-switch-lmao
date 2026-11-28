@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// fillTexture:level:slice:region:color: (SPI) on the driver: a region of a 64x64 texture set to one colour, drawn by

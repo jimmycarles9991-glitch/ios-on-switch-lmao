@@ -54,20 +54,26 @@ TEST(SdCardDetectSource, TegraGpioDefinesAndMuxesPz1WithPullUp)
 
 TEST(SdCardDetectSource, PrimaryInterruptFilterAndLifecycleOrder)
 {
+    EXPECT_THAT(driver(), Not(HasSubstr("irqLoop")));
+    EXPECT_THAT(driver(), Not(HasSubstr("IOWorkLoop")));
+    EXPECT_THAT(driver(), Not(HasSubstr("IOFilterInterruptEventSource")));
+
+    const std::string startIrq = body("void NativeSwitchBlock::startInterrupt()");
+    EXPECT_THAT(startIrq, HasSubstr("nub->registerInterrupt(0, this, &NativeSwitchBlock::interruptHandler, nullptr)"));
+    EXPECT_THAT(startIrq, HasSubstr("irqNub->enableInterrupt(0)"));
+
     const std::string startCd = body("void NativeSwitchBlock::startCardDetect()");
     EXPECT_THAT(startCd, HasSubstr("tegra_gpio_interrupt_nub(TEGRA_GPIO_SD_CD, TEGRA_GPIO_EDGE_RISING)"));
-    EXPECT_THAT(startCd, HasSubstr("IOFilterInterruptEventSource::filterInterruptEventSource("));
-    EXPECT_THAT(startCd, HasSubstr("this, nullptr, &NativeSwitchBlock::cardDetectFilter, nub, 0"));
+    EXPECT_THAT(startCd, HasSubstr("nub->registerInterrupt(0, this, &NativeSwitchBlock::cardDetectHandler, nullptr)"));
     EXPECT_LT(Index(startCd, "__atomic_store_n(&cardDetectArmed, true, __ATOMIC_RELEASE)"),
-              Index(startCd, "cdSource->enable()"));
-    EXPECT_LT(Index(startCd, "cdSource->enable()"), Index(startCd, "checkCardPresent(\"boot\")"));
+              Index(startCd, "cdNub->enableInterrupt(0)"));
+    EXPECT_LT(Index(startCd, "cdNub->enableInterrupt(0)"), Index(startCd, "checkCardPresent(\"boot\")"));
 
     const std::string setup = body("bool NativeSwitchBlock::setup()");
     EXPECT_LT(Index(setup, "kernel_thread_start("), Index(setup, "startCardDetect();"));
 
-    const std::string filter = body("bool NativeSwitchBlock::cardDetectFilter(");
-    EXPECT_THAT(filter, HasSubstr("checkCardPresent(\"interrupt\")"));
-    EXPECT_THAT(filter, HasSubstr("return false;"));
+    const std::string handler = body("void NativeSwitchBlock::cardDetectHandler(");
+    EXPECT_THAT(handler, HasSubstr("checkCardPresent(\"interrupt\")"));
 
     const std::string check = body("void NativeSwitchBlock::checkCardPresent(");
     EXPECT_LT(Index(check, "__atomic_load_n(&cardDetectArmed, __ATOMIC_ACQUIRE)"),
@@ -83,21 +89,23 @@ TEST(SdCardDetectSource, PrimaryInterruptFilterAndLifecycleOrder)
 
     const std::string suspend = body("void NativeSwitchBlock::suspend()");
     EXPECT_LT(Index(suspend, "__atomic_store_n(&cardDetectArmed, false, __ATOMIC_RELEASE)"),
-              Index(suspend, "cdSource->disable()"));
-    EXPECT_LT(Index(suspend, "cdSource->disable()"), Index(suspend, "powerOffCard()"));
+              Index(suspend, "cdNub->disableInterrupt(0)"));
+    EXPECT_LT(Index(suspend, "cdNub->disableInterrupt(0)"), Index(suspend, "powerOffCard()"));
 
     const std::string resume = body("void NativeSwitchBlock::resume()");
     EXPECT_LT(Index(resume, "__atomic_store_n(&cardDetectArmed, true, __ATOMIC_RELEASE)"),
-              Index(resume, "cdSource->enable()"));
-    EXPECT_LT(Index(resume, "cdSource->enable()"), Index(resume, "checkCardPresent(\"resume\")"));
+              Index(resume, "cdNub->enableInterrupt(0)"));
+    EXPECT_LT(Index(resume, "cdNub->enableInterrupt(0)"), Index(resume, "checkCardPresent(\"resume\")"));
     EXPECT_LT(Index(resume, "checkCardPresent(\"resume\")"), Index(resume, "powerOnController()"));
 
     const std::string shutdown = body("void NativeSwitchBlock::shutdown()");
     EXPECT_LT(Index(shutdown, "__atomic_store_n(&cardDetectArmed, false, __ATOMIC_RELEASE)"),
-              Index(shutdown, "cdSource->disable()"));
+              Index(shutdown, "cdNub->disableInterrupt(0)"));
 
     const std::string stop = body("void NativeSwitchBlock::stop(");
     EXPECT_LT(Index(stop, "__atomic_store_n(&cardDetectArmed, false, __ATOMIC_RELEASE)"),
-              Index(stop, "cdSource->disable()"));
+              Index(stop, "cdNub->disableInterrupt(0)"));
+    EXPECT_LT(Index(stop, "cdNub->disableInterrupt(0)"), Index(stop, "cdNub->unregisterInterrupt(0)"));
+    EXPECT_LT(Index(stop, "irqNub->disableInterrupt(0)"), Index(stop, "irqNub->unregisterInterrupt(0)"));
     EXPECT_FALSE(Search(startCd, R"(\b(IOTimerEventSource|thread_call|IOSleep)\b)"));
 }

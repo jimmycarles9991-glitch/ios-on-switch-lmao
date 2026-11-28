@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Passes into textures made with ShaderRead usage alone (Metal's validation error, which a release process does not

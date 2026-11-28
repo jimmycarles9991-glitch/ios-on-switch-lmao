@@ -40,17 +40,22 @@ TEST(SdAdmaSource, DriverGuards)
     // Every card write is range-checked where every data command is issued (issue(), which command() and the worker's
     // ADMA2 commands both go through), besides beginBatch's check of the whole chain.
     const std::string issue = body("int NativeSwitchBlock::issue("),
+                      emit = body("void NativeSwitchBlock::emitSlotCommand("),
                       complete = body("int NativeSwitchBlock::complete(");
     EXPECT_THAT(issue, HasSubstr("outside its partition"));
     EXPECT_LT(Index(issue, "outside its partition"), Index(issue, "w16(COMMAND"));
+    EXPECT_THAT(emit, HasSubstr("outside its partition"));
+    EXPECT_LT(Index(emit, "outside its partition"), Index(emit, "w16(COMMAND"));
     EXPECT_THAT(body("int NativeSwitchBlock::command("),
-                HasSubstr("issue(lba, sectors, write, descriptors, cmd23, window)"));
-    const std::string begin = body("void NativeSwitchBlock::beginBatch(");
-    EXPECT_THAT(begin, HasSubstr("outside its partition"));
-    EXPECT_LT(Index(begin, "outside its partition"), Index(begin, "issue("));
-    // issue() is only called from command() and beginBatch().
+                HasSubstr("issue(lba, sectors, write, descriptors, cmd23, window, descPA)"));
+    const std::string prep = body("void NativeSwitchBlock::prepareAndPublishSlot(");
+    EXPECT_THAT(prep, HasSubstr("outside its partition"));
+    EXPECT_LT(Index(prep, "outside its partition"), Index(prep, "prepareDirect("));
+    // issue() is only called from command(); emitSlotCommand() is only called from interruptHandler and launchSlot.
     const auto calls = LinesMatching(source, R"(^.*[^:\w]issue\(static_cast|^.*[^:\w]issue\(lba)");
-    EXPECT_EQ(calls.size(), 2u) << testing::PrintToString(calls);
+    EXPECT_EQ(calls.size(), 1u) << testing::PrintToString(calls);
+    EXPECT_THAT(body("void NativeSwitchBlock::interruptHandler("), HasSubstr("emitSlotCommand("));
+    EXPECT_THAT(body("void NativeSwitchBlock::launchSlot("), HasSubstr("emitSlotCommand("));
     // In ADMA2 mode the SDMA boundary interrupt is neither awaited nor acted on (resuming would rewrite the descriptor
     // table's address), and an ADMA error is the host's failure.
     EXPECT_THAT(complete, HasSubstr("INT_TRANSFER | (descriptors ? 0 : INT_DMA) | ERROR_SIGNALS"));
@@ -71,18 +76,29 @@ TEST(SdAdmaSource, DriverGuards)
     EXPECT_FALSE(Search(source, R"(dc\s+(c?isw|csw)|FlushPoC_Dcache\b|CleanPoC_Dcache\b)"));
 }
 
-// r12-sdio: the next chain's command is issued before the previous chain completes; waits stay on the interrupt.
+// Two-slot prepared ADMA2 pipeline + primary-IRQ fast-issue; waits stay on the interrupt.
 TEST(SdAdmaSource, PipelinedWorker)
 {
     const std::string worker = body("void NativeSwitchBlock::worker(");
-    EXPECT_LT(Index(worker, "beginBatch(*next)"), Index(worker, "completeBatch(*pending)"));
-    EXPECT_LT(Index(worker, "completeBatch(*pending)"), Index(worker, "endBatch(*next)"));
-    // suspend() waits for `working`: it is set before the command is begun and cleared only after endBatch.
-    EXPECT_LT(Index(worker, "working = true", Index(worker, "pickLocked(")), Index(worker, "beginBatch(*next)"));
-    EXPECT_LT(Index(worker, "endBatch(*next)"), RIndex(worker, "working = false"));
-    // beginBatch never waits for the card: it only issues (no complete(), command(), run() or transfer() there).
-    EXPECT_FALSE(Search(body("void NativeSwitchBlock::beginBatch("),
-                        R"(\b(complete|command|run|transfer|bounceChain|waitSignal)\()"));
+    EXPECT_LT(Index(worker, "pipe.takeDone()"), Index(worker, "finishSlowActive("));
+    EXPECT_LT(Index(worker, "finishSlowActive("), Index(worker, "if (self->pipe.stashed)"));
+    EXPECT_LT(Index(worker, "pickLocked("), Index(worker, "prepareAndPublishSlot("));
+    // prepareAndPublishSlot checks PA/LBA overlap BEFORE prepareDirect and never waits for the card.
+    const std::string prep = body("void NativeSwitchBlock::prepareAndPublishSlot(");
+    EXPECT_LT(Index(prep, "switchAdmaTablesOverlap("), Index(prep, "prepareDirect("));
+    EXPECT_LT(Index(prep, "canOverlap("), Index(prep, "prepareDirect("));
+    EXPECT_FALSE(Search(prep, R"(\b(complete|command|run|transfer|bounceChain|waitSignal)\()"));
+    // interruptHandler acquires hwLock, runs pipe.onIrq, unlocks hwLock BEFORE thread_wakeup.
+    const std::string isr = body("void NativeSwitchBlock::interruptHandler(");
+    EXPECT_LT(Index(isr, "IOSimpleLockLock(self->hwLock)"), Index(isr, "pipe.onIrq("));
+    EXPECT_LT(Index(isr, "IOSimpleLockUnlock(self->hwLock)"), Index(isr, "thread_wakeup(&self->workerEvent)"));
+    // waitForPipeline asserts wait under hwLock, unlocks before thread_block, and re-checks active before interruptLost.
+    const std::string wait = body("void NativeSwitchBlock::waitForPipeline(");
+    const size_t blockAt = Index(wait, "thread_block(THREAD_CONTINUE_NULL)");
+    const size_t assertAt = Index(wait, "assert_wait_deadline(&workerEvent");
+    EXPECT_LT(assertAt, blockAt);
+    EXPECT_LT(assertAt, RIndex(wait.substr(0, blockAt), "IOSimpleLockUnlockEnableInterrupt("));
+    EXPECT_LT(Index(wait, "pipe.active == expected && !expected->irqDone"), Index(wait, "interruptLost(awaited)"));
     // complete(): STATUS first (a command that finished meanwhile takes no interrupt), then the interrupt; its time limit
     // starts there; a lost interrupt panics, and there is no polled mode.
     const std::string complete = body("int NativeSwitchBlock::complete(");
@@ -93,13 +109,15 @@ TEST(SdAdmaSource, PipelinedWorker)
     EXPECT_THAT(body("void NativeSwitchBlock::interruptLost("), HasSubstr("panic(\"SwitchSD: SDMMC1 interrupt lost"));
     // Card commands, the recovery's CMD12 and each tuning block sleep on the interrupt too.
     for (const char *waiter : {"int NativeSwitchBlock::cardCommand(", "void NativeSwitchBlock::recover(",
-                               "void NativeSwitchBlock::tuneStep()"})
+                               "void NativeSwitchBlock::tuneStep("})
         EXPECT_THAT(body(waiter), HasSubstr("awaitStatus(")) << waiter;
-    // endBatch: a split command's errors take run()'s retry, and a read's pages are invalidated after the command.
-    const std::string end = body("void NativeSwitchBlock::endBatch(");
-    EXPECT_THAT(end,
-                HasSubstr("retry(step, status, first->lba, sectors, write, table.count, windowOf(first->shared))"));
-    EXPECT_LT(Index(end, "retry("), Index(end, "finishDirect(write)"));
+    // finishSlowActive retries with the slot's window before completeSlot invalidates and copies staged segments.
+    const std::string slow = body("void NativeSwitchBlock::finishSlowActive(");
+    EXPECT_THAT(slow, HasSubstr("retry(step, status, slot.lba, slot.sectors, slot.write, slot.table.count, "
+                                "slot.window, slot.tablePA)"));
+    EXPECT_LT(Index(slow, "retry("), Index(slow, "completeSlot("));
+    const std::string done = body("void NativeSwitchBlock::completeSlot(");
+    EXPECT_LT(Index(done, "finishDirect("), Index(done, "copyStaged("));
 }
 
 // The data path does the least maintenance that is correct: writes clean, reads invalidate before and after (every line
@@ -109,24 +127,29 @@ TEST(SdAdmaSource, MinimalMaintenance)
 {
     const std::string &source = driver();
     const std::string prepare = body("void NativeSwitchBlock::prepareDirect(");
-    EXPECT_THAT(prepare, HasSubstr("syncLines(SWITCH_DCACHE_CLEAN, table, tableUncached);"));
-    EXPECT_THAT(prepare, HasSubstr("syncLines(SWITCH_DCACHE_INVALIDATE, table, tableUncached, sinkPA,"));
-    EXPECT_THAT(body("void NativeSwitchBlock::finishDirect("), HasSubstr("syncLines(SWITCH_DCACHE_INVALIDATE, table,"));
-    EXPECT_EQ(Count(source, "prepareDirect("), 3u);  // declaration, definition, beginBatch
+    EXPECT_THAT(prepare,
+                HasSubstr("syncLines(SWITCH_DCACHE_CLEAN, slot.table, slot.tableUncached, slot.descUncached);"));
+    EXPECT_THAT(
+        prepare,
+        HasSubstr("syncLines(SWITCH_DCACHE_INVALIDATE, slot.table, slot.tableUncached, slot.descUncached, sinkPA,"));
+    EXPECT_THAT(body("void NativeSwitchBlock::finishDirect("),
+                HasSubstr("syncLines(SWITCH_DCACHE_INVALIDATE, slot.table, slot.tableUncached, slot.descUncached,"));
+    EXPECT_EQ(Count(source, "prepareDirect("), 4u);  // declaration, definition, prepareAndPublishSlot, worker stashed
     const std::string page = body("static DmaPage dmaPage(");
     EXPECT_THAT(page, HasSubstr("if (attributes == kWimgDefault)\n        return DmaPage::kCacheable;"));
     EXPECT_THAT(page, HasSubstr("(attributes & kWimgNotCacheable) != 0 ? DmaPage::kUncached : DmaPage::kRefused"));
     const std::string sync = body("static void syncLines(");
-    EXPECT_THAT(sync, HasSubstr("if (dmaPage(pa) == DmaPage::kCacheable)"));
-    EXPECT_THAT(body("SwitchAdmaRefusal NativeSwitchBlock::buildTable("), HasSubstr("tableUncached = false;"));
+    EXPECT_THAT(sync, HasSubstr("uncachedBits[i >> 6]"));
+    EXPECT_THAT(sync, Not(HasSubstr("dmaPage(")));
+    EXPECT_THAT(body("SwitchAdmaRefusal NativeSwitchBlock::buildTable("), HasSubstr("slot.tableUncached = false;"));
 }
 
 // r12-sdio: a read's refused segments alone go through the bounce buffer.
 TEST(SdAdmaSource, ReadStaging)
 {
     // Reads only, when the stages have memory; writes keep the whole-chain bounce.
-    EXPECT_THAT(body("SwitchAdmaRefusal NativeSwitchBlock::buildTable("), HasSubstr("if (!write && stages) {"));
+    EXPECT_THAT(body("SwitchAdmaRefusal NativeSwitchBlock::buildTable("), HasSubstr("if (!write && slot.stages) {"));
     // The staged segments are copied out after the read's invalidate.
-    const std::string end = body("void NativeSwitchBlock::endBatch(");
-    EXPECT_LT(Index(end, "finishDirect(write)"), Index(end, "copyStaged()"));
+    const std::string done = body("void NativeSwitchBlock::completeSlot(");
+    EXPECT_LT(Index(done, "finishDirect("), Index(done, "copyStaged("));
 }

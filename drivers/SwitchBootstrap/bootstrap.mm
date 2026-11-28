@@ -118,7 +118,8 @@ static int switch_bootstrap_finish_activation(NSString *root)
 static int switch_bootstrap_command(NSString *path, NSArray<NSString *> *arguments,
                                     int (*run)(const char *, char *const[]) = switch_bootstrap_run)
 {
-    char *argv[9];
+    // A development image updates up to 9 managed packages in one dpkg call (3 flags + 9 debs).
+    char *argv[32];
     if (arguments.count > sizeof(argv) / sizeof(argv[0]) - 2)
         return E2BIG;
     argv[0] = (char *)path.fileSystemRepresentation;
@@ -195,9 +196,12 @@ int switch_bootstrap_validate_root(NSString *root, BOOL prepared)
         return error;
     if (lstat(root.fileSystemRepresentation, &current))
         return errno;
-    if ((!captured || previous.st_dev != current.st_dev || previous.st_ino != current.st_ino) &&
-        (error = switch_bootstrap_readiness(0)))
-        return error;
+    BOOL didModify = NO;
+    if (!captured || previous.st_dev != current.st_dev || previous.st_ino != current.st_ino) {
+        didModify = YES;
+        if ((error = switch_bootstrap_readiness(0)))
+            return error;
+    }
     const char *alias = "/private/var/jb";
     struct stat info;
     if (lstat(alias, &info)) {
@@ -206,6 +210,8 @@ int switch_bootstrap_validate_root(NSString *root, BOOL prepared)
         if (symlink(root.fileSystemRepresentation, alias)) {
             if (errno != EEXIST)
                 return errno;
+        } else {
+            didModify = YES;
         }
         if (lstat(alias, &info))
             return errno;
@@ -223,7 +229,10 @@ int switch_bootstrap_validate_root(NSString *root, BOOL prepared)
     if (info.st_uid || info.st_gid) {
         if (lchown(alias, 0, 0))
             return errno;
+        didModify = YES;
     }
+    if (!didModify)
+        return 0;
     const int parent = open("/private/var", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (parent < 0)
         return errno;

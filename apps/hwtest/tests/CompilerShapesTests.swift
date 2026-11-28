@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// The shader compiler's branch layout: sm53_layout_paths (nested if/else, a loop with continue and break, every
@@ -51,6 +53,73 @@ struct FloatTestsTest: HWTest {
                 )
             }
             return [("wrong=\(wrong.count) of \(bits.count)", wrong.isEmpty)]
+        }
+    }
+}
+
+/// Half powr at every special operand: powr_specials over each pair of CompilerShapes.powrHalves (the specials, class
+/// boundaries and two curve exponents, 400 pairs), each answer against Metal's (CompilerShapes.powrRight: its special
+/// answers exactly, the rest within two half ulps). The shader compiler gives a half powr on GM20B as exp2(y * log2(x))
+/// alone, with none of the selects around it that answer the specials on other devices: this is that rule's proof,
+/// judged on the special lanes (wrong_special); `wrong` adds the finite ones, whose precision is MUFU's.
+struct PowrSpecialsTest: HWTest {
+    let id = "gpu.gm20b.powr_specials"
+    let name = "Half powr at every special operand, as Metal answers, on raw"
+    let subsystem = Subsystem.metal
+    var timeout: TimeInterval { 30 }
+
+    func run(_ context: TestContext) async throws -> Outcome {
+        try await CompilerShapeRun.judged { gpu, metrics in
+            let (answers, timing) = try await CompilerShapes.powrAnswers(gpu)
+            guard let answers else { return [("powr_specials failed: \(timing.facadePath)", false)] }
+            let pairs = CompilerShapes.powrPairs
+            let operands = pairs.map { (Float16(bitPattern: $0.x), Float16(bitPattern: $0.y)) }
+            let wrong = pairs.indices.filter { !CompilerShapes.powrRight(operands[$0].0, operands[$0].1, answers[$0]) }
+            let special = pairs.indices.filter { CompilerShapes.powrSpecial(operands[$0].0, operands[$0].1) != nil }
+            let wrongSpecial = wrong.filter(special.contains)
+            metrics.set("wrong", wrong.count)
+            metrics.set("wrong_special", wrongSpecial.count)
+            metrics.set("pairs", pairs.count)
+            if let i = wrongSpecial.first ?? wrong.first {
+                let hex = { (v: UInt16) in String(v, radix: 16) }
+                metrics.set("first_wrong", "\(hex(pairs[i].x))_\(hex(pairs[i].y)):\(answers[i])")
+            }
+            return [("wrong_special=\(wrongSpecial.count) of \(special.count)", wrongSpecial.isEmpty)]
+        }
+    }
+}
+
+/// Half fmax, fmin and a clamp over every pair of CompilerShapes.powrHalves (400: the specials, both zeros, NaNs of
+/// both signs, class boundaries), against Apple's GPUs' answers (CompilerShapes.metalMax, metalMin: x where x > y, or
+/// x < y, or where y is a NaN; y otherwise, so a tie of +0 and -0 gives y), and a transfer curve's tests of a half
+/// (abs(x) < y, x < 0). The shader compiler gives a half's min and max on GM20B as HSETP2 and SEL, and those tests as
+/// HSETP2 with |x| as an operand modifier and zero as RZ, with no F2F to f32 and back.
+struct HalfMinMaxTest: HWTest {
+    let id = "gpu.gm20b.half_min_max"
+    let name = "Half fmax, fmin and clamp over every special pair, as Metal defines them, on raw"
+    let subsystem = Subsystem.metal
+    var timeout: TimeInterval { 30 }
+
+    func run(_ context: TestContext) async throws -> Outcome {
+        try await CompilerShapeRun.judged { gpu, metrics in
+            let (answers, timing) = try await CompilerShapes.minMaxAnswers(gpu)
+            guard let answers else { return [("half_min_max failed: \(timing.facadePath)", false)] }
+            let pairs = CompilerShapes.powrPairs
+            let wrong = pairs.indices.filter { i in
+                let (x, y) = (Float16(bitPattern: pairs[i].x), Float16(bitPattern: pairs[i].y))
+                let hi = CompilerShapes.metalMax(x, y)
+                return !CompilerShapes.sameHalf(answers[i].x, hi)
+                    || !CompilerShapes.sameHalf(answers[i].y, CompilerShapes.metalMin(x, y))
+                    || !CompilerShapes.sameHalf(answers[i].z, CompilerShapes.metalMin(hi, 1))
+                    || answers[i].w != CompilerShapes.curveTests(x, y)
+            }
+            metrics.set("wrong", wrong.count)
+            metrics.set("pairs", pairs.count)
+            if let i = wrong.first {
+                let hex = { (v: UInt16) in String(v, radix: 16) }
+                metrics.set("first_wrong", "\(hex(pairs[i].x))_\(hex(pairs[i].y)):\(answers[i])")
+            }
+            return [("wrong=\(wrong.count) of \(pairs.count)", wrong.isEmpty)]
         }
     }
 }

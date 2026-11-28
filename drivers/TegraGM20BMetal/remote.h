@@ -16,10 +16,13 @@
 #include <iterator>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 #include "../../kits/SwitchSeedPack/SwitchSeedStore.h"
 #include "compile_request.h"
+#include "store_key.h"
 #include "TegraGM20BCompilerABI.h"
 #include "kernel_transport.h"
 #include "word_wait.h"
@@ -82,13 +85,17 @@ public:
     // The boot has a compiler, but none comes: it declined, or its launcher stopped starting it (asked of the kernel)
     bool declined();
 
-    // The store's entry under `name`, copied out of the mapping
+    // The store's entry under `name`, in place in the mapping or copied out
+    bool find(const Digest &name, std::string_view &bytes);
     bool find(const Digest &name, std::string &bytes);
     // A program slot's bytes where the mapped store holds them (switch_compiler::Store::putProgramSlots), in place, with
     // that mapping's first byte and size in `mapping` and `bytes`; null where it holds none of them
     const uint8_t *findSlot(const uint8_t *slot, size_t size, const uint8_t *&mapping, uint64_t &bytes) const;
     // The mapped store's identity (its stack and the pack rules' digest) in hex, "" with none mapped
     std::string storeIdentity() const;
+    // This process's compile scope as the kernel reads it (TegraGM20BAbiCompilerScope): asked until the kernel answers,
+    // then kept (kind 0 meanwhile, which no record is filed under)
+    StoreScope scope();
     // The mapped store's first byte and size; null with none mapped
     const uint8_t *storeMapping(uint64_t &bytes) const;
     // Asked of the compiler at the calling thread's class; the thread sleeps until it answers
@@ -100,8 +107,27 @@ public:
     // Sleep on an in-flight async Compile (`cookie` from compileAsync) via TegraGM20BMethodCompileWait,
     // donating the calling thread's priority to the compiler worker. Returns true if the caller should retry.
     bool waitAsync(uint64_t cookie);
+    // Register a client library slice via TegraGM20BMethodCompilerRegisterLibrary (CoW snapshot), caching the
+    // handle per (address, size, source) for this connection (library_source.h LibrarySource::id). Returns 0 when unsupported or refused (caller
+    // falls back to inline bytes).
+    uint64_t registerLibrary(const void *bytes, size_t size, uint64_t source);
 
 private:
+    struct RegisteredLibrary {
+        const void *address = nullptr;
+        size_t size = 0;
+        uint64_t source = 0;
+
+        bool operator<(const RegisteredLibrary &o) const
+        {
+            if (address != o.address)
+                return address < o.address;
+            if (size != o.size)
+                return size < o.size;
+            return source < o.source;
+        }
+    };
+
     struct Mapping {
         uint32_t generation = 0;
         const uint8_t *base = nullptr;
@@ -120,13 +146,24 @@ private:
 
     const Call call_;
     const uint64_t stack_;
+    // scope_ is written once under scopeLock_, before scopeKnown_ is set with release; after that it is read with no lock.
+    // The lock only orders the first lookups of a process, which may ask the kernel at once.
+    gm20b::UnfairMutex scopeLock_;
+    std::atomic<bool> scopeKnown_{false};
+    StoreScope scope_;
     std::atomic<CompilerMethods> methods_{CompilerMethods::Unknown};
     std::atomic<bool> expected_{false}, declined_{false};
     std::atomic<bool> absent_{false};
     std::atomic<bool> waitSupported_{true};
+    std::atomic<bool> librariesSupported_{false};
     std::atomic<const Mapping *> mapping_{nullptr};
     std::atomic<uint32_t> latest_{0};  // the newest generation a completion named
-    gm20b::Mutex mapLock_, asyncLock_;
+    gm20b::UnfairMutex mapLock_;
+    gm20b::Mutex asyncLock_, libraryLock_;
+    gm20b::CondVar libraryReady_, asyncDrained_;
+    std::map<RegisteredLibrary, uint64_t> registeredLibraries_;
+    std::set<RegisteredLibrary> registeringLibraries_;
+    uint32_t libraryWaiters_ = 0;
     std::vector<const Mapping *> mappings_;  // every one ever made: a reader may still be inside an older one
 
     // One notification port per class an answer is taken at, each with a queue of that class: the kernel's answer
@@ -135,16 +172,25 @@ private:
         void *port = nullptr, *queue = nullptr;
     };
 
+    struct Pending {
+        Done done;
+        bool confirmed = false;
+    };
+
     static constexpr qos_class_t kAnswerClasses[] = {QOS_CLASS_USER_INTERACTIVE, QOS_CLASS_USER_INITIATED,
                                                      QOS_CLASS_DEFAULT, QOS_CLASS_UTILITY, QOS_CLASS_BACKGROUND};
     std::array<Port, std::size(kAnswerClasses)> ports_;  // asyncLock_'s
-    std::map<uint64_t, Done> pending_;
+    std::map<uint64_t, Pending> pending_;
     std::vector<Held> held_;  // past the bound, asked once an earlier one is answered
     gm20b::ChangeWord heldChanged_;
     uint64_t nextCookie_ = 1;
+    uint64_t deliveredCount_ = 0;
+    size_t confirmedPending_ = 0;
+    uint32_t asyncInFlight_ = 0, asyncWaiters_ = 0;
+    bool closing_ = false, promoting_ = false, promoteAgain_ = false;
 
-    // asyncLock_ held: the request asked, or held past the bound; false: neither
-    bool ask(Held &&held);
+    // asyncLock_ held through `l` (released across the kernel call and recheck): asked or held past the bound; false: neither
+    bool ask(std::unique_lock<gm20b::Mutex> &l, Held &&held, bool fromHeld);
     bool capable();
     void refresh(const TegraGM20BAbiCompilerInfoReply &info);
     void recheck();

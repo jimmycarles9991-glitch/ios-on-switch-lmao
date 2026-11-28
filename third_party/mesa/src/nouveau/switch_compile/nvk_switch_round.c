@@ -10,6 +10,7 @@
 #include "nir_builder.h"
 
 _Thread_local uint32_t switch_nvk_half_targets_current;
+_Thread_local uint32_t switch_nvk_unorm_targets_current;
 
 static bool
 round_output(nir_builder *b, nir_intrinsic_instr *store, void *data)

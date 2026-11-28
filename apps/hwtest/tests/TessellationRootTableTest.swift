@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A post-tessellation vertex function that reads a colour through one pointer that is a bound buffer or an argument

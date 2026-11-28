@@ -158,8 +158,9 @@ int tegra_gpio_config(unsigned gpio);
 void tegra_gpio_describe(unsigned gpio, char *buffer, size_t size);
 
 // Lost-interrupt check for consumers without a natural wait (call it from a slow timer or before trusting a level
-// read): if the pin's interrupt is pending and enabled at the GPIO controller and still is 50 ms later, the bank
-// interrupt never reached the CPU: panics "<who>: GPIO n interrupt lost: <tegra_gpio_describe>". May sleep.
+// read): if the pin's interrupt is pending and enabled at the GPIO controller, schedules a non-blocking 50 ms check
+// on TegraGPIO's work loop and panics "<who>: GPIO n interrupt lost: <tegra_gpio_describe>" if it is still latched
+// without having been serviced. Never blocks the caller.
 void tegra_gpio_check_delivery(unsigned gpio, const char *who);
 
 // Hardware debounce, 0 (off) to 255 ms. The counter is per port: the longest request on a port wins.

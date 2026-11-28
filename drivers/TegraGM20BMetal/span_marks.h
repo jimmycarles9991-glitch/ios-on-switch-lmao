@@ -25,6 +25,7 @@ namespace gm20b {
 enum : uint32_t {
     REPORT_SEMAPHORE_A = NVB197_SET_REPORT_SEMAPHORE_A,
     REPORT_RELEASE_AFTER_ALL = NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, OPERATION, RELEASE) |
+        NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, FLUSH_DISABLE, TRUE) |
         NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, RELEASE, AFTER_ALL_PRECEEDING_WRITES_COMPLETE) |
         NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, PIPELINE_LOCATION, ALL) |
         NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, STRUCTURE_SIZE, FOUR_WORDS),
@@ -150,7 +151,7 @@ public:
     {
         if (!slots_)
             return;
-        std::lock_guard<gm20b::Mutex> l(lock_);
+        std::lock_guard<gm20b::UnfairMutex> l(lock_);
         at_ = &(*slots_)[(stamp - 1) % kSpanSlots];
         at_->stamp = stamp;
         at_->marks = 0;
@@ -183,7 +184,7 @@ public:
     {
         if (!slots_ || !stamp)
             return {};
-        std::lock_guard<gm20b::Mutex> l(lock_);
+        std::lock_guard<gm20b::UnfairMutex> l(lock_);
         const Slot &s = (*slots_)[(stamp - 1) % kSpanSlots];
         if (s.stamp != stamp)
             return {};
@@ -199,7 +200,7 @@ private:
 
     std::unique_ptr<std::array<Slot, kSpanSlots>> slots_;
     Slot *at_ = nullptr;
-    gm20b::Mutex lock_;
+    gm20b::UnfairMutex lock_;
     uint64_t va_ = 0;
     uint8_t *cpu_ = nullptr;
 };
@@ -212,7 +213,9 @@ template <class Pipeline> SpanLabel drawSpanLabel(const Pipeline &pl, uint64_t k
     l.instructions = pl.fragmentInstructions;
     l.kpx = uint16_t(std::min<uint32_t>(kpx, 0xffff));
     l.samples = samples;
-    if (const char *name = pl.caName ? pl.caName : pl.spanName)
+    const char *ca = __atomic_load_n(&pl.caName, __ATOMIC_ACQUIRE);
+    const char *span = __atomic_load_n(&pl.spanName, __ATOMIC_ACQUIRE);
+    if (const char *name = ca ? ca : span)
         strlcpy(l.name, name, sizeof l.name);
     return l;
 }

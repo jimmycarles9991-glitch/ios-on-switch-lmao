@@ -527,6 +527,9 @@ Lswitch_secondary_check_off:
 	add x1, x1, EXT(switch_secondary_records_end)@pageoff
 	adr x22, EXT(switch_secondary_entry)
 	SWITCH_SMP_CONTEXT x0, x22, x19, x1, x2, Lswitch_secondary_halt
+	ldr x2, [x0, #SWITCH_SMP_STAGE_OFF]
+	cmp x2, #SWITCH_SMP_STAGE_C
+	b.eq Lswitch_secondary_warm
 	mov x19, x0
 	mov x27, x0
 	mov x28, xzr
@@ -672,6 +675,57 @@ Lswitch_secondary_el1:
 	mov x1, #SWITCH_SMP_STAGE_RESET
 	str x1, [x19, #SWITCH_SMP_STAGE_OFF]
 	dsb sy
+	b EXT(LowResetVectorBase)
+
+/* Warm C7 resume: record already reached SWITCH_SMP_STAGE_C on cold bringup or first C7.
+ * Leave x27=0 so reset_vector and common_start skip switch_secondary_vectors and boot-record barriers. */
+Lswitch_secondary_warm:
+	mov x27, xzr
+	mov x28, xzr
+	cmp x20, #8
+	b.ne Lswitch_secondary_warm_el1
+	MOV64 x1, 0x80000000
+	msr HCR_EL2, x1
+	msr VTTBR_EL2, xzr
+	MOV64 x1, 0x33ff
+	msr CPTR_EL2, x1
+	msr MDCR_EL2, xzr
+	msr HSTR_EL2, xzr
+	mrs x1, MIDR_EL1
+	msr VPIDR_EL2, x1
+	mrs x1, MPIDR_EL1
+	msr VMPIDR_EL2, x1
+	mov x1, #3
+	msr CNTHCTL_EL2, x1
+	msr CNTVOFF_EL2, xzr
+	mov x1, #2
+	msr CNTHP_CTL_EL2, x1
+	MOV64 x1, 0x30d00800
+	msr SCTLR_EL1, x1
+	msr TTBR0_EL1, xzr
+	msr TTBR1_EL1, xzr
+	msr TCR_EL1, xzr
+	msr MAIR_EL1, xzr
+	msr CONTEXTIDR_EL1, xzr
+	msr CPACR_EL1, xzr
+	msr CNTKCTL_EL1, xzr
+	adrp x1, Lswitch_secondary_warm_el1@page
+	add x1, x1, Lswitch_secondary_warm_el1@pageoff
+	msr ELR_EL2, x1
+	mov x1, #0x3c5
+	msr SPSR_EL2, x1
+	isb
+	eret
+Lswitch_secondary_warm_el1:
+	msr SPSel, #1
+	mov x1, #2
+	msr CNTP_CTL_EL0, x1
+	msr CNTV_CTL_EL0, x1
+	MOV64 x1, 0x30d00800
+	msr SCTLR_EL1, x1
+	msr CPACR_EL1, xzr
+	msr CNTKCTL_EL1, xzr
+	isb
 	b EXT(LowResetVectorBase)
 
 Lswitch_secondary_bad_control:
@@ -1398,9 +1452,14 @@ common_start:
 #endif
 
 #if defined(XNU_NATIVE_ARCH_TIMER) && XNU_NATIVE_ARCH_TIMER
+	cbz x27, Lswitch_secondary_maint_nsh
 	/* Finish local maintenance before a first-start secondary enables M/C/I. */
 	dsb sy
 	isb
+	b Lswitch_secondary_maint_done
+Lswitch_secondary_maint_nsh:
+	dsb nsh
+Lswitch_secondary_maint_done:
 #endif
 
 	/* If x21 is not 0, then this is either the start_cpu path or

@@ -43,9 +43,9 @@
 	.globl EXT(invalidate_mmu_icache)
 LEXT(InvalidatePoU_Icache)
 LEXT(invalidate_mmu_icache)
-	dsb		sy
+	dsb		ish
 	ic		ialluis								// Invalidate icache
-	dsb		sy
+	dsb		ish
 	isb		sy
 	ret
 
@@ -73,10 +73,12 @@ L_ipui_loop:
 	add		x0, x0, #1<<MMU_I_CLINE				// Get next cache aligned addr
 	subs	x1, x1, #1							// Decrementer cache line counter
 	b.pl	L_ipui_loop							// Loop in counter not null
-	dsb		sy
+	dsb		ish
 	isb		sy
 #else
-	bl		EXT(InvalidatePoU_Icache)
+	ic		ialluis
+	dsb		ish
+	isb		sy
 #endif
 	POP_FRAME
 	ARM64_STACK_EPILOG
@@ -252,6 +254,7 @@ LEXT(CleanPoU_Dcache)
 LEXT(CleanPoU_DcacheRegion)
 #if defined(APPLE_ARM64_ARCH_FAMILY)
 	/* "Fully Coherent." */
+	dsb		sy
 #else /* !defined(APPLE_ARM64_ARCH_FAMILY) */
 	mov		x9, #((1<<MMU_CLINE)-1)
 	and		x2, x0, x9
@@ -259,14 +262,14 @@ LEXT(CleanPoU_DcacheRegion)
 	add		x4, x1, x2
 	sub		x4, x4, #1
 	lsr		x4, x4, #MMU_CLINE					// Set cache line counter
-	dmb		sy
+	dmb		ish
 L_cpudr_loop:
 	dc		cvau, x3							// Clean dcache line to PoU 
 	add		x3, x3, #(1<<MMU_CLINE)				// Get next cache aligned addr
 	subs	x4, x4, #1							// Decrementer cache line counter
 	b.pl	L_cpudr_loop						// Loop in counter not null
+	dsb		ish
 #endif /* defined(APPLE_ARM64_ARCH_FAMILY) */
-	dsb		sy
 	ret
 
 /*

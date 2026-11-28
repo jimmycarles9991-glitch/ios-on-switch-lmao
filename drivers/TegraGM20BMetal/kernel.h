@@ -72,6 +72,7 @@ struct KernelJob {
     // writer promises (method 34) the job keeps: its end releases them
     const uint32_t *promises = nullptr;
     uint32_t promiseCount = 0;
+    bool sameUses = false;
 };
 
 class Kernel;
@@ -141,22 +142,24 @@ public:
     // The GPU may write the IOSurface from now on (BoImport took it as only sampled): before its first render or store.
     bool surfaceGpuWrites(uint32_t surfaceId);
     // Priority (method 18): every channel of the connection runs at the most urgent of the process's queues' Metal
-    // priorities (TegraGM20BABI.h); false without the method
-    bool priority(uint32_t priority, uint32_t background);
+    // priorities (TegraGM20BABI.h); `*critical` reports whether the kernel treats this connection as UI-critical
+    // (TegraGM20BSchedABI.h). False without the method.
+    bool priority(uint32_t priority, uint32_t background, bool *critical = nullptr);
     // SurfaceLayout (method 16) for the import `bo` of a surface: its layout, decided by the kernel once for every process
     // at the first asking import (TegraGM20BLayout.h: block-linear when that importer writes it alone). `writes`: this
     // texture renders into or stores to it. TegraGM20BLayoutTiled, TegraGM20BLayoutOtherShape, or 0 (pitch; also without
     // the method).
     uint32_t surfaceLayout(const Bo &bo, uint32_t width, uint32_t height, uint32_t bpp, uint32_t bytesPerRow,
                            bool writes, tgm_layout *canonical = nullptr, uint32_t *kind = nullptr);
-    int nativeSurfaceView(const Bo &source, Bo &view, TegraGM20BAbiNativeSurfaceViewReply &layout);
+    int nativeSurfaceView(const Bo &source, Bo &view, TegraGM20BAbiNativeSurfaceViewReply &layout,
+                          bool writable = false);
     bool bindImport(void *addr, Bo &bo, uint32_t kind);
     // BoAlloc Compressible (comp.h), never CPU-mapped; safe beside the other calls (it may zero pages a free left
     // dirty); the kern_return_t.
     int allocCompressible(uint64_t bytes, Bo &bo);
     // Binds it whole at a VA aligned as its memory with compressible `kind`: the VmBind's kern_return_t (kIOReturnNoResources:
-    // the kernel had no comptags left for it), or kIOReturnNoSpace with no VA left; refused, the BO is left unbound. Under the
-    // caller's lock (the VA list).
+    // the kernel had no comptags left for it), or kIOReturnNoSpace with no VA left; refused, the BO is left unbound. Safe
+    // without Device::lock_ (the VA allocator holds vaLock_).
     int bindCompressed(Bo &bo, uint32_t kind);
     // Method 19: adds a zero-bandwidth-clear entry to the GPU's table (zbc.h); the kern_return_t (kIOReturnNoResources:
     // the table is full)
@@ -187,8 +190,16 @@ public:
         return (info_.flags & TegraGM20BInfoBoPark) != 0;
     }
 
+    bool supportsSameUses() const
+    {
+        return sameUses_;
+    }
+
     int park(uint64_t handle, bool guardNone);
     int unpark(uint64_t handle, uint64_t &address, uint64_t &bytes, uint32_t &status);
+    // Memory pressure or the app gone to the background: the kernel's zeroed spares go back if the VM is short (method 43;
+    // a kernel without it ignores the call)
+    void sparesGiveBack();
     bool mapAt(uint32_t token, uint64_t bytes, uint64_t fixedVa, bool readOnly = false);
     void unmap(uint32_t token, uint64_t address);
 
@@ -213,6 +224,7 @@ public:
     }
 
     bool channel(uint32_t engines, uint32_t &channel, const volatile uint32_t *&fence);
+    bool channelProgress(uint32_t channel, uint64_t &gpuVa);
     void closeChannel(uint32_t channel);
     // The GPU's channel epoch (TegraGM20BChannelEpochWord) in the connection's fence page, mapped at the first call; null:
     // the page could not be mapped
@@ -330,7 +342,7 @@ public:
 
     std::string error() const
     {
-        std::lock_guard<gm20b::Mutex> lock(errorLock_);
+        std::lock_guard<gm20b::UnfairMutex> lock(errorLock_);
         return err_;
     }
 
@@ -340,6 +352,11 @@ public:
     }
 
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    // HW Test gpu.perf.fill: uncompressed BOs allocated while set ask for direct physical addresses
+    // (TegraGM20BBoProbeDirect); the BOs that asked, and those the kernel answered are reached through the SMMU
+    mutable std::atomic<bool> probeDirect{false};
+    std::atomic<uint64_t> probeDirectBos{0}, smmuBos{0};
+
     // A debug kernel's method outside TegraGM20BABI.h (TegraGM20BPathsABI.h), on this connection
     int debugCall(uint32_t method, const void *in, size_t inSize, void *out, size_t outSize)
     {
@@ -365,7 +382,7 @@ private:
 #endif
     void setError(std::string error)
     {
-        std::lock_guard<gm20b::Mutex> lock(errorLock_);
+        std::lock_guard<gm20b::UnfairMutex> lock(errorLock_);
         err_ = std::move(error);
     }
 
@@ -378,20 +395,21 @@ private:
     uint32_t conn_ = 0;
     bool tunnel_ = false;
     bool volatileWrites_ = false;
+    bool sameUses_ = false;
     FreeObserver *freeObserver_ = nullptr;
     // A SurfaceWrites failed: imports stop saying the GPU only samples them.
     std::atomic<bool> importsWritten_{false};
     std::atomic<uint32_t> lostChannel_{0}, lostError_{0}, opened_{0};
     std::atomic<uint64_t> admissionCookie_{1};
-    gm20b::Mutex lostLock_;  // a channel made, and a channel marked lost, one after the other
+    gm20b::UnfairMutex lostLock_;  // a channel made, and a channel marked lost, one after the other
     std::atomic<uint64_t> lostFaultVa_{0};
     uint64_t fenceMap_ = 0;  // the connection's fence page, mapped once: every channel's word is in it
     uint64_t fenceMapBytes_ = 0;
     uint32_t selector_ = 0;
     TegraGM20BAbiInfo info_ = {};
     std::map<uint64_t, uint64_t> vaFree_;  // start -> bytes, coalesced
-    gm20b::Mutex vaLock_;
-    gm20b::Mutex eventsLock_;
+    gm20b::UnfairMutex vaLock_;
+    gm20b::UnfairMutex eventsLock_;
     std::shared_ptr<SharedEvents> events_;
     std::atomic<uint64_t> vaUsed_{0};
     std::atomic<uint64_t> allocated_{0};
@@ -399,7 +417,7 @@ private:
     // give-back line on another: a count of their own, as allocated_ is, not their BOs' fields
     std::atomic<uint64_t> controlMapped_{0};
     std::string err_;
-    mutable gm20b::Mutex errorLock_;
+    mutable gm20b::UnfairMutex errorLock_;
 };
 
 // Whether the calling thread's last Kernel::submitJob, asked to end quiet, ends with its own interrupt all the same

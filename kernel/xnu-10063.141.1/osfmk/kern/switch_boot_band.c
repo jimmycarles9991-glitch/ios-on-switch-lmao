@@ -11,9 +11,11 @@
  * thread that owns what the waiter needs.
  *
  * The band closes for good at the first of: backboardd setting "System Boot Complete" on IOPMrootDomain (SpringBoard
- * finished startup, ~3 s after the boot logo is dismissed; IOPMrootDomain kPowerEventSystemBootCompleted) or 60 s of
- * uptime. Every process it held is put back then. One log line says when and how many. (The boot's full CPU and GPU
- * clocks are not tied to the band: they end at System Boot Complete itself, IOPMrootDomain's switch_perf_hint.)
+ * finished startup, ~3 s after the boot logo is dismissed; IOPMrootDomain kPowerEventSystemBootCompleted) or 120 s of
+ * uptime, a bound System Boot Complete comes well inside (81 s on 25 Nov; at 60 s the bound closed the band while
+ * SpringBoard still had 18 s to go to its logo). Every process it held is put back then. One log line says when and
+ * how many. (The boot's full CPU and GPU clocks are not tied to the band: they end at System Boot Complete itself,
+ * IOPMrootDomain's switch_perf_hint.)
  */
 
 #include <kern/kalloc.h>
@@ -33,7 +35,7 @@ void switch_boot_band_lift(const char *why);
 #define BAND_NONE       0       /* image_params.ip_switch_band (zeroed with the exec's data) */
 #define BAND_DAEMON     1
 #define BAND_WIDGET     2
-#define BAND_UPTIME_NS  60000000000ull
+#define BAND_UPTIME_NS  120000000000ull
 
 /* Executables (basenames) that nothing on SpringBoard's or backboardd's startup path waits for. */
 static const char *const band_names[] = {
@@ -89,7 +91,7 @@ switch_boot_band_classify(const char *path)
 static void
 band_timeout(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
-	switch_boot_band_lift("60 s of uptime");
+	switch_boot_band_lift("120 s of uptime");
 }
 
 /* posix_spawn and execve (kern_exec.c), after the spawn attributes' policy: a member spawned while the band is open
@@ -108,9 +110,13 @@ switch_boot_band_spawned(task_t task, int band_class)
 	}
 	absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
 	lck_mtx_lock(&band_lock);
-	if (band_closed || now_ns >= BAND_UPTIME_NS) {
-		band_closed = true;
+	if (band_closed) {
 		lck_mtx_unlock(&band_lock);
+		return;
+	}
+	if (now_ns >= BAND_UPTIME_NS) {
+		lck_mtx_unlock(&band_lock);
+		switch_boot_band_lift("120 s of uptime");
 		return;
 	}
 	if (band_call == NULL) {
@@ -136,7 +142,7 @@ switch_boot_band_spawned(task_t task, int band_class)
 	lck_mtx_unlock(&band_lock);
 }
 
-/* IOPMrootDomain's System Boot Complete, or the 60 s bound: every task still in the band gets its CPU back, once. */
+/* IOPMrootDomain's System Boot Complete, or the 120 s bound: every task still in the band gets its CPU back, once. */
 void
 switch_boot_band_lift(const char *why)
 {
@@ -150,7 +156,7 @@ switch_boot_band_lift(const char *why)
 		lck_mtx_unlock(&band_lock);
 		return;
 	}
-	band_closed = true;
+	os_atomic_store(&band_closed, true, relaxed);
 	members = band_count;
 	lck_mtx_lock(&tasks_threads_lock);
 	queue_iterate(&tasks, task, task_t, tasks) {

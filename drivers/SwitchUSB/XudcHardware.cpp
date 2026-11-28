@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Tegra X1 XUSB device controller hardware layer; see XudcHardware.h.
 #include "XudcHardware.h"
+#include "XudcSettle.h"
 #include "UsbDmaCache.h"
 #include "../../kits/SwitchCAR/SwitchCAR.h"
 #include "../../kits/SwitchCAR/SwitchPMC.h"
@@ -9,6 +10,7 @@
 #include "XusbUtmiPad.h"
 #include "XusbPartitions.h"
 #include <IOKit/IOLib.h>
+#include <kern/clock.h>
 
 namespace xudc {
 namespace {
@@ -171,9 +173,6 @@ enum : uint32_t {
 // two segments of kEventSegmentTrbs (XudcTransfer.h: sized for every event the rings can owe), is a buffer of its own.
 constexpr uint32_t kContextOffset = 0x0800, kRingOffset = 0x1000, kControlBytes = 0x4000;
 constexpr uint32_t kEventBytes = 2 * kEventSegmentTrbs * 16;
-// Hardware::settled's period: the bound the spins it replaced had (switch_mmio_wait32, 1 ms), until the device probe
-// gives the real completion time; Linux gives up at 100 us (tegra_xudc.c xudc_readl_poll).
-constexpr uint32_t kStateChangeMs = 1;
 constexpr unsigned kPortPasses = 8;  // Hardware::portChange
 
 const char *registerName(uint32_t offset)
@@ -408,6 +407,23 @@ bool Hardware::eventPending() const
     return (e[3] & TRB_CYCLE) == eventCycle;
 }
 
+bool Hardware::nextTransferEventReady(uint32_t blockedDcis) const
+{
+    volatile uint32_t *e = reinterpret_cast<volatile uint32_t *>(events.va) + static_cast<size_t>(eventIndex) * 4;
+    const uint32_t d3 = e[3];
+    if ((d3 & TRB_CYCLE) != eventCycle)
+        return true;
+    const uint32_t type = (d3 >> 10) & 0x3fu;
+    const uint32_t dci = (d3 >> 16) & 0x1fu;
+    return type == TRB_TRANSFER_EVENT && dci >= 2u && (blockedDcis & (1u << dci)) == 0u;
+}
+
+void Hardware::setSettleWait(SettleSleep fn, void *context)
+{
+    settleSleep = fn;
+    settleContext = context;
+}
+
 // Linux tegra_xudc_process_event_ring(): the new dequeue pointer with EHB written as 1 (W1C), which re-enables the
 // interrupt. ST.IP is not touched here: an IP raised for events that arrived after the drain must survive.
 void Hardware::finishEvents()
@@ -585,17 +601,31 @@ bool Hardware::initEndpoint(uint32_t dci, uint32_t type, uint32_t maxPacket, uin
     return true;
 }
 
-// No interrupt or event for an endpoint's halt, pause or reload taking effect or its thread going idle was found in the
-// sources this driver follows: the event types are transfer, port status and setup (Linux tegra-xudc TRB_TYPE_*), ST
-// holds IP, RC and DSE, CTRL's SMI_EVT, SMI_DSE and EWE are defined and used nowhere, the T210 TRM (22.9.4-5) says to
-// poll, and both Linux drivers poll EP_STCHG, EP_RELOAD and EP_THREAD_ACTIVE (and ignore the result: their 100 us is
-// when they give up, not when the change is known done). Nothing spins on one here: the work-loop thread sleeps
-// kStateChangeMs and reads the register once. A miss is one line naming the endpoints and the register.
+// Endpoint state changes raise no interrupt (T210 TRM 22.9.4-5): check immediately and poll briefly for microsecond
+// completions, then release the work-loop gate via settleSleep if still pending up to kStateChangeMs.
 bool Hardware::settled(uint32_t offset, uint32_t mask, uint32_t value)
 {
-    IOSleep(kStateChangeMs);
-    const uint32_t seen = xr(offset) & mask;
-    if (seen == value)
+    uint32_t seen = 0;
+    const bool done = settleRegister(
+        mask, value, kFastSettleUs, kStateChangeMs,
+        [this, offset] {
+            return xr(offset);
+        },
+        [] {
+            uint64_t ns = 0;
+            absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+            return ns;
+        },
+        [this, mask](uint64_t remainingNs) {
+            if (settleSleep) {
+                settleSleep(settleContext, mask, remainingNs);
+            } else {
+                const uint32_t ms = static_cast<uint32_t>((remainingNs + 999999ULL) / 1000000ULL);
+                IOSleep(ms ? ms : 1u);
+            }
+        },
+        &seen);
+    if (done)
         return true;
     IOLog("SwitchUSB: DCI bits %#x: %s reads %#x, not %#x, %u ms after the change\n", mask, registerName(offset), seen,
           value, kStateChangeMs);

@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A cubic sampler (MTLSamplerMinMagFilterCubic) bound to the vertex stage on the driver: a vertex

@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
 import IOSurface

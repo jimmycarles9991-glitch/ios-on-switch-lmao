@@ -485,7 +485,7 @@ static void io_reprioritize(mpsc_queue_chain_t elm, mpsc_daemon_queue_t dq);
 
 void vm_page_request_reprioritize(vm_object_t, uint64_t, uint32_t, int);
 void vm_page_handle_prio_inversion(vm_object_t, vm_page_t);
-void vm_decmp_upl_reprioritize(upl_t, int);
+void vm_decmp_upl_reprioritize(upl_t, int, zalloc_flags_t);
 #endif
 
 void
@@ -6942,7 +6942,9 @@ unsigned int preheat_min_bytes = (1024 * 32);
  * for, so this costs no extra decoding or reading: the pages that were decoded and dropped are kept, and the next
  * faults in the same chunk find them resident. Counted for the kprof decmpfs line.
  */
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
 uint64_t switch_decmpfs_aligned, switch_decmpfs_aligned_pages;
+#endif
 #ifndef SWITCH_DECMPFS_CHUNK_ALIGN
 #define SWITCH_DECMPFS_CHUNK_ALIGN 1  /* 0: page-ins as XNU sizes them (an A/B build); the counters stay */
 #endif
@@ -6995,8 +6997,10 @@ switch_cluster_chunk_align(vm_object_t object, vm_object_offset_t *start, vm_siz
 	if (s == *start && e == *start + *length) {
 		return;
 	}
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
 	os_atomic_inc(&switch_decmpfs_aligned, relaxed);
 	os_atomic_add(&switch_decmpfs_aligned_pages, (uint64_t)((e - s - *length) >> PAGE_SHIFT), relaxed);
+#endif
 	*start = s;
 	*length = (vm_size_t)(e - s);
 }
@@ -8248,6 +8252,11 @@ ReScan:
 #endif /* MACH_ASSERT */
 #if CONFIG_IOSCHED
 
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
+/* Busy-page raises XNU queued for the device (kernel/switch/vm/prefetch.c's debug line) */
+uint64_t switch_reprio_requested;
+#endif
+
 void
 vm_page_request_reprioritize(vm_object_t o, uint64_t blkno, uint32_t len, int prio)
 {
@@ -8274,12 +8283,15 @@ vm_page_request_reprioritize(vm_object_t o, uint64_t blkno, uint32_t len, int pr
 
 	/* Insert request into the reprioritization list */
 	mpsc_daemon_enqueue(&io_reprioritize_q, &req->iorr_elm, MPSC_QUEUE_DISABLE_PREEMPTION);
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
+	os_atomic_inc(&switch_reprio_requested, relaxed);
+#endif
 
 	return;
 }
 
 void
-vm_decmp_upl_reprioritize(upl_t upl, int prio)
+vm_decmp_upl_reprioritize(upl_t upl, int prio, zalloc_flags_t flags)
 {
 	int offset;
 	vm_object_t object;
@@ -8323,7 +8335,7 @@ vm_decmp_upl_reprioritize(upl_t upl, int prio)
 	upl_unlock(upl);
 
 	/* Now perform the allocation */
-	io_upl_reprio_info = kalloc_data(sizeof(uint64_t) * atop(io_upl_size), Z_WAITOK);
+	io_upl_reprio_info = kalloc_data(sizeof(uint64_t) * atop(io_upl_size), flags);
 	if (io_upl_reprio_info == NULL) {
 		return;
 	}
@@ -8372,8 +8384,17 @@ vm_decmp_upl_reprioritize(upl_t upl, int prio)
 
 		if (blkno != 0 && len != 0) {
 			/* Create the request for I/O reprioritization */
-			req = zalloc_flags(io_reprioritize_req_zone,
-			    Z_WAITOK | Z_NOFAIL);
+			if (flags & Z_NOWAIT) {
+				/* Switch: a raise the busy-page hook admitted is dropped rather than wait for memory. */
+				req = (io_reprioritize_req_t)zalloc_noblock(io_reprioritize_req_zone);
+				if (req == NULL) {
+					offset += len;
+					continue;
+				}
+			} else {
+				req = zalloc_flags(io_reprioritize_req_zone,
+				    Z_WAITOK | Z_NOFAIL);
+			}
 			req->blkno = blkno;
 			req->len = len;
 			req->priority = prio;
@@ -8381,6 +8402,9 @@ vm_decmp_upl_reprioritize(upl_t upl, int prio)
 
 			/* Insert request into the reprioritization list */
 			mpsc_daemon_enqueue(&io_reprioritize_q, &req->iorr_elm, MPSC_QUEUE_DISABLE_PREEMPTION);
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
+			os_atomic_inc(&switch_reprio_requested, relaxed);
+#endif
 
 			offset += len;
 		} else {
@@ -8390,6 +8414,21 @@ vm_decmp_upl_reprioritize(upl_t upl, int prio)
 
 out:
 	kfree_data(io_upl_reprio_info, sizeof(uint64_t) * atop(io_upl_size));
+}
+
+/*
+ * Switch: the boot replay's I/O is tier 0 (passive) but the SD card queues it one class below tier-0 demand reads
+ * (NativeSwitchBlock SwitchSdPick.h switchSdClassOf), so a tier-0 thread sleeping on one of its busy pages raises it as
+ * it would a lower tier's. The UPL keeps priority 0: spec_strategy issues a cluster I/O at its UPL's priority, and tier
+ * 1 would hold the replay in throttle_lowpri_io. Compares thread pointers only, under the object lock the caller holds.
+ * A decmpfs pagein UPL (UPL_DECMP_REQ) it admits is raised with Z_NOWAIT (vm_decmp_upl_reprioritize): the waiter holds
+ * the object lock, so a raise that finds no memory is dropped, as vm_page_request_reprioritize drops its own.
+ */
+static bool
+switch_upl_below_waiter(upl_t upl, int cur_tier)
+{
+	return cur_tier == THROTTLE_LEVEL_TIER0 && upl->upl_creator != current_thread() &&
+	       switch_vm_prefetch_is_replay_thread != NULL && switch_vm_prefetch_is_replay_thread(upl->upl_creator);
 }
 
 void
@@ -8407,7 +8446,8 @@ vm_page_handle_prio_inversion(vm_object_t o, vm_page_t m)
 	 *  UPL containing the contended page.
 	 */
 	queue_iterate(&o->uplq, upl, upl_t, uplq) {
-		if (((upl->flags & UPL_EXPEDITE_SUPPORTED) == 0) || upl->upl_priority <= cur_tier) {
+		if (((upl->flags & UPL_EXPEDITE_SUPPORTED) == 0) ||
+		    (upl->upl_priority <= cur_tier && !switch_upl_below_waiter(upl, cur_tier))) {
 			continue;
 		}
 		pl = UPL_GET_INTERNAL_PAGE_LIST(upl);
@@ -8425,7 +8465,7 @@ vm_page_handle_prio_inversion(vm_object_t o, vm_page_t m)
 				if ((upl->flags & UPL_DECMP_REQ) && upl->decmp_io_upl) {
 					KDBG((VMDBG_CODE(DBG_VM_PAGE_EXPEDITE)) | DBG_FUNC_NONE, VM_KERNEL_UNSLIDE_OR_PERM(upl->upl_creator), VM_KERNEL_UNSLIDE_OR_PERM(m),
 					    VM_KERNEL_UNSLIDE_OR_PERM(upl), upl->upl_priority);
-					vm_decmp_upl_reprioritize(upl, cur_tier);
+					vm_decmp_upl_reprioritize(upl, cur_tier, upl->upl_priority > cur_tier ? Z_WAITOK : Z_NOWAIT);
 					break;
 				}
 				KDBG((VMDBG_CODE(DBG_VM_PAGE_EXPEDITE)) | DBG_FUNC_NONE, VM_KERNEL_UNSLIDE_OR_PERM(upl->upl_creator), VM_KERNEL_UNSLIDE_OR_PERM(m),

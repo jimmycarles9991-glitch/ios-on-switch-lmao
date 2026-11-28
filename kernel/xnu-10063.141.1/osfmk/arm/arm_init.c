@@ -855,7 +855,7 @@ arm_init_idle_cpu(
 #if __arm64__
 	wfe_timeout_init();
 	pmap_clear_user_ttb();
-	flush_mmu_tlb();
+	flush_core_tlb();
 	/* Enable asynchronous exceptions */
 	__builtin_arm_wsr("DAIFClr", DAIFSC_ASYNCF);
 #endif

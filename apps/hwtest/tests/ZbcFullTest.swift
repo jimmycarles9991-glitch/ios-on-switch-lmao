@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 
 /// The GPU's ZBC colour table filling up (drivers/TegraGM20BMetal/zbc.h: 15 colour entries, every
@@ -64,16 +66,15 @@ struct ZbcFullTest: HWTest {
         metrics.set("target_comptags", compressed)
         guard compressed == 1 else { return .fail("no compressed 512x512 BGRA8 target", metrics) }
         let before = GM20BFacade.compression(of: gpu.device)
+        let readback = try gpu.buffer(Self.side * Self.side * 4)
         var pixelsWrong = 0
         for k in 0 ..< Self.colours {
-            for _ in 0 ..< 3 { try await Self.clear(gpu, target, k) }
-            pixelsWrong += try await Self.wrong(gpu, target, k)
+            pixelsWrong += try Self.clearAndCheck(gpu, target, readback: readback, colour: k, repeats: 3)
         }
         let drained = try await Self.drain(gpu)
         let answered = GM20BFacade.compression(of: gpu.device)
         for k in 0 ..< Self.colours {
-            try await Self.clear(gpu, target, k)
-            pixelsWrong += try await Self.wrong(gpu, target, k)
+            pixelsWrong += try Self.clearAndCheck(gpu, target, readback: readback, colour: k, repeats: 1)
         }
         let after = GM20BFacade.compression(of: gpu.device)
         let delta = { (a: [String: Int], b: [String: Int], key: String) in (b[key] ?? 0) - (a[key] ?? 0) }
@@ -99,20 +100,42 @@ struct ZbcFullTest: HWTest {
         return Outcome.judged(checks, metrics, proof: gpu.proof).onRawPath(gpu)
     }
 
-    static func clear(_ gpu: GPU, _ target: MTLTexture, _ k: Int) async throws {
-        try await gpu.run { commands in
-            let pass = MTLRenderPassDescriptor()
-            pass.colorAttachments[0].texture = target
-            pass.colorAttachments[0].loadAction = .clear
-            pass.colorAttachments[0].clearColor = clearColour(k)
-            pass.colorAttachments[0].storeAction = .store
-            commands.makeRenderCommandEncoder(descriptor: pass)!.endEncoding()
+    static func clearAndCheck(
+        _ gpu: GPU, _ target: MTLTexture, readback: MTLBuffer, colour k: Int, repeats: Int
+    ) throws -> Int {
+        let color = clearColour(k)
+        let rowBytes = Self.side * 4
+        var buffers: [MTLCommandBuffer] = []
+        buffers.reserveCapacity(repeats + 1)
+        for _ in 0 ..< repeats {
+            buffers.append(
+                try gpu.commit { commands in
+                    let pass = MTLRenderPassDescriptor()
+                    pass.colorAttachments[0].texture = target
+                    pass.colorAttachments[0].loadAction = .clear
+                    pass.colorAttachments[0].clearColor = color
+                    pass.colorAttachments[0].storeAction = .store
+                    commands.makeRenderCommandEncoder(descriptor: pass)!.endEncoding()
+                }
+            )
         }
-    }
-
-    static func wrong(_ gpu: GPU, _ target: MTLTexture, _ k: Int) async throws -> Int {
-        let read = try await gpu.read(target, bytesPerPixel: 4), want = bytes(k)
-        return stride(from: 0, to: read.count, by: 4).filter { read[$0 ..< $0 + 4].elementsEqual(want) == false }.count
+        buffers.append(
+            try gpu.commit { commands in
+                let blit = commands.makeBlitCommandEncoder()!
+                blit.copy(
+                    from: target, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(),
+                    sourceSize: MTLSize(width: Self.side, height: Self.side, depth: 1), to: readback,
+                    destinationOffset: 0, destinationBytesPerRow: rowBytes, destinationBytesPerImage: 0
+                )
+                blit.endEncoding()
+            }
+        )
+        try gpu.finish(buffers)
+        let b = bytes(k)
+        let want = ByteCompare.word(b[0], b[1], b[2], b[3])
+        return ByteCompare.wordWrongCount(
+            UnsafeRawBufferPointer(start: readback.contents(), count: rowBytes * Self.side), want: want
+        )
     }
 
     /// The compression thread settled: every ZBC entry asked so far added or refused; false where the facade has no

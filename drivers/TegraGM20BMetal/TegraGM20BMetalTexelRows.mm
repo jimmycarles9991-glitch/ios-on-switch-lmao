@@ -25,7 +25,9 @@ void gm20bMoveShadowImage(gm20b::BlitEncoder &b, const gm20b::Texture &t, bool f
 // is filled before every pass into it
 void SwitchMetalRangeEncode::texelRowsTargets(const SwitchMetalPass &pass)
 {
-    for (const SwitchMetalPass::Color &a : pass.color) {
+    const uint8_t mask = pass.colorMask ? pass.colorMask : 0xffu;
+    for (uint8_t m = mask; m; m &= uint8_t(m - 1)) {
+        const SwitchMetalPass::Color &a = pass.color[__builtin_ctz(m)];
         __unsafe_unretained SwitchMetalTexture *t = (SwitchMetalTexture *)a.texture;
         if (!t || !t->_raw.texelRows)
             continue;

@@ -13,23 +13,25 @@ extern "C" {
 #define TGM_VICTIM_NONE (-1)
 #define TGM_VICTIM_SWITCHING (-2)
 
-/* A channel's runlist level, lowest first: runningboardd's background and foreground roles, and the compositor's. */
+/* A channel's runlist level, lowest first: background, foreground, priority-0 app, and the compositor's. */
 enum tgm_level {
 	TGM_LEVEL_BACKGROUND,
 	TGM_LEVEL_FOREGROUND,
+	TGM_LEVEL_APP_HIGH,
 	TGM_LEVEL_HIGH,
 	TGM_LEVELS,
 };
 
-/* A connection's runlist level from the GPU priority its Metal queues asked for (TegraGM20BABI.h method 18) and whether
- * runningboardd denies its process the GPU (`background`: then its background priority counts). */
+/* A connection's runlist level from the GPU priority its Metal queues asked for (TegraGM20BABI.h method 18), whether
+ * runningboardd denies its process the GPU (`background`: then its background priority counts), and whether its task
+ * holds com.apple.private.graphics-restart-no-kill (`restart_no_kill`: only then is priority 0 the compositor's). */
 static inline enum tgm_level tgm_priority_level(uint32_t priority, uint32_t background_priority,
-						int background)
+						int background, int restart_no_kill)
 {
 	const uint32_t p = background ? background_priority : priority;
 
 	if (p == 0 && !background)
-		return TGM_LEVEL_HIGH;
+		return restart_no_kill ? TGM_LEVEL_HIGH : TGM_LEVEL_APP_HIGH;
 	return p <= 2 ? TGM_LEVEL_FOREGROUND : TGM_LEVEL_BACKGROUND;
 }
 
@@ -48,6 +50,21 @@ static inline int tgm_priority_granted(uint32_t asked)
 static inline int tgm_compositor(enum tgm_level level, int restart_no_kill)
 {
 	return level == TGM_LEVEL_HIGH && restart_no_kill;
+}
+
+/* RAMFC 0xf8 (PFIFO 0x2310) timeslice word: enable bit 28, scale bits 15:12, timeout bits 7:0. */
+static inline uint32_t tgm_timeslice_word(uint32_t us)
+{
+	uint32_t timeout = us;
+	uint32_t scale = 0;
+
+	while (timeout >= 256u && scale < 15u) {
+		timeout >>= 1;
+		scale++;
+	}
+	if (timeout > 255u)
+		timeout = 255u;
+	return 0x10000000u | (scale << 12) | timeout;
 }
 
 /* What a high channel's kick should preempt, from engine 0's (GR's) status, whether its resident channel is high, and the
@@ -100,21 +117,23 @@ static inline void tgm_interleave_units(const uint8_t *tier_of, unsigned units, 
 	}
 }
 
-/* Appends the tiers above the bottom one (two or three tiers in all): the top tier, and with a middle tier, each of its
- * units followed by the top tier again (nvgpu gk20a_runlist_construct_locked). */
-static inline void tgm_interleave_upper(const uint8_t *tier_of, unsigned units, unsigned tiers,
-					uint16_t *order, unsigned *n)
+/* Appends tiers `tier..top` recursively so every unit of a lower tier is followed by every higher tier
+ * (nvgpu gk20a_runlist_construct_locked generalized to up to TGM_LEVELS tiers). */
+static inline void tgm_interleave_upper(const uint8_t *tier_of, unsigned units, unsigned tier,
+					unsigned top, uint16_t *order, unsigned *n)
 {
 	unsigned i = 0;
 
-	tgm_interleave_units(tier_of, units, tiers - 1, order, n);
-	if (tiers < 3)
+	if (tier == top) {
+		tgm_interleave_units(tier_of, units, top, order, n);
 		return;
+	}
+	tgm_interleave_upper(tier_of, units, tier + 1, top, order, n);
 	for (i = 0; i < units; i++) {
-		if (tier_of[i] != 1)
+		if (tier_of[i] != tier)
 			continue;
 		order[(*n)++] = (uint16_t)i;
-		tgm_interleave_units(tier_of, units, 2, order, n);
+		tgm_interleave_upper(tier_of, units, tier + 1, top, order, n);
 	}
 }
 
@@ -135,6 +154,7 @@ static inline unsigned tgm_interleave_tiers(const uint8_t *level, const uint16_t
 	unsigned n = 0;
 	unsigned i = 0;
 	unsigned top = 0;
+	unsigned t = 0;
 	uint64_t weight[TGM_LEVELS] = {0};
 	uint64_t above_units = 0;
 	uint64_t above_entries = 0;
@@ -143,6 +163,8 @@ static inline unsigned tgm_interleave_tiers(const uint8_t *level, const uint16_t
 	if (units > sizeof(tier_of))
 		return 0;
 	for (i = 0; i < units; i++) {
+		if (level[i] >= TGM_LEVELS)
+			return 0;
 		present[level[i]] = 1;
 		top = level[i] > top ? level[i] : top;
 	}
@@ -164,9 +186,12 @@ static inline unsigned tgm_interleave_tiers(const uint8_t *level, const uint16_t
 	}
 	above_units = count[tiers - 1];
 	above_entries = weight[tiers - 1];
-	if (tiers == 3) {
-		above_units += (uint64_t)count[1] * (1 + count[2]);
-		above_entries += weight[1] + count[1] * weight[2];
+	for (t = tiers - 1; t > 1; t--) {
+		const unsigned lower = t - 1;
+		if (above_entries > max || above_units > order_max)
+			return 0;
+		above_units = count[lower] + (1 + (uint64_t)count[lower]) * above_units;
+		above_entries = weight[lower] + (1 + (uint64_t)count[lower]) * above_entries;
 	}
 	for (every = 1; every <= (merge ? count[0] : 1); every++) {
 		repeats = count[0] / every;
@@ -181,7 +206,7 @@ static inline unsigned tgm_interleave_tiers(const uint8_t *level, const uint16_t
 			continue;
 		order[n++] = (uint16_t)i;
 		if (!(++seen % every))
-			tgm_interleave_upper(tier_of, units, tiers, order, &n);
+			tgm_interleave_upper(tier_of, units, 1, tiers - 1, order, &n);
 	}
 	return n;
 }

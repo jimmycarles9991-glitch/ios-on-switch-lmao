@@ -91,4 +91,7 @@ uint32_t tegra_apbdma_interrupts(const struct tegra_apbdma_channel *ch);
 // One line of the channel's registers and its interrupt's GIC state, for a log or panic line.
 void tegra_apbdma_describe(const struct tegra_apbdma_channel *ch, char *buffer, size_t size);
 
+// System sleep (SwitchSuspend): re-enables the controller clock/reset and control registers after SC7.
+extern "C" void tegra_apbdma_resume(void);
+
 #endif

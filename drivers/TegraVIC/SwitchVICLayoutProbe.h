@@ -6,7 +6,8 @@
 // destinations back through the Tegra block-linear law below, the law BlockLinear.c de-swizzles NVDEC's pictures with
 // and the one the GPU samples its block-linear textures by. Every source byte names its place, and the destination is
 // poisoned, so matchedLaws says which layout the engine wrote. VIC writes whole blocks: changed bytes inside a plane's
-// blocks but outside the picture are padWritten, not a fault. Plain logic, no IOKit: SwitchVICLayoutProbe.cpp runs it,
+// blocks but outside the picture are padWritten, not a fault. The last case reads instead: a BGRA source the CPU laid
+// out in 16-GOB blocks by the same law (the GPU's render targets, kTegraVICTraits.blockLinearRgbIn) copied to pitch. Plain logic, no IOKit: SwitchVICLayoutProbe.cpp runs it,
 // test/switch_vic_layout_probe_test.cpp checks it.
 #pragma once
 #include <stdint.h>
@@ -14,7 +15,7 @@
 #include "TegraVICConfig.h"
 
 #define SWITCH_VIC_LAYOUT_PROBE_MAGIC 0x56424c4bu  // 'VBLK'
-#define SWITCH_VIC_LAYOUT_PROBE_CASES 6u
+#define SWITCH_VIC_LAYOUT_PROBE_CASES 7u
 
 typedef struct {
     uint32_t fourcc, blockHeightLog2;               // the destination's; 0xff: pitch linear
@@ -24,6 +25,7 @@ typedef struct {
     uint32_t matchedLaws;     // bit k: every plane reads back exactly with 2^k GOBs a block; bit 8: as pitch linear
     uint32_t padWritten;      // changed bytes inside the planes' blocks but outside the picture
     uint32_t outsideWritten;  // changed bytes outside every plane
+    uint32_t sourceBlockHeightLog2;  // the source's; 0xff: pitch linear
 } SwitchVICLayoutResult;
 
 typedef struct {
@@ -43,11 +45,12 @@ constexpr uint8_t kPoison = 0xab, kSourcePad = 0x5a;
 
 struct Case {
     uint32_t fourcc, width, height, blockHeightLog2;
+    uint32_t sourceBlockHeightLog2 = kPitch;
 };
 
 constexpr Case kCases[SWITCH_VIC_LAYOUT_PROBE_CASES] = {
-    {kBGRA, 40, 40, kPitch}, {kNV12, 96, 40, kPitch}, {kBGRA, 40, 40, 0},
-    {kBGRA, 40, 40, 1},      {kBGRA, 40, 40, 4},      {kNV12, 96, 40, 1},
+    {kBGRA, 40, 40, kPitch}, {kNV12, 96, 40, kPitch}, {kBGRA, 40, 40, 0},         {kBGRA, 40, 40, 1},
+    {kBGRA, 40, 40, 4},      {kNV12, 96, 40, 1},      {kBGRA, 40, 40, kPitch, 4},
 };
 constexpr uint32_t kControls = 2;
 
@@ -98,11 +101,18 @@ inline uint64_t offsetUnder(uint32_t law, uint32_t x, uint32_t y, uint32_t pitch
     return law == kPitchLaw ? uint64_t(y) * pitch + x : blockLinearOffset(x, y, pitch, law);
 }
 
-// Sources at VIC's source row alignment (256 bytes); destinations on whole GOBs, their rows whole blocks.
+// Sources at VIC's source row alignment (256 bytes, whole GOBs too); destinations on whole GOBs; a block-linear
+// plane's rows whole blocks.
+inline uint32_t blockHeightOf(const Case &c, bool destination)
+{
+    return destination ? c.blockHeightLog2 : c.sourceBlockHeightLog2;
+}
+
 inline Layout layout(const Case &c, bool destination)
 {
     const bool nv12 = c.fourcc == kNV12;
-    const bool blockLinear = destination && c.blockHeightLog2 != kPitch;
+    const uint32_t log2 = blockHeightOf(c, destination);
+    const bool blockLinear = log2 != kPitch;
     Layout l = {};
     l.planes = nv12 ? 2 : 1;
     uint64_t at = 0;
@@ -112,7 +122,7 @@ inline Layout layout(const Case &c, bool destination)
         plane.rowBytes = nv12 ? c.width : c.width * 4;
         plane.height = nv12 && p ? c.height / 2 : c.height;
         plane.pitch = roundUp(plane.rowBytes, destination ? 64 : 256);
-        plane.rows = blockLinear ? roundUp(plane.height, 8u << c.blockHeightLog2) : plane.height;
+        plane.rows = blockLinear ? roundUp(plane.height, 8u << log2) : plane.height;
         plane.offset = at;
         at = roundUp64(at + uint64_t(plane.pitch) * plane.rows, 256);
     }
@@ -132,9 +142,9 @@ inline TegraVICImage image(const Case &c, bool destination, uint64_t address)
         im.base[p] = address + l.plane[p].offset;
         im.span[p] = kBufferBytes - l.plane[p].offset;
     }
-    if (destination && c.blockHeightLog2 != kPitch) {
+    if (blockHeightOf(c, destination) != kPitch) {
         im.blockLinear = 1;
-        im.blockHeightLog2 = c.blockHeightLog2;
+        im.blockHeightLog2 = blockHeightOf(c, destination);
     }
     return im;
 }
@@ -155,11 +165,12 @@ inline void fillSource(uint8_t *bytes, const Case &c)
 {
     memset(bytes, kSourcePad, kBufferBytes);
     const Layout l = layout(c, false);
+    const uint32_t law = c.sourceBlockHeightLog2 == kPitch ? kPitchLaw : c.sourceBlockHeightLog2;
     for (uint32_t p = 0; p < l.planes; p++) {
         const Plane &plane = l.plane[p];
         for (uint32_t y = 0; y < plane.height; y++) {
             for (uint32_t x = 0; x < plane.rowBytes; x++)
-                bytes[plane.offset + uint64_t(y) * plane.pitch + x] = sourceByte(c, p, x, y);
+                bytes[plane.offset + offsetUnder(law, x, y, plane.pitch)] = sourceByte(c, p, x, y);
         }
     }
 }

@@ -202,11 +202,11 @@ class RecordsTest(unittest.TestCase):
             'key': rec['key'],
             'programs': programs[:2],
             'samplers': [],
-            'variants': [{'assume': 1, 'program': programs[2]}],
+            'variants': [{'assume': 1, 'program': programs[2], 'memory': 4}],
             'probe': {'index': 0, 'form': '', 'targets': 1, 'records': [{'regs': {}}]},
         }
         back = directlink.pipeline_of(record, [], ids, [])
-        self.assertEqual(back['variants'], [{'stage': 1, 'assume': 1, 'program': 2}])
+        self.assertEqual(back['variants'], [{'stage': 1, 'assume': 1, 'program': 2, 'memory': 4}])
         self.assertEqual((back['bound_entries'], back['uniform'], back['fetch_rung']), (1, uniform, rec['fetch_rung']))
         self.assertEqual(back['memory_entries'], packfile.ALL_ENTRIES)
         self.assertEqual(
@@ -217,7 +217,7 @@ class RecordsTest(unittest.TestCase):
         )
         self.assertEqual(packfile.pipeline_bytes(back, 0, 0, 5), data)
         pipes, _, _, variants = packfile.pipeline_sections([dict(back, key=rec['key']), dict(back, key=rec['key'])])
-        self.assertEqual(len(variants), 16)
+        self.assertEqual(len(variants), 2 * packfile.VARIANT_STRUCT.size)
         v15 = directlink.PIPELINE_BYTES + directlink.V20_AT - packfile.PIPELINE_V18.size - packfile.PIPELINE_V15.size
         self.assertEqual(struct.unpack_from('<I', pipes, v15), (1,))
 
@@ -361,6 +361,34 @@ class RecordsTest(unittest.TestCase):
         pipes, blob, _, _ = packfile.pipeline_sections([rec])
         self.assertEqual(packfile.PIPELINE_V24.unpack_from(pipes, directlink.V24_AT), (2, 3, 0, 3, 4, 4, 2))
         self.assertEqual(blob, [0x1A00, 9, 0x2080, 0x20, 0x20C0, 0x30])
+
+    def test_a_buffers_metal_address_words_round_trip(self):
+        rec = {
+            'key': 'samples=1 c0=80:15:0',
+            'vs': 0,
+            'fs': 1,
+            'blob': [],
+            'entries': [],
+            'push': [],
+            'vbs': [],
+            'set_size': 0,
+            'fetch': False,
+            'guest_base_word': [7, 21],
+            'guest_base_slot': [5, 0x80 | 2],
+        }
+        data = packfile.pipeline_bytes(rec, 0, 0)
+        self.assertEqual(len(data), directlink.PIPELINE_BYTES)
+        self.assertEqual(data[directlink.V36_AT :], bytes([7, 21, 0, 0, 5, 0x82, 0, 0]))
+        programs = [{'image': bytes([i]), 'data': b'', 'cbufs': []} for i in range(2)]
+        ids = {directlink.program_id(p): i for i, p in enumerate(programs)}
+        probe = {'index': 0, 'form': '', 'targets': 1, 'records': [{'regs': {}}]}
+        record = {'pipeline': data, 'key': rec['key'], 'programs': programs, 'samplers': [], 'probe': probe}
+        back = directlink.pipeline_of(record, [], ids, [])
+        self.assertEqual(back['guest_base_word'], [7, 21, 0, 0])
+        self.assertEqual(back['guest_base_slot'], [5, 0x82, 0, 0])
+        self.assertEqual(
+            packfile.pipeline_bytes(dict(back, blob=[]), 0, 0)[directlink.V36_AT :], data[directlink.V36_AT :]
+        )
 
     def test_a_stride_twin_is_its_records_index_of_the_same_form(self):
         base = {'vs': 0, 'fs': 1, 'blob': [], 'entries': [], 'push': [], 'vbs': [], 'set_size': 0, 'fetch': False}
@@ -509,7 +537,13 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual(data[v20 - 8 : v20 - 4], bytes(4))
         self.assertEqual(struct.unpack_from('<I', data, v20 - 4), (packfile.ALL_ENTRIES,))
         self.assertEqual(
-            data[v21:], bytes(packfile.PIPELINE_V21.size + packfile.PIPELINE_V22.size + packfile.PIPELINE_V24.size)
+            data[v21:],
+            bytes(
+                packfile.PIPELINE_V21.size
+                + packfile.PIPELINE_V22.size
+                + packfile.PIPELINE_V24.size
+                + packfile.PIPELINE_V36.size
+            ),
         )
 
     def test_shader_test_views_and_push_placements_round_trip(self):

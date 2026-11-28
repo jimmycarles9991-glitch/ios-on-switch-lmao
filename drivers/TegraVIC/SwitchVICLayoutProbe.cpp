@@ -15,6 +15,7 @@ int runCase(uint32_t index, const SwitchVICProbeBuffers &buffers, SwitchVICLayou
     *r = {};
     r->fourcc = c.fourcc;
     r->blockHeightLog2 = c.blockHeightLog2;
+    r->sourceBlockHeightLog2 = c.sourceBlockHeightLog2;
     int error = switch_vic_probe_cpu(buffers, 0, SWITCH_GPU_BACKING_WRITE, [&](uint8_t *bytes) {
         fillSource(bytes, c);
     });

@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestKit
 import SwitchAtomics
 
 /// Every LSE form an A12 build emits (atomics/switch_atomics_list.h: CAS at each size and CASP, the eight LD<op>s and

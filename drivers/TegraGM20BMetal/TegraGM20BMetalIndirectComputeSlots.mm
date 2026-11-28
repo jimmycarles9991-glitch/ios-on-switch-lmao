@@ -59,11 +59,13 @@ std::shared_ptr<SwitchMetalICBBlock> gm20bNewBlock(SwitchMetalIndirectComputeBuf
 
 uint32_t *gm20bComputeSlot(SwitchMetalIndirectComputeBuffer *b, NSUInteger index)
 {
+    b->_raw.markCpuDirty();
     return reinterpret_cast<uint32_t *>(b->_raw.cpu) + index * b->_slotWords;
 }
 
 uint32_t *gm20bBindSlot(SwitchMetalIndirectComputeBuffer *b, NSUInteger index)
 {
+    b->_binds.markCpuDirty();
     return reinterpret_cast<uint32_t *>(b->_binds.cpu) + index * b->_bindWords;
 }
 

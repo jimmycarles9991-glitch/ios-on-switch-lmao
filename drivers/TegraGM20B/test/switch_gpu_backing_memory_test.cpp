@@ -312,27 +312,53 @@ TEST_F(BackingMemory, EngineMappingSurvivesAliasesAndRetiresBeforeItsPages)
 	EXPECT_TRUE(released);
 }
 
-TEST_F(BackingMemory, InstalledEngineMappingFixesThePinnedExtent)
+TEST_F(BackingMemory, InstalledEngineMappingSurvivesPrefixPreservingGrowth)
 {
 	const std::array<uint64_t, 2> pages{next_page += 4096, next_page += 4096};
-	auto *b = switch_gpu_backing_register(pages.data(), 1, 0, nullptr, nullptr);
-	switch_gpu_backing_info info{};
-	switch_gpu_backing_describe(b, &info);
+	bool firstOwnerReleased = false, secondOwnerReleased = false;
+	auto *b = switch_gpu_backing_register(pages.data(), 1, 77, &firstOwnerReleased,
+					      [](void *owner) {
+						      *static_cast<bool *>(owner) = true;
+					      });
+	ASSERT_NE(b, nullptr);
+	switch_gpu_backing_info before{};
+	switch_gpu_backing_describe(b, &before);
 	void *memory = nullptr;
 	uint32_t flags = 0;
-	ASSERT_EQ(createMemory(info.pages, 1, &memory, &flags), 0);
+	ASSERT_EQ(createMemory(before.pages, 1, &memory, &flags), 0);
 	EXPECT_EQ(switch_gpu_backing_mapping_install(b, SWITCH_GPU_ENGINE_NVJPG,
-						     info.allocation_generation + 1, memory,
+						     before.allocation_generation + 1, memory,
 						     destroyMapping),
 		  SWITCH_GPU_BACKING_STALE);
 	EXPECT_EQ(switch_gpu_backing_mapping_context(b, SWITCH_GPU_ENGINE_NVJPG), nullptr);
 	ASSERT_EQ(switch_gpu_backing_mapping_install(b, SWITCH_GPU_ENGINE_NVJPG,
-						     info.allocation_generation, memory,
+						     before.allocation_generation, memory,
 						     destroyMapping),
 		  0);
-	EXPECT_EQ(switch_gpu_backing_register(pages.data(), 2, 0, nullptr, nullptr), nullptr);
-	EXPECT_EQ(switch_gpu_backing_mapping_context(b, SWITCH_GPU_ENGINE_NVJPG), memory);
+	EXPECT_EQ(switch_gpu_backing_register(pages.data(), 2, 77, nullptr, nullptr), nullptr);
+	const std::array<uint64_t, 2> mismatch{pages[0], next_page += 4096};
+	auto *grown = switch_gpu_backing_register(pages.data(), 2, 77, &secondOwnerReleased,
+						  [](void *owner) {
+							  EXPECT_EQ(destroyed, 1u);
+							  *static_cast<bool *>(owner) = true;
+						  });
+	ASSERT_EQ(grown, b);
+	EXPECT_TRUE(firstOwnerReleased);
+	EXPECT_FALSE(secondOwnerReleased);
+	switch_gpu_backing_info after{};
+	switch_gpu_backing_describe(grown, &after);
+	EXPECT_EQ(after.page_count, 2u);
+	EXPECT_NE(after.allocation_generation, before.allocation_generation);
+	EXPECT_EQ(before.pages[0], pages[0]);
+	EXPECT_EQ(switch_gpu_backing_mapping_context(grown, SWITCH_GPU_ENGINE_NVJPG), memory);
+	EXPECT_EQ(switch_gpu_backing_register(mismatch.data(), 2, 77, &secondOwnerReleased,
+					      [](void *) {}),
+		  nullptr);
+	switch_gpu_backing_release(grown);
 	switch_gpu_backing_release(b);
+	switch_gpu_backing_retire();
+	EXPECT_EQ(destroyed, 1u);
+	EXPECT_TRUE(secondOwnerReleased);
 }
 
 TEST_F(BackingMemory, ExistingLookupReturnsCanonicalObjectWithoutCreating)
@@ -414,5 +440,35 @@ TEST_F(BackingMemory, ConcurrentDirectPaLatchDiscardsUnpublishedSmmuCandidate)
 	EXPECT_EQ(smmuCalls.load(), 1u);
 	EXPECT_EQ(created.load(), 2u);
 	EXPECT_EQ(destroyed.load(), 1u);
+	switch_gpu_backing_release(b);
+}
+
+TEST_F(BackingMemory, UncompressedSmmuMemoryFixesExtentAndPreventsAliasedGrowth)
+{
+	std::vector<uint64_t> pages(32);
+	for (uint32_t i = 0; i < 32; ++i)
+		pages[i] = next_page += 4096;
+	auto *b = switch_gpu_backing_register(pages.data(), 16, 0, nullptr, nullptr);
+	ASSERT_NE(b, nullptr);
+	auto createUncompressedSmmu = [](const uint64_t *p, uint32_t count, void **out,
+					 uint32_t *flags) {
+		++created;
+		*flags = SWITCH_GPU_BACKING_MEMORY_SMMU;
+		*out = new Memory{p, count, p[0]};
+		return 0;
+	};
+	void *object = nullptr;
+	ASSERT_EQ(switch_gpu_backing_memory_acquire_smmu(b, 16, createUncompressedSmmu,
+							 createMemory, destroyMemory, &object),
+		  0);
+	ASSERT_NE(object, nullptr);
+	EXPECT_EQ(switch_gpu_backing_register(pages.data(), 32, 0, nullptr, nullptr), nullptr)
+		<< "SMMU-backed uncompressed memory must refuse backing growth";
+	auto *prefix = switch_gpu_backing_register(pages.data(), 8, 0, nullptr, nullptr);
+	ASSERT_EQ(prefix, b);
+	void *reused = nullptr;
+	ASSERT_EQ(switch_gpu_backing_memory_existing(prefix, 8, destroyMemory, &reused), 0);
+	EXPECT_EQ(reused, object);
+	switch_gpu_backing_release(prefix);
 	switch_gpu_backing_release(b);
 }

@@ -12,6 +12,9 @@
 //
 // The accelerator keeps the Apple class name AGXAccelerator and its connection is AGXDeviceUserClient, so the original
 // sandbox profiles that name them admit the render server's open, and NVK finds it by that class name (never the stub).
+#ifndef SWITCH_IPSW_BUILD
+#error "TegraGM20B compiles with the IPSW kind's header (IPSW_KIND_FLAGS)"
+#endif
 #include "OriginalAcceleratorABI.h"
 #include <IOKit/IOUserClient.h>
 
@@ -27,7 +30,45 @@ OSDeclareDefaultStructors(AGXAccelerator) public
 			     OSDictionary *properties, IOUserClient **handler) APPLE_KEXT_OVERRIDE;
 };
 
+#if SWITCH_IPSW_KIND_24B119
+namespace
+{
+const OSMetaClass *gSuperMeta;
+}  // namespace
+
+extern "C" void tegra_gm20b_accelerator_set_super_meta(const OSMetaClass *meta)
+{
+	gSuperMeta = meta;
+}
+
+// On 24B119, runningboardd matches IOServiceMatching("IOGPU") while Metal matches IOAcceleratorES.
+// Binding the metaclass superclass to IOGPUFamily's IOGPU (itself a subclass of IOAcceleratorES)
+// satisfies both without inheriting IOGPU's fields or vtable; no prelinked kext casts to IOGPU.
+AGXAccelerator::MetaClass AGXAccelerator::gMetaClass;
+const OSMetaClass *const AGXAccelerator::metaClass = &AGXAccelerator::gMetaClass;
+const OSMetaClass *const AGXAccelerator::superClass = &IOAcceleratorES::gMetaClass;
+
+AGXAccelerator::AGXAccelerator(const OSMetaClass *meta) : IOAcceleratorES(meta)
+{
+}
+
+AGXAccelerator::~AGXAccelerator() = default;
+
+const OSMetaClass *AGXAccelerator::getMetaClass() const
+{
+	return &gMetaClass;
+}
+
+AGXAccelerator::MetaClass::MetaClass()
+    : OSMetaClass("AGXAccelerator", gSuperMeta ? gSuperMeta : &IOAcceleratorES::gMetaClass,
+		  sizeof(AGXAccelerator))
+{
+}
+
+OSDefineDefaultStructors(AGXAccelerator, IOAcceleratorES)
+#else
 OSDefineMetaClassAndStructors(AGXAccelerator, IOAcceleratorES)
+#endif
 
 	IOReturn AGXAccelerator::newUserClient(task_t owningTask, void *securityID, UInt32 type,
 					       OSDictionary *properties, IOUserClient **handler)

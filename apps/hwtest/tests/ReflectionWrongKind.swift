@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import HWTestGPU
+import HWTestGPUModels
 import Metal
 
 /// gpu.gm20b.reflection_kinds's wrong_kind arm: a binding asked another binding type's selector reports through Metal's

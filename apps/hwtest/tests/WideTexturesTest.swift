@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A render state that reads vertex and fragment textures at slots 31, 64 and 127, drawn on the driver: 24B119's A13

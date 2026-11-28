@@ -668,3 +668,56 @@ TEST(SdAdma, SinkCases)
 {
     sinkCases();
 }
+
+TEST(SdAdma, OverlapFastPathAndClassifiedOncePerPage)
+{
+    constexpr uint64_t kSink = 0x80200000;
+    constexpr uint64_t kSinkBytes = 0x8000;
+    {
+        Table a, b;
+        a.t.reset();
+        b.t.reset();
+        for (uint32_t i = 0; i < 64; ++i) {
+            REQUIRE(a.t.add(0x90000000ull + i * 0x2000, 0x1000, anyPage) == kAdmaOk);
+            REQUIRE(b.t.add(0xa0000000ull + i * 0x2000, 0x1000, anyPage) == kAdmaOk);
+        }
+        REQUIRE(a.t.addSealed(kSink, kSinkBytes) == kAdmaOk);
+        REQUIRE(b.t.addSealed(kSink, kSinkBytes) == kAdmaOk);
+        EXPECT_TRUE(switchAdmaTablesOverlap(a.t, b.t));
+        EXPECT_FALSE(switchAdmaTablesOverlap(a.t, b.t, kSink, kSinkBytes));
+    }
+    {
+        Table a, b;
+        a.t.reset();
+        b.t.reset();
+        for (uint32_t i = 0; i < 40; ++i) {
+            REQUIRE(a.t.add(0x90000000ull + (39 - i) * 0x4000, 0x1000, anyPage) == kAdmaOk);
+            REQUIRE(b.t.add(0x90002000ull + i * 0x4000, 0x1000, anyPage) == kAdmaOk);
+        }
+        EXPECT_FALSE(switchAdmaTablesOverlap(a.t, b.t));
+        REQUIRE(b.t.add(0x90000000ull + 17 * 0x4000 + 0x800, 0x200, anyPage) == kAdmaOk);
+        EXPECT_TRUE(switchAdmaTablesOverlap(a.t, b.t));
+    }
+    {
+        Memory m;
+        m.runs = {{0x90000000ull, 0x4000}};
+        std::unordered_map<uint64_t, int> calls;
+        auto kind = [&](uint64_t page) -> uint8_t {
+            ++calls[page];
+            return (page == 0x90001000ull || page == 0x90002000ull) ? 2 : 1;
+        };
+        Table t;
+        t.t.reset();
+        uint64_t uncachedBits[16] = {};
+        bool hadUncached = false;
+        REQUIRE(t.t.addMemoryClassified(&m, 0x4000, kind, uncachedBits, 16, &hadUncached) == kAdmaOk);
+        REQUIRE(t.t.finish());
+        EXPECT_TRUE(hadUncached);
+        EXPECT_EQ(t.t.count, 3u);
+        EXPECT_EQ((uncachedBits[0] & (1ULL << 0)), 0ULL);
+        EXPECT_NE((uncachedBits[0] & (1ULL << 1)), 0ULL);
+        EXPECT_EQ((uncachedBits[0] & (1ULL << 2)), 0ULL);
+        for (uint64_t p = 0x90000000ull; p < 0x90004000ull; p += 0x1000)
+            EXPECT_EQ(calls[p], 1);
+    }
+}

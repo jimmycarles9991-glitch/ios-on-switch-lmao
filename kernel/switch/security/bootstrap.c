@@ -40,7 +40,8 @@ LCK_MTX_DECLARE(switch_bootstrap_lock, &switch_bootstrap_lck_grp);
 
 static int switch_bootstrap_lookup_path(const char *path, vnode_t directory, vnode_t *vp)
 {
-    struct nameidata *nd = kalloc_type(struct nameidata, Z_WAITOK | Z_NOFAIL);
+    struct nameidata *nd = kalloc_type(struct nameidata, Z_WAITOK);
+    if (!nd) return ENOMEM;
     NDINIT(nd, LOOKUP, OP_LOOKUP, NOFOLLOW | (directory ? NOCROSSMOUNT : 0), UIO_SYSSPACE,
            CAST_USER_ADDR_T(path), vfs_context_kernel());
     nd->ni_flag |= NAMEI_NOFOLLOW_ANY;
@@ -86,15 +87,11 @@ static bool switch_bootstrap_attributes(vnode_t vp, bool directory, uint64_t *id
 
 bool switch_bootstrap_member(vnode_t vp, bool directory)
 {
-    if (!vp || vnode_mount(vp) != switch_bootstrap_data) return false;
-    lck_mtx_lock(&switch_bootstrap_lock);
-    vnode_t root = switch_bootstrap_root;
-    const uint64_t root_id = switch_bootstrap_root_id;
-    if (root && vnode_get(root)) root = NULLVP;
-    lck_mtx_unlock(&switch_bootstrap_lock);
-    if (!root) return false;
+    vnode_t root = __atomic_load_n(&switch_bootstrap_root, __ATOMIC_ACQUIRE);
+    if (!root || !vp || vnode_mount(vp) != switch_bootstrap_data) return false;
+    const uint64_t root_id = __atomic_load_n(&switch_bootstrap_root_id, __ATOMIC_RELAXED);
     vnode_t node = vp;
-    if (vnode_get(node)) { vnode_put(root); return false; }
+    if (vnode_get(node)) return false;
     bool found = false, complete = false;
     for (unsigned depth = 0; depth < MAXPATHLEN / 2; ++depth) {
         uint64_t id = 0, parent = 0;
@@ -109,8 +106,18 @@ bool switch_bootstrap_member(vnode_t vp, bool directory)
         directory = true;
     }
     vnode_put(node);
-    vnode_put(root);
     return found && complete;
+}
+
+bool switch_bootstrap_active(void)
+{
+    return __atomic_load_n(&switch_bootstrap_root, __ATOMIC_RELAXED) != NULLVP;
+}
+
+bool switch_bootstrap_on_data(vnode_t vp)
+{
+    return vp && __atomic_load_n(&switch_bootstrap_root, __ATOMIC_RELAXED) != NULLVP &&
+        vnode_mount(vp) == switch_bootstrap_data;
 }
 
 bool switch_bootstrap_image(vnode_t vp)
@@ -177,10 +184,15 @@ static int switch_bootstrap_capture_root(void)
     if (!error) {
         lck_mtx_lock(&switch_bootstrap_lock);
         vnode_t previous = switch_bootstrap_root;
-        switch_bootstrap_root_id = id;
-        switch_bootstrap_root = root;
-        lck_mtx_unlock(&switch_bootstrap_lock);
-        if (previous) vnode_rele(previous);
+        if (previous == root && switch_bootstrap_root_id == id) {
+            lck_mtx_unlock(&switch_bootstrap_lock);
+            vnode_rele(root);
+        } else {
+            __atomic_store_n(&switch_bootstrap_root_id, id, __ATOMIC_RELAXED);
+            __atomic_store_n(&switch_bootstrap_root, root, __ATOMIC_RELEASE);
+            lck_mtx_unlock(&switch_bootstrap_lock);
+            if (previous) vnode_rele(previous);
+        }
         if (!switch_bootstrap_member(root, true)) error = EPERM;
     }
     if (root) vnode_put(root);
@@ -198,6 +210,27 @@ static bool switch_bootstrap_migration_file(const char *path, uint64_t min, uint
     const bool valid = vnode_isreg(vp) && vnode_mount(vp) == switch_bootstrap_data &&
         !vnode_getattr(vp, &va, vfs_context_kernel()) && VATTR_IS_SUPPORTED(&va, va_data_size) &&
         va.va_data_size >= min && va.va_data_size <= max;
+    vnode_put(vp);
+    return valid;
+}
+
+static bool switch_bootstrap_migration_active(const char *path)
+{
+    vnode_t vp = NULLVP;
+    if (switch_bootstrap_lookup_path(path, NULLVP, &vp)) return false;
+    struct vnode_attr va;
+    VATTR_INIT(&va);
+    VATTR_WANTED(&va, va_data_size);
+    char prefix[9] = {0};
+    int resid = 0;
+    const bool valid = vnode_isreg(vp) && vnode_mount(vp) == switch_bootstrap_data &&
+        !vnode_getattr(vp, &va, vfs_context_kernel()) && VATTR_IS_SUPPORTED(&va, va_data_size) &&
+        (va.va_data_size == 74 || va.va_data_size == 72) &&
+        !vn_rdwr(UIO_READ, vp, prefix, (int)sizeof(prefix), 0, UIO_SYSSPACE, IO_NOAUTH,
+                 vfs_context_ucred(vfs_context_kernel()), &resid, vfs_context_proc(vfs_context_kernel())) &&
+        resid == 0 &&
+        ((va.va_data_size == 74 && !memcmp(prefix, "complete ", 9)) ||
+         (va.va_data_size == 72 && !memcmp(prefix, "repair ", 7)));
     vnode_put(vp);
     return valid;
 }
@@ -231,11 +264,18 @@ done:
     }
     const bool packaged = switch_bootstrap_migration_file("/private/var/Switch/overlay/usr/share/Switch/bootstrap/manifest.json", 1, 1024 * 1024) &&
         switch_bootstrap_migration_file("/private/var/Switch/overlay/usr/share/Switch/bootstrap/payload.tar", 512, INT64_MAX);
-    const bool pending = switch_bootstrap_migration_file(SWITCH_BOOTSTRAP_BASE "/migration.pending", 0, 4096);
+    const bool pending = packaged &&
+        (switch_bootstrap_migration_file(SWITCH_BOOTSTRAP_BASE "/migration.pending", 0, 4096) ||
+         !switch_bootstrap_migration_active(SWITCH_BOOTSTRAP_BASE "/migration.state"));
     switch_migration_home_prepare(packaged, pending);
 #if DEVELOPMENT || DEBUG
     printf("SwitchBootstrap: captured " SWITCH_IPSW_BUILD " Data volume; recovery %d\n", switch_bootstrap_recovery);
 #endif
+}
+
+mount_t switch_bootstrap_data_mount(void)
+{
+    return switch_bootstrap_data;
 }
 
 bool switch_bootstrap_target(vnode_t vp)
@@ -266,7 +306,7 @@ void switch_bootstrap_exec(proc_t p, bool enabled)
 bool switch_bootstrap_alias(vnode_t vp)
 {
     uint64_t id = 0, parent = 0;
-    if (!vp || vnode_mount(vp) != switch_bootstrap_data || !vnode_islnk(vp) ||
+    if (!switch_bootstrap_on_data(vp) || !vnode_islnk(vp) ||
         !switch_bootstrap_attributes(vp, false, &id, &parent) || parent != switch_bootstrap_data_id ||
         (!switch_bootstrap_named(vp, "/private/var/jb") && !switch_bootstrap_named(vp, "/var/jb"))) return false;
     char target[sizeof(SWITCH_BOOTSTRAP_ROOT)] = {0};
@@ -279,20 +319,34 @@ bool switch_bootstrap_alias(vnode_t vp)
 
 bool switch_bootstrap_access(vnode_t vp, int mode)
 {
-    if (!vp || !switch_bootstrap_process(current_proc()) || (mode & (FWRITE | O_TRUNC | O_APPEND))) return false;
+    if (!switch_bootstrap_on_data(vp) || (mode & (FWRITE | O_TRUNC | O_APPEND)) ||
+        !switch_bootstrap_process(current_proc())) return false;
     if (switch_bootstrap_alias(vp)) return true;
     return switch_bootstrap_member(vp, vnode_isdir(vp));
 }
 
+static bool switch_bootstrap_root_component(const char *name, size_t length)
+{
+    for (const char *part = &SWITCH_BOOTSTRAP_ROOT[1]; *part;) {
+        const char *end = strchr(part, '/');
+        const size_t count = end ? (size_t)(end - part) : strlen(part);
+        if (count == length && !memcmp(part, name, length)) return true;
+        if (!end) break;
+        part = end + 1;
+    }
+    return false;
+}
+
 bool switch_bootstrap_lookup(vnode_t directory, const char *name, size_t length)
 {
-    if (!switch_bootstrap_process(current_proc()) || !directory || !name || !length ||
+    if (!switch_bootstrap_active() || !switch_bootstrap_process(current_proc()) || !directory || !name || !length ||
         length >= MAXPATHLEN || memchr(name, '/', length) ||
         (length == 2 && !memcmp(name, "..", 2))) return false;
     if (switch_bootstrap_access(directory, FREAD)) return true;
     uint64_t id = 0, parent = 0;
     if (length == 2 && !memcmp(name, "jb", 2) && vnode_mount(directory) == switch_bootstrap_data &&
         switch_bootstrap_attributes(directory, true, &id, &parent) && id == switch_bootstrap_data_id) return true;
+    if (!switch_bootstrap_root_component(name, length)) return false;
     char *path = zalloc(ZV_NAMEI);
     int capacity = MAXPATHLEN;
     bool allowed = false;
@@ -321,9 +375,13 @@ static bool switch_bootstrap_below(const char *path, const char *root)
 
 bool switch_bootstrap_preflight(vnode_t directory, const char *path, size_t length)
 {
-    if (!directory || !path || length >= MAXPATHLEN || !switch_bootstrap_process(current_proc())) return false;
+    if (!switch_bootstrap_active() || !directory || !path || length >= MAXPATHLEN ||
+        !switch_bootstrap_process(current_proc())) return false;
     const size_t size = strnlen(path, MAXPATHLEN);
     if (!size || size == MAXPATHLEN) return false;
+    const bool absolute_input = *path == '/';
+    if (absolute_input && !switch_bootstrap_below(path, SWITCH_BOOTSTRAP_ROOT) &&
+        !switch_bootstrap_below(path, "/var/jb") && !switch_bootstrap_below(path, "/private/var/jb")) return false;
     for (const char *part = path; *part;) {
         const char *end = strchr(part, '/');
         const size_t count = end ? (size_t)(end - part) : strlen(part);
@@ -331,21 +389,19 @@ bool switch_bootstrap_preflight(vnode_t directory, const char *path, size_t leng
         part += count;
         if (*part) ++part;
     }
+    if (absolute_input) return true;
     char *absolute = zalloc(ZV_NAMEI);
     bool allowed = false;
-    if (*path == '/') {
-        memcpy(absolute, path, size + 1);
-    } else {
-        int capacity = MAXPATHLEN;
-        if (vn_getpath(directory, absolute, &capacity)) goto done;
+    int capacity = MAXPATHLEN;
+    if (!vn_getpath(directory, absolute, &capacity)) {
         const size_t prefix = strlen(absolute);
-        if (prefix + size + 2 > MAXPATHLEN) goto done;
-        if (prefix > 1) strlcat(absolute, "/", MAXPATHLEN);
-        strlcat(absolute, path, MAXPATHLEN);
+        if (prefix + size + 2 <= MAXPATHLEN) {
+            if (prefix > 1) strlcat(absolute, "/", MAXPATHLEN);
+            strlcat(absolute, path, MAXPATHLEN);
+            allowed = switch_bootstrap_below(absolute, SWITCH_BOOTSTRAP_ROOT) ||
+                switch_bootstrap_below(absolute, "/var/jb") || switch_bootstrap_below(absolute, "/private/var/jb");
+        }
     }
-    allowed = switch_bootstrap_below(absolute, SWITCH_BOOTSTRAP_ROOT) ||
-        switch_bootstrap_below(absolute, "/var/jb") || switch_bootstrap_below(absolute, "/private/var/jb");
-done:
     zfree(ZV_NAMEI, absolute);
     return allowed;
 }

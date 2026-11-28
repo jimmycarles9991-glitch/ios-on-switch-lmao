@@ -11,6 +11,8 @@
 #define BCM2837
 #define BCM2837_BRINGUP
 #define ARM_ARCH_TIMER
+#define SWITCH_ARMV8_PMUV3        1
+#define CPMU_AIC_PMI              1
 
 #define __ARM_ARCH__              8
 #define __ARM_VMSA__              8
@@ -18,6 +20,7 @@
 #define __ARM_COHERENT_CACHE__    1
 #define __ARM_DEBUG__             7
 #define __ARM64_PMAP_SUBPAGE_L1__ 1
+#define HAS_16BIT_ASID            1
 
 /* Explicit native ARMv8.1+ bring-up; the original A53 target has no PAN. */
 #if defined(XNU_NATIVE_PAN) && XNU_NATIVE_PAN

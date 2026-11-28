@@ -48,7 +48,9 @@ class VisibilityQueries {
 public:
     static constexpr uint32_t kSetWords = SWITCH_GM20B_SAMPLES_REPORT_WORDS + 3 * SWITCH_GM20B_RELEASE_WORD_WORDS +
                                           SWITCH_GM20B_SAMPLES_BEGIN_WORDS + SWITCH_GM20B_SAMPLES_END_WORDS;
-    static constexpr uint32_t kFinishWords = 7, kResultWords = 2 * SWITCH_GM20B_COPY_WORD_REDUCE_WORDS;
+    static constexpr uint32_t kFinishWords = 7;
+    static constexpr uint32_t kResultWords =
+        SWITCH_GM20B_COPY_WORD_REDUCE_WORDS + SWITCH_GM20B_COPY_BYTES_WORDS + 2 * SWITCH_GM20B_COPY_PREDICATE_WORDS;
 
     enum class Set : uint8_t {
         Done,
@@ -79,8 +81,10 @@ public:
 
     void clear()
     {
-        queries_.clear();
-        taken_.reset();
+        if (!queries_.empty()) {
+            queries_.clear();
+            taken_.reset();
+        }
         open_ = counting_ = false;
     }
 

@@ -1,6 +1,9 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestScenes
 import Metal
 
 /// gpu.gm20b.zeta_colour judges the driver's stencil plane route (drivers/TegraGM20BMetal/zeta_colour.h):

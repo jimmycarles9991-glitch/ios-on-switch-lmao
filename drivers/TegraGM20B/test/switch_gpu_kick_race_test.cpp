@@ -343,3 +343,91 @@ TEST(KickRace, EveryPartyMeetsJobsPublishingInTheOrder)
 	for (int i = 0; i < 4; ++i)
 		switch_gpu_backing_retire();
 }
+
+TEST(KickRace, MultiBackingTransactionsInShuffledOrdersNeverDeadlockOrRace)
+{
+	constexpr uint32_t kBackings = 8;
+	constexpr uint32_t kWorkers = 6;
+	constexpr uint32_t kRounds = 250;
+	open();
+	std::vector<switch_gpu_backing *> backings;
+	for (uint32_t i = 0; i < kBackings; ++i)
+		backings.push_back(surface());
+
+	Channel workers[kWorkers];
+	for (uint32_t w = 0; w < kWorkers; ++w)
+		workers[w].timeline = switch_gpu_timeline_create(100u + w, &workers[w].fence);
+
+	std::atomic<bool> stop{false};
+	std::vector<std::thread> threads;
+	for (uint32_t w = 0; w < kWorkers; ++w) {
+		threads.emplace_back([&, w] {
+			hostCpu() = int(w % 4);
+			uint32_t state = 0x9e3779b9u * (w + 1u);
+			auto nextRand = [&] {
+				state ^= state << 13;
+				state ^= state >> 17;
+				state ^= state << 5;
+				return state;
+			};
+			switch_gpu_backing_token deps[16] = {};
+			for (uint32_t r = 1; r <= kRounds; ++r) {
+				const uint32_t count = 2u + (nextRand() % 4u);
+				switch_gpu_backing_use uses[5];
+				for (uint32_t i = 0; i < count; ++i) {
+					const uint32_t idx = nextRand() % kBackings;
+					const uint32_t acc =
+						(nextRand() & 1u)
+							? kWrite
+							: (kRead |
+							   SWITCH_GPU_BACKING_NO_CPU_EXCLUSION);
+					uses[i] = {backings[idx], acc, 0};
+				}
+				const auto completion = workers[w].token(r);
+				switch_gpu_backing_transaction tx = {};
+				ASSERT_EQ(switch_gpu_backing_begin_held(uses, count, nullptr, 0,
+									nullptr, 0, &completion,
+									&tx),
+					  0);
+				uint32_t needed = 0;
+				EXPECT_EQ(switch_gpu_backing_dependencies(&tx, deps, 16, &needed),
+					  0);
+				if ((r & 7u) == 0u) {
+					switch_gpu_backing_abort(&tx);
+				} else {
+					switch_gpu_backing_publish(&tx);
+					switch_gpu_backing_finish(&tx);
+					workers[w].complete(r);
+				}
+			}
+		});
+	}
+
+	std::thread observer([&] {
+		while (!stop.load(std::memory_order_acquire)) {
+			for (auto *b : backings) {
+				uint32_t engines = 0, owners = 0;
+				EXPECT_EQ(switch_gpu_backing_pending(b, kRead, &engines, &owners),
+					  0);
+				if (!switch_gpu_backing_cpu_acquire(
+					    b, 0, kBytes,
+					    kRead | SWITCH_GPU_BACKING_CPU_AVOID_SYNC))
+					EXPECT_EQ(
+						switch_gpu_backing_cpu_release(b, 0, kBytes, kRead),
+						0);
+			}
+		}
+	});
+
+	for (auto &t : threads)
+		t.join();
+	stop.store(true, std::memory_order_release);
+	observer.join();
+
+	for (uint32_t w = 0; w < kWorkers; ++w)
+		switch_gpu_timeline_close(workers[w].timeline);
+	for (auto *b : backings)
+		switch_gpu_backing_release(b);
+	for (int i = 0; i < 4; ++i)
+		switch_gpu_backing_retire();
+}

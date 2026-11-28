@@ -37,6 +37,7 @@ constexpr unsigned kFramesPerSample = 7, kFramesToFirstSample = kFramesPerSample
 constexpr unsigned kFrameUS = 1000000 / 60, kSetUpUS = 1000, kFirstSampleTimeoutUS = 250000;
 constexpr unsigned kSampleUS = kFramesPerSample * kFrameUS;
 constexpr unsigned kFirstSampleUS = kFramesToFirstSample * kFrameUS;
+constexpr uint32_t kMaxLeewayUS = 10000;  // stays well inside CoreBrightness's 250 ms first-sample budget
 constexpr unsigned kLuxMultiplier = 3600, kLuxMax = 100000;
 constexpr unsigned kGains = 4;
 constexpr unsigned kGainFactor[kGains] = {1, 2, 64, 128};  // GAIN register 0..3
@@ -97,6 +98,24 @@ inline unsigned nextGain(unsigned gain, uint32_t visible, uint32_t ir)
         return gain + 1;
     }
     return gain;
+}
+
+inline uint32_t leewayUS(uint32_t intervalUS)
+{
+    const uint32_t fraction = intervalUS / 16;
+    return fraction < kMaxLeewayUS ? fraction : kMaxLeewayUS;
+}
+
+// Always report the first sample after enable/wake/re-subscribe, transitions into/out of 0 lux, or a lux change
+// exceeding the ~3% deadband (1 lux below 32 lux) so steady readings do not allocate and dispatch IOHIDEvents.
+inline bool shouldReport(bool hasLast, uint32_t lastLevel, uint32_t level)
+{
+    if (!hasLast)
+        return true;
+    if ((level == 0) != (lastLevel == 0))
+        return true;
+    const uint32_t diff = level > lastLevel ? level - lastLevel : lastLevel - level;
+    return diff > lastLevel / 32;
 }
 }  // namespace switch_als
 #endif

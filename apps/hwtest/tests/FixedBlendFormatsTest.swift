@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Rule fetch.blend's further formats (drivers/TegraGM20BMetal/fetch_rungs.h fixedBlendFormat): 8-bit

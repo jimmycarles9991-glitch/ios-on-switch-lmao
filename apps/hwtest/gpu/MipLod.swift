@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// gpu.gm20b.mip_lod's draws (shaders/MipLod.metal): a mipmapped texture drawn over a whole target, minified by a uniform

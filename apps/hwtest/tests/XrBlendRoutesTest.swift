@@ -2,6 +2,7 @@ import CoreVideo
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Extended-range targets under overlapping premultiplied source-over draws, each route the driver can draw them by

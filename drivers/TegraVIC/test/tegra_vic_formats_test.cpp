@@ -220,12 +220,12 @@ TEST(VicFormats, ALuminanceDestinationHoldsTheStandardsLuma)
         }
     TegraVICSurfaceDesc luma = surface(l008, 64, 64, 256);
     const std::vector<uint8_t> untagged = runLuma(bgra, px, luma);
-    EXPECT_NEAR(untagged[8 * 256 + 4], 76, 1) << "BT.601 luma of red";
-    EXPECT_NEAR(untagged[8 * 256 + 40], 150, 1) << "BT.601 luma of green";
+    EXPECT_EQ(untagged[8 * 256 + 4], 76u) << "BT.601 luma of red";
+    EXPECT_EQ(untagged[8 * 256 + 40], 150u) << "BT.601 luma of green";
     luma.colorMatrix = SWITCH_VIC_MATRIX_709;
     const std::vector<uint8_t> hd = runLuma(bgra, px, luma);
-    EXPECT_NEAR(hd[8 * 256 + 4], 54, 1) << "BT.709 luma of red";
-    EXPECT_NEAR(hd[8 * 256 + 40], 182, 1) << "BT.709 luma of green";
+    EXPECT_EQ(hd[8 * 256 + 4], 54u) << "BT.709 luma of red";
+    EXPECT_EQ(hd[8 * 256 + 40], 182u) << "BT.709 luma of green";
     luma.colorMatrix = SWITCH_VIC_MATRIX_UNSUPPORTED;
     EXPECT_STREQ(build(bgra, luma).why, "YCbCr matrix requires color conversion outside VIC's contract");
 }
@@ -238,8 +238,87 @@ TEST(VicFormats, ALuminanceDestinationTakesAYccSourcesLumaAloneInFullRange)
     for (uint32_t y = 0; y < 64; y++)
         memset(&px[y * 256], y < 32 ? 235 : 126, 64);
     const std::vector<uint8_t> out = runLuma(nv12, px, surface(TEGRA_VIC_FOURCC('L', '0', '0', '8'), 64, 64, 256));
-    EXPECT_EQ(out[8 * 256 + 8], 255) << "video white whatever its chroma";
-    EXPECT_NEAR(out[40 * 256 + 8], 128, 1) << "(126 - 16) * 255 / 219";
+    EXPECT_EQ(out[8 * 256 + 8], 255u) << "video white whatever its chroma";
+    EXPECT_EQ(out[40 * 256 + 8], 128u) << "(126 - 16) * 255 / 219";
+}
+
+TEST(VicFormats, ALuminanceSourceExpandsGrayscaleToBgraL008AndNv12)
+{
+    const uint32_t l008 = TEGRA_VIC_FOURCC('L', '0', '0', '8');
+    const TegraVICSurfaceDesc src = surface(l008, 64, 64, 256);
+    std::vector<uint8_t> px(src.length);
+    for (uint32_t y = 0; y < 64; y++)
+        for (uint32_t x = 0; x < 64; x++)
+            px[y * 256 + x] = static_cast<uint8_t>(x * 4 + y / 16);
+
+    const TegraVICSurfaceDesc bgra = surface(kBgra, 64, 64, 256);
+    const std::vector<uint8_t> outBgra = runLuma(src, px, bgra);
+    uint32_t worst = 0, minAlpha = 255;
+    for (uint32_t y = 0; y < 64; y++)
+        for (uint32_t x = 0; x < 64; x++) {
+            const uint8_t l = static_cast<uint8_t>(x * 4 + y / 16);
+            const uint8_t *p = &outBgra[y * 256 + x * 4];
+            for (int c = 0; c < 3; c++)
+                worst = std::max<uint32_t>(worst, std::abs(int(p[c]) - int(l)));
+            minAlpha = std::min<uint32_t>(minAlpha, p[3]);
+        }
+    EXPECT_EQ(worst, 0u);
+    EXPECT_EQ(minAlpha, 255u);
+
+    const std::vector<uint8_t> outL8 = runLuma(src, px, src);
+    for (uint32_t y = 0; y < 64; y++)
+        for (uint32_t x = 0; x < 64; x++)
+            EXPECT_EQ(outL8[y * 256 + x], px[y * 256 + x]);
+
+    const TegraVICSurfaceDesc nv12 = surface(TEGRA_VIC_FOURCC('4', '2', '0', 'f'), 64, 64, 256, 256);
+    const std::vector<uint8_t> outYcc = runLuma(src, px, nv12);
+    for (uint32_t y = 0; y < 32; y++)
+        for (uint32_t x = 0; x < 32; x++) {
+            EXPECT_EQ(outYcc[nv12.planeOffset[1] + y * 256 + x * 2], 128u);
+            EXPECT_EQ(outYcc[nv12.planeOffset[1] + y * 256 + x * 2 + 1], 128u);
+        }
+}
+
+TEST(VicFormats, YccTagsAndLumaMatchHardwareMatrixRounding)
+{
+    const auto hwApply = [](const TegraVICMatrix &m, double in0, double in1, double in2, int row) {
+        const double acc = m.c[row][0] * in0 + m.c[row][1] * in1 + m.c[row][2] * in2;
+        const int64_t v10 = (static_cast<int64_t>(acc) >> m.shift) + m.c[row][3] + 128;
+        return tegra_vic_clamp(v10 >> 8, 1023) >> 2;
+    };
+    const auto unorm10 = [](uint32_t v) {
+        return v * 1023.0 / 255.0;
+    };
+
+    TegraVICMatrix m601 = {}, m709 = {}, mY = {}, rgb601 = {}, rgb709 = {};
+    tegra_vic_matrix_luma(TEGRA_VIC_YCC_601, false, true, &m601);
+    tegra_vic_matrix_luma(TEGRA_VIC_YCC_709, false, true, &m709);
+    tegra_vic_matrix_luma(TEGRA_VIC_YCC_601, true, false, &mY);
+    tegra_vic_matrix_ycc_to_rgb(TEGRA_VIC_YCC_601, false, &kTegraVICTraits.in, &rgb601);
+    tegra_vic_matrix_ycc_to_rgb(TEGRA_VIC_YCC_709, false, &kTegraVICTraits.in, &rgb709);
+
+    EXPECT_EQ(hwApply(m601, unorm10(255), 0, 0, 0), 76u);
+    EXPECT_EQ(hwApply(m601, 0, unorm10(255), 0, 0), 150u);
+    EXPECT_EQ(hwApply(m709, unorm10(255), 0, 0, 0), 54u);
+    EXPECT_EQ(hwApply(m709, 0, unorm10(255), 0, 0), 182u);
+    EXPECT_EQ(hwApply(mY, unorm10(235), unorm10(16), unorm10(16), 0), 255u);
+    EXPECT_EQ(hwApply(mY, unorm10(126), unorm10(16), unorm10(16), 0), 128u);
+    EXPECT_EQ(hwApply(rgb709, unorm10(63), unorm10(240), unorm10(102), 0), 255u);
+    EXPECT_LE(hwApply(rgb709, unorm10(63), unorm10(240), unorm10(102), 1), 1u);
+    const uint32_t tagNoneRed = hwApply(rgb601, unorm10(63), unorm10(240), unorm10(102), 0);
+    EXPECT_GE(tagNoneRed, 233u);
+    EXPECT_LE(tagNoneRed, 234u);
+
+    const TegraVICSurfaceDesc nv12 = surface(TEGRA_VIC_FOURCC('4', '2', '0', 'v'), 64, 64, 256, 256);
+    std::vector<uint8_t> px(nv12.length);
+    memset(&px[nv12.planeOffset[0]], 63, 256 * 64);
+    for (uint32_t i = 0; i < 256 * 32; i += 2) {
+        px[nv12.planeOffset[1] + i] = 102;
+        px[nv12.planeOffset[1] + i + 1] = 240;
+    }
+    const std::vector<uint8_t> bgra601 = runLuma(nv12, px, surface(kBgra, 64, 64, 256));
+    EXPECT_GE(bgra601[8 * 256 + 8 * 4 + 2], 233u);
+    EXPECT_LE(bgra601[8 * 256 + 8 * 4 + 2], 234u);
 }
 
 TEST(VicFormats, OneAndTwoByteElementsAndFullResolutionChroma)

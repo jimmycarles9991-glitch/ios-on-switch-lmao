@@ -676,6 +676,48 @@ TEST_F(PlaneComposite, TheArmedProbeComposesWhatAdmissionTakesAndTheReportDisarm
     EXPECT_EQ(composites, 1u);
 }
 
+TEST_F(PlaneComposite, ATurnedOverlayIsNotComposedUnturned)
+{
+    reserveLimit = twoVideos() - 1;
+    display->planeLayers[2].layer.transform = 4;
+    EXPECT_FALSE(display->planeComposeWaits(wanted, selected, 720, 1280));
+    EXPECT_EQ(composites, 0u);
+    EXPECT_EQ(retains, 0u);
+    EXPECT_EQ(wanted[0].slot, 1);
+    EXPECT_EQ(wanted[1].slot, 3);
+}
+
+// A turned overlay is shown 1:1 at its size on the screen (the window's own turn or the conversion job's plane). Over
+// every line, beside the heaviest overlay the display publishes (a 4K picture at 1/6), its bandwidth floor stays far
+// under the EMC's top rate (1600 MHz), which two such pictures on the same lines reach (SwitchWindowCaps.h): admission
+// takes the set, so the composite is never needed for it. The windows' latency plan is SwitchPower's to admit.
+TEST_F(PlaneComposite, ATurnedOverlayBesideTheHeaviestVideoIsUnderTheTopRate)
+{
+    native_planes::Layer turned;
+    turned.kind = native_planes::kKindBgra;
+    turned.surface.format = native_planes::fourcc('B', 'G', 'R', 'A');
+    turned.surface.width = 720;
+    turned.surface.height = 1280;
+    turned.surface.stride[0] = 3072;
+    turned.surface.planeHeight[0] = 1280;
+    turned.surface.allocation = turned.surface.descriptorBytes = 3072ull * 1280;
+    turned.src = {0, 0, 720, 1280};
+    turned.dst = {0, 0, 720, 1280};
+    turned.transform = 3;
+    PlaneSet same = {};
+    same.window[0] = overlay(1, 1, video(40, 600));
+    same.window[1] = wanted[1];
+    ASSERT_TRUE(Display().planeReserveBandwidth(same));
+    const uint64_t ceiling = reserved;
+    PlaneSet set = {};
+    set.window[0] = overlay(1, 1, turned);
+    set.window[1] = wanted[1];
+    ASSERT_TRUE(Display().planeReserveBandwidth(set));
+    EXPECT_LT(reserved * 3 / 2, ceiling) << reserved << " of " << ceiling;
+    EXPECT_LE(switch_display::floorKhz(ceiling), 1600000u) << ceiling;
+    EXPECT_LE(switch_display::floorKhz(reserved), 1600000u / 2) << reserved;
+}
+
 TEST_F(PlaneComposite, WithoutMultiSlotTwoOverlaysAreNotComposed)
 {
     reserveLimit = twoVideos() - 1;

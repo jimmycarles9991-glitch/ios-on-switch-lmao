@@ -141,6 +141,32 @@ inline bool viewWord0(uint32_t vkFormat, const uint32_t components[4], bool stor
     return switch_gm20b_view_word0(vkFormat, components, storage, &word0);
 }
 
+inline bool vkFormatSrgb(uint32_t vkFormat)
+{
+    if (vkFormat >= 158 && vkFormat <= 184 && (vkFormat & 1) == 0)
+        return true;
+    switch (vkFormat) {
+    case 15:   // VK_FORMAT_R8_SRGB
+    case 22:   // VK_FORMAT_R8G8_SRGB
+    case 29:   // VK_FORMAT_R8G8B8_SRGB
+    case 36:   // VK_FORMAT_B8G8R8_SRGB
+    case 43:   // VK_FORMAT_R8G8B8A8_SRGB
+    case 50:   // VK_FORMAT_B8G8R8A8_SRGB
+    case 57:   // VK_FORMAT_A8B8G8R8_SRGB_PACK32
+    case 132:  // VK_FORMAT_BC1_RGB_SRGB_BLOCK
+    case 134:  // VK_FORMAT_BC1_RGBA_SRGB_BLOCK
+    case 136:  // VK_FORMAT_BC2_SRGB_BLOCK
+    case 138:  // VK_FORMAT_BC3_SRGB_BLOCK
+    case 146:  // VK_FORMAT_BC7_SRGB_BLOCK
+    case 148:  // VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK
+    case 150:  // VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK
+    case 152:  // VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK
+        return true;
+    default:
+        return false;
+    }
+}
+
 // The set-0 bindings of draw `d`'s writes of fragment texture slots `slots` (nvk_switch_xr_planes.h), none where a slot
 // has no write
 inline XrPlaneBindings xrPlaneBindings(const NmbDirectDraw &d, uint16_t slots)

@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestScenes
 import Metal
 import XCTest
 
@@ -23,7 +24,7 @@ final class SceneGoldensWriter: XCTestCase {
         )
         let gpu = GPU(device: device, queue: try XCTUnwrap(device.makeCommandQueue()), library: library)
         var lines = ["# QuartzCore \(build) on \(device.name), 8x8 block means"]
-        for scene in Scenes.all + [Scenes.glass, Scenes.glassSplit] {
+        for scene in Scenes.all + [Scenes.glass, Scenes.glassSplit, Scenes.glassAxes] {
             guard let result = try? await scene.run(gpu) else { continue }
             for picture in result.pictures where picture.golden == picture.label {
                 lines.append(

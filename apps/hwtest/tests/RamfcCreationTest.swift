@@ -1,16 +1,20 @@
 import Darwin
+import HWTestCommon
 import HWTestCore
+import HWTestKit
+import HWTestShared
 
 /// A channel's first RAMFC words as the host keeps them (debug.switch_gpu_ramfc, debug kernels). nvkm puts a new channel
 /// on its runlist enabled, so the host may load its RAMFC before its first submission and save that copy over a word
 /// written afterwards; boot 22 read the default timeslice on the scrubber and on 4 client channels made high. The
-/// kernel channels (present, scrubber) are made high and never change level, so their timeslice is the creation's.
+/// kernel channels (present, scrubber) are made critical and never change level, so their timeslice is the creation's.
+/// The words are gpu_internal.h's: a critical channel's 50 ms (195 << 8 us), every other channel's 1 ms (128 << 3 us).
 struct RamfcCreationTest: HWTest {
     let id = "gpu.ramfc_creation"
     let name = "RAMFC timeslice written at channel creation: kernel channels and client channels"
     let subsystem = Subsystem.metal
 
-    static let highTimeslice = "10005080"
+    static let criticalTimeslice = "100080c3"
 
     func run(_ context: TestContext) async throws -> Outcome {
         var run: Int32 = 1
@@ -42,8 +46,9 @@ struct RamfcCreationTest: HWTest {
                     fields["kernel_mismatched"] == "0"
                 ),
                 (
-                    "the probe channel, made high, read high before its change (flip_from = 10005080)",
-                    fields["flip_from"] == Self.highTimeslice
+                    "the probe channel, a kernel channel made critical, read the critical timeslice before its change "
+                        + "(flip_from = \(Self.criticalTimeslice))",
+                    fields["flip_from"] == Self.criticalTimeslice
                 ),
                 (
                     "every client channel last written at its creation holds it (created_mismatched = 0)",

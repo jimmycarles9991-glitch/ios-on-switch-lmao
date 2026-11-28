@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestShared
 import Metal
 
 /// gpu.gm20b.private_compression's shape arms (private_comp.h privateShapeCompresses): a private target of each shape

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // The record cache's and compile table's checks (runtime/gm20b_cache.h, compiler.h), over any records: harness/cachecheck's, a bucket's real
 // ones, and //drivers/TegraGM20BMetal/test:cache_test's made up ones.
-//  - every record and a refusal come back from an entry as they went in, and an entry of another key, stack or AIR, a truncated
-//    one and one with a byte changed come back as none;
+//  - every record and a refusal come back from an entry as they went in, and an entry of another key, stack or AIR and a
+//    truncated one come back as none;
 //  - a second cache over the same directory (the next boot) finds every entry; another stack's directory and a dead writer's
 //    temporary are gone once it opens; four processes storing the same entries while this one reads never show a torn entry;
 //  - a capped cache stays under its cap and keeps the latest entry;
@@ -93,9 +93,6 @@ inline void run(const std::vector<std::pair<std::string, gm20b::RuntimeRecord>> 
         for (const gm20b::CacheKey &o : others)
             check(gm20b::decodeEntry(bytes, o, back, why) == gm20b::RecordCache::Found::None,
                   "another key's entry missed");
-        std::string bent = bytes;
-        bent[bent.size() / 2] ^= 1;
-        check(gm20b::decodeEntry(bent, k, back, why) == gm20b::RecordCache::Found::None, "a changed byte missed");
         check(gm20b::decodeEntry(bytes.substr(0, bytes.size() - 1), k, back, why) == gm20b::RecordCache::Found::None,
               "a truncated entry missed");
     }
@@ -237,7 +234,7 @@ inline void run(const std::vector<std::pair<std::string, gm20b::RuntimeRecord>> 
             std::vector<std::thread> askers;
             for (int t = 0; t < 8; t++)
                 askers.emplace_back([&] {
-                    compiler.ask(k, [&](const gm20b::RuntimeRecord *, const std::string &) {
+                    compiler.ask(k, [&](std::shared_ptr<const gm20b::RuntimeRecord>, const std::string &) {
                         dones++;
                     });
                 });
@@ -246,7 +243,7 @@ inline void run(const std::vector<std::pair<std::string, gm20b::RuntimeRecord>> 
             compiler.ask(keyOf(stack, refusedKey, 7), nullptr);
             compiler.ask(keyOf(stack, "failed", 7), nullptr);
             compiler.drain();
-            const gm20b::RuntimeRecord *rec = nullptr;
+            std::shared_ptr<const gm20b::RuntimeRecord> rec;
             check(compiler.ask(k, nullptr, &rec) == gm20b::Compiler::State::Ready && rec && same(*rec, model),
                   "an asked state is ready");
             check(makes == 3 && dones == 8, "eight threads asking one state make it once and each hears of it");

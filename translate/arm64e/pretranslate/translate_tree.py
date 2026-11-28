@@ -274,6 +274,7 @@ def main() -> None:
     pairs = []
     external_pairs = _external_pairs(args.cdhash_pairs)
     no_category = 0
+    fallbacks = 0
 
     caches = [args.volume / directory for directory in CACHES]
     _report(args, 'finding the Mach-O files')
@@ -304,6 +305,10 @@ def main() -> None:
         return rel, dst, in_sha, r
 
     for rel, dst, in_sha, r in _in_order(args, translate, machos, 'files'):
+        for s in r['slices']:
+            if s['status'] == 'fallback':
+                fallbacks += 1
+                print(f'{args.role}: fallback /{rel}: {s.get("why", "unknown")}', file=sys.stderr)
         translated = [s for s in r['slices'] if s['status'] == 'translated']
         if not translated:
             if '/' + str(rel) in edits_by_path:
@@ -332,6 +337,8 @@ def main() -> None:
 
     (out / f'{args.role}.manifest.json').write_text(json.dumps(manifest, indent=1))
     (out / f'{args.role}.trustcache').write_bytes(trust_module(trust))
+    if fallbacks:
+        print(f'{args.role}: WARNING {fallbacks} slices fell back to load-time translation', file=sys.stderr)
     if no_category:
         print(
             f"{args.role}: WARNING {no_category} binaries not in Apple's trust caches (trust category 0)",
@@ -349,7 +356,7 @@ def _translate_caches(
 ) -> None:
     listed = []
     for directory in CACHES:
-        if (args.volume / directory).is_dir():
+        if (args.volume / directory / 'dyld_shared_cache_arm64e').is_file():
             for cdhash, original in _translate_cache(args, args.volume / directory, pairs, manifest):
                 listed.append(cdhash)
                 if original:

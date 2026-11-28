@@ -25,10 +25,13 @@ def _ios_binary_impl(ctx):
         args += ["--entitlements", ctx.file.entitlements.path]
     if ctx.attr.pagesize:
         args += ["--pagesize", ctx.attr.pagesize]
-    if ctx.attr._profile[BuildSettingInfo].value == "release":
+    is_release = ctx.attr._profile[BuildSettingInfo].value == "release"
+    if is_release:
         # Stripped before the signature (the release profile), so the CDHash the trust cache holds is the shipped one.
         args.append("--strip")
     args += ["--", switch_debug_define(ctx)]
+    if is_release:
+        args += ["-flto", "-DNDEBUG"]
     for flag in ctx.attr.copts:
         args.append(flag.replace("{tree}", ctx.label.package).replace("{bin}", ctx.bin_dir.path))
     args += ctx.attr.linkopts

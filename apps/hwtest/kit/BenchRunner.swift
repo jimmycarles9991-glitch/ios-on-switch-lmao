@@ -21,19 +21,19 @@ public final class BenchRunner {
         return BenchRunner(bench)
     }
 
-    var summary: String {
+    public var summary: String {
         var line = [CChar](repeating: 0, count: 512)
         switch_bench_describe(bench, &line, line.count)
         return String(cString: line)
     }
 
-    static var knownData: [UInt32] {
+    public static var knownData: [UInt32] {
         var words = [UInt32](repeating: 0, count: 4)
         switch_bench_known_data(&words)
         return words
     }
 
-    static var knownKernel: Data {
+    public static var knownKernel: Data {
         var bytes = [UInt8](repeating: 0, count: 256)
         return Data(bytes.prefix(switch_bench_known_kernel(&bytes, bytes.count)))
     }
@@ -61,7 +61,7 @@ public final class BenchRunner {
 
     /// All of `surface` (one plane, of a format the driver renders) filled with `color` (an RGBA8 word) by the 2D engine
     /// on the bench's own connection and channel, waited for: "ok", else the status and why.
-    func fill(_ surface: IOSurfaceRef, format: MTLPixelFormat, color: UInt32) -> String {
+    public func fill(_ surface: IOSurfaceRef, format: MTLPixelFormat, color: UInt32) -> String {
         var r = switch_bench_result()
         switch_bench_fill_surface(
             bench, Unmanaged.passUnretained(surface).toOpaque(), UInt32(format.rawValue), color, &r
@@ -206,6 +206,40 @@ public final class BenchRunner {
     /// What the app's copies of a compare target and an output buffer hold until the GPU's bytes are copied in
     static let unread: UInt8 = 0xEE
 
+    /// The bytes of the bench device's interlock ticket buffer; 0 without a device
+    public var ticketBytes: Int { Int(switch_bench_ticket_bytes(bench)) }
+
+    static let l2Ends: [L2Writeback.Arm: switch_bench_l2_end] = [
+        .noFlush: SWITCH_BENCH_L2_NONE, .bracket: SWITCH_BENCH_L2_BRACKET, .memOpD: SWITCH_BENCH_L2_MEM_OP_D,
+        .jobEnd: SWITCH_BENCH_L2_JOB_END, .memOpB: SWITCH_BENCH_L2_MEM_OP_B,
+    ]
+
+    /// One round of gpu.x1.l2_flush_writeback (switch_bench.h switch_bench_l2_round): `pattern` drawn over a
+    /// `width` x `height` RGBA32Float target the CPU filled with `sentinel`, ended by `arm`, read back with no lease
+    public func l2Round(
+        _ arm: L2Writeback.Arm, pattern: [UInt32], sentinel: [UInt32], width: Int, height: Int
+    ) -> BenchL2Read {
+        var r = switch_bench_l2_round()
+        r.end = Self.l2Ends[arm]!.rawValue
+        r.pattern = (pattern[0], pattern[1], pattern[2], pattern[3])
+        r.sentinel = (sentinel[0], sentinel[1], sentinel[2], sentinel[3])
+        (r.width, r.height) = (UInt32(width), UInt32(height))
+        var words = [UInt32](repeating: 0, count: width * height * 4)
+        words.withUnsafeMutableBufferPointer { buffer in
+            r.words = buffer.baseAddress
+            r.word_count = buffer.count
+            switch_bench_l2_round_run(bench, &r)
+            r.words = nil
+        }
+        var read = BenchL2Read()
+        read.status = Self.statuses[Int(r.status)]
+        read.why = Self.text(&r.why)
+        (read.exactJobs, read.wc, read.blockLinear) = (r.exact_jobs != 0, r.wc != 0, r.block_linear != 0)
+        (read.emitted, read.lostError) = (Int(r.emitted), r.lost_error)
+        if read.status == "ok" { read.words = words }
+        return read
+    }
+
     /// The second device a `compete` experiment draws on, opened once
     private func competitor() -> BenchCompetition? {
         if rival == nil { rival = try? BenchRunner.open() }
@@ -215,6 +249,15 @@ public final class BenchRunner {
     private static func text<T>(_ tuple: inout T) -> String {
         withUnsafeBytes(of: &tuple) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
     }
+}
+
+/// One gpu.x1.l2_flush_writeback round's readings; `words` only where it ran
+public struct BenchL2Read: Sendable {
+    public var status = "ok", why = ""
+    public var words: [UInt32] = []
+    public var exactJobs = false, wc = false, blockLinear = false
+    public var emitted = 0
+    public var lostError: UInt32 = 0
 }
 
 /// Copies of the inputs at addresses that stay put for the C call, freed with it.

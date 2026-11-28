@@ -55,6 +55,41 @@ uint32_t roundUp(uint32_t v, uint32_t a)
     return (v + a - 1) / a * a;
 }
 
+// Why an accepted turned layer would not be shown, or empty: the window's own scan, or the conversion job's plane, its
+// VIC job within the unit's 16x either way (TegraVICConfig.h) and the window showing the plane 1:1 where the layer goes.
+std::string convertedUnshown(const Layer &l, const Image &image)
+{
+    ScreenConversion c;
+    if (!screenConversionOf(l, W, H, c))
+        return "no conversion of a visible layer";
+    const bool transpose = turnOf(l.transform).transpose;
+    const uint64_t sw = transpose ? c.srcH : c.srcW, sh = transpose ? c.srcW : c.srcH;
+    const uint64_t dw = static_cast<uint64_t>(c.width) << 16, dh = static_cast<uint64_t>(c.height) << 16;
+    if (sw > dw * 16 || sh > dh * 16 || dw > sw * 16 || dh > sh * 16)
+        return "VIC scale past 16x";
+    if (c.srcW < (1u << 16) || c.srcH < (1u << 16) || c.srcX + c.srcW > static_cast<uint64_t>(l.surface.width) << 16 ||
+        c.srcY + c.srcH > static_cast<uint64_t>(l.surface.height) << 16)
+        return "VIC source outside the surface";
+    Image shown;
+    if (c.width < 2 || c.height < 2)
+        return "a plane VIC refuses (a side under 2)";
+    const Layer plane = screenConversionLayer(c, roundUp(static_cast<uint32_t>(c.width) * 4, 256));
+    if (!imageOf(plane, W, H, shown) || !shown.visible)
+        return "the plane has no window image";
+    const bool widened = c.width != c.screen.w || c.height != c.screen.h;
+    if ((!widened && shown.dda != 0x10001000u) || shown.position != image.position || shown.size != image.size)
+        return format("the plane is not shown 1:1 where the layer goes: dda %#x", shown.dda);
+    return "";
+}
+
+std::string turnedUnshown(const Layer &l)
+{
+    Image image;
+    if (!imageOf(l, W, H, image))
+        return "no window image";
+    return image.convert && image.visible ? convertedUnshown(l, image) : "";
+}
+
 Surface makeSurface(Kind kind, uint32_t width, uint32_t height)
 {
     Surface s;
@@ -115,20 +150,28 @@ Layer randomDetached()
         dh = dh > 4000 ? 4000 : dh;
     }
     l.dst = {(int32_t)rnd(W + 200) - 100, (int32_t)rnd(H + 200) - 100, dw, dh};
+    // Every transform word Core Animation may set; a quarter turn's destination takes the source's other side.
+    l.transform = rnd(2) ? rnd(8) : 0;
+    if (turnOf(l.transform).transpose) {
+        const int32_t t = l.dst.w;
+        l.dst.w = l.dst.h;
+        l.dst.h = t;
+    }
     return l;
 }
 
 void testAcceptance()
 {
-    const Limits limits;
+    const Limits &limits = kLimits24B119;
     unsigned accepted = 0, total = 0, visible = 0;
     for (int n = 0; n < 200000; ++n) {
         Layer layers[kLayers];
         bool has[kLayers] = {};
         Layer d = randomDetached();
         // Within the published limits: CA's own check (scale by integer quotient on A10X; here the exact ratio).
-        if ((uint64_t)d.dst.w * 4 < (uint64_t)d.src.w || (uint64_t)d.dst.h * 4 < (uint64_t)d.src.h ||
-            (uint64_t)d.dst.w > 4ull * d.src.w || (uint64_t)d.dst.h > 4ull * d.src.h)
+        const bool turned = turnOf(d.transform).transpose;
+        const uint64_t ow = turned ? d.dst.h : d.dst.w, oh = turned ? d.dst.w : d.dst.h;
+        if (ow * 4 < (uint64_t)d.src.w || oh * 4 < (uint64_t)d.src.h || ow > 4ull * d.src.w || oh > 4ull * d.src.h)
             continue;
         const unsigned slot = isYuv(d.kind) ? 2 : 0;  // YUV in layer 2, RGB in layer 0 (QuartzCore [V])
         layers[slot] = d;
@@ -141,6 +184,8 @@ void testAcceptance()
         const uint32_t updated = (has[0] ? 1u : 0) | (has[1] ? 2u : 0) | (has[2] ? 4u : 0) | kBackgroundBit;
         ++total;
         const unsigned why = checkUpdated(updated, kOpaqueBlack, has, layers, W, H, limits);
+        CHECK(checkUpdated(updated, kOpaqueBlack, has, layers, W, H, Limits()) == (d.transform ? kTransformed : why),
+              "iOS 17's limits (no rotation published) answer transform %u differently", d.transform);
         CHECK(why == kAccepted,
               "swap within the limits refused (reason %u): kind %d src %d,%d %dx%d of %ux%u dst %d,%d %dx%d", why,
               d.kind, d.src.x, d.src.y, d.src.w, d.src.h, d.surface.width, d.surface.height, d.dst.x, d.dst.y, d.dst.w,
@@ -161,6 +206,14 @@ void testAcceptance()
               image.prescaled);
         CHECK((image.dda & 0xffff) <= (image.yuv ? 8u : 4u) << 12 && (image.dda >> 16) <= 15u << 12, "dda %#x",
               image.dda);
+        CHECK(!d.transform || image.convert || (image.options & 0x15u) == turnOptions(d.transform),
+              "a transformed layer the window scans has the wrong direction bits");
+        // Any YUV layer may go to the conversion job (a chroma siting DC A lacks, or a live window's other matrix).
+        if (d.transform || isYuv(d.kind)) {
+            const std::string why = d.transform ? turnedUnshown(d) : convertedUnshown(d, image);
+            CHECK(why.empty(), "transform %u kind %d src %dx%d dst %dx%d: %s", d.transform, d.kind, d.src.w, d.src.h,
+                  d.dst.w, d.dst.h, why.c_str());
+        }
         CHECK(image.readHigh <= ((d.surface.allocation + 4095) & ~4095ull) && image.readLow < image.readHigh,
               "read range %#llx-%#llx outside %#llx", (unsigned long long)image.readLow,
               (unsigned long long)image.readHigh, (unsigned long long)d.surface.allocation);
@@ -189,7 +242,9 @@ void testRefusals()
     CHECK(checkUpdated(7u | kBackgroundBit, kOpaqueBlack, has, layers, W, H) == kAccepted, "the reference swap");
     Layer keep = d;
     d.transform = 4;
-    CHECK(checkUpdated(6, 0, has, layers, W, H) == kTransformed, "a transform");
+    CHECK(checkUpdated(6, 0, has, layers, W, H, kLimits24B119) == kAccepted,
+          "a turned video: the conversion job turns it");
+    CHECK(checkUpdated(6, 0, has, layers, W, H) == kTransformed, "a turned video where no rotation is published");
     d = keep;
     d.surface.format = fourcc('x', '4', '2', '0');
     d.kind = kindOf(d.surface.format, d.surface.planes);
@@ -432,6 +487,204 @@ void testLatch()
 }  // namespace
 
 // One process, in this order: the scenarios draw from one random stream (rng), as the harness always did.
+// turnedRect agrees pixel for pixel with the turned whole surface's own mapping (TegraVICConfig.h vicFlips).
+TEST(DisplayPlanesTurn, TurnedRectMatchesThePixelMapping)
+{
+    const uint32_t sw = 13, sh = 7;
+    const Rect r = {3, 2, 6, 4};
+    for (uint32_t t = 0; t < 8; ++t) {
+        const Turn turn = turnOf(t);
+        const uint32_t ow = turn.transpose ? sh : sw, oh = turn.transpose ? sw : sh;
+        const Rect o = turnedRect(r, sw, sh, t);
+        unsigned inside = 0;
+        for (uint32_t oy = 0; oy < oh; ++oy)
+            for (uint32_t ox = 0; ox < ow; ++ox) {
+                uint32_t a = turn.transpose ? oy : ox, b = turn.transpose ? ox : oy;
+                if (turn.flipX)
+                    a = sw - 1 - a;
+                if (turn.flipY)
+                    b = sh - 1 - b;
+                const bool inR =
+                    (int32_t)a >= r.x && (int32_t)a < r.x + r.w && (int32_t)b >= r.y && (int32_t)b < r.y + r.h;
+                const bool inO =
+                    (int32_t)ox >= o.x && (int32_t)ox < o.x + o.w && (int32_t)oy >= o.y && (int32_t)oy < o.y + o.h;
+                EXPECT_EQ(inR, inO) << "transform " << t << " at " << ox << "," << oy;
+                inside += inO;
+            }
+        EXPECT_EQ(inside, (unsigned)(r.w * r.h)) << t;
+    }
+}
+
+// The conversion job reads exactly the source pixels that land on the screen, by the turned surface's own mapping.
+TEST(DisplayPlanesTurn, ScreenConversionReadsThePixelsOnTheScreen)
+{
+    const uint32_t sw = 13, sh = 7;
+    const int32_t screenW = 4, screenH = 3;
+    Layer l;
+    l.kind = kKindBgra;
+    l.surface.width = sw;
+    l.surface.height = sh;
+    l.src = {3, 2, 6, 4};
+    for (uint32_t t = 0; t < 8; ++t) {
+        l.transform = t;
+        const Turn turn = turnOf(t);
+        const Rect o = turnedRect(l.src, sw, sh, t);
+        l.dst = {-1, -1, o.w, o.h};
+        ScreenConversion c;
+        ASSERT_TRUE(screenConversionOf(l, uint32_t(screenW), uint32_t(screenH), c)) << t;
+        uint32_t lowA = sw, lowB = sh, highA = 0, highB = 0;
+        for (int32_t y = 0; y < screenH; ++y)
+            for (int32_t x = 0; x < screenW; ++x) {
+                const int32_t ox = o.x + x - l.dst.x, oy = o.y + y - l.dst.y;
+                if (x >= l.dst.x + l.dst.w || y >= l.dst.y + l.dst.h)
+                    continue;
+                uint32_t a = uint32_t(turn.transpose ? oy : ox), b = uint32_t(turn.transpose ? ox : oy);
+                if (turn.flipX)
+                    a = sw - 1 - a;
+                if (turn.flipY)
+                    b = sh - 1 - b;
+                lowA = a < lowA ? a : lowA;
+                lowB = b < lowB ? b : lowB;
+                highA = a + 1 > highA ? a + 1 : highA;
+                highB = b + 1 > highB ? b + 1 : highB;
+            }
+        EXPECT_EQ(c.srcX, uint64_t(lowA) << 16) << t;
+        EXPECT_EQ(c.srcY, uint64_t(lowB) << 16) << t;
+        EXPECT_EQ(c.srcW, uint64_t(highA - lowA) << 16) << t;
+        EXPECT_EQ(c.srcH, uint64_t(highB - lowB) << 16) << t;
+        EXPECT_EQ(c.screen.x, 0);
+        EXPECT_EQ(c.screen.y, 0);
+    }
+}
+
+// A quarter turn under 16-GOB blocks (a surface under 86 rows) is the conversion job's, and so is one the window
+// would scan but whose read the surface's bytes don't cover.
+TEST(DisplayPlanesTurn, AShortOrUnreadableTurnIsTheConversionJobs)
+{
+    Layer l;
+    l.kind = kKindBgra;
+    l.surface = makeSurface(kKindBgra, 128, 64);
+    tgm_layout block = {};
+    ASSERT_EQ(tgm_layout_tiled(128, 64, 4, &block), 1);
+    ASSERT_LT(block.y_log2, 4u);
+    l.surface.stride[0] = block.row_bytes;
+    l.surface.allocation = block.bytes;
+    l.surface.descriptorBytes = (block.bytes + 16383) & ~16383ull;
+    l.src = {0, 0, 128, 64};
+    l.dst = {0, 0, 64, 128};
+    l.transform = 7;
+    Image image;
+    ASSERT_TRUE(imageOf(l, W, H, image, &block));
+    EXPECT_TRUE(image.convert);
+
+    l.surface = makeSurface(kKindBgra, 1280, 720);
+    ASSERT_EQ(tgm_layout_tiled(1280, 720, 4, &block), 1);
+    ASSERT_EQ(block.y_log2, 4u);
+    l.surface.stride[0] = block.row_bytes;
+    l.surface.allocation = l.surface.descriptorBytes = 4096;
+    l.src = {0, 0, 1280, 720};
+    l.dst = {0, 0, 720, 1280};
+    ASSERT_TRUE(imageOf(l, W, H, image, &block));
+    EXPECT_TRUE(image.convert);
+}
+
+// The words window B gets for each transform (VIC's vicFlips and V3's proven pair).
+TEST(DisplayPlanesTurn, TransformWordsToWindowBits)
+{
+    const uint32_t expected[8] = {0, 0x1, 0x4, 0x5, 0x14, 0x15, 0x10, 0x11};
+    for (uint32_t t = 0; t < 8; ++t)
+        EXPECT_EQ(turnOptions(t), expected[t]) << t;
+}
+
+// Maps' detached Metal layer: 1280x720 BGRA in the GPU's 16-GOB blocks, turned by 7 onto the whole 720x1280 panel at
+// 1:1, is scanned by the window itself: SCAN_COLUMN | H_DIRECTION from the last column's last byte, 1280 columns of
+// 720 pixels, no filter, whole block rows read.
+TEST(DisplayPlanesTurn, AFullScreenTurnedMetalLayerIsScannedByTheWindow)
+{
+    Layer l;
+    l.kind = kKindBgra;
+    l.surface = makeSurface(kKindBgra, 1280, 720);
+    tgm_layout block = {};
+    ASSERT_EQ(tgm_layout_tiled(1280, 720, 4, &block), 1);
+    l.surface.stride[0] = block.row_bytes;
+    l.surface.allocation = block.bytes;
+    l.surface.descriptorBytes = (block.bytes + 16383) & ~16383ull;
+    l.src = {0, 0, 1280, 720};
+    l.dst = {0, 0, 720, 1280};
+    l.transform = 7;
+    EXPECT_EQ(checkDetached(l, W, H, kLimits24B119), (unsigned)kAccepted);
+    Image image;
+    ASSERT_TRUE(imageOf(l, W, H, image, &block));
+    EXPECT_FALSE(image.convert);
+    EXPECT_TRUE(image.visible);
+    EXPECT_EQ(image.options & 0x515u, 0x11u);  // SCAN_COLUMN | H_DIRECTION, no filters
+    EXPECT_EQ(image.size, 1280u << 16 | 720u);
+    EXPECT_EQ(image.prescaled, 1280u << 16 | 720u * 4);
+    EXPECT_EQ(image.dda, 0x10001000u);
+    EXPECT_EQ(image.hOffset, 1279u * 4 + 3);
+    EXPECT_EQ(image.vOffset, 0u);
+    EXPECT_EQ(image.start[0], 0u);
+    EXPECT_EQ(image.surfaceKind & 3u, (unsigned)kSurfaceKindBlock);
+    EXPECT_EQ(image.lineStride, block.row_bytes);
+    // Transform 4 goes the other way down the rows instead: V_DIRECTION from the last row.
+    l.transform = 4;
+    ASSERT_TRUE(imageOf(l, W, H, image, &block));
+    EXPECT_EQ(image.options & 0x515u, 0x14u);
+    EXPECT_EQ(image.hOffset, 0u);
+    EXPECT_EQ(image.vOffset, 719u);
+    // Pitch-linear, or scaled, the conversion job turns it instead: accepted, never refused.
+    ASSERT_TRUE(imageOf(l, W, H, image));
+    EXPECT_TRUE(image.convert);
+    l.dst = {0, 0, 360, 640};
+    EXPECT_EQ(checkDetached(l, W, H, kLimits24B119), (unsigned)kAccepted);
+    ASSERT_TRUE(imageOf(l, W, H, image, &block));
+    EXPECT_TRUE(image.convert);
+}
+
+// QuartzCore 24B119's AppleInternalDisplay::display_supports_rotation_p with IOMFBSupportsRotation published (bit 14),
+// IOMFBDisableFlip not (bit 15 set): every transformed layer it lets through, in every format the display takes, at
+// every scale within the limits, is accepted. Core Animation has no answer to a refused swap.
+bool caSendsTurned(const Surface &s, uint32_t transform, const Limits &limits)
+{
+    if (!(transform & 4))
+        return true;  // flips: bit 15
+    const uint64_t area = static_cast<uint64_t>(roundUp(s.width, 32)) * roundUp(s.height, 32) & ~0x3ffull;
+    return limits.maxSrcRectWidth >= s.height && area < limits.maxSrcRotRectTotal;
+}
+
+TEST(DisplayPlanesTurn, EveryShapeCoreAnimationSendsTurnedIsAccepted)
+{
+    const Limits &limits = kLimits24B119;
+    static const Kind kinds[] = {kKindNv12Video, kKindNv12Full, kKindNv16Video, kKindNv16Full, kKindBgra, kKindRgba};
+    unsigned sent = 0;
+    for (const Kind kind : kinds)
+        for (const uint32_t sw : {64u, 720u, 1280u, 1920u, 4096u})
+            for (const uint32_t sh : {64u, 720u, 1080u, 2304u})
+                for (uint32_t t = 1; t < 8; ++t) {
+                    Layer l;
+                    l.kind = kind;
+                    l.surface = makeSurface(kind, sw, sh);
+                    l.transform = t;
+                    if (!caSendsTurned(l.surface, t, limits))
+                        continue;
+                    l.src = {0, 0, (int32_t)sw, (int32_t)sh};
+                    const bool turned = turnOf(t).transpose;
+                    // 1:1, half size, and down to the published 1/4 (RGB) or 1/6 (YUV), rounded up to stay within it.
+                    for (const uint32_t scale : {1u, 2u, 4u, 6u}) {
+                        if (scale == 6 && !isYuv(kind))
+                            continue;
+                        const int32_t ow = (int32_t)((sw + scale - 1) / scale),
+                                      oh = (int32_t)((sh + scale - 1) / scale);
+                        l.dst = turned ? Rect{0, 0, oh, ow} : Rect{0, 0, ow, oh};
+                        ++sent;
+                        EXPECT_EQ(checkDetached(l, W, H, limits), (unsigned)kAccepted)
+                            << "kind " << kind << " " << sw << "x" << sh << " transform " << t << " scale " << scale;
+                        EXPECT_EQ(turnedUnshown(l), "") << kind << " " << sw << "x" << sh << " " << t << " 1/" << scale;
+                    }
+                }
+    EXPECT_GT(sent, 1000u);
+}
+
 TEST(DisplayPlanes, AcceptanceWithinThePublishedLimits)
 {
     testAcceptance();
@@ -485,7 +738,25 @@ TEST(DisplayPlanes, PublishedAlignmentSuitsEveryReader)
 }
 
 // iOS 27 publishes iOS 17's limits and, where QuartzCore 24B119 no longer goes by J120's chip id, packed 10-bit YUV and
-// compressed surfaces ruled out.
+// compressed surfaces ruled out, and rotation published.
+// 21H461 is not told the display rotates, so a transform word it sends anyway is refused; 24B119 is told, and every
+// word is shown.
+TEST(DisplayPlanes, ATransformIsAcceptedOnlyWhereRotationIsPublished)
+{
+    for (const Kind kind : {kKindBgra, kKindNv12Video}) {
+        Layer l;
+        l.kind = kind;
+        l.surface = makeSurface(kind, 1280, 720);
+        l.src = {0, 0, 1280, 720};
+        for (uint32_t t = 1; t < 8; ++t) {
+            l.transform = t;
+            l.dst = turnOf(t).transpose ? Rect{0, 0, 720, 1280} : Rect{0, 0, 1280, 720};
+            EXPECT_EQ(checkDetached(l, W, H), (unsigned)kTransformed) << kind << " " << t;
+            EXPECT_EQ(checkDetached(l, W, H, kLimits24B119), (unsigned)kAccepted) << kind << " " << t;
+        }
+    }
+}
+
 TEST(DisplayPlanes, Limits24B119AreIos17sWithoutPackedOrCompressed)
 {
     const Limits ios17;
@@ -494,6 +765,10 @@ TEST(DisplayPlanes, Limits24B119AreIos17sWithoutPackedOrCompressed)
     EXPECT_TRUE(ios27.packedYuvUnsupported);
     EXPECT_FALSE(ios17.compressionUnsupported);
     EXPECT_TRUE(ios27.compressionUnsupported);
+    EXPECT_FALSE(ios17.flipUnsupported);
+    EXPECT_FALSE(ios27.flipUnsupported);  // flips and turns are shown: Core Animation hands them over
+    EXPECT_FALSE(ios17.rotation);
+    EXPECT_TRUE(ios27.rotation);
     EXPECT_EQ(ios27.minScaleFraction, ios17.minScaleFraction);
     EXPECT_EQ(ios27.maxScale, ios17.maxScale);
     EXPECT_EQ(ios27.maxSrcRectWidth, ios17.maxSrcRectWidth);

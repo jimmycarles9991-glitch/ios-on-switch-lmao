@@ -1,14 +1,36 @@
 // SPDX-License-Identifier: MIT
 #import "TegraGM20BMetalInternal.h"
 #include "TegraGM20BGrPreemptABI.h"
+#include "TegraGM20BPathsABI.h"
+#include "probe_restores.h"
 #include "push.h"
+#include <libkern/OSCacheControl.h>
+#include <xpc/xpc.h>
 
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+extern "C" XPC_RETURNS_RETAINED xpc_object_t xpc_copy_entitlement_for_self(const char *key);
+
+static bool probesEntitled()
+{
+    static const bool entitled = [] {
+        xpc_object_t value = xpc_copy_entitlement_for_self(SWITCH_GPU_PROBES_ENTITLEMENT);
+        const bool granted = value && xpc_get_type(value) == XPC_TYPE_BOOL && xpc_bool_get_value(value);
+#if !__has_feature(objc_arc)
+        if (value)
+            xpc_release(value);
+#endif
+        return granted;
+    }();
+    return entitled;
+}
+
+static NSString *const kProbesUnentitled = @"raw methods need the " SWITCH_GPU_PROBES_ENTITLEMENT " entitlement";
+
 // GM20B methods Metal cannot reach, for hw_test_app's hardware probes (app27/X1RawProbes.swift): each NSData holds
 // (method, value) uint32 pairs of the 3D class. Every draw of one instance this process encodes emits `before` after
 // its state and `after` once it ended, until a call with `before` nil disarms them and answers how many draws emitted
 // them. The probe's command buffers must complete before it disarms: their encoding may run after commit returns.
-static bool appendMethods(NSData *pairs, std::vector<uint32_t> &words)
+static bool appendMethods(NSData *pairs, std::vector<uint32_t> &words, gm20b::Device::ProbeWords &into)
 {
     if (!pairs)
         return true;
@@ -18,6 +40,7 @@ static bool appendMethods(NSData *pairs, std::vector<uint32_t> &words)
     for (NSUInteger i = 0; i < pairs.length / 4; i += 2) {
         if (v[i] >= 0x8000 || v[i] % 4)
             return false;
+        into.restores |= gm20b::probeRestoreBits(v[i]);
         words.push_back(gm20b::Push::hdr(1, gm20b::SUBC_3D, v[i], 1));
         words.push_back(v[i + 1]);
     }
@@ -63,8 +86,10 @@ static gm20b::ProbeSurface probeSurface(const gm20b::Texture &t, uint32_t fmt2d)
         d.probeWords.reset();
         return [NSString stringWithFormat:@"%llu", (unsigned long long)d.probeEmitted.exchange(0)];
     }
+    if (!probesEntitled())
+        return kProbesUnentitled;
     auto words = std::make_shared<gm20b::Device::ProbeWords>();
-    if (!appendMethods(before, words->before) || !appendMethods(after, words->after))
+    if (!appendMethods(before, words->before, *words) || !appendMethods(after, words->after, *words))
         return @"methods are (method, value) uint32 pairs of 3D-class methods below 0x8000";
     if (words->before.size() + words->after.size() > 1024)
         return @"more than 512 methods";
@@ -180,6 +205,58 @@ static gm20b::ProbeSurface probeSurface(const gm20b::Texture &t, uint32_t fmt2d)
     return [NSString stringWithFormat:@"old=%u readback=%u", reply.old_mode, reply.readback];
 }
 
+// Shared buffers made while `on` is true are bound L2-bypassing (VOL=1); answers whether they were before, or
+// "unsupported" where the kernel takes no volatile writes and such a buffer would be L2-cached anyway
+- (NSString *)switchMetalSharedBypassesL2:(NSNumber *)on
+{
+    if (!gRM->raw->kernel().volatileWrites() || !gRM->raw->kernel().exactJobs())
+        return @"unsupported";
+    return gRM->raw->probeSharedBypassesL2.exchange(on.boolValue, std::memory_order_acq_rel) ? @"1" : @"0";
+}
+
+// Render passes encoded from now on write `knob` to SET_SUBTILING_PERF_KNOB_A in their prologue; 0 stops. Answers the
+// knob it replaced, in hexadecimal.
+- (NSString *)switchMetalProbeSubtilingKnob:(NSNumber *)knob
+{
+    return [NSString stringWithFormat:@"%x", gRM->raw->probeSubtilingKnob.exchange(knob.unsignedIntValue)];
+}
+
+// Block-linear texture headers written from now on take SECTOR_PROMOTION `mode` (0 none, 1 to 2V, 2 to 2H, 3 to 4).
+// Answers the mode it replaced.
+- (NSString *)switchMetalProbeSectorPromotion:(NSNumber *)mode
+{
+    return [NSString
+        stringWithFormat:@"%u", unsigned(gm20b::fx::probeSectorPromotion.exchange(mode.unsignedCharValue & 3))];
+}
+
+// nvn_probes.h's bits for render passes encoded from now on (0 off); answers the bits it replaced, in hexadecimal
+- (NSString *)switchMetalProbeNvn:(NSNumber *)bits
+{
+    return [NSString stringWithFormat:@"%x", gRM->raw->probeNvn.exchange(bits.unsignedIntValue)];
+}
+
+// The zcull invalidation rules draws skip from now on (zcull.h kZcullKeep*); answers the bits it replaced
+- (NSString *)switchMetalProbeZcullKeep:(NSNumber *)bits
+{
+    return [NSString stringWithFormat:@"%x", gRM->raw->probeZcullKeep.exchange(bits.unsignedIntValue)];
+}
+
+// Uncompressed BOs allocated while `on` ask the kernel for direct physical addresses, never the SMMU's 64 KiB big pages
+// (TegraGM20BBoProbeDirect, HW Test gpu.perf.fill); answers whether they did
+- (NSString *)switchMetalProbeDirectPa:(NSNumber *)on
+{
+    return gRM->raw->kernel().probeDirect.exchange(on.boolValue) ? @"1" : @"0";
+}
+
+// 4x colour textures made while `on` take the 2CBR compression kinds (comp.h probeMs4Cbr); answers whether they did
+- (NSString *)switchMetalProbeMs4Cbr:(NSNumber *)on
+{
+    const bool was = gm20b::probeMs4Cbr.exchange(on.boolValue);
+    if (was && !on.boolValue)
+        gRM->raw->dropProbeCompressedKinds();
+    return was ? @"1" : @"0";
+}
+
 - (NSString *)switchMetalProbeMacroBands:(NSNumber *)on
 {
     gRM->raw->probeMacroBands.store(on.boolValue, std::memory_order_release);
@@ -233,16 +310,44 @@ static gm20b::ProbeSurface probeSurface(const gm20b::Texture &t, uint32_t fmt2d)
 }
 
 // What a probe's line says of a texture and the device: "raw=1 comptags=1 block_linear=1 pitch=N tiled_cache=1
-// compression=1", raw=0 where the driver does not hold it
+// compression=1 kind=0xNN block_rows=N" (kind its compressed memory's, 0: none; a block's rows, 0 for a pitch-linear
+// texture), raw=0 where the driver does not hold it
 - (NSString *)switchMetalProbeFacts:(id<MTLTexture>)texture
 {
     const uint32_t flags = gRM->raw->kernelInfo().flags;
     SwitchMetalTexture *t = gm20bTexture(texture);
     const gm20b::Texture now = t ? gRM->raw->lockedCopy(t->_raw) : gm20b::Texture();
-    return
-        [NSString stringWithFormat:@"raw=%d comptags=%d block_linear=%d pitch=%u tiled_cache=%d compression=%d",
-                                   t != nil, t && now.comptags, t && now.blockLinear, t ? now.pitch : 0,
-                                   (flags & TegraGM20BInfoTiledCache) != 0, (flags & TegraGM20BInfoCompression) != 0];
+    const bool blockLinear = t && now.blockLinear;
+    return [NSString
+        stringWithFormat:@"raw=%d comptags=%d block_linear=%d pitch=%u tiled_cache=%d compression=%d kind=0x%x "
+                         @"block_rows=%u",
+                         t != nil, t && now.comptags, blockLinear, t ? now.pitch : 0,
+                         (flags & TegraGM20BInfoTiledCache) != 0, (flags & TegraGM20BInfoCompression) != 0,
+                         t ? gRM->raw->privateKind(t->_raw) : 0u, blockLinear ? 8u << now.blockHeight : 0u];
+}
+
+// A buffer's binding as a probe's line says it: "raw=1 wc=1 volatile=0", volatile where its PTEs bypass the GPU's L2
+// (gpu.perf.ca_binding's proof of each arm's route); raw=0 where the driver does not hold it
+- (NSString *)switchMetalProbeBufferFacts:(id<MTLBuffer>)buffer
+{
+    SwitchMetalBuffer *b = [(id)buffer isKindOfClass:[SwitchMetalBuffer class]] ? (SwitchMetalBuffer *)buffer : nil;
+    return [NSString stringWithFormat:@"raw=%d wc=%d volatile=%d", b != nil, b && b->_raw.wc, b && b->_raw.gpuVolatile];
+}
+
+// gpu.x1.clean_l2_syncpoint's read: a buffer's bytes as the CPU sees them in its own mapping, with none of the driver's
+// visibility work: {bytes, view}, view "wc" (uncached) or "cached" (cleaned and invalidated first); nil where the
+// driver holds no CPU mapping of it
+- (NSDictionary *)switchMetalProbeRawRead:(id<MTLBuffer>)buffer
+{
+    SwitchMetalBuffer *b = [(id)buffer isKindOfClass:[SwitchMetalBuffer class]] ? (SwitchMetalBuffer *)buffer : nil;
+    if (!b || !b->_raw.cpu)
+        return nil;
+    if (!b->_raw.wc)
+        sys_dcache_flush(b->_raw.cpu, size_t(b->_raw.length));
+    return @{
+        @"bytes" : [NSData dataWithBytes:b->_raw.cpu length:NSUInteger(b->_raw.length)],
+        @"view" : b->_raw.wc ? @"wc" : @"cached"
+    };
 }
 
 // A texture's header as the texture unit reads it, its eight words dot-separated; nil where the driver holds no header
@@ -268,8 +373,8 @@ static gm20b::ProbeSurface probeSurface(const gm20b::Texture &t, uint32_t fmt2d)
     gm20b::ProbeForms f;
     if (!gm20b::parseProbeForms(forms.UTF8String, f))
         return [NSString stringWithFormat:@"forms not understood: %@", forms];
-    std::lock_guard<gm20b::Mutex> lock(_lock);
-    if (_committed)
+    std::lock_guard<gm20b::UnfairMutex> lock(_lock);
+    if (_committed.load(std::memory_order_relaxed))
         return @"committed already";
     gm20bPipelineVeto(self, VetoProbes);
     _probeForms = f;
@@ -279,28 +384,31 @@ static gm20b::ProbeSurface probeSurface(const gm20b::Texture &t, uint32_t fmt2d)
 // Where its barriers took the forms, once it completed (probe_forms.h ProbeTaken)
 - (NSString *)switchMetalProbeTaken
 {
-    std::lock_guard<gm20b::Mutex> lock(_lock);
+    std::lock_guard<gm20b::UnfairMutex> lock(_lock);
     return @(_probeTaken.text().c_str());
 }
 
 // 2D-engine work at the open blit encoder (probe_ops.h): {kind: "scale"|"fill", read, written: textures, dx, dy, dw,
 // dh, and for scale du, dv, sx, sy (32.32), bilinear, corner, fmt2d (0: each texture's own); for fill colorFormat,
 // color0..color3, reference (the DDX's state first); unbracketed: no waits around it}. Or {kind: "method", method, value,
-// written}: one 3D-class method there. nil, else why not
+// written, unbracketed}: one 3D-class method there. nil, else why not
 - (NSString *)switchMetalProbeEngine:(NSDictionary *)op
 {
     SwitchMetalTexture *written = gm20bTexture(op[@"written"]), *read = gm20bTexture(op[@"read"]);
     const bool fill = [op[@"kind"] isEqual:@"fill"], method = [op[@"kind"] isEqual:@"method"];
+    if (method && !probesEntitled())
+        return kProbesUnentitled;
     if (!written || (!fill && !method && !read))
         return @"a texture the driver does not hold (memoryless, a view, or refused)";
-    std::lock_guard<gm20b::Mutex> lock(_lock);
-    if (_committed || !_encOpen || ![_active isKindOfClass:[SwitchMetalBlitEncoder class]])
+    std::lock_guard<gm20b::UnfairMutex> lock(_lock);
+    if (_committed.load(std::memory_order_relaxed) || !_encOpen || ![_active isKindOfClass:[SwitchMetalBlitEncoder class]])
         return @"no blit encoder open";
     if (method) {
         gm20b::ProbeOp o;
         o.kind = gm20b::ProbeOpKind::Method;
         o.method = uint32_t(number(op, @"method"));
         o.value = uint32_t(number(op, @"value"));
+        o.bracketed = number(op, @"unbracketed") == 0;
         if (o.method >= 0x8000 || o.method % 4)
             return @"a 3D-class method below 0x8000";
         gm20bPipelineVeto(self, VetoProbes);

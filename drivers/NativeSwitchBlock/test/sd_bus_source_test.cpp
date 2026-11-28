@@ -65,19 +65,24 @@ TEST(SdBusSource, EveryCommandClaimsAndEnds)
                 HasSubstr("if (!bus.idle() && awaitRelease())\n        return 10;"));
     EXPECT_THAT(body("void NativeSwitchBlock::resetLines()"), HasSubstr("bus.reset();"));
     EXPECT_THAT(body("void NativeSwitchBlock::powerOnController()"), HasSubstr("bus.reset();"));
-    // COMMAND is written by those five and by tuning alone.
-    EXPECT_EQ(Count(driver(), "w16(COMMAND,"), 6u);
+    // COMMAND is written by those five, emitSlotCommand (guarded by bus.claim/pipe.onIrq under hwLock), and tuning.
+    EXPECT_LT(Index(body("void NativeSwitchBlock::launchSlot("), "bus.claim(r32(PRESENT), use)"),
+              Index(body("void NativeSwitchBlock::launchSlot("), "emitSlotCommand(slot)"));
+    EXPECT_EQ(Count(driver(), "w16(COMMAND,"), 7u);
 }
 
-// SDR104 tuning raises no transfer complete, so its PRESENT_STATE wait stays; nothing on the I/O path reaches it.
+// SDR104/DDR200 tuning raises no transfer complete, so its PRESENT_STATE wait stays; nothing on the I/O path reaches it.
 TEST(SdBusSource, TuningWaitStaysInTuning)
 {
-    EXPECT_EQ(Count(driver(), "awaitTuningIdle("), 4u);  // declaration, definition, tuneStep, tune
-    EXPECT_THAT(body("void NativeSwitchBlock::tuneStep()"), HasSubstr("awaitTuningIdle("));
+    EXPECT_EQ(Count(driver(), "awaitTuningIdle("), 5u);  // declaration, definition, tuneStep, tune, tuneDdr200
+    EXPECT_THAT(body("void NativeSwitchBlock::tuneStep("), HasSubstr("awaitTuningIdle("));
     EXPECT_THAT(body("bool NativeSwitchBlock::tune()"), HasSubstr("awaitTuningIdle("));
-    for (const char *signature : {"int NativeSwitchBlock::issue(", "int NativeSwitchBlock::complete(",
-                                  "void NativeSwitchBlock::beginBatch(", "void NativeSwitchBlock::endBatch(",
-                                  "int NativeSwitchBlock::controlCommand(", "void NativeSwitchBlock::worker("}) {
+    EXPECT_THAT(body("bool NativeSwitchBlock::tuneDdr200("), HasSubstr("awaitTuningIdle("));
+    for (const char *signature :
+         {"int NativeSwitchBlock::issue(", "int NativeSwitchBlock::complete(",
+          "void NativeSwitchBlock::emitSlotCommand(", "void NativeSwitchBlock::launchSlot(",
+          "void NativeSwitchBlock::prepareAndPublishSlot(", "void NativeSwitchBlock::completeSlot(",
+          "int NativeSwitchBlock::controlCommand(", "void NativeSwitchBlock::worker("}) {
         EXPECT_FALSE(Search(body(signature), R"(\b(IOSleep|IODelay|awaitTuningIdle)\b)")) << signature;
     }
 }
@@ -107,5 +112,5 @@ TEST(SdBusSource, FailedWaitCapturesTheInterruptBeforeDeassertingItsSource)
     EXPECT_EQ(Count(driver(), "tegra_mc_error_latest("), 1u);
     EXPECT_THAT(driver(), Not(HasSubstr("tegra_mc_errors_start(")));
     EXPECT_EQ(Count(driver(), "interruptLost(signals);"), 1u);
-    EXPECT_EQ(Count(driver(), "interruptLost(awaited);"), 1u);
+    EXPECT_EQ(Count(driver(), "interruptLost(awaited);"), 2u);
 }

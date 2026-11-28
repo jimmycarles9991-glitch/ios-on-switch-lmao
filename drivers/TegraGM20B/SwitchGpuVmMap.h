@@ -115,6 +115,9 @@ int tgm_vm_unmap_volatile(struct tgm_vm *vm, uint64_t va, uint64_t range)
 	return ret;
 }
 
+/* Debug kernels: the first big view a constructor refused this boot (its error), for the demotion line below */
+static int big_view_refused;
+
 static void mem_prepare_big_views(struct tgm_mem *mem)
 {
 	u32 at = 0;
@@ -145,6 +148,10 @@ static void mem_prepare_big_views(struct tgm_mem *mem)
 					 tgm_gpu.mem_type, SWITCH_GPU_BIG_SHIFT, view->bytes, &args,
 					 sizeof(args), &view->mem);
 		if (ret) {
+			int none = 0;
+			if (stats_on())
+				__atomic_compare_exchange_n(&big_view_refused, &none, ret, 0,
+							    __ATOMIC_RELAXED, __ATOMIC_RELAXED);
 			kfree(view);
 			continue;
 		}
@@ -169,6 +176,46 @@ static struct nvif_mem *mem_mapping_view(struct tgm_mem *mem,
 	}
 	entry->shift = PAGE_SHIFT;
 	return &mem->mem;
+}
+
+/*
+ * Debug kernels: a volatile map's bytes in 4 KiB and 128 KiB PTEs, and of the 4 KiB ones those its pages had 128 KiB runs
+ * for (mem_mapping_view demoted them: no big view of the memory covers the run). The first demotion of a boot names its
+ * memory and why.
+ */
+static void map_volatile_stats(const struct tgm_mem *mem, const struct switch_gpu_mapping *made,
+			       u64 offset, u64 range)
+{
+	static int told;
+	const struct switch_gpu_memory_view *view;
+	u64 small = 0, big = 0, planned = 0, demoted;
+	u32 views = 0, i;
+	for (i = 0; i < made->count; ++i) {
+		const struct switch_gpu_mapping_entry *entry = &made->entries[i];
+		struct switch_gpu_mapping_run run;
+		if (entry->shift != PAGE_SHIFT)
+			big += entry->bytes;
+		else
+			small += entry->bytes;
+		if (made->compressed)
+			planned += entry->bytes;
+		else if (switch_gpu_mapping_next(mem->pages, mem->npages, entry->va, entry->offset,
+						 entry->bytes, &run) &&
+			 run.shift != PAGE_SHIFT)
+			planned += entry->bytes;
+	}
+	demoted = planned > big ? planned - big : 0;
+	tgm_stats_map(small, big, demoted);
+	if (!demoted || __atomic_exchange_n(&told, 1, __ATOMIC_RELAXED))
+		return;
+	for (view = mem->big_views; view; view = view->next)
+		++views;
+	nvxnu_log("tegra-gm20b: volatile map %llu KiB at %llu of %llu KiB: %llu KiB of 128 KiB "
+		  "runs on 4 KiB PTEs; "
+		  "%u big views (%s), first refused %d; logged once\n",
+		  range >> 10, offset >> 10, mem->bytes >> 10, demoted >> 10, views,
+		  mem->big_views_ready ? "prepared" : "never prepared",
+		  __atomic_load_n(&big_view_refused, __ATOMIC_RELAXED));
 }
 
 int switch_gpu_vm_map_volatile(struct tgm_vm *vm, u64 va, u64 range, struct tgm_mem *mem,
@@ -255,12 +302,8 @@ int switch_gpu_vm_map_volatile(struct tgm_vm *vm, u64 va, u64 range, struct tgm_
 		kfree(made);
 	else
 		*mapping = made;
-	for (i = 0; !ret && stats_on() && i < count; ++i) {
-		const struct switch_gpu_mapping_entry *entry = &made->entries[i];
-		const bool big = entry->shift != PAGE_SHIFT;
-
-		tgm_stats_map(big ? 0 : entry->bytes, big ? entry->bytes : 0, 0);
-	}
+	if (!ret && stats_on())
+		map_volatile_stats(mem, made, offset, range);
 	return ret;
 }
 

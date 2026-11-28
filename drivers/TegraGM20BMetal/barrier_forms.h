@@ -70,7 +70,8 @@ enum class Opened : uint8_t {
 constexpr bool switchDrainProven(BarrierEngine before, BarrierEngine next)
 {
     return (before == BarrierEngine::ThreeD && (next == BarrierEngine::Copy || next == BarrierEngine::Compute)) ||
-           (before == BarrierEngine::Copy && next == BarrierEngine::ThreeD);
+           (before == BarrierEngine::Copy && next == BarrierEngine::ThreeD) ||
+           (before == BarrierEngine::Compute && (next == BarrierEngine::ThreeD || next == BarrierEngine::Copy));
 }
 
 constexpr SwitchForm switchFormFor(SwitchForm asked, BarrierEngine before, BarrierEngine next)
@@ -115,12 +116,23 @@ template <typename Emit, typename... Args> void barrier(Push &p, Emit emit, Args
 
 // A submission's prologue after its stamp, for an entry form other than today's: what the job reads invalidated by the
 // form, nothing flushed or waited for (the job before ended with its fence's RELEASE_WFI). Answers the
-// INVALIDATE_SHADER_CACHES_NO_WFI data word commit gives the INSTRUCTION bit where the heap grew
-inline uint32_t *entryOpening(Push &p, EntryForm f)
+// INVALIDATE_SHADER_CACHES_NO_WFI data word commit gives the INSTRUCTION bit where the heap grew. When `samplerSlot` or
+// `headerSlot` is non-null, a 1-word NOP placeholder is reserved for commit() to patch only if the pool was written.
+inline uint32_t *entryOpening(Push &p, EntryForm f, uint32_t **samplerSlot = nullptr, uint32_t **headerSlot = nullptr)
 {
     if (f != EntryForm::None) {
-        p.m(NVB197_INVALIDATE_SAMPLER_CACHE_NO_WFI, 0);
-        p.m(NVB197_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI, 0);
+        if (samplerSlot) {
+            *samplerSlot = p.at;
+            *p.at++ = Push::hdr(4, SUBC_3D, NVB197_NO_OPERATION, 0);
+        } else {
+            p.m(NVB197_INVALIDATE_SAMPLER_CACHE_NO_WFI, 0);
+        }
+        if (headerSlot) {
+            *headerSlot = p.at;
+            *p.at++ = Push::hdr(4, SUBC_3D, NVB197_NO_OPERATION, 0);
+        } else {
+            p.m(NVB197_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI, 0);
+        }
     }
     constexpr uint32_t data = NVDEF(NVB197, INVALIDATE_SHADER_CACHES_NO_WFI, GLOBAL_DATA, TRUE),
                        constant = NVDEF(NVB197, INVALIDATE_SHADER_CACHES_NO_WFI, CONSTANT, TRUE);
@@ -131,9 +143,11 @@ inline uint32_t *entryOpening(Push &p, EntryForm f)
     return word;
 }
 
-// A pass's opening (today switch_gm20b_pass_drain without the tiled flush, which the pass before ends with)
+// A pass's opening (today switch_gm20b_pass_drain without the tiled flush, which the pass before ends with).
+// When `alreadyIdle` is true (previous 3D pass body ended with implicit-WFI INVALIDATE_SHADER_CACHES), skip a second WFI
+// and emit only the NO_WFI consumer invalidates.
 inline Opened passOpening(Push &p, PassForm pass, SwitchForm switchForm, EntryForm entry, BarrierEngine before,
-                          bool invalidateConstants = false)
+                          bool invalidateConstants = false, bool alreadyIdle = false)
 {
     if (before == BarrierEngine::None && relaxed(entry))
         return Opened::First;
@@ -149,6 +163,13 @@ inline Opened passOpening(Push &p, PassForm pass, SwitchForm switchForm, EntryFo
             barrier_forms_detail::barrier(p, switch_gm20b_invalidate_texture_data);
         }
         return Opened::Switch;
+    }
+    if (before == BarrierEngine::ThreeD && alreadyIdle) {
+        barrier_forms_detail::barrier(
+            p, switch_gm20b_invalidate_shader_caches_no_wfi,
+            uint32_t(SWITCH_GM20B_SHADER_DATA | (invalidateConstants ? SWITCH_GM20B_SHADER_CONSTANTS : 0u)));
+        barrier_forms_detail::barrier(p, switch_gm20b_invalidate_texture_data);
+        return Opened::Today;
     }
     barrier_forms_detail::barrier(p, switch_gm20b_pass_drain, invalidateConstants || before != BarrierEngine::ThreeD);
     return Opened::Today;
@@ -167,13 +188,17 @@ inline Opened blitOpening(Push &p, SwitchForm switchForm, EntryForm entry, Barri
 }
 
 // A compute encoder's opening: the scheduler's and the compute class's header and sampler caches always; the flush and
-// the data invalidates by the form (today's is compute_opening.h's)
-inline Opened computeEncoderOpening(Push &p, SwitchForm switchForm, EntryForm entry, BarrierEngine before)
+// the data invalidates by the form (today's is compute_opening.h's). When `alreadyIdle` is true (previous compute
+// encoder ended with implicit-WFI computeRelease), skip a second WFI and emit NO_WFI consumer invalidates.
+inline Opened computeEncoderOpening(Push &p, SwitchForm switchForm, EntryForm entry, BarrierEngine before,
+                                    bool alreadyIdle = false)
 {
     constexpr uint32_t dataNoWfi = NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES_NO_WFI, GLOBAL_DATA, TRUE),
                        constantNoWfi = NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES_NO_WFI, CONSTANT, TRUE);
     const bool first = before == BarrierEngine::None && relaxed(entry);
-    const bool switched = before != BarrierEngine::None && before != BarrierEngine::Compute && relaxed(switchForm);
+    const bool switched =
+        (before != BarrierEngine::None && before != BarrierEngine::Compute && relaxed(switchForm)) ||
+        (before == BarrierEngine::Compute && alreadyIdle);
     if (!first && !switched) {
         computeOpening(p);
         return Opened::Today;

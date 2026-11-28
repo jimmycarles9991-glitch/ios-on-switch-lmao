@@ -5,6 +5,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <os/log.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include "AVDEmitter.h"
@@ -28,6 +29,9 @@ typedef struct {
 
 typedef struct {
     pthread_mutex_t lock;
+    pthread_cond_t idle;
+    _Atomic uint32_t owner;  // 0: idle, 1: active owner, 2: active owner with waiters
+    uint32_t waiters;
     VTVideoDecoderSession session;
     VTTileDecoderSession tileSession;  // a tile session (grid images) instead of a frame session
     AVDTile tile;
@@ -45,7 +49,6 @@ typedef struct {
     OSType pixelFormat;
     CFTypeRef matrix, primaries, transfer, chromaTop, chromaBottom;
     uint32_t width, height, frames;
-    uint64_t decodeTicks, copyTicks;  // copyTicks: placing pictures in pixel buffers (VIC's or the CPU's copy)
     bool present;
     uint32_t presented, exported, copied;
     // VideoToolbox's HEVC-with-alpha contract (AVDAlpha.c): what MuxedAlphaDecoder asked before the start, and what
@@ -54,12 +57,32 @@ typedef struct {
     int32_t planeAsked;
     uint32_t firstPlane;
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    uint64_t decodeTicks, copyTicks;  // copyTicks: placing pictures in pixel buffers (VIC's or the CPU's copy)
     uint32_t intoTargetCount;
     AVDFrameTiming timing;
 #endif
 } Decoder;
 
 extern os_log_t gAVDLog;
+
+void avd_decoder_enter_slow(Decoder *d);
+void avd_decoder_leave_slow(Decoder *d);
+
+static inline void avd_decoder_enter(Decoder *d)
+{
+    uint32_t expected = 0;
+    if (atomic_compare_exchange_strong_explicit(&d->owner, &expected, 1u, memory_order_acquire, memory_order_relaxed))
+        return;
+    avd_decoder_enter_slow(d);
+}
+
+static inline void avd_decoder_leave(Decoder *d)
+{
+    uint32_t expected = 1u;
+    if (atomic_compare_exchange_strong_explicit(&d->owner, &expected, 0u, memory_order_release, memory_order_relaxed))
+        return;
+    avd_decoder_leave_slow(d);
+}
 
 // The factory every entry registers (AVDRegister.c).
 OSStatus avd_create_instance(FourCharCode codec, CFAllocatorRef allocator, VTVideoDecoderRef *out);

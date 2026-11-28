@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A sampler of pixel coordinates whose s and t axes mirror once to the edge (call.sampler: such a sampler was m2v's alone,

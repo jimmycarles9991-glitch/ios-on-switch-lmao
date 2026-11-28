@@ -4063,6 +4063,7 @@ impl SM70Op for OpCCtl {
 
 impl SM70Op for OpMemBar {
     fn legalize(&mut self, _b: &mut LegalizeBuilder) {
+        assert!(!self.vc, "MEMBAR.VC is SM50-SM6x");
         // Nothing to do
     }
 

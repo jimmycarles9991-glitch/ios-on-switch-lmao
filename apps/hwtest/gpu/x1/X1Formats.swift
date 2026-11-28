@@ -67,6 +67,82 @@ public struct X1Format: Sendable {
         }
     }
 
+    /// Texel t's channel codes, RGBA order, packed into SIMD4 without heap allocation.
+    @inline(__always)
+    public func codes4(_ base: UnsafePointer<UInt8>, _ t: Int) -> SIMD4<UInt32> {
+        let p = base.advanced(by: t * bytesPerTexel)
+        switch pixelFormat {
+        case .bgra8Unorm, .bgra8Unorm_srgb:
+            return SIMD4(UInt32(p[2]), UInt32(p[1]), UInt32(p[0]), UInt32(p[3]))
+        case .rgba8Unorm, .rgba8Unorm_srgb:
+            return SIMD4(UInt32(p[0]), UInt32(p[1]), UInt32(p[2]), UInt32(p[3]))
+        case .r8Unorm:
+            return SIMD4(UInt32(p[0]), 0, 0, 0)
+        case .rg8Unorm:
+            return SIMD4(UInt32(p[0]), UInt32(p[1]), 0, 0)
+        case .rgba16Float:
+            let raw = UnsafeRawPointer(p)
+            return SIMD4(
+                UInt32(raw.loadUnaligned(fromByteOffset: 0, as: UInt16.self).littleEndian),
+                UInt32(raw.loadUnaligned(fromByteOffset: 2, as: UInt16.self).littleEndian),
+                UInt32(raw.loadUnaligned(fromByteOffset: 4, as: UInt16.self).littleEndian),
+                UInt32(raw.loadUnaligned(fromByteOffset: 6, as: UInt16.self).littleEndian)
+            )
+        case .rgba32Float:
+            let raw = UnsafeRawPointer(p)
+            return SIMD4(
+                raw.loadUnaligned(fromByteOffset: 0, as: UInt32.self).littleEndian,
+                raw.loadUnaligned(fromByteOffset: 4, as: UInt32.self).littleEndian,
+                raw.loadUnaligned(fromByteOffset: 8, as: UInt32.self).littleEndian,
+                raw.loadUnaligned(fromByteOffset: 12, as: UInt32.self).littleEndian
+            )
+        case .rgb10a2Unorm:
+            let w = UnsafeRawPointer(p).loadUnaligned(as: UInt32.self).littleEndian
+            return SIMD4(w & 1023, (w >> 10) & 1023, (w >> 20) & 1023, w >> 30)
+        default:
+            let w = UnsafeRawPointer(p).loadUnaligned(as: UInt32.self).littleEndian
+            return SIMD4(w & 2047, (w >> 11) & 2047, w >> 22, 0)
+        }
+    }
+
+    /// Writes one texel's RGBA codes directly into `out` at byte offset `offset`.
+    @inline(__always)
+    public func writeBytes(_ codes: SIMD4<UInt32>, into out: UnsafeMutableRawBufferPointer, at offset: Int) {
+        switch pixelFormat {
+        case .bgra8Unorm, .bgra8Unorm_srgb:
+            out.storeBytes(of: UInt8(codes.z), toByteOffset: offset, as: UInt8.self)
+            out.storeBytes(of: UInt8(codes.y), toByteOffset: offset + 1, as: UInt8.self)
+            out.storeBytes(of: UInt8(codes.x), toByteOffset: offset + 2, as: UInt8.self)
+            out.storeBytes(of: UInt8(codes.w), toByteOffset: offset + 3, as: UInt8.self)
+        case .rgba8Unorm, .rgba8Unorm_srgb:
+            out.storeBytes(of: UInt8(codes.x), toByteOffset: offset, as: UInt8.self)
+            out.storeBytes(of: UInt8(codes.y), toByteOffset: offset + 1, as: UInt8.self)
+            out.storeBytes(of: UInt8(codes.z), toByteOffset: offset + 2, as: UInt8.self)
+            out.storeBytes(of: UInt8(codes.w), toByteOffset: offset + 3, as: UInt8.self)
+        case .r8Unorm:
+            out.storeBytes(of: UInt8(codes.x), toByteOffset: offset, as: UInt8.self)
+        case .rg8Unorm:
+            out.storeBytes(of: UInt8(codes.x), toByteOffset: offset, as: UInt8.self)
+            out.storeBytes(of: UInt8(codes.y), toByteOffset: offset + 1, as: UInt8.self)
+        case .rgba16Float:
+            out.storeBytes(of: UInt16(codes.x).littleEndian, toByteOffset: offset, as: UInt16.self)
+            out.storeBytes(of: UInt16(codes.y).littleEndian, toByteOffset: offset + 2, as: UInt16.self)
+            out.storeBytes(of: UInt16(codes.z).littleEndian, toByteOffset: offset + 4, as: UInt16.self)
+            out.storeBytes(of: UInt16(codes.w).littleEndian, toByteOffset: offset + 6, as: UInt16.self)
+        case .rgba32Float:
+            out.storeBytes(of: codes.x.littleEndian, toByteOffset: offset, as: UInt32.self)
+            out.storeBytes(of: codes.y.littleEndian, toByteOffset: offset + 4, as: UInt32.self)
+            out.storeBytes(of: codes.z.littleEndian, toByteOffset: offset + 8, as: UInt32.self)
+            out.storeBytes(of: codes.w.littleEndian, toByteOffset: offset + 12, as: UInt32.self)
+        case .rgb10a2Unorm:
+            let w = codes.x | codes.y << 10 | codes.z << 20 | codes.w << 30
+            out.storeBytes(of: w.littleEndian, toByteOffset: offset, as: UInt32.self)
+        default:
+            let w = codes.x | codes.y << 11 | codes.z << 22
+            out.storeBytes(of: w.littleEndian, toByteOffset: offset, as: UInt32.self)
+        }
+    }
+
     /// The bytes of one texel from RGBA codes
     public func bytes(_ codes: [UInt32]) -> [UInt8] {
         func le(_ v: UInt32, _ n: Int) -> [UInt8] { (0 ..< n).map { UInt8(truncatingIfNeeded: v >> (8 * $0)) } }

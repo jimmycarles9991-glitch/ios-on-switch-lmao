@@ -200,6 +200,77 @@ TEST_F(BenchRecords, ATemplateIsTakenByItsKeyOnlyWhenPlain)
     EXPECT_EQ(bench::fragmentTemplate(pack_, 0x0123456789abcdefull), nullptr);
 }
 
+TEST_F(BenchRecords, NonQuartzCoreFetchFreeAndNonTriangleTemplatesAreSkipped)
+{
+    gm20b::PackHeader h = {};
+    memcpy(h.magic, "GM20BPK1", 8);
+    h.version = gm20b::kPackVersion;
+    h.programs = 2;
+    h.pipelines = 4;
+    gm20b::PackProgram programs[2] = {};
+    for (uint32_t i = 0; i < 2; i++) {
+        programs[i].heapOffset = i * 0x100;
+        programs[i].program = i * 0x100 + 0x30;
+        programs[i].bytes = 0x100;
+        programs[i].cbufs = 1;
+        programs[i].cbufType[0] = gm20b::CbufRoot;
+        programs[i].gprs = kTemplateGprs[i];
+    }
+    const char kOtherFramework[] =
+        "samples=1 topo=0 ds=0/0 c0=554:15:0:1:0:0:1:0:0 a0=31:0:1:48:1:1 | v x | f y | l CoreRE";
+    const char kPointTopo[] = "samples=1 topo=3 ds=0/0 c0=554:15:0:1:0:0:1:0:0 a0=31:0:1:48:1:1 | v x | f y";
+    const char kPlain[] = "samples=1 topo=0 ds=0/0 c0=554:15:0:1:0:0:1:0:0 a0=31:0:1:48:1:1 | v x | f y";
+    std::string strings;
+    auto addStr = [&](const char *s) -> uint32_t {
+        const uint32_t off = uint32_t(strings.size());
+        strings.append(s, strlen(s) + 1);
+        return off;
+    };
+    const uint32_t offOther = addStr(kOtherFramework);
+    const uint32_t offTopo = addStr(kPointTopo);
+    const uint32_t offPlain = addStr(kPlain);
+
+    gm20b::PackPipeline base = {};
+    base.vs = 0;
+    base.fs = 1;
+    base.blobDwords = sizeof kTemplateBlob / 4;
+    base.vertexSlot = 1;
+    base.vertexStride = 48;
+
+    gm20b::PackPipeline pipes[4] = {base, base, base, base};
+    pipes[0].keyHash = 0x10;
+    pipes[0].keyString = offOther;
+    pipes[1].keyHash = 0x20;
+    pipes[1].keyString = offTopo;
+    pipes[2].keyHash = 0x30;
+    pipes[2].keyString = offPlain;
+    pipes[2].flags = gm20b::PipelineFetchFreeForm;
+    pipes[3].keyHash = 0x40;
+    pipes[3].keyString = offPlain;
+
+    std::vector<uint8_t> heap(0x200, 0x5a);
+    std::vector<uint8_t> out(sizeof h);
+    put(out, h, gm20b::PackPrograms, programs, 2);
+    put(out, h, gm20b::PackPipelines, pipes, 4);
+    put(out, h, gm20b::PackBlob, kTemplateBlob, sizeof kTemplateBlob / 4);
+    put(out, h, gm20b::PackStrings, strings.data(), strings.size());
+    put(out, h, gm20b::PackHeap, heap.data(), heap.size());
+    memcpy(out.data(), &h, sizeof h);
+    const char *dir = getenv("TEST_TMPDIR");
+    const std::string p = std::string(dir ? dir : "/tmp") + "/bench_records_filter_test.pack";
+    FILE *f = fopen(p.c_str(), "wb");
+    ASSERT_NE(f, nullptr);
+    ASSERT_EQ(fwrite(out.data(), 1, out.size(), f), out.size());
+    fclose(f);
+    gm20b::Pack filtered;
+    std::string err;
+    ASSERT_TRUE(filtered.load(p.c_str(), 0, err)) << err;
+    unlink(p.c_str());
+    const gm20b::PackPipeline *tpl = bench::fragmentTemplate(filtered);
+    ASSERT_NE(tpl, nullptr);
+    EXPECT_EQ(tpl->keyHash, 0x40ull);
+}
+
 TEST_F(BenchRecords, FirstColourOnlyDropsTheOtherColours)
 {
     EXPECT_EQ(

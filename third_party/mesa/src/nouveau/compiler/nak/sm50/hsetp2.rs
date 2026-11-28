@@ -92,4 +92,18 @@ mod sm53_hsetp2_tests {
         assert_eq!((bits(w, 30, 1), bits(w, 31, 1)), (1, 0));
         assert_eq!((bits(w, 35, 4), bits(w, 39, 3), bits(w, 45, 2)), (1, 7, 0));
     }
+    /// HSETP2's predicate is read 13 cycles after it, as FSETP's
+    #[test]
+    fn hsetp2_s_predicate_takes_every_compare_s_latency() {
+        let hsetp2 = Op::HSetP2(Box::new(OpHSetP2 {
+            dsts: [RegRef::new(RegFile::Pred, 1, 1).into(), Dst::None],
+            set_op: PredSetOp::And,
+            cmp_op: FloatCmpOp::OrdLt,
+            srcs: [Src::ZERO, Src::ZERO],
+            accum: SrcRef::True.into(),
+            ftz: false,
+            horizontal: false,
+        }));
+        assert_eq!(instr_latency(53, &hsetp2, 0), 13);
+    }
 }

@@ -1,8 +1,9 @@
-//! Compiled stages a process keeps by their [`FunctionCompileKey`], once [`keep_compiled_stages`]
-//! turns keeping on (the system shader compiler does; nothing else keeps any). A stage another
-//! pipeline of the process compiles under the same key, or another form of the same pipeline, is
-//! taken as compiled: a compile is a function of its key, which names its bitcode by the bitcode's
-//! own SHA-256. What the compile charged its meter is kept with it and charged again at each use,
+//! Compiled stages a process keeps by their [`FunctionCompileKey`] and their libraries' scope, once
+//! [`keep_compiled_stages`] turns keeping on (the system shader compiler does; nothing else keeps any). A stage
+//! another pipeline of the process compiles under the same key and scope, or another form of the same pipeline, is
+//! taken as compiled: a compile is a function of its key, which names its bitcode by its `HASH` tag. A tag is taken
+//! as its library states it, so only a sealed library's compiles (scope 0) are shared across libraries; every other
+//! library's are its own (`Library::scope`). What the compile charged its meter is kept with it and charged again at each use,
 //! so a pipeline over the work or ledger caps is refused whether its stages were kept or not. A
 //! failed compile is not kept.
 
@@ -32,10 +33,13 @@ struct Made<T> {
 /// one compile.
 type Slot<T> = Arc<Mutex<Option<Made<T>>>>;
 
+/// A compile key and the scope it is kept under
+type Scoped = (FunctionCompileKey, u64);
+
 struct Kept<T> {
-    slots: HashMap<FunctionCompileKey, (Slot<T>, usize)>,
+    slots: HashMap<Scoped, (Slot<T>, usize)>,
     /// The made keys, the most recently used last.
-    order: VecDeque<FunctionCompileKey>,
+    order: VecDeque<Scoped>,
     bytes: usize,
 }
 
@@ -97,20 +101,22 @@ pub fn kept_compiled_stages() -> KeptStages {
 /// The portable stage of `key`, kept or made by `make`: its bytes are its SPIR-V's and relocations'.
 pub(crate) fn artifact(
     key: FunctionCompileKey,
+    scope: u64,
     m: &mut Meter,
     make: impl FnOnce(&mut Meter) -> Result<Arc<FunctionArtifact>, Error>,
 ) -> Result<Arc<FunctionArtifact>, Error> {
-    kept(&ARTIFACTS, key, m, make, |a, _| a.module.footprint())
+    kept(&ARTIFACTS, (key, scope), m, make, |a, _| a.module.footprint())
 }
 
 /// The native stage of `key`, kept or made by `make`: its typed module has no measure of its own, so its bytes are
 /// what its compile left charged.
 pub(crate) fn native(
     key: FunctionCompileKey,
+    scope: u64,
     m: &mut Meter,
     make: impl FnOnce(&mut Meter) -> Result<NativeFunction, Error>,
 ) -> Result<NativeFunction, Error> {
-    kept(&NATIVE, key, m, make, |_, charged| {
+    kept(&NATIVE, (key, scope), m, make, |_, charged| {
         usize::try_from(charged.kept.max(0)).unwrap_or(usize::MAX)
     })
 }
@@ -118,7 +124,7 @@ pub(crate) fn native(
 /// `size`: the bytes a made stage holds
 fn kept<T: Clone>(
     store: &Mutex<Option<Kept<T>>>,
-    key: FunctionCompileKey,
+    key: Scoped,
     m: &mut Meter,
     make: impl FnOnce(&mut Meter) -> Result<T, Error>,
     size: impl FnOnce(&T, &Charged) -> usize,
@@ -167,7 +173,7 @@ fn kept<T: Clone>(
     }
 }
 
-fn used<T>(store: &Mutex<Option<Kept<T>>>, key: FunctionCompileKey) {
+fn used<T>(store: &Mutex<Option<Kept<T>>>, key: Scoped) {
     if let Some(k) = lock(store).as_mut() {
         if let Some(at) = k.order.iter().position(|o| *o == key) {
             k.order.remove(at);
@@ -178,7 +184,7 @@ fn used<T>(store: &Mutex<Option<Kept<T>>>, key: FunctionCompileKey) {
 
 fn record<T>(
     store: &Mutex<Option<Kept<T>>>,
-    key: FunctionCompileKey,
+    key: Scoped,
     slot: &Slot<T>,
     bytes: usize,
     limit: usize,
@@ -208,7 +214,7 @@ fn record<T>(
     }
 }
 
-fn forget<T>(store: &Mutex<Option<Kept<T>>>, key: FunctionCompileKey, slot: &Slot<T>) {
+fn forget<T>(store: &Mutex<Option<Kept<T>>>, key: Scoped, slot: &Slot<T>) {
     if let Some(k) = lock(store).as_mut() {
         if k.slots
             .get(&key)
@@ -231,7 +237,7 @@ mod tests {
     /// The numbers' stages hold what their compile left charged
     fn kept_numbers(
         store: &Mutex<Option<Kept<u32>>>,
-        key: FunctionCompileKey,
+        key: Scoped,
         m: &mut Meter,
         make: impl FnOnce(&mut Meter) -> Result<u32, Error>,
     ) -> Result<u32, Error> {
@@ -240,8 +246,8 @@ mod tests {
     /// The tests share LIMIT and the store: one at a time
     static SERIAL: Mutex<()> = Mutex::new(());
 
-    fn key(n: u8) -> FunctionCompileKey {
-        FunctionCompileKey::new([n; 32])
+    fn key(n: u8) -> Scoped {
+        (FunctionCompileKey::new([n; 32]), 0)
     }
 
     fn fresh(limit: usize) -> MutexGuard<'static, ()> {
@@ -275,6 +281,95 @@ mod tests {
             (warm.work(), warm.ledger(), warm.ledger_peak()),
             (cold.work(), cold.ledger(), cold.ledger_peak())
         );
+    }
+
+    /// An app library stating a sealed function's tag compiles its own stage: the sealed one's is not handed to it,
+    /// nor its to the sealed library's next compile
+    #[test]
+    fn a_stage_is_kept_apart_for_each_scope() {
+        let _serial = fresh(1 << 20);
+        let count = AtomicU32::new(0);
+        let (compile_key, _) = key(9);
+        let mut m = Meter::with_caps(&Budget::default(), 1000, 10_000);
+        assert_eq!(kept_numbers(&NUMBERS, (compile_key, 0), &mut m, compile(1, &count)), Ok(1));
+        assert_eq!(kept_numbers(&NUMBERS, (compile_key, 7), &mut m, compile(2, &count)), Ok(2));
+        assert_eq!(kept_numbers(&NUMBERS, (compile_key, 0), &mut m, compile(3, &count)), Ok(1));
+        assert_eq!(kept_numbers(&NUMBERS, (compile_key, 7), &mut m, compile(4, &count)), Ok(2));
+        assert_eq!(count.load(Ordering::Relaxed), 2);
+    }
+
+    #[derive(Debug)]
+    struct Held(Vec<u8>);
+
+    impl crate::library::HeldBytes for Held {
+        fn bytes(&self) -> &[u8] {
+            &self.0
+        }
+    }
+
+    /// The scope a stage is kept under, from its libraries: one sealed library's functions share it; two unsealed
+    /// libraries stating the same `HASH` (one bitcode under it here) get scopes of their own; a stage reading two
+    /// unsealed libraries is kept by neither
+    #[test]
+    fn a_stages_scope_shares_only_what_sealed_libraries_state() {
+        use crate::library::Library;
+        use crate::pipeline::compile::{stage_scope, DynamicOrder};
+        use crate::pipeline::descriptor::{LinkedFunction, LinkedFunctions};
+        use metal2vulkan_devtools::metallib::{metallib, MtlbFunction};
+        let bytes = metallib(&[
+            MtlbFunction {
+                name: "k",
+                type_code: 2,
+                bitcode: b"one function's bitcode".to_vec(),
+                constants: vec![],
+                public: vec![],
+                tags: vec![],
+            },
+            MtlbFunction {
+                name: "v",
+                type_code: 4,
+                bitcode: b"a visible function's bitcode".to_vec(),
+                constants: vec![],
+                public: vec![],
+                tags: vec![],
+            },
+        ]);
+        let sealed = |b: &Vec<u8>| {
+            Library::from_held_metallib(Arc::new(Held(b.clone())), true).expect("sealed library")
+        };
+        let (system, also_system) = (sealed(&bytes), sealed(&bytes));
+        let app = Library::from_metallib(&bytes).expect("app library");
+        let other_app = Library::from_metallib(&bytes).expect("another app's library");
+        let none = LinkedFunctions::default();
+        let dynamic = DynamicOrder::default();
+        let scope = |l: &Library, linked: &LinkedFunctions| {
+            stage_scope(&l.function("k").expect("k"), linked, &dynamic)
+        };
+        assert_eq!(scope(&system, &none), Some(0));
+        assert_eq!(scope(&also_system, &none), Some(0));
+        let (a, b) = (scope(&app, &none), scope(&other_app, &none));
+        assert!(a.is_some_and(|s| s != 0) && b.is_some_and(|s| s != 0) && a != b, "{a:?} {b:?}");
+        let mut own = LinkedFunctions::default();
+        own.functions
+            .push(LinkedFunction::new(app.function("v").expect("v")));
+        assert_eq!(scope(&app, &own), a, "an app's function linking its own library");
+        assert_eq!(scope(&system, &own), a, "a system function linking an app's");
+        assert_eq!(scope(&other_app, &own), None, "two apps' libraries");
+
+        let app_scope = Library::new_scope();
+        let in_app = |b: &Vec<u8>| {
+            Library::from_held_metallib_in(Arc::new(Held(b.clone())), app_scope).expect("app library")
+        };
+        let (read, read_again) = (in_app(&bytes), in_app(&bytes));
+        assert_eq!(scope(&read, &none), Some(app_scope));
+        assert_eq!(scope(&read_again, &none), Some(app_scope), "the app's library read again");
+        let mut again = LinkedFunctions::default();
+        again
+            .functions
+            .push(LinkedFunction::new(read_again.function("v").expect("v")));
+        assert_eq!(scope(&read, &again), Some(app_scope), "two reads of one app's libraries");
+        assert_eq!(scope(&app, &again), None, "a library of another scope beside them");
+        assert!(Library::from_held_metallib_in(Arc::new(Held(bytes.clone())), 0).is_err());
     }
 
     #[test]

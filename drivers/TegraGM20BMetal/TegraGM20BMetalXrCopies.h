@@ -12,5 +12,7 @@ bool xrDescriptorCopy(SwitchMetalTexture *a, SwitchMetalTexture *b);
 // Each descriptor side of a copy with a surface holds its temp; false: no memory for one
 bool xrCopyTemps(SwitchMetalTexture *a, SwitchMetalTexture *b);
 // `w` x `h` texels from (sx, sy) of slice `ss` of `s` to (dx, dy) of slice `ds` of `t`
-void copyXrPlanes(gm20b::BlitEncoder *be, SwitchMetalTexture *s, uint32_t ss, uint32_t sx, uint32_t sy,
-                  SwitchMetalTexture *t, uint32_t ds, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h);
+bool copyXrPlanes(gm20b::CommandBuffer *rc, gm20b::BlitEncoder *be, const void *srcKey, const void *dstKey,
+                  const void *stageKey, SwitchMetalTexture *s, uint32_t ss, uint32_t sx, uint32_t sy,
+                  SwitchMetalTexture *t, uint32_t ds, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h,
+                  const char **why);

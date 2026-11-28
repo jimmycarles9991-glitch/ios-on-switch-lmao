@@ -29,8 +29,8 @@ struct FetchDraw {
 }
 
 /// A 16-bit target of the fetch scenes: blue in bits 0-4, green in the `greenBits` above, red in the five above those
-/// (fill_texel.h), and how its fetching states keep raster order. NVK grants neither format storage access;
-/// BGR5A1Unorm's storage form views it as R16_UINT (the translator's fetch/packed.rs), B5G6R5Unorm has none.
+/// (fill_texel.h), and how its fetching states keep raster order. NVK grants neither format storage access; the
+/// translator's storage form (fetch/packed.rs) views each as R16_UINT, so both keep it by the pixel interlock.
 struct FetchTarget {
     let name: String
     let format: MTLPixelFormat
@@ -39,7 +39,7 @@ struct FetchTarget {
 
     static let all = [
         FetchTarget(name: "bgr5a1", format: .bgr5A1Unorm, greenBits: 5, route: .interlock),
-        FetchTarget(name: "b5g6r5", format: .b5g6r5Unorm, greenBits: 6, route: .macro),
+        FetchTarget(name: "b5g6r5", format: .b5g6r5Unorm, greenBits: 6, route: .interlock),
     ]
 
     func codes(_ bytes: [UInt8]) -> [SIMD3<UInt8>] {

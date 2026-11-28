@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// A pass's memoryless attachment is backed by a view of memory its attachment slot's passes share, taken in size

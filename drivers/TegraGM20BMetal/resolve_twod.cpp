@@ -94,7 +94,7 @@ void BlitEncoder::resolveTwod(const Texture &ms, uint32_t sxLog2, uint32_t syLog
     const switch_gm20b_2d_surface out = gridSurface(into, fmt2d, into.width, into.height);
     const uint64_t du = (1ull << 32) << sxLog2, dv = (1ull << 32) << syLog2;
     const uint8_t rop = complement ? SWITCH_GM20B_2D_ROP_NOTSRCCOPY : 0;
-    const switch_gm20b_2d_scale_op op = {0, 0, width, height, du, dv, du / 2, dv / 2, true, true, rop};
+    const switch_gm20b_2d_scale_op op = {0, 0, width, height, du, dv, du / 2, dv / 2, true, true, rop, false};
     if (complement) {
         kit(p_, switch_gm20b_2d_invert, &grid, 0, 0, grid.width, grid.height);
         p_.m(NV902D_WAIT_FOR_IDLE, 0, SUBC_2D);
@@ -117,7 +117,7 @@ void BlitEncoder::spreadTwod(const Texture &one, const Texture &ms, uint32_t sxL
     const switch_gm20b_2d_surface from = gridSurface(one, fmt2d, one.width, one.height);
     const switch_gm20b_2d_surface grid = gridSurface(ms, fmt2d, ms.width << sxLog2, ms.height << syLog2);
     const uint64_t du = (1ull << 32) >> sxLog2, dv = (1ull << 32) >> syLog2;
-    const switch_gm20b_2d_scale_op op = {0, 0, width << sxLog2, height << syLog2, du, dv, 0, 0, false, false, 0};
+    const switch_gm20b_2d_scale_op op = {0, 0, width << sxLog2, height << syLog2, du, dv, 0, 0, false, false, 0, false};
     kit(p_, switch_gm20b_2d_scale, &from, &grid, &op);
 }
 

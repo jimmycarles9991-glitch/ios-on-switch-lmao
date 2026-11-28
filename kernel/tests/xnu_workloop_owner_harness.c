@@ -267,7 +267,7 @@ static uint64_t knote_filt_wev64(struct knote *kn)
     return (uint64_t)(uintptr_t)kn;
 }
 
-static void waitq_wakeup64_thread(int *waitq, uint64_t event, thread_t t, int result)
+static void waitq_wakeup64_thread(const int *waitq, uint64_t event, thread_t t, int result)
 {
     (void)waitq;
     (void)event;
@@ -287,12 +287,14 @@ void xnu_wl_reset(int owner, int servicer, bool override)
         threads[i] = (struct thread){.refs = 1, .name = 0x1003u + 0x100u * (mach_port_name_t)i};
     workloop = (struct kqworkloop){.kqwl_turnstile = &turnstile};
     override_qos = override ? THREAD_QOS_USER_INTERACTIVE : THREAD_QOS_UNSPECIFIED;
-    if ((workloop.kqwl_owner = thread_at(owner))) {
+    workloop.kqwl_owner = thread_at(owner);
+    if (workloop.kqwl_owner) {
         workloop.kqwl_owner->refs++;
         if (override)
             workloop.kqwl_owner->overrides++;
     }
-    if ((workloop.kqwl_request.tr_thread = thread_at(servicer)))
+    workloop.kqwl_request.tr_thread = thread_at(servicer);
+    if (workloop.kqwl_request.tr_thread)
         workloop.kqwl_request.tr_state = WORKQ_TR_STATE_BOUND;
     lock_depth = kq_depth = turnstile_refs = asserts_failed = 0;
 }
@@ -304,7 +306,9 @@ struct xnu_wl_result xnu_wl_update(const struct xnu_wl_kevent *k)
     struct kevent_qos_s kev = {
         .flags = k->flags,
         .fflags = k->fflags,
-        .ext = {[EV_EXTIDX_WL_ADDR] = 0x16f000000, [EV_EXTIDX_WL_MASK] = ~0ull, [EV_EXTIDX_WL_VALUE] = word ^ k->stale},
+        .ext = {[EV_EXTIDX_WL_ADDR] = 0x16f000000,
+                [EV_EXTIDX_WL_MASK] = ~0ULL,
+                [EV_EXTIDX_WL_VALUE] = word ^ (k->stale ? 1u : 0u)},
     };
     user_word = word;
     self = thread_at(k->self);

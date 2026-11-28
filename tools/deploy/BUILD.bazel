@@ -10,7 +10,6 @@ lint_files()
 
 exports_files([
     "deploy.py",
-    "icon_cache.py",
     "pull_logs.py",
     "system_update.py",
 ])
@@ -19,14 +18,15 @@ py_library(
     name = "lib",
     srcs = [
         "app_journal.py",
+        "compiler_inputs.py",
         "deployed.py",
         "fileprovider_bookmark.py",
-        "icon_cache.py",
         "joycon_pairing.py",
         "mkarchive.py",
         "poster_snapshots.py",
         "pull_logs.py",
         "registration.py",
+        "ssh_keys.py",
         "system_apps.py",
     ],
     imports = ["../.."],
@@ -39,21 +39,16 @@ py_library(
     ],
 )
 
+# deploy.py runs system_update's cryptex step, and system_update.py checks the card's kind the deploy's way.
 py_library(
     name = "deploy",
-    srcs = ["deploy.py"],
+    srcs = [
+        "data_owner.py",
+        "deploy.py",
+        "system_update.py",
+    ],
     imports = ["../.."],
     deps = [":lib"],
-)
-
-py_library(
-    name = "system_update",
-    srcs = ["system_update.py"],
-    imports = ["../.."],
-    deps = [
-        ":deploy",
-        ":lib",
-    ],
 )
 
 py_test(
@@ -61,6 +56,13 @@ py_test(
     size = "small",
     srcs = ["app_journal_test.py"],
     deps = [":lib"],
+)
+
+py_test(
+    name = "compiler_inputs_test",
+    size = "small",
+    srcs = ["compiler_inputs_test.py"],
+    deps = [":deploy"],
 )
 
 py_test(
@@ -80,23 +82,16 @@ py_test(
 )
 
 py_test(
-    name = "icon_cache_test",
-    size = "small",
-    srcs = ["icon_cache_test.py"],
-    deps = [
-        ":deploy",
-        ":lib",
-    ],
-)
-
-py_test(
     name = "deployed_test",
     size = "small",
     srcs = [
         "deployed_test.py",
         "//tools/package:snapshot.py",
     ],
-    deps = [":lib"],
+    deps = [
+        ":lib",
+        "//tools/gpu:stage_format",
+    ],
 )
 
 py_test(
@@ -127,6 +122,13 @@ lint_test(
 )
 
 py_test(
+    name = "ssh_keys_test",
+    size = "small",
+    srcs = ["ssh_keys_test.py"],
+    deps = [":lib"],
+)
+
+py_test(
     name = "system_apps_test",
     size = "small",
     srcs = ["system_apps_test.py"],
@@ -134,8 +136,15 @@ py_test(
 )
 
 py_test(
+    name = "data_owner_test",
+    size = "small",
+    srcs = ["data_owner_test.py"],
+    deps = [":deploy"],
+)
+
+py_test(
     name = "system_update_test",
     size = "small",
     srcs = ["system_update_test.py"],
-    deps = [":system_update"],
+    deps = [":deploy"],
 )

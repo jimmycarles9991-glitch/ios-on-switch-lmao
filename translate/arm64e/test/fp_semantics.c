@@ -93,11 +93,11 @@ static fn_t build(uint32_t *at, uint32_t w, bool stub, uint32_t dead, int *nword
         (void)pro;
         int head = 2 + 5 + 4 + 1 + 32 + 2 + 29 + 1; /* prologue words before body */
         uint64_t stub_pc = (uint64_t)(uintptr_t)(at + head);
-        int n = a64x_stub_v(w, 0, stub_pc, dead, cur_vdead, body, 256);
+        int n = a64x_stub_v(w, 0, stub_pc, dead, cur_vdead, false, body, 256);
         if (n <= 0 || n > 256)
             return NULL;
         /* regenerate with the right site: the trailing branch must go to stub_pc + 4n */
-        n = a64x_stub_v(w, stub_pc + 4 * (uint64_t)n - 4, stub_pc, dead, cur_vdead, body, 256);
+        n = a64x_stub_v(w, stub_pc + 4 * (uint64_t)n - 4, stub_pc, dead, cur_vdead, false, body, 256);
         nb = n;
     }
     pthread_jit_write_protect_np(0);

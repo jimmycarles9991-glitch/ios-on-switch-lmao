@@ -20,7 +20,8 @@
 #include <kern/thread.h>
 #include <string.h>
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && \
+    ((defined(SWITCH_STATS_FRAME) && SWITCH_STATS_FRAME) || (defined(SWITCH_STATS_SCHED) && SWITCH_STATS_SCHED))
 
 #define PERIOD_US 16667
 
@@ -77,32 +78,31 @@ void switch_frames_render_message(task_t sender, mach_msg_id_t id, bool own)
     lck_spin_unlock(&frames_lock);
 }
 
-void switch_frames_render_server_sent(ipc_port_t port)
+bool switch_frames_touch_pending(void)
 {
-    char name[SWITCH_FRAMES_NAME];
-    ipc_space_t space;
-    task_t receiver;
-
     if (current_thread()->base_pri < SWITCH_FRAMES_EVENT_PRI) {
-        return;
+        return false;
     }
+    if (os_atomic_load(&report_pending, relaxed) != 0) {
+        return true;
+    }
+    return mach_absolute_time() <= os_atomic_load(&co_receivers_until, relaxed);
+}
+
+void switch_frames_render_server_sent_to(int32_t pid, const char *name)
+{
     const bool report = os_atomic_load(&report_pending, relaxed) != 0;
     const uint64_t abs = mach_absolute_time();
+
     if (!report && abs > os_atomic_load(&co_receivers_until, relaxed)) {
-        return;
-    }
-    space = ip_get_receiver(port);
-    receiver = space != NULL ? space->is_task : TASK_NULL;
-    if (receiver == TASK_NULL || receiver == kernel_task) {
         return;
     }
     if (!report) {
         lck_spin_lock(&frames_lock);
-        switch_latency_also_delivered(&latency, task_pid(receiver));
+        switch_latency_also_delivered(&latency, pid);
         lck_spin_unlock(&frames_lock);
         return;
     }
-    switch_task_name(receiver, name, sizeof(name));
     const uint64_t now = abs_to_us(abs);
     uint64_t window;
     uint64_t stamp;
@@ -110,13 +110,13 @@ void switch_frames_render_server_sent(ipc_port_t port)
     lck_spin_lock(&frames_lock);
     stamp = report_stamp;
     os_atomic_store(&co_receivers_until, abs + window, relaxed);
-    switch_latency_delivered(&latency, acc.delivery[STATS_WINDOW].pending_us, task_pid(receiver), now);
+    switch_latency_delivered(&latency, acc.delivery[STATS_WINDOW].pending_us, pid, now);
     for (int w = 0; w < WINDOWS; w++) {
-        switch_frames_note_delivery(&acc.delivery[w], task_pid(receiver), name, now);
+        switch_frames_note_delivery(&acc.delivery[w], pid, name, now);
     }
     os_atomic_store(&report_pending, 0, relaxed);
     lck_spin_unlock(&frames_lock);
-    switch_sched_watch_delivered(stamp, task_pid(receiver), abs);
+    switch_sched_watch_delivered(stamp, pid, abs);
 }
 
 void switch_frames_touch(uint64_t stamp, bool down, unsigned int changes)

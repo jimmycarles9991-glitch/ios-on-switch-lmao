@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestKit
 import SwitchWorkloopProbe
 
 /// The kernel half of dispatch_sync, without libdispatch: waiter threads park in kevent_id(NOTE_WL_SYNC_WAIT) on one

@@ -74,7 +74,6 @@ TEST(EmitPredicate, IdleFlushedWaitsThenFlushesShaderData)
 {
     const auto w = emitted(SWITCH_GM20B_COMPUTE_IDLE_WORDS, switch_gm20b_compute_idle_flushed);
     EXPECT_EQ(Methods(w), (std::vector<Method>{
-                              {kCompute, NVB1C0_WAIT_FOR_IDLE, 0},
                               {kCompute, NVB1C0_INVALIDATE_SHADER_CACHES,
                                uint32_t(NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES, DATA, TRUE) |
                                         NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES, FLUSH_DATA, TRUE))},

@@ -77,9 +77,12 @@ inline std::string wrappedBitcode(uint8_t seed, size_t bytes = 64)
 
 // A thin metallib, as the system's Metal front end makes one: function i of TYPE types[i], its bitcode bitcodes[i] placed
 // in the bitcode section (OFFT, MDSZ; the section's offset and size at 72 and 80), and its public metadata record's tags
-// publics[i] (made with tag()) in the public metadata section (OFFT's first offset; the section's at 40 and 48)
+// publics[i] (made with tag()) in the public metadata section (OFFT's first offset; the section's at 40 and 48); its HASH
+// filled with `seed + i`. Libraries meant to hold other functions take other seeds: the shader compiler's store keys a
+// function by its HASH alone, as Apple's tag is the SHA-256 of its bitcode.
 inline std::string thin(const std::vector<std::string> &functions, const std::vector<uint8_t> &types,
-                        const std::vector<std::string> &bitcodes, const std::vector<std::vector<uint8_t>> &publics = {})
+                        const std::vector<std::string> &bitcodes, const std::vector<std::vector<uint8_t>> &publics = {},
+                        uint8_t seed = 0xB0)
 {
     std::vector<uint8_t> slice(0x58);
     memcpy(slice.data(), "MTLB", 4);
@@ -91,7 +94,7 @@ inline std::string thin(const std::vector<std::string> &functions, const std::ve
         tag(e, "NAME", functions[i].c_str(), uint16_t(functions[i].size() + 1));
         tag(e, "TYPE", &types[i], 1);
         uint8_t hash[32];
-        memset(hash, 0xB0 + int(i), sizeof hash);
+        memset(hash, seed + int(i), sizeof hash);
         tag(e, "HASH", hash, sizeof hash);
         const uint64_t offsets[3] = {records.size(), 0, placed}, size = bitcodes[i].size();
         tag(e, "OFFT", offsets, sizeof offsets);

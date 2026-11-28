@@ -51,8 +51,8 @@ void avd_emitter_dependency_wait(AVDEmitter *e);
 void avd_emitter_drain(AVDEmitter *e);
 // Every job of the session waited for and every picture pushed so far emitted before it returns.
 void avd_emitter_settle(AVDEmitter *e, bool synchronous);
-// A tile's answer: its jobs waited for, its status settled; the caller answers it.
-void avd_emitter_settle_output(AVDEmitter *e, Output *out);
+// A tile's answer: its jobs waited for, its status settled and returned, and `out` returned to the pool.
+OSStatus avd_emitter_settle_output(AVDEmitter *e, Output *out);
 // No picture goes out after this returns (one emitting on another thread finishes first).
 void avd_emitter_close(AVDEmitter *e);
 uint32_t avd_emitter_errors(const AVDEmitter *e);

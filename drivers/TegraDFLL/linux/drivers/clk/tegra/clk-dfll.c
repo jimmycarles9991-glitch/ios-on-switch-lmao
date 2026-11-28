@@ -442,6 +442,7 @@ struct tegra_dfll {
 	/* Vmin calibration */
 	struct timer_list		calibration_timer;
 	unsigned long			calibration_delay;
+	unsigned int			calibration_retries;
 	ktime_t				last_calibration;
 	unsigned long			calibration_range_min;
 	unsigned long			calibration_range_max;
@@ -1191,13 +1192,21 @@ static int dfll_force_output(struct tegra_dfll *td, unsigned int out_sel)
 static int dfll_wait_monitor_data(struct tegra_dfll *td, u32 *reg)
 {
 	int sample_period;
+	u64 end;
 
 	sample_period = DIV_ROUND_UP(1000000, td->sample_rate);
+	end = switch_linux_nanotime() + (u64)(sample_period * 2) * NSEC_PER_USEC;
 
-	return readl_relaxed_poll_timeout_atomic(td->base + DFLL_MONITOR_DATA,
-					  *reg,
-					  *reg & DFLL_MONITOR_DATA_NEW_MASK, 1,
-					  sample_period * 2);
+	for (;;) {
+		*reg = readl_relaxed(td->base + DFLL_MONITOR_DATA);
+		if (*reg & DFLL_MONITOR_DATA_NEW_MASK)
+			return 0;
+		if (switch_linux_nanotime() > end) {
+			*reg = readl_relaxed(td->base + DFLL_MONITOR_DATA);
+			return (*reg & DFLL_MONITOR_DATA_NEW_MASK) ? 0 : tdfll_poll_timed_out();
+		}
+		usleep_range(sample_period / 2, sample_period);
+	}
 }
 
 static int dfll_get_monitor_data(struct tegra_dfll *td, u32 *reg)
@@ -1244,6 +1253,20 @@ static inline void calibration_timer_update(struct tegra_dfll *td)
 	 */
 	if (td->calibration_delay) {
 		dfll_set_force_output_enabled(td, false);
+		mod_timer(&td->calibration_timer,
+			  jiffies + td->calibration_delay + 1);
+	}
+}
+
+#define DFLL_CALIBRATION_MAX_RETRIES 30
+
+static inline void calibration_timer_retry(struct tegra_dfll *td)
+{
+	if (!td->calibration_delay)
+		return;
+	dfll_set_force_output_enabled(td, false);
+	if (td->calibration_retries < DFLL_CALIBRATION_MAX_RETRIES) {
+		td->calibration_retries++;
 		mod_timer(&td->calibration_timer,
 			  jiffies + td->calibration_delay + 1);
 	}
@@ -1309,14 +1332,14 @@ static void dfll_calibrate(struct tegra_dfll *td)
 	/* Defer calibration if in the middle of tuning transition */
 	if ((td->tune_range > DFLL_TUNE_LOW) &&
 	    (td->tune_range < DFLL_TUNE_HIGH)) {
-		calibration_timer_update(td);
+		calibration_timer_retry(td);
 		return;
 	}
 
 	/* Defer calibration if forced output was left enabled */
 	val = dfll_readl(td, DFLL_OUTPUT_FORCE);
 	if (val & DFLL_OUTPUT_FORCE_ENABLE) {
-		calibration_timer_update(td);
+		calibration_timer_retry(td);
 		return;
 	}
 
@@ -1350,7 +1373,7 @@ static void dfll_calibrate(struct tegra_dfll *td)
 	/* Defer calibration if data reading is not consistent */
 	dfll_get_monitor_data(td, &data);
 	if (dfll_get_monitor_data(td, &data) < 0) {
-		calibration_timer_update(td);
+		calibration_timer_retry(td);
 		return;
 	}
 
@@ -1359,7 +1382,7 @@ static void dfll_calibrate(struct tegra_dfll *td)
 		/* Defer calibration if I2C transaction is pending */
 		val = dfll_i2c_readl(td, DFLL_I2C_STS);
 		if (val & DFLL_I2C_STS_I2C_REQ_PENDING) {
-			calibration_timer_update(td);
+			calibration_timer_retry(td);
 			return;
 		}
 		val = (val >> DFLL_I2C_STS_I2C_LAST_SHIFT) & OUT_MASK;
@@ -1371,7 +1394,7 @@ static void dfll_calibrate(struct tegra_dfll *td)
 		/* Defer calibration if data reading is not consistent */
 		dfll_set_monitor_mode(td, DFLL_OUTPUT_VALUE);
 		if (dfll_get_monitor_data(td, &val) < 0) {
-			calibration_timer_update(td);
+			calibration_timer_retry(td);
 			return;
 		}
 	}
@@ -1379,7 +1402,7 @@ static void dfll_calibrate(struct tegra_dfll *td)
 	if (td->cfg_flags & DFLL_CALIBRATE_FORCE_VMIN) {
 		/* Defer calibration if forced and read outputs do not match */
 		if (val != out_min) {
-			calibration_timer_update(td);
+			calibration_timer_retry(td);
 			return;
 		}
 		dfll_set_force_output_enabled(td, false);
@@ -1407,7 +1430,7 @@ static void dfll_calibrate(struct tegra_dfll *td)
 	 */
 	if ((val == td->last_req.lut_index) &&
 	    (td->cfg_flags & DFLL_DEFER_FORCE_CALIBRATE)) {
-		calibration_timer_update(td);
+		calibration_timer_retry(td);
 		return;
 	}
 
@@ -1424,7 +1447,7 @@ static void dfll_calibrate(struct tegra_dfll *td)
 	if ((val == out_min) && (pinned_rate > rate_min)) {
 		rate_min = pinned_rate;
 	} else if ((val > out_min) && (rate > td->last_req.dvco_target_rate + td->ref_rate / 2)) {
-		calibration_timer_update(td);
+		calibration_timer_retry(td);
 		return;
 	} else {
 		int t_floor_out, t_floor_idx = td->thermal_floor_index;
@@ -1443,13 +1466,18 @@ static void dfll_calibrate(struct tegra_dfll *td)
 			td->dvco_rate_floors[t_floor_idx] = rate_min;
 			return;
 		}
-		calibration_timer_update(td);
 		return;
 	}
 
-	td->dvco_rate_min = clamp(rate_min,
-			td->calibration_range_min, td->calibration_range_max);
-	calibration_timer_update(td);
+	{
+		unsigned long new_min = clamp(rate_min,
+				td->calibration_range_min, td->calibration_range_max);
+
+		if (new_min == td->dvco_rate_min)
+			return;
+		td->dvco_rate_min = new_min;
+	}
+	calibration_timer_retry(td);
 	pr_debug("%s: calibrated dvco_rate_min %lu (%lu), measured %lu\n",
 		 __func__, td->dvco_rate_min, rate_min, rate);
 }
@@ -1992,6 +2020,23 @@ static void dfll_set_frequency_request(struct tegra_dfll *td,
  * -EPERM if the DFLL driver has not yet been initialized, or -EINVAL
  * if @rate is outside the DFLL's tunable range.
  */
+static bool dfll_needs_calibration(struct tegra_dfll *td)
+{
+	int floor_idx = td->thermal_floor_index;
+	u8 out_min = dfll_get_output_min(td);
+	bool calibrated = dfll_tune_target(td, td->last_req.rate) > DFLL_TUNE_LOW
+		? (td->tune_high_dvco_rate_floors[floor_idx] != 0)
+		: (td->dvco_rate_floors[floor_idx] != 0);
+
+	if (!calibrated)
+		return true;
+	if (td->last_req.dvco_target_rate <= td->dvco_rate_min + td->ref_rate / 2)
+		return true;
+	if (td->last_req.lut_index <= out_min)
+		return true;
+	return false;
+}
+
 static int dfll_request_rate(struct tegra_dfll *td, unsigned long rate)
 {
 	int ret;
@@ -2006,8 +2051,6 @@ static int dfll_request_rate(struct tegra_dfll *td, unsigned long rate)
 
 	req.rate = rate;
 
-	/* Calibrate dfll minimum rate */
-	dfll_calibrate(td);
 	dvco_min_updated = dfll_one_shot_calibrate_floors(td);
 
 	/* Update minimum dvco rate if we are crossing tuning threshold */
@@ -2032,8 +2075,14 @@ static int dfll_request_rate(struct tegra_dfll *td, unsigned long rate)
 	if (td->mode == DFLL_CLOSED_LOOP) {
 		dfll_set_close_loop_config(td, &td->last_req);
 		dfll_set_frequency_request(td, &td->last_req);
-		/* SWITCH: every request, so each is checked against its DVCO floor once settled */
-		calibration_timer_update(td);
+		/* SWITCH: defer opportunistic calibration to the timer, and only arm it when uncalibrated or
+		 * near/at the DVCO floor so upward ramps never block on monitor sleeps. */
+		if (dfll_needs_calibration(td)) {
+			td->calibration_retries = 0;
+			calibration_timer_update(td);
+		} else {
+			del_timer(&td->calibration_timer);
+		}
 	}
 
 	return 0;
@@ -2096,7 +2145,11 @@ static int dfll_disable(struct tegra_dfll *td)
 
 	spin_lock_irqsave(&td->lock, flags);
 	dfll_set_mode(td, DFLL_DISABLED);
+	del_timer(&td->calibration_timer);
+	hrtimer_try_to_cancel(&td->tune_timer);
 	spin_unlock_irqrestore(&td->lock, flags);
+	del_timer_sync(&td->calibration_timer);
+	hrtimer_cancel(&td->tune_timer);
 
 	pm_runtime_put_sync(td->dev);
 
@@ -2167,6 +2220,7 @@ static int _dfll_lock(struct tegra_dfll *td)
 		dfll_set_close_loop_config(td, req);
 		dfll_set_frequency_request(td, req);
 		dfll_set_force_output_enabled(td, false);
+		td->calibration_retries = 0;
 		calibration_timer_update(td);
 
 		return 0;
@@ -2190,6 +2244,8 @@ static int _dfll_unlock(struct tegra_dfll *td)
 {
 	switch (td->mode) {
 	case DFLL_CLOSED_LOOP:
+		del_timer(&td->calibration_timer);
+		hrtimer_try_to_cancel(&td->tune_timer);
 		dfll_set_open_loop_config(td);
 		dfll_set_mode(td, DFLL_OPEN_LOOP);
 		if (td->pmu_if == TEGRA_DFLL_PMU_PWM)
@@ -2243,6 +2299,10 @@ static int dfll_unlock(struct tegra_dfll *td)
 	ret = _dfll_unlock(td);
 
 	spin_unlock_irqrestore(&td->lock, flags);
+	if (!ret) {
+		del_timer_sync(&td->calibration_timer);
+		hrtimer_cancel(&td->tune_timer);
+	}
 
 	if (!ret)
 		pr_debug("%s: done\n", __func__);
@@ -4071,6 +4131,12 @@ int tegra_dfll_register(struct platform_device *pdev,
 		dev_err(td->dev, "built invalid LUT\n");
 		return ret;
 	}
+#if DEVELOPMENT || DEBUG
+	/* SWITCH: the LUT once, so a landing's output (cpu.dfll_landing's I2C_STS) reads as a voltage. */
+	dev_info(td->dev, "LUT %d outputs, %d..%d mV (output 1 %d mV, output %d %d mV), up to %lu kHz\n", td->lut_size,
+		 td->lut_uv[0] / 1000, td->lut_uv[td->lut_size - 1] / 1000, td->lut_uv[1] / 1000, td->lut_size / 2,
+		 td->lut_uv[td->lut_size / 2] / 1000, td->out_rate_max / 1000);
+#endif
 
 	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!mem) {

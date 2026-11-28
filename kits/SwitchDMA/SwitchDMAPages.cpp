@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #include "SwitchDMAPages.h"
 #include <IOKit/IOLib.h>
+#include "SwitchDMAOrder.h"
 #include "SwitchDcache.h"
 #include "SwitchHwPage.h"
 
@@ -54,7 +55,13 @@ bool switch_dma_pages_alloc(switch_dma_pages *out, size_t size, IOOptionBits ext
         return false;
     }
     bzero(va, whole);
-    switch_dcache_clean_invalidate(va, whole);
+    const IOOptionBits cacheMode = extraOptions & static_cast<IOOptionBits>(kIOMapCacheMask);
+    if (cacheMode == static_cast<IOOptionBits>(kIOMapWriteCombineCache) ||
+        cacheMode == static_cast<IOOptionBits>(kIOMapInhibitCache)) {
+        switch_dma_publish();
+    } else {
+        switch_dcache_clean_invalidate(va, whole);
+    }
     *out = {memory, va, pages, count, static_cast<size_t>(whole)};
     return true;
 }

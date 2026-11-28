@@ -11,6 +11,7 @@
 // 8-bit unorm ones).
 #pragma once
 #include "lock.h"
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -191,8 +192,12 @@ public:
     // thread that asks)
     bool lookup(const TegraGM20BAbiZbc &e, bool &wanted)
     {
-        std::lock_guard<gm20b::Mutex> l(lock_);
         wanted = false;
+        const uint32_t held = heldCount_.load(std::memory_order_acquire);
+        for (uint32_t i = 0; i < held; i++)
+            if (!memcmp(&held_[i], &e, sizeof e))
+                return true;
+        std::lock_guard<gm20b::UnfairMutex> l(lock_);
         Entry *x = find(e);
         if (!x) {
             if (!(x = slot()))
@@ -209,7 +214,7 @@ public:
     // The next entry to ask the kernel for, now Asking
     bool next(TegraGM20BAbiZbc &e)
     {
-        std::lock_guard<gm20b::Mutex> l(lock_);
+        std::lock_guard<gm20b::UnfairMutex> l(lock_);
         for (uint32_t i = 0; i < count_; i++)
             if (entries_[i].state == Wanted) {
                 entries_[i].state = Asking;
@@ -221,16 +226,25 @@ public:
 
     void answer(const TegraGM20BAbiZbc &e, bool held)
     {
-        std::lock_guard<gm20b::Mutex> l(lock_);
-        if (Entry *x = find(e))
+        std::lock_guard<gm20b::UnfairMutex> l(lock_);
+        if (Entry *x = find(e)) {
+            const bool newlyHeld = held && x->state != Held;
             x->state = held ? Held : Refused;
+            if (newlyHeld) {
+                const uint32_t n = heldCount_.load(std::memory_order_relaxed);
+                if (n < kHeldMax) {
+                    held_[n] = e;
+                    heldCount_.store(n + 1, std::memory_order_release);
+                }
+            }
+        }
     }
 
     // Whether a refusal of an entry of `type` (TegraGM20BZbcColor or Depth) for want of room is the first this process
     // met: the table is never emptied, so that one alone is worth a line
     bool firstFull(uint32_t type)
     {
-        std::lock_guard<gm20b::Mutex> l(lock_);
+        std::lock_guard<gm20b::UnfairMutex> l(lock_);
         bool &said = fullSaid_[type == TegraGM20BZbcDepth];
         const bool first = !said;
         said = true;
@@ -239,7 +253,7 @@ public:
 
     bool pending()
     {
-        std::lock_guard<gm20b::Mutex> l(lock_);
+        std::lock_guard<gm20b::UnfairMutex> l(lock_);
         for (uint32_t i = 0; i < count_; i++)
             if (entries_[i].state == Wanted)
                 return true;
@@ -249,7 +263,7 @@ public:
     // An entry wanted or in the kernel's hands, not yet added or refused
     bool unanswered()
     {
-        std::lock_guard<gm20b::Mutex> l(lock_);
+        std::lock_guard<gm20b::UnfairMutex> l(lock_);
         for (uint32_t i = 0; i < count_; i++)
             if (entries_[i].state == Wanted || entries_[i].state == Asking)
                 return true;
@@ -258,7 +272,7 @@ public:
 
 private:
     // the GPU's 15 colour and 15 depth entries, plus headroom for seen, in-flight and refused values
-    static constexpr uint32_t kEntries = 64;
+    static constexpr uint32_t kEntries = 64, kHeldMax = 32;
 
     struct Entry {
         TegraGM20BAbiZbc key;
@@ -293,8 +307,11 @@ private:
         return nullptr;
     }
 
-    gm20b::Mutex lock_;
+    gm20b::UnfairMutex lock_;
     Entry entries_[kEntries] = {};
+    // Append-only publication of Held entries (never removed once in the GPU table) so steady-state clears avoid lock_.
+    TegraGM20BAbiZbc held_[kHeldMax] = {};
+    std::atomic<uint32_t> heldCount_{0};
     uint32_t count_ = 0, evict_ = 0, evictRefused_ = 0;
     bool fullSaid_[2] = {};
 };

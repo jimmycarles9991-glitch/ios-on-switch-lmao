@@ -17,7 +17,7 @@
 #include <net/necp.h>
 #include <os/log.h>
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_DIAG_NECP) && SWITCH_DIAG_NECP
 
 static struct switch_necp_timeline switch_necp_timeline;
 static uint64_t switch_necp_dumps;
@@ -149,13 +149,16 @@ void switch_necp_policy_changed(const struct necp_kernel_socket_policy *policy, 
 {
     uint32_t generation = 0;
     if (!switch_necp_policy_account(&switch_necp_timeline, policy->order, &generation)) {
+#if defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
         if (switch_necp_in_window(policy->order) &&
             __atomic_load_n(&switch_necp_timeline.suppressed, __ATOMIC_RELAXED) == 1u) {
             os_log(OS_LOG_DEFAULT, "SwitchNECP: policy lines past %u are counted, not printed",
                    SWITCH_NECP_POLICY_LINES);
         }
+#endif
         return;
     }
+#if defined(SWITCH_STATS_IO) && SWITCH_STATS_IO
     const proc_t self = current_proc();
     os_log(OS_LOG_DEFAULT,
            "SwitchNECP: policy %s generation %u id %u session-order %u order %u conditions 0x%llx negated 0x%llx "
@@ -164,6 +167,9 @@ void switch_necp_policy_changed(const struct necp_kernel_socket_policy *policy, 
            policy->condition_mask, policy->condition_negated_mask, policy->result,
            switch_necp_result_name(policy->result), policy->result_parameter.skip_policy_order, proc_getpid(self),
            proc_best_name(self), policy->session_pid);
+#else
+    (void)added;
+#endif
 }
 
-#endif /* DEVELOPMENT || DEBUG */
+#endif /* (DEVELOPMENT || DEBUG) && SWITCH_DIAG_NECP */

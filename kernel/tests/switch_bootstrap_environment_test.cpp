@@ -12,7 +12,13 @@ using user_addr_t = uintptr_t;
 constexpr int Z_WAITOK = 1, Z_NOFAIL = 2, UIO_SYSSPACE = 0;
 constexpr int VSUID = 04000, VSGID = 02000;
 constexpr bool TRUE = true;
-char *kalloc_data(size_t size, int) { return static_cast<char *>(std::malloc(size)); }
+bool fail_kalloc_data = false;
+char *kalloc_data(size_t size, int flags)
+{
+    EXPECT_FALSE((flags & Z_NOFAIL) && size > 16384u);
+    if (fail_kalloc_data || ((flags & Z_NOFAIL) && size > 16384u)) return nullptr;
+    return static_cast<char *>(std::malloc(size));
+}
 void kfree_data(void *value, size_t) { std::free(value); }
 struct vnode_attr {
     unsigned va_mode;
@@ -125,6 +131,25 @@ TEST(BootstrapEnvironment, KeepsSetIdImagesUnderNativeExecPolicy)
             snapshot(&image);
             EXPECT_FALSE(image.ip_switch_tweaks);
         }
+    }
+}
+
+TEST(BootstrapEnvironment, HandlesLargeEnvironmentAndAllocationFailure)
+{
+    for (auto append : {switch_bootstrap_environment_17, switch_bootstrap_environment_27}) {
+        std::vector<char> storage(64 * 1024, '\0');
+        image_params image{nullptr, storage.data(), storage.data(), static_cast<int>(storage.size()),
+                           static_cast<int>(storage.size()), 0, true};
+        std::string large = "BIG=" + std::string(40 * 1024, 'x');
+        ASSERT_EQ(exec_add_user_string(&image, CAST_USER_ADDR_T(large.c_str()), 0, true), 0);
+        image.ip_argspace -= sizeof(void *);
+        ++image.ip_envc;
+        ASSERT_EQ(append(&image, sizeof(void *)), 0);
+        EXPECT_EQ(image.ip_envc, 2u);
+
+        fail_kalloc_data = true;
+        EXPECT_EQ(append(&image, sizeof(void *)), ENOMEM);
+        fail_kalloc_data = false;
     }
 }
 }

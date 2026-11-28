@@ -11,6 +11,7 @@
 #include "../compute_key.h"
 #include "../function_attributes.h"
 #include "../render_key.h"
+#include "../store_key.h"
 
 namespace switch_compiler {
 namespace {
@@ -168,7 +169,9 @@ bool libraryKey(Prepared &p, uint64_t stack, std::string &why)
     p.key = gm20b::libraryCacheKey(stack, r.codeGenType, r.codeGen);
     if (p.key.key != r.key)
         return why = "a library request whose bytes give another key than its own", false;
-    p.name = gm20b::storeName(p.key, r, {});
+    gm20b::StoreKey store = gm20b::storeKeyOf(p.key, r, {}, {});
+    p.content = std::move(store.content);
+    p.name = store.name;
     return true;
 }
 
@@ -210,6 +213,12 @@ bool SystemLibraries::air(const std::string &path, std::map<std::string, gm20b::
     return true;
 }
 
+std::string SystemLibraries::facts(const std::string &path, const std::string &function)
+{
+    std::string real, why;
+    return resolve(root_, path, real, why) ? gm20b::metallibListedFacts(real, function) : std::string();
+}
+
 std::string restacked(const std::string &bytes, uint64_t stack)
 {
     gm20b::CompileRequest r;
@@ -219,7 +228,8 @@ std::string restacked(const std::string &bytes, uint64_t stack)
     return gm20b::encodeRequest(r);
 }
 
-bool prepare(const std::string &bytes, uint64_t stack, SystemLibraries &system, Prepared &out, std::string &why)
+bool prepare(const std::string &bytes, uint64_t stack, SystemLibraries &system, Prepared &out, std::string &why,
+             uint64_t client, ClientLibraries *clientLibraries, const gm20b::StoreScope &scope)
 {
     Prepared p;
     if (!gm20b::decodeRequest(bytes, p.request))
@@ -232,17 +242,30 @@ bool prepare(const std::string &bytes, uint64_t stack, SystemLibraries &system, 
         out = std::move(p);
         return true;
     }
+    if (!gm20b::canonicalize(p.request.fields))
+        return why = "a vertex stride no descriptor holds", false;
     std::vector<std::map<std::string, gm20b::AirHash>> air(p.request.libraries.size());
-    std::vector<gm20b::LibraryIdentity> identities;
+    p.clientLibraries.resize(p.request.libraries.size());
     for (size_t i = 0; i < p.request.libraries.size(); ++i) {
         const gm20b::RequestLibrary &library = p.request.libraries[i];
-        const bool read = library.system
-                              ? system.air(library.path, air[i], why)
-                              : gm20b::metallibAirHashes(reinterpret_cast<const uint8_t *>(library.bytes.data()),
-                                                         library.bytes.size(), air[i]);
+        bool read = false;
+        if (library.system) {
+            read = system.air(library.path, air[i], why);
+        } else if (library.libraryId) {
+            if (!client || !clientLibraries)
+                return why = "a library handle with no client mapping", false;
+            std::shared_ptr<const MappedClientLibrary> mapped;
+            if (!clientLibraries->resolve(client, library.libraryId, {}, mapped, why))
+                return false;
+            air[i] = mapped->air;
+            p.clientLibraries[i] = std::move(mapped);
+            read = true;
+        } else {
+            read = gm20b::metallibAirHashes(reinterpret_cast<const uint8_t *>(library.bytes.data()),
+                                            library.bytes.size(), air[i]);
+        }
         if (!read)
             return why = why.empty() ? "a library that is not a metallib" : why, false;
-        identities.push_back(gm20b::identityOf(library));
     }
     const gm20b::RequestKind kind = p.request.kind;
     const bool keyed = gm20b::functionAttributes(p.request)  ? attributesKey(p, air, stack, why)
@@ -256,7 +279,28 @@ bool prepare(const std::string &bytes, uint64_t stack, SystemLibraries &system, 
     if (p.key.key != p.request.key)
         return why = "a request whose fields give another key than its own: " + keyDifference(p.request.key, p.key.key),
                false;
-    p.name = gm20b::storeName(p.key, p.request, identities);
+    std::vector<gm20b::StageContent> stages(p.request.stages.size());
+    for (size_t i = 0; i < stages.size(); ++i) {
+        const gm20b::RequestStage &s = p.request.stages[i];
+        const gm20b::RequestLibrary &l = p.request.libraries[s.library];
+        if (!airOf(p.request, air, s, stages[i].air, why))
+            return false;
+        const MappedClientLibrary *mapped = p.clientLibraries[s.library].get();
+        stages[i].facts = l.system ? system.facts(l.path, s.function)
+                          : mapped ? gm20b::metallibListedFacts(mapped->data, mapped->size, s.function)
+                                   : gm20b::metallibListedFacts(reinterpret_cast<const uint8_t *>(l.bytes.data()),
+                                                                l.bytes.size(), s.function);
+    }
+    gm20b::StoreKey store = gm20b::storeKeyOf(p.key, p.request, stages, scope);
+    p.content = std::move(store.content);
+    p.name = store.name;
+    if (gm20b::fullForm(p.request.form)) {
+        gm20b::CompileRequest primary = p.request;
+        primary.form = gm20b::withoutFull(p.request.form);
+        gm20b::StoreKey filed = gm20b::storeKeyOf(p.key, primary, stages, scope);
+        p.primaryContent = std::move(filed.content);
+        p.primaryName = filed.name;
+    }
     out = std::move(p);
     return true;
 }

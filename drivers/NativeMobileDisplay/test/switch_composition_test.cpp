@@ -150,6 +150,22 @@ TEST(Composition, MatchingLiveMatricesAreReusedAndConflictsRequireVicConversion)
     EXPECT_EQ(result.convert, 2u);
 }
 
+// A layer window B scans turned keeps window B; one that has to go on window C is turned by the conversion job.
+TEST(Composition, ATurnedScanStaysOnWindowBOrIsConverted)
+{
+    auto desired = frame(2, -1, 1);
+    desired.window[0].image.options = native_planes::kWinEnable | native_planes::kScanColumn;
+    WindowState windows[2] = {{false, -1, -1, -1}, {false, -1, -1, -1}};
+    auto result = assign(desired.window, windows);
+    EXPECT_EQ(result.window[0], 0u);
+    EXPECT_EQ(result.convert, 0u);
+    desired = frame(2, 3, 1);
+    desired.window[0].image.options = native_planes::kWinEnable | native_planes::kHDirection;
+    desired.window[1].image.options = native_planes::kWinEnable | native_planes::kVDirection;
+    result = assign(desired.window, windows);
+    EXPECT_EQ(result.convert, 1u << (result.window[0] == 1 ? 0 : 1)) << "the one on window C";
+}
+
 TEST(Composition, SitingTheWindowCannotSampleGoesThroughVicOnAnyWindow)
 {
     auto desired = frame(2, -1, 1);

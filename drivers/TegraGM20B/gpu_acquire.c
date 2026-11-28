@@ -60,7 +60,7 @@ void tgm_ramfc_write(u32 chid, u32 offset, u32 value)
 	nvkm_done(inst);
 }
 
-#if TGM_STATS
+#if TGM_DEBUG_PROBES
 u32 tgm_ramfc_read(u32 chid, u32 offset)
 {
 	struct nvkm_gpuobj *inst = chan_inst(chid);
@@ -171,6 +171,18 @@ static enum tgm_wait_source semaphore_source(struct tgm_chan *chan,
 		at = READ_ONCE(*word);
 		if (!tgm_acquire_blocked(w->operation, at, w->payload))
 			return TGM_WAITS_NONE;
+		if (!owner && switch_gpu_pack_failed_word(tgm_fence_offset(word))) {
+			scnprintf(what, len, "the pack image's stream, stopped at chunk %u of %u",
+				  at, w->payload);
+			return TGM_WAITS_FAILED;
+		}
+		if (!owner &&
+		    tgm_fence_offset(word) == TGM_FENCE_USER_PAGES * TGM_FENCE_SLOT +
+						      TGM_FENCE_KERNEL_BRIDGE_GATE *
+							      sizeof(struct TegraGM20BAbiFence)) {
+			scnprintf(what, len, "the host1x bridge gate (at %u)", at);
+			return TGM_WAITS_VICTIM;
+		}
 		scnprintf(what, len, "%s ch %d fence %u (at %u)", owner ? owner->owner : "a gone",
 			  owner ? (int)owner->chid : -1, w->payload, at);
 		*source = owner;
@@ -270,127 +282,31 @@ void tgm_acquire_unfired(struct tgm_chan *chan, u64 now)
 		  (unsigned long long)(TGM_ACQUIRE_NS / NSEC_PER_MSEC));
 }
 
-#if TGM_STATS
-/* The ACQUIRE probe, under tgm_live_lock: the looks this window that found a channel parked on an acquire (a hang
- * check's candidates, the stats window's live channels) against the ACQUIRE interrupts that came. Boot 18 had two ~2 s
- * promise parks and no "semaphore acquire timed out" line. A park seen at one look and still there TGM_ACQUIRE_NS
- * later with no interrupt since is logged once a boot, with whether the PBDMA was timing it. A line, not a panic: the
- * lost-interrupt rule applies once a boot shows which it is. */
-static struct {
-	u32 parks, fired;
-	int logged;
-} probe;
-
-static const char *const probe_where_names[] = {
-	"switched out", "interrupt lost", "on PBDMA0 with its timeout off",
-	"neither on PBDMA0 at an acquire nor switched out on one"};
-
-void tgm_acquire_probe_look(struct tgm_chan *chan, u64 now)
+/* tgm_live_lock held: chan is parked on a failed producer word that will never advance */
+static void isolate_failed_waiter(struct tgm_chan *chan, const char *why, const char *what, u64 now)
 {
-	struct nvkm_device *device = tgm_gpu.device;
-	const u32 done = tgm_chan_completed(chan);
-	u32 ccsr = 0;
-	u32 method0 = 0;
-	u32 data0 = 0;
-	u32 acquire = 0;
-	u32 pbdma = 0;
+	char state[256];
+	char report[sizeof(chan->fault)];
+	const u32 seqno = tgm_chan_completed(chan) + 1;
+	const u64 waited_ns = chan->submit_ns ? now - chan->submit_ns : 0;
+	const char *detail = what && what[0] ? what : "stopped producer";
 
-	if (READ_ONCE(chan->error) || (s32)(done - chan->submitted) >= 0) {
-		chan->acquire_probe_ns = 0;
-		return;
-	}
-	ccsr = nvkm_rd32(device, TGM_CCSR_CHANNEL(chan->chid));
-	if (!chan_parked(chan->chid, ccsr)) {
-		chan->acquire_probe_ns = 0;
-		return;
-	}
-	probe.parks++;
-	if (!chan->acquire_probe_ns || chan->acquire_probe_done != done ||
-	    chan->acquire_fired_ns >= chan->acquire_probe_ns) {
-		chan->acquire_probe_ns = now;
-		chan->acquire_probe_done = done;
-		return;
-	}
-	if (probe.logged || now - chan->acquire_probe_ns < TGM_ACQUIRE_NS)
-		return;
-	probe.logged = 1;
-	pbdma = PBDMA_CHID(nvkm_rd32(device, PBDMA_CHANNEL(0)));
-	method0 = nvkm_rd32(device, PBDMA_METHOD0(0));
-	data0 = nvkm_rd32(device, PBDMA_DATA0(0));
-	acquire = nvkm_rd32(device, TGM_PBDMA_ACQUIRE(0));
-	nvxnu_log("tegra-gm20b: acquire probe: %s (channel %u) parked on an acquire "
-		  "over %llu ms with no ACQUIRE interrupt: %s (CCSR %08x; PBDMA0 on "
-		  "channel %u at method %08x data %08x, ACQUIRE_SWITCH %s, ACQUIRE %08x)\n",
-		  chan->owner, chan->chid, (now - chan->acquire_probe_ns) / NSEC_PER_MSEC,
-		  probe_where_names[tgm_acquire_probe_where(
-			  chan->chid, ccsr, pbdma, tgm_pbdma_acquiring(method0, data0), acquire)],
-		  ccsr, pbdma, method0, data0, data0 & (1u << 12) ? "on" : "off", acquire);
+	tgm_chan_describe(chan, state, sizeof(state));
+	scnprintf(report, sizeof(report), HANG_REPORT "%s (%s) for %s fence %u; %s", why, detail,
+		  chan->owner, seqno, state);
+	nvxnu_log("tegra-gm20b: recovering %s (channel %u): %s (%s) waited %llu ms for fence %u; "
+		  "%s\n",
+		  chan->owner, chan->chid, why, detail, waited_ns / 1000000, seqno, state);
+	tgm_chan_isolate(chan, report, now);
+	tgm_recover_fault(tgm_gpu.device, (int)chan->chid);
 }
 
-static const char *const probe_giveup_names[] = {
-	"switched out", "on PBDMA0 at the acquire with its timeout armed",
-	"on PBDMA0 at the acquire with its timeout off",
-	"neither on PBDMA0 at an acquire nor switched out on one"};
-
-/* A GPU reader still parked on a writer promise at its give-up (SwitchGpuPromiseGiveUp.h), which comes about
- * TGM_ACQUIRE_NS after the park, too soon for a look above to judge the timeout: where the PBDMA has it, and whether an
- * ACQUIRE interrupt came since the park, once a boot */
-void tgm_acquire_probe_giveup(struct tgm_chan *chan, u64 parked_ns, u64 now)
-{
-	struct nvkm_device *device = tgm_gpu.device;
-	static int logged;
-	u32 ccsr = 0;
-	u32 method0 = 0;
-	u32 data0 = 0;
-	u32 acquire = 0;
-	u32 pbdma = 0;
-
-	if (logged || READ_ONCE(chan->error))
-		return;
-	logged = 1;
-	ccsr = nvkm_rd32(device, TGM_CCSR_CHANNEL(chan->chid));
-	pbdma = PBDMA_CHID(nvkm_rd32(device, PBDMA_CHANNEL(0)));
-	method0 = nvkm_rd32(device, PBDMA_METHOD0(0));
-	data0 = nvkm_rd32(device, PBDMA_DATA0(0));
-	acquire = nvkm_rd32(device, TGM_PBDMA_ACQUIRE(0));
-	nvxnu_log("tegra-gm20b: acquire probe: %s (channel %u) still parked on a writer promise at "
-		  "its give-up "
-		  "%llu ms after the park, %s ACQUIRE interrupt since: %s (CCSR %08x; PBDMA0 on "
-		  "channel %u at "
-		  "method %08x data %08x, ACQUIRE_SWITCH %s, ACQUIRE %08x)\n",
-		  chan->owner, chan->chid, (now - parked_ns) / NSEC_PER_MSEC,
-		  chan->acquire_fired_ns >= parked_ns ? "an" : "no",
-		  probe_giveup_names[tgm_acquire_probe_where(
-			  chan->chid, ccsr, pbdma, tgm_pbdma_acquiring(method0, data0), acquire)],
-		  ccsr, pbdma, method0, data0, data0 & (1u << 12) ? "on" : "off", acquire);
-}
-
-void tgm_acquire_probe_window(char *line, unsigned int len, u64 now)
-{
-	struct tgm_chan *chan = NULL;
-
-	line[0] = 0;
-	mutex_lock(&tgm_live_lock);
-	list_for_each_entry(chan, &tgm_live_chans, live)
-	{
-		tgm_acquire_probe_look(chan, now);
-	}
-	if (probe.parks || probe.fired)
-		scnprintf(
-			line, len,
-			"%u looks found a channel parked on an acquire, %u ACQUIRE interrupts came",
-			probe.parks, probe.fired);
-	probe.parks = 0;
-	probe.fired = 0;
-	mutex_unlock(&tgm_live_lock);
-}
-
-#endif
 /* tgm_live_lock held: the rule for a channel parked on an acquire past its timeout. While it waits on another channel and
  * the GPU progresses, a check is due again (the rule's second look at the producer); a wait on what the kernel or a
  * host1x engine releases is left to that releaser, with no check repeating. Returns the verdict; the caller panics on
  * TGM_HANG_STUCK. */
-static enum tgm_hang acquire_check(struct tgm_chan *chan, enum tgm_wait_source kind, u64 now)
+static enum tgm_hang acquire_check(struct tgm_chan *chan, enum tgm_wait_source kind,
+				   const char *what, u64 now)
 {
 	const u32 done = tgm_chan_completed(chan);
 	enum tgm_hang verdict = TGM_HANG_PROGRESSING;
@@ -399,6 +315,10 @@ static enum tgm_hang acquire_check(struct tgm_chan *chan, enum tgm_wait_source k
 	if (READ_ONCE(chan->error) || chan->isolating || (s32)(done - chan->submitted) >= 0 ||
 	    kind == TGM_WAITS_VICTIM)
 		return verdict;
+	if (kind == TGM_WAITS_FAILED) {
+		isolate_failed_waiter(chan, "semaphore acquire timeout", what, now);
+		return TGM_HANG_RECOVERING;
+	}
 	if (kind == TGM_WAITS_UNREAD && chan->acquire_unread++)
 		return verdict;
 	verdict = tgm_hang_recover(chan, "semaphore acquire timeout", done + 1,
@@ -428,9 +348,6 @@ static void acquire_timed_out(u32 chid, const struct acquire_record *r)
 	}
 	WRITE_ONCE(chan->acquire_due, 1);
 	chan->acquire_fired_ns = r->ns;
-#if TGM_STATS
-	probe.fired++;
-#endif
 	chan->acquire_unread = 0;
 	kind = tgm_chan_wait_source(chan, &source, what, sizeof(what));
 	if (PBDMA_METHOD_ADDR(r->method0) == TGM_HOST_SYNCPOINTB) {
@@ -445,7 +362,7 @@ static void acquire_timed_out(u32 chid, const struct acquire_record *r)
 			  : 0ull,
 		  (unsigned long long)(TGM_ACQUIRE_NS / NSEC_PER_MSEC), r->method0, r->data0,
 		  what[0] ? what : "nothing RAMFC names yet");
-	if (acquire_check(chan, kind, now) == TGM_HANG_STUCK)
+	if (acquire_check(chan, kind, what, now) == TGM_HANG_STUCK)
 		tgm_chan_hung(chan, "semaphore acquire timeout", tgm_chan_completed(chan) + 1,
 			      chan->submit_ns ? now - chan->submit_ns : 0);
 	mutex_unlock(&tgm_live_lock);
@@ -486,10 +403,14 @@ static void acquire_recheck(void *arg)
 			chan->acquire_check_ns = 0;
 		} else if (now - chan->acquire_check_ns + TGM_STUCK_NS < TGM_HANG_NS) {
 			wait = TGM_HANG_NS - (now - chan->acquire_check_ns);
-		} else if (acquire_check(chan, tgm_chan_wait_source(chan, &source, NULL, 0), now) ==
-			   TGM_HANG_STUCK) {
-			tgm_chan_hung(chan, "semaphore acquire timeout", chan->acquire_done + 1,
-				      chan->submit_ns ? now - chan->submit_ns : 0);
+		} else {
+			char what[112];
+			if (acquire_check(chan,
+					  tgm_chan_wait_source(chan, &source, what, sizeof(what)),
+					  what, now) == TGM_HANG_STUCK)
+				tgm_chan_hung(chan, "semaphore acquire timeout",
+					      chan->acquire_done + 1,
+					      chan->submit_ns ? now - chan->submit_ns : 0);
 		}
 	}
 	mutex_unlock(&tgm_live_lock);
@@ -513,4 +434,38 @@ void tgm_acquire_suspend(void)
 	nvxnu_work_cancel_wait(acq.recheck);
 	for (i = 0; i < ACQUIRE_WORDS; i++)
 		__atomic_store_n(&acq.pending[i], 0, __ATOMIC_RELAXED);
+}
+
+/* A stopped producer's waiters, failed one at a time: a recovery may end channels, so the walk starts again after each */
+void tgm_acquire_recover_failed(const char *why)
+{
+	struct tgm_chan *chan = NULL;
+	struct tgm_chan *source = NULL;
+	char what[112];
+	int recovered = 1;
+	u32 rounds = 0;
+
+	if (tgm_gpu.stage < 3 || !tgm_iso.deadline)
+		return;
+	while (recovered && rounds++ < ACQUIRE_CHIDS) {
+		const u64 now = nvxnu_nanotime();
+		recovered = 0;
+		mutex_lock(&tgm_live_lock);
+		if (tgm_gpu.stage < 3 || !tgm_iso.deadline) {
+			mutex_unlock(&tgm_live_lock);
+			return;
+		}
+		list_for_each_entry(chan, &tgm_live_chans, live)
+		{
+			if (chan->kernel || READ_ONCE(chan->error) || chan->isolating ||
+			    (s32)(tgm_chan_completed(chan) - chan->submitted) >= 0 ||
+			    tgm_chan_wait_source(chan, &source, what, sizeof(what)) !=
+				    TGM_WAITS_FAILED)
+				continue;
+			isolate_failed_waiter(chan, why, what, now);
+			recovered = 1;
+			break;
+		}
+		mutex_unlock(&tgm_live_lock);
+	}
 }

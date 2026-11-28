@@ -14,10 +14,19 @@ public final class Suite: ObservableObject {
 
     let list: RunList
     @Published private(set) var running = false
-    /// The run shown: as it stood when its batch started while one runs, as it ended after.
-    @Published private(set) var report: Report?
-    @Published private(set) var pendingRun: Report?
+    @Published private(set) var session = RunSession()
     @Published private(set) var resumeError: String?
+    /// A run choice being saved, or the launch's or Run All's read of earlier runs, is on the recorder's queue: the
+    /// controls that start a run wait for it.
+    @Published private(set) var busy = false
+
+    /// The run shown: as it stood when its batch started while one runs, as it ended after.
+    var report: Report? { session.report }
+    var reportSaved: Bool { session.reportSaved }
+    var pendingRun: Report? { session.pendingRun }
+    var resumePromptShown: Bool { session.resumePromptShown }
+    /// Nothing runs, waits for the resume sheet or waits for the card: a run may start.
+    var idle: Bool { !running && !busy && !resumePromptShown }
     /// What this launch found of the last one, shown above the results.
     @Published private(set) var notice = ""
 
@@ -26,9 +35,9 @@ public final class Suite: ObservableObject {
     let documents: URL
     private let tests: [any HWTest]
     let ios: Int
-    private let store: RunStore
     private let recorder: RunRecorder
     private var launched = false
+    private var recording = false
     private var wedgedBy: String?
 
     /// `ios`: the iOS major version the app is built for, which its summary line names so a log tells which
@@ -38,29 +47,38 @@ public final class Suite: ObservableObject {
         self.ios = ios
         list = RunList(tests: tests)
         documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        store = RunStore(directory: AppFiles.working)
-        recorder = RunRecorder(store: store)
+        recorder = RunRecorder(store: RunStore(directory: AppFiles.working), log: Suite.results)
     }
 
-    /// A boot's first launch runs everything; an unfinished run waits for the person's choice;
-    /// any other launch shows this boot's last run until Run All.
+    /// An unfinished run opens the resume sheet; a finished run from this boot is shown; otherwise stays idle until
+    /// started.
     func launch() {
         guard !launched else { return }
         launched = true
+        busy = true
         let boot = DeviceInfo.bootUUID
-        let recent = store.recent(boot: boot)
-        if let interrupted = Report.interrupted(recent) {
-            show(interrupted)
-            pendingRun = interrupted
-        } else if let last = recent.last(where: { $0.latestBootUUID == boot }) {
-            show(last)
-        } else {
-            runAll(stoppedIn: Report.lastBootStoppedIn(recent, boot: boot))
+        Task {
+            let recent = await recorder.recent(boot: boot)
+            busy = false
+            switch session.applyLaunch(recent: recent, boot: boot) {
+            case .empty:
+                break
+            case .showLast(let last):
+                populateRows(from: last)
+            case .promptUnfinished(let interrupted):
+                populateRows(from: interrupted)
+            }
         }
     }
 
+    func dismissPendingRun() {
+        guard !busy else { return }
+        session.dismissResumePrompt()
+        resumeError = nil
+    }
+
     func continueRun() {
-        guard let pending = pendingRun, !running else { return }
+        guard let pending = pendingRun, !running, !busy else { return }
         let byID = Dictionary(tests.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let continued = pending.continued(
             boot: DeviceInfo.bootUUID, at: Date(), identity: DeviceInfo.identity(ios: ios), available: Set(byID.keys)
@@ -71,51 +89,77 @@ public final class Suite: ObservableObject {
                     finished: Date()
                 )
         }
-        guard acceptRunChoice(continued.report, ended: continued.order.isEmpty) else { return }
-        notice = Self.continuationNotice(continued.cause) { id in byID[id]?.name ?? id }
-        if let crash = continued.crash { Self.log(LogLine.format(crash)) }
-        run(continued.order.compactMap { byID[$0] }, summarize: true)
+        busy = true
+        Task {
+            let saved = await acceptRunChoice(continued.report, ended: continued.order.isEmpty)
+            busy = false
+            guard saved else { return }
+            notice = Self.continuationNotice(continued.cause) { id in byID[id]?.name ?? id }
+            if let crash = continued.crash { Self.log(LogLine.format(crash)) }
+            run(continued.order.compactMap { byID[$0] }, summarize: true)
+        }
     }
 
     func startNewRun() {
-        guard var cancelled = pendingRun, !running else { return }
+        guard var cancelled = pendingRun, !running, !busy else { return }
         cancelled.cancel(at: Date())
-        guard acceptRunChoice(cancelled, ended: true) else { return }
-        runAll()
+        busy = true
+        Task {
+            let saved = await acceptRunChoice(cancelled, ended: true)
+            busy = false
+            if saved { runAll() }
+        }
     }
 
-    private func acceptRunChoice(_ chosen: Report, ended: Bool) -> Bool {
+    /// Saved before the run goes on: a run that continued from a choice the card never got would be offered again. The
+    /// caller holds `busy` from the tap until this returns.
+    private func acceptRunChoice(_ chosen: Report, ended: Bool) async -> Bool {
         do {
-            if ended { try recorder.close(chosen) } else { try recorder.checkpoint(chosen) }
+            if ended { try await recorder.close(chosen) } else { try await recorder.checkpoint(chosen) }
         } catch {
             resumeError = "Could not save the run. Try again."
             Self.results.error("Run choice not saved: \(String(describing: error), privacy: .public)")
             return false
         }
-        pendingRun = nil
+        session.acceptPendingChoice(chosen)
         resumeError = nil
-        show(chosen)
+        populateRows(from: chosen)
         return true
     }
 
     /// The app going to the background or away while a run goes, for the next launch to tell a person's or the
     /// system's ending of the process from a crash.
     func interrupted(_ reason: String?) {
-        guard running else { return }
+        guard running, recording else { return }
         recorder.interrupt(reason)
     }
 
+    func requestRunAll() {
+        guard idle else { return }
+        switch session.requestRunAll() {
+        case .promptUnfinished:
+            break
+        case .startFresh:
+            runAll()
+        }
+    }
+
     func runAll() {
-        guard !running, pendingRun == nil else { return }
+        guard !running, !busy, pendingRun == nil else { return }
+        busy = true
         let boot = DeviceInfo.bootUUID
-        runAll(stoppedIn: Report.lastBootStoppedIn(store.recent(boot: boot), boot: boot))
+        Task {
+            let recent = await recorder.recent(boot: boot)
+            busy = false
+            runAll(stoppedIn: Report.lastBootStoppedIn(recent, boot: boot))
+        }
     }
 
     /// `stoppedIn`: the test the last boot went down in, which runs last.
     private func runAll(stoppedIn stopped: String?) {
-        guard !running, pendingRun == nil else { return }
+        guard !running, !busy, pendingRun == nil else { return }
         wedgedBy = nil
-        report = newReport()
+        session.beginFreshRun(newReport())
         for row in list.rows { row.record = nil }
         var batch = tests.filter { !$0.interactive }
         notice = ""
@@ -137,13 +181,14 @@ public final class Suite: ObservableObject {
     }
 
     private func run(_ batch: [any HWTest], summarize: Bool) {
-        guard !running, pendingRun == nil, !batch.isEmpty else { return }
+        guard idle, !batch.isEmpty else { return }
         running = true
         UIApplication.shared.isIdleTimerDisabled = true
-        var planned = report ?? newReport()
-        planned.plan(batch.map(\.id))
-        report = planned
-        recorder.start(planned)
+        let target = session.planBatch(batch.map(\.id)) { newReport() }
+        let planned = target.report
+        let persists = target.persists
+        recording = persists
+        if persists { recorder.start(planned) }
         list.seed(planned)
         let context = TestContext(
             media: Bundle.main.resourceURL!.appendingPathComponent("media"), documents: documents, ios: ios,
@@ -151,33 +196,57 @@ public final class Suite: ObservableObject {
         )
         let recorder = recorder
         let main = ThreadTimes.current()
+        let mainPort = pthread_mach_thread_np(pthread_self())
         Task.detached(priority: .userInitiated) { [weak self] in
             let start = CFAbsoluteTimeGetCurrent()
             var harness = HarnessTally()
+            harness.longRuns = LongRuns.on
+            var ephemeral = persists ? nil : planned
             var finished: TestRecord?
             var ended: Double?
             var cpu = ThreadTimes.sample(main: main)
             for test in batch {
                 guard let self else { return }
+                let mainBefore = ThreadTimes.nanoseconds(of: mainPort)
                 let wedged = await self.advance(finished, next: test.id)
-                let flush = await recorder.advance(finished, begin: test.id)
+                let flush: Double = persists ? await recorder.advance(finished, begin: test.id) : 0
+                ephemeral = Suite.advanceEphemeral(ephemeral, finished: finished, next: test.id)
                 let mainWait = await Suite.mainThreadAnswer()
                 let begun = CFAbsoluteTimeGetCurrent()
-                if let ended { harness.add(boundaryMs: (begun - ended) * 1000, flushMs: flush, mainWaitMs: mainWait) }
+                if let ended {
+                    harness.add(
+                        boundaryMs: (begun - ended) * 1000, flushMs: flush, mainWaitMs: mainWait,
+                        mainCpuMs: Suite.cpuMs(of: mainPort, since: mainBefore)
+                    )
+                }
                 let ran = await Suite.outcome(of: test, context, wedgedBy: wedged, cpuSince: cpu)
                 harness.add(cpuSampleMs: ran.sampleMs)
+                if TestBudget.over(ran.record.milliseconds, interactive: test.interactive) {
+                    harness.add(overBudget: test.id)
+                }
                 cpu = ran.cpu
                 ended = begun + ran.record.milliseconds / 1000
                 finished = ran.record
             }
             guard let self else { return }
             _ = await self.advance(finished, next: nil)
-            _ = await recorder.advance(finished, begin: nil)
-            let final = await recorder.finish(at: Date())
+            if persists { _ = await recorder.advance(finished, begin: nil) }
+            let final: Report? = persists
+                ? await recorder.finish(at: Date())
+                : Suite.advanceEphemeral(ephemeral, finished: finished, next: nil)
             await self.done(
                 final, summarize: summarize, milliseconds: (CFAbsoluteTimeGetCurrent() - start) * 1000, harness: harness
             )
         }
+    }
+
+    private nonisolated static func advanceEphemeral(
+        _ report: Report?, finished: TestRecord?, next: String?
+    ) -> Report? {
+        guard var report else { return nil }
+        if let finished { report.record(finished) }
+        if let next { report.begin(next) } else { report.finish(at: Date()) }
+        return report
     }
 
     /// Returns the test that wedged the GPU, if one did.
@@ -188,16 +257,22 @@ public final class Suite: ObservableObject {
         return wedgedBy
     }
 
+    nonisolated static func cpuMs(of port: thread_act_t, since before: UInt64?) -> Double? {
+        guard let before, let now = ThreadTimes.nanoseconds(of: port) else { return nil }
+        return Double(now - min(before, now)) / 1e6
+    }
+
     nonisolated static func mainThreadAnswer() async -> Double {
         let asked = CFAbsoluteTimeGetCurrent()
-        await MainActor.run {}
+        _ = await MainActor.run { 0 }
         return (CFAbsoluteTimeGetCurrent() - asked) * 1000
     }
 
     private func done(_ final: Report?, summarize: Bool, milliseconds: Double, harness: HarnessTally) {
         running = false
+        recording = false
         UIApplication.shared.isIdleTimerDisabled = false
-        if let final { report = final }
+        session.finishBatch(final)
         guard summarize else { return }
         let ran = Dictionary(
             (report?.results ?? []).enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first }
@@ -213,8 +288,7 @@ public final class Suite: ObservableObject {
         for piece in LogLine.pieces(line) { results.notice("\(piece, privacy: .public)") }
     }
 
-    private func show(_ shown: Report) {
-        report = shown
+    private func populateRows(from shown: Report) {
         let entries = Dictionary(shown.results.map { ($0.id, $0) }, uniquingKeysWith: { $1 })
         for row in list.rows {
             row.record = entries[row.id].map { entry in

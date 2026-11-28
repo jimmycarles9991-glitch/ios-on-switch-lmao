@@ -59,11 +59,9 @@ bool spareRoom()
 	return !belowReaperBy(2 * (kSpareCapBytes / PAGE_SIZE));
 }
 
-// The class a spare of `bytes` serves: the largest class not past it.
-uint32_t spareClass(uint64_t bytes)
+uint32_t spareSlot(const Spare *s)
 {
-	const uint32_t c = classUp(bytes);
-	return c < kClasses && classBytes(c) == bytes ? c : c - 1;
+	return switch_gpu_spare_slot(s->kind, switch_gpu_spare_class_of_spare(s->bytes));
 }
 
 void spareFree(Spare *s)
@@ -88,28 +86,44 @@ void cleanZeros(void *va, uint64_t bytes)
 namespace
 {
 
-// The page list of a wired kernel buffer.
-bool kernelPages(const void *va, uint64_t bytes, uint64_t *pas)
+// lock held: ready spares of slots asked before `slot`, the least recently asked first, off their lists until `need`
+// more bytes fit under the cap; the caller frees them once the lock is dropped
+Spare *evictLocked(SparePool *p, uint32_t slot, uint64_t need)
 {
-	for (uint64_t off = 0; off < bytes; off += 4096) {
-		const uint64_t pa = ml_vtophys(reinterpret_cast<vm_offset_t>(va) + off);
-		if (!pa || (pa & 0xfff) || pa + 4096 > (1ULL << 34))
-			return false;
-		pas[off >> 12] = pa;
+	switch_gpu_spare_books &b = p->books;
+	Spare *given = nullptr;
+	while (b.held + need > kSpareCapBytes) {
+		const uint32_t d =
+			switch_gpu_spare_books_evict(b, slot, b.held + need - kSpareCapBytes);
+		if (d == SWITCH_GPU_SPARE_NONE || !p->ready[d])
+			break;
+		Spare *s = p->ready[d];
+		p->ready[d] = s->next;
+		--b.ready[d];
+		b.held -= s->bytes;
+		s->next = given;
+		given = s;
 	}
-	return true;
+	return given;
 }
 
-// A wired cached BO of `bytes`, of 128 KiB units where its layout has them (each one GMMU big page), or nullptr. Its pages
-// hold what their last owner left: it is a dirty spare until the copy engine has zeroed it (spareWork). The refill
-// thread alone makes these: BoAlloc's own path on the allocating thread never searches for units.
-Spare *spareMake(SparePool *p, uint64_t bytes)
+void spareFreeAll(Spare *s)
 {
-	Spare *s = IONew(Spare, 1);
-	uint64_t *pas = IONew(uint64_t, bytes >> 12);
-	SwitchGpuCachedBuffer buffer = {};
-	bool made = switch_gpu_cached_buffer_units(bytes, &buffer);
-	if (!made && switch_gpu_spare_layout(bytes).units) {
+	while (s) {
+		Spare *next = s->next;
+		spareFree(s);
+		s = next;
+	}
+}
+
+bool spareBuffer(SparePool *p, switch_gpu_spare_kind kind, uint64_t bytes,
+		 SwitchGpuCachedBuffer *buffer)
+{
+	if (kind == SWITCH_GPU_SPARE_WC)
+		return switch_gpu_cached_buffer_write_combined(bytes, buffer);
+	if (switch_gpu_cached_buffer_units(bytes, buffer))
+		return true;
+	if (switch_gpu_spare_layout(bytes).units) {
 #if TGM_STATS
 		IOLockLock(p->lock);
 		++p->notUnits;
@@ -118,11 +132,40 @@ Spare *spareMake(SparePool *p, uint64_t bytes)
 		(void)p;
 #endif
 	}
-	made = made || switch_gpu_cached_buffer_pages(bytes, &buffer);
-	if (s && pas && made && kernelPages(buffer.cpu, bytes, pas)) {
-		*s = {nullptr, buffer, pas, bytes, nullptr};
+	return switch_gpu_cached_buffer_pages(bytes, buffer);
+}
+
+// A wired BO of `slot`'s class and kind, or nullptr: a cached one of 128 KiB units where its layout has them (each one
+// GMMU big page). Its pages hold what their last owner left: it is a dirty spare until the copy engine has zeroed it
+// (spareWork). The refill thread alone makes these: BoAlloc's own path on the allocating thread never searches for
+// units.
+Spare *spareMake(SparePool *p, uint32_t slot)
+{
+	const uint64_t bytes = switch_gpu_spare_slot_bytes(slot);
+	const auto kind = static_cast<switch_gpu_spare_kind>(switch_gpu_spare_slot_kind(slot));
+	Spare *s = IONew(Spare, 1);
+	uint64_t *pas = IONew(uint64_t, bytes >> 12);
+	SwitchGpuCachedBuffer buffer = {};
+	const bool made = spareBuffer(p, kind, bytes, &buffer);
+	const SwitchGpuPageList listed =
+		s && pas && made ? switch_gpu_cached_buffer_page_list(buffer, bytes, pas)
+				 : SwitchGpuPageList::NoSegment;
+	if (listed == SwitchGpuPageList::Listed) {
+		*s = {nullptr, buffer, pas, bytes, kind, nullptr};
 		return s;
 	}
+	static bool told;
+	if (!__atomic_exchange_n(&told, true, __ATOMIC_RELAXED))
+		IOLog("tegra-gm20b: the spare refill could not make a %llu KiB %s spare: %s; "
+		      "further ones not logged\n",
+		      bytes >> 10, kind == SWITCH_GPU_SPARE_WC ? "write-combined" : "cached",
+		      !s || !pas ? "no memory for its records"
+		      : !made    ? "the VM gave no pages"
+		      : listed == SwitchGpuPageList::NoSegment
+			      ? "its descriptor has no physical segment"
+		      : listed == SwitchGpuPageList::Misaligned
+			      ? "a physical segment is not page-aligned"
+			      : "a page is past the GPU's 34 bits");
 	switch_gpu_cached_buffer_free(&buffer);
 	if (pas)
 		IODelete(pas, uint64_t, bytes >> 12);
@@ -135,20 +178,23 @@ void spareZeroed(void *context, int result)
 {
 	auto *s = static_cast<Spare *>(context);
 	SparePool *p = gSpares;
-	const uint32_t c = spareClass(s->bytes);
+	const uint32_t slot = spareSlot(s);
+	switch_gpu_spare_books &b = p->books;
 	IOLockLock(p->lock);
-	--p->zeroing[c];
-	p->cleaningBytes -= s->bytes;
+	--b.zeroing[slot];
 	const bool keep = !result && spareRoom();
 	if (keep) {
-		s->next = p->ready[c];
-		p->ready[c] = s;
-		++p->count[c];
+		s->next = p->ready[slot];
+		p->ready[slot] = s;
+		++b.ready[slot];
 	} else {
-		p->clean -= s->bytes;
+		b.held -= s->bytes;
 	}
 	const bool firstFailure = result && !p->fillFailed;
 	p->fillFailed = p->fillFailed || result;
+	const bool hasDirty = p->dirty != nullptr || p->poolDirty != nullptr;
+	const bool needFill = !p->fillFailed && spareRoom() &&
+			      switch_gpu_spare_books_wants_refill(b, kSpareCapBytes);
 	IOLockUnlock(p->lock);
 	if (firstFailure)
 		IOLog("tegra-gm20b: the copy engine's zero-fill of a %llu KiB spare "
@@ -156,17 +202,18 @@ void spareZeroed(void *context, int result)
 		      s->bytes >> 10, result);
 	if (!keep)
 		spareFree(s);
-	thread_call_enter(p->call);
+	if (hasDirty)
+		thread_call_enter(p->recycleCall);
+	if (needFill)
+		thread_call_enter(p->call);
 }
 
-void spareWork(thread_call_param_t param, thread_call_param_t)
+void spareRecycleWork(thread_call_param_t param, thread_call_param_t)
 {
 	SparePool *p = static_cast<SparePool *>(param);
 	for (;;) {
-		if (reclaimParkedStep(memoryPressure(), spareRoom()))
-			continue;
 		IOLockLock(p->lock);
-		if (PoolZero *z = p->poolDirty) {  // first: pool pages are the scarcer
+		if (PoolZero *z = p->poolDirty) {
 			p->poolDirty = z->next;
 			IOLockUnlock(p->lock);
 			tgm_pool_free_zeroed(z->va, z->bytes, z->pa);
@@ -177,37 +224,37 @@ void spareWork(thread_call_param_t param, thread_call_param_t)
 			continue;
 		}
 		const bool pressure = memoryPressure();
+		switch_gpu_spare_books &b = p->books;
 		if (Spare *s = p->dirty) {
+			const uint32_t slot = spareSlot(s);
 			p->dirty = s->next;
-			p->dirtyBytes -= s->bytes;
-			const bool keep =
-				!pressure && spareRoom() && p->clean + s->bytes <= kSpareCapBytes;
-			if (keep) {
-				p->clean += s->bytes;
-				p->cleaningBytes += s->bytes;
-				++p->zeroing[spareClass(s->bytes)];
-			}
+			--b.dirty[slot];
+			const bool keep = !pressure && spareRoom() &&
+					  switch_gpu_spare_books_keep(b, slot, kSpareCapBytes);
+			Spare *given = keep ? evictLocked(p, slot, 0) : nullptr;
+			if (keep)
+				++b.zeroing[slot];
+			else
+				b.held -= s->bytes;
 			IOLockUnlock(p->lock);
+			spareFreeAll(given);
 			if (!keep) {
-				spareFree(
-					s);  // past the cap or under pressure: back to the VM, unzeroed
+				spareFree(s);
 				continue;
 			}
-			const int result =
-				switch_gpu_cached_zero(s->pas, uint32_t(s->bytes >> 12),
-						       s->buffer.cpu, &s->mapping, spareZeroed, s);
+			const int result = switch_gpu_cached_zero(
+				s->pas, uint32_t(s->bytes >> 12),
+				s->kind == SWITCH_GPU_SPARE_WC ? nullptr : s->buffer.cpu,
+				&s->mapping, spareZeroed, s);
 			if (result == -16) {
-				// every scrub slot busy: a retiring scrub's completion runs this again
 				IOLockLock(p->lock);
 #if TGM_STATS
 				++p->zeroBusy;
 #endif
-				--p->zeroing[spareClass(s->bytes)];
-				p->cleaningBytes -= s->bytes;
-				p->clean -= s->bytes;
+				--b.zeroing[slot];
 				s->next = p->dirty;
 				p->dirty = s;
-				p->dirtyBytes += s->bytes;
+				++b.dirty[slot];
 				IOLockUnlock(p->lock);
 				return;
 			}
@@ -219,86 +266,93 @@ void spareWork(thread_call_param_t param, thread_call_param_t)
 			}
 			continue;
 		}
-		if (pressure) {  // give every spare back; refill nothing while it lasts
+		if (pressure) {
 			Spare *all = nullptr;
-			for (uint32_t c = 0; c < kClasses; c++) {
-				while (Spare *s = p->ready[c]) {
-					p->ready[c] = s->next;
+			for (uint32_t slot = 0; slot < SWITCH_GPU_SPARE_SLOTS; slot++) {
+				while (Spare *s = p->ready[slot]) {
+					p->ready[slot] = s->next;
+					b.held -= s->bytes;
 					s->next = all;
 					all = s;
 				}
-				p->count[c] = 0;
+				b.ready[slot] = 0;
 			}
-			p->clean = p->cleaningBytes;
 			IOLockUnlock(p->lock);
-			while (all) {
-				Spare *next = all->next;
-				spareFree(all);
-				all = next;
-			}
+			spareFreeAll(all);
 			return;
 		}
-		Spare *evicted = nullptr;
-		// a spare made goes through the dirty list, which keeps none without room or with the copy engine's fills
-		// failing: the refill would make and free one without end
-		uint32_t c = p->fillFailed || !spareRoom() ? kClasses : 0;
-		for (; c < kClasses; c++) {
-			if (p->count[c] + p->zeroing[c] >= p->target[c])
-				continue;
-			uint64_t over = 0;
-			for (uint32_t d = 0; d < kClasses; d++)
-				if (p->count[d] > p->target[d])
-					over += uint64_t(p->count[d] - p->target[d]) *
-						classBytes(d);
-			if (!switch_gpu_spare_fits_after(p->clean, over, classBytes(c),
-							 kSpareCapBytes))
-				continue;
-			while (p->clean + classBytes(c) > kSpareCapBytes) {
-				const uint32_t d =
-					switch_gpu_spare_over_depth(p->count, p->target, kClasses);
-				if (d == kClasses || !p->ready[d])
-					break;
-				Spare *s = p->ready[d];
-				p->ready[d] = s->next;
-				p->count[d]--;
-				p->clean -= s->bytes;
-				s->next = evicted;
-				evicted = s;
-			}
-			if (p->clean + classBytes(c) <= kSpareCapBytes)
-				break;
-		}
-		if (c < kClasses)
-			p->clean += classBytes(c);
 		IOLockUnlock(p->lock);
-		while (evicted) {
-			Spare *next = evicted->next;
-			spareFree(evicted);
-			evicted = next;
-		}
-		if (c == kClasses)
-			return;
-		Spare *s = spareMake(p, classBytes(c));
+		return;
+	}
+}
+
+void spareReclaimWork(thread_call_param_t, thread_call_param_t)
+{
+	while (reclaimParkedStep(memoryPressure(), spareRoom()))
+		;
+}
+
+void spareWork(thread_call_param_t param, thread_call_param_t)
+{
+	SparePool *p = static_cast<SparePool *>(param);
+	switch_gpu_spare_books &b = p->books;
+	if (!p->recordRead) {
+		p->recordRead = true;
+		sparesSeed(p);
+	}
+	for (;;) {
 		IOLockLock(p->lock);
-		p->clean -= classBytes(c);
-		if (!s) {  // the VM could not give it: try again at the next event, not now
+		if (memoryPressure()) {
+			bool hasReady = false;
+			for (const uint16_t ready : b.ready)
+				hasReady = hasReady || ready != 0;
+			IOLockUnlock(p->lock);
+			if (hasReady)
+				thread_call_enter(p->recycleCall);
+			return;
+		}
+		const uint32_t slot = p->fillFailed || !spareRoom()
+					      ? SWITCH_GPU_SPARE_NONE
+					      : switch_gpu_spare_books_refill(b, kSpareCapBytes);
+		const uint64_t bytes =
+			slot != SWITCH_GPU_SPARE_NONE ? switch_gpu_spare_slot_bytes(slot) : 0;
+		Spare *given = nullptr;
+		if (slot != SWITCH_GPU_SPARE_NONE) {
+			given = evictLocked(p, slot, bytes);
+			// counted from now, on the dirty list it goes to: neither this loop nor a take's kick makes it twice
+			b.held += bytes;
+			++b.dirty[slot];
+		}
+		IOLockUnlock(p->lock);
+		spareFreeAll(given);
+		if (slot == SWITCH_GPU_SPARE_NONE)
+			return;
+		Spare *s = spareMake(p, slot);
+		IOLockLock(p->lock);
+		if (!s) {
+			--b.dirty[slot];
+			b.held -= bytes;
 #if TGM_STATS
 			++p->refillRefused;
 #endif
 			IOLockUnlock(p->lock);
 			return;
 		}
-		// to the copy engine as a freed spare goes; this loop takes the dirty list before it makes another
 		s->next = p->dirty;
 		p->dirty = s;
-		p->dirtyBytes += s->bytes;
 		IOLockUnlock(p->lock);
+		thread_call_enter(p->recycleCall);
 	}
 }
 }  // namespace
 
 namespace tgm_uc
 {
+
+SparePool *sparesExisting()
+{
+	return __atomic_load_n(&gSpares, __ATOMIC_ACQUIRE);
+}
 
 SparePool *spares()
 {
@@ -309,14 +363,29 @@ SparePool *spares()
 	if (!n)
 		return nullptr;
 	bzero(n, sizeof(*n));
-	for (const switch_gpu_spare_warm &w : SWITCH_GPU_SPARE_WARM)
-		n->target[classUp(w.bytes)] = w.ready;
+	switch_gpu_spare_books_init(n->books);
 	n->lock = IOLockAlloc();
-	n->call =
-		n->lock ? thread_call_allocate_with_options(spareWork, n, THREAD_CALL_PRIORITY_USER,
-							    THREAD_CALL_OPTIONS_ONCE)
-			: nullptr;
-	if (!n->call) {
+	// The workers allocate, wire, free and (when the copy engine cannot) zero memory on the CPU: at user priority, so
+	// they never take a core from app or render threads.
+	if (n->lock) {
+		n->call = thread_call_allocate_with_options(spareWork, n, THREAD_CALL_PRIORITY_USER,
+							    THREAD_CALL_OPTIONS_ONCE);
+		n->recycleCall = thread_call_allocate_with_options(
+			spareRecycleWork, n, THREAD_CALL_PRIORITY_USER, THREAD_CALL_OPTIONS_ONCE);
+		n->reclaimCall = thread_call_allocate_with_options(
+			spareReclaimWork, n, THREAD_CALL_PRIORITY_USER, THREAD_CALL_OPTIONS_ONCE);
+		n->recordCall = thread_call_allocate_with_options(
+			spareRecordWork, n, THREAD_CALL_PRIORITY_USER, THREAD_CALL_OPTIONS_ONCE);
+	}
+	if (!n->call || !n->recycleCall || !n->reclaimCall || !n->recordCall) {
+		if (n->recordCall)
+			thread_call_free(n->recordCall);
+		if (n->reclaimCall)
+			thread_call_free(n->reclaimCall);
+		if (n->recycleCall)
+			thread_call_free(n->recycleCall);
+		if (n->call)
+			thread_call_free(n->call);
 		if (n->lock)
 			IOLockFree(n->lock);
 		IODelete(n, SparePool, 1);
@@ -324,58 +393,81 @@ SparePool *spares()
 	}
 	if (!__atomic_compare_exchange_n(&gSpares, &p, n, false, __ATOMIC_ACQ_REL,
 					 __ATOMIC_ACQUIRE)) {
+		thread_call_free(n->recordCall);
+		thread_call_free(n->reclaimCall);
+		thread_call_free(n->recycleCall);
 		thread_call_free(n->call);
 		IOLockFree(n->lock);
 		IODelete(n, SparePool, 1);
 		return p;
 	}
-	thread_call_enter(n->call);  // the warm classes, made before anyone waits for them
+	thread_call_enter(n->call);
 	return n;
 }
 
-// A ready spare for a cached BO of `bytes`: of its class, or of a larger one up to about twice its size; nullptr when
-// none is ready, which marks the class to keep warm. Either way a class below its mark wakes the thread call.
-Spare *spareTake(uint64_t bytes)
+Spare *spareTake(uint64_t bytes, switch_gpu_spare_kind kind, bool critical)
 {
 	SparePool *p = spares();
 	const uint32_t c = classUp(bytes);
 	if (!p || c >= kClasses)
 		return nullptr;
+	const uint32_t asked = switch_gpu_spare_slot(kind, c);
+	switch_gpu_spare_books &b = p->books;
 	IOLockLock(p->lock);
+	const uint32_t d = switch_gpu_spare_books_take(b, asked, critical);
+	switch_gpu_spare_books_asked(b, asked, d);
 	Spare *s = nullptr;
-	for (uint32_t d = c; d < kClasses && switch_gpu_spare_serves(c, d) && !s; d++) {
+	if (d != SWITCH_GPU_SPARE_NONE) {
 		s = p->ready[d];
-		if (s) {
-			p->ready[d] = s->next;
-			p->count[d]--;
-			p->clean -= s->bytes;
-		}
-	}
-	if (!s) {
+		p->ready[d] = s->next;
+		--b.ready[d];
+		b.held -= s->bytes;
+	} else {
 		const switch_gpu_spare_miss why =
-			switch_gpu_spare_miss_of(p->target[c], p->zeroing[c], memoryPressure());
-		const uint16_t learnt = switch_gpu_spare_depth_after_miss(
-			p->target[c], classBytes(c) <= kLearnMaxBytes, why);
-		const uint16_t most = switch_gpu_spare_depth_cap(classBytes(c), kSpareCapBytes);
-		p->target[c] = learnt < most ? learnt : most;
+			switch_gpu_spare_books_why(b, asked, critical, memoryPressure());
+		switch_gpu_spare_books_learn(b, asked, why, kLearnMaxBytes, kSpareCapBytes);
 #if TGM_STATS
 		++p->misses[why];
 #endif
 	}
 	const bool pressure = memoryPressure();
 	const bool room = spareRoom();
-	const bool kick = pressure ? p->clean != 0 : room && p->count[c] < p->target[c];
-	if (kick)
+	const bool kickRecycle = pressure && b.held != 0;
+	const bool kickFill =
+		!pressure && room && switch_gpu_spare_books_wants_refill(b, kSpareCapBytes);
+	if (kickFill || kickRecycle)
 		p->fillFailed = false;
 	IOLockUnlock(p->lock);
-	bool wake = kick;
-	if (!s && !pressure && room && parkedNotifyDemand(classBytes(c)))
-		wake = true;
-	else if (pressure && !wake && parkedHasAny())
-		wake = true;
-	if (wake)
+	bool kickReclaim = false;
+	// the parked BOs a demand reclaims are cached ones
+	if (!s && kind == SWITCH_GPU_SPARE_CACHED && !pressure && room &&
+	    parkedNotifyDemand(classBytes(c)))
+		kickReclaim = true;
+	else if (pressure && parkedHasAny())
+		kickReclaim = true;
+	if (kickRecycle)
+		thread_call_enter(p->recycleCall);
+	if (kickFill)
 		thread_call_enter(p->call);
+	if (kickReclaim)
+		thread_call_enter(p->reclaimCall);
 	return s;
+}
+
+// A process released its idle memory (method 43: memory pressure, or gone to the background): what a take does under
+// pressure, without waiting for one, since nothing reads the pressure level while the GPU allocates nothing and the pool
+// holds up to its cap wired; and this boot's demand record set again for the next boot.
+void sparesPressureLook()
+{
+	SparePool *p = __atomic_load_n(&gSpares, __ATOMIC_ACQUIRE);
+	if (!p)
+		return;
+	thread_call_enter(p->recordCall);
+	if (!memoryPressure())
+		return;
+	thread_call_enter(p->recycleCall);
+	if (parkedHasAny())
+		thread_call_enter(p->reclaimCall);
 }
 
 bool sparesPressure()
@@ -391,10 +483,10 @@ bool sparesHasRoom()
 void kickSpareWork()
 {
 	if (SparePool *p = spares())
-		thread_call_enter(p->call);
+		thread_call_enter(p->reclaimCall);
 }
 
-// Debug kernels: a cached BoAlloc that no spare can serve by its flags (contiguous, write-combined).
+// Debug kernels: a BoAlloc that no spare can serve by its flags (contiguous).
 void spareIneligible()
 {
 #if TGM_STATS
@@ -406,10 +498,10 @@ void spareIneligible()
 #endif
 }
 
-// A freed cached BO (its prepared buffer, which nothing else holds, with its `bytes` and page list) to the spares:
-// true if taken, then the caller must not touch the buffer, pas or its persistent mapping again.
+// A freed cached or system BO (its prepared buffer, which nothing else holds, with its `bytes` and page list) to the
+// spares of its kind: true if taken, then the caller must not touch the buffer, pas or its persistent mapping again.
 bool spareKeep(const SwitchGpuCachedBuffer &buffer, uint64_t *pas, uint64_t bytes,
-	       switch_gpu_cached_mapping *mapping)
+	       switch_gpu_spare_kind kind, switch_gpu_cached_mapping *mapping)
 {
 	if (memoryPressure() || !spareRoom())
 		return false;
@@ -419,101 +511,24 @@ bool spareKeep(const SwitchGpuCachedBuffer &buffer, uint64_t *pas, uint64_t byte
 	Spare *s = p && switch_gpu_cached_buffer_alone(buffer) ? IONew(Spare, 1) : nullptr;
 	if (!s)
 		return false;
-	*s = {nullptr, buffer, pas, bytes, mapping};
+	*s = {nullptr, buffer, pas, bytes, kind, mapping};
 	IOLockLock(p->lock);
 	s->next = p->dirty;
 	p->dirty = s;
-	p->dirtyBytes += bytes;
+	p->books.held += bytes;
+	++p->books.dirty[spareSlot(s)];
 	IOLockUnlock(p->lock);
-	thread_call_enter(p->call);
+	thread_call_enter(p->recycleCall);
 	return true;
 }
 }  // namespace tgm_uc
 
 void switch_gpu_cached_retire(SwitchGpuCachedBuffer buffer, uint64_t *pages, uint32_t count,
-			      switch_gpu_cached_mapping *mapping)
+			      switch_gpu_spare_kind kind, switch_gpu_cached_mapping *mapping)
 {
-	if (buffer.cpu && spareKeep(buffer, pages, uint64_t(count) << 12, mapping))
+	if (buffer.cpu && spareKeep(buffer, pages, uint64_t(count) << 12, kind, mapping))
 		return;
 	switch_gpu_cached_mapping_drop(&mapping);
 	switch_gpu_cached_buffer_free(&buffer);
 	IODelete(pages, uint64_t, count);
-}
-
-extern "C" void tgm_spare_counts(uint64_t *kept_bytes, uint64_t *ready,
-				 uint64_t *pool_zeroing_bytes)
-{
-	const SparePool *p = __atomic_load_n(&gSpares, __ATOMIC_ACQUIRE);
-	uint64_t n = 0;
-	if (p) {
-		IOLockLock(p->lock);
-		for (const uint16_t count : p->count)
-			n += count;
-		*kept_bytes = p->clean + p->dirtyBytes;
-		*pool_zeroing_bytes = p->poolZeroing;
-		IOLockUnlock(p->lock);
-	} else {
-		*kept_bytes = *pool_zeroing_bytes = 0;
-	}
-	*ready = n;
-}
-
-// The window's BoAllocs by process ("name n (KiB, mean/max us, made m)"), then cleared; 0 when there were none.
-extern "C" unsigned long tgm_owner_stats(char *out, unsigned long size)
-{
-#if TGM_STATS
-	SparePool *p = __atomic_load_n(&gSpares, __ATOMIC_ACQUIRE);
-	unsigned long at = 0;
-	if (!TGM_STATS || !p || !size)
-		return 0;
-	out[0] = 0;
-	uint64_t parked = 0, unparkResident = 0, unparkReclaimed = 0, reclaimedCached = 0,
-		 reclaimedSystem = 0;
-	parkedStatsTake(&parked, &unparkResident, &unparkReclaimed, &reclaimedCached,
-			&reclaimedSystem);
-	IOLockLock(p->lock);
-	for (uint32_t i = 0; i < kOwners && p->owners[i].n; i++) {
-		const OwnerStat &o = p->owners[i];
-		const int n = snprintf(out + at, size - at,
-				       "%s%s %llu (%llu KiB, %llu/%llu us, made %llu)",
-				       at ? "; " : "", o.name, o.n, o.bytes >> 10,
-				       o.ns / o.n / 1000, o.max_ns / 1000, o.made);
-		if (n > 0)
-			at = at + size_t(n) < size ? at + size_t(n) : size - 1;
-	}
-	uint32_t missed = p->zeroBusy + p->zeroFailed + p->refillRefused + p->notUnits;
-	for (const uint32_t m : p->misses)
-		missed += m;
-	const int n =
-		missed ? snprintf(out + at, size - at,
-				  "%sspare misses: first %u, zeroing %u, drained %u, pressure %u, "
-				  "ineligible %u; copy-engine zero busy %u, failed %u; refill "
-				  "refused %u, not in 128 KiB units %u",
-				  at ? "; " : "", p->misses[SWITCH_GPU_SPARE_FIRST],
-				  p->misses[SWITCH_GPU_SPARE_ZEROING],
-				  p->misses[SWITCH_GPU_SPARE_DRAINED],
-				  p->misses[SWITCH_GPU_SPARE_PRESSURE],
-				  p->misses[SWITCH_GPU_SPARE_INELIGIBLE], p->zeroBusy,
-				  p->zeroFailed, p->refillRefused, p->notUnits)
-		       : 0;
-	if (n > 0)
-		at = at + size_t(n) < size ? at + size_t(n) : size - 1;
-	if (parked || unparkResident || unparkReclaimed || reclaimedCached || reclaimedSystem) {
-		const int pn = snprintf(out + at, size - at,
-					"%sparked %llu (res %llu, rec %llu, cached %llu, sys %llu)",
-					at ? "; " : "", parked, unparkResident, unparkReclaimed,
-					reclaimedCached, reclaimedSystem);
-		if (pn > 0)
-			at = at + size_t(pn) < size ? at + size_t(pn) : size - 1;
-	}
-	bzero(p->owners, sizeof(p->owners));
-	bzero(p->misses, sizeof(p->misses));
-	p->zeroBusy = p->zeroFailed = p->refillRefused = p->notUnits = 0;
-	IOLockUnlock(p->lock);
-	return at;
-#else
-	(void)out;
-	(void)size;
-	return 0;
-#endif
 }

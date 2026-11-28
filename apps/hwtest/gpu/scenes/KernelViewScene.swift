@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// Kernels that write half-float textures (RGBA16Float, R16Float), as Core Image's do in PosterBoard and

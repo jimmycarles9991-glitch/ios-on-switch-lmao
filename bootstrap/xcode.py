@@ -53,7 +53,7 @@ def xcode(root: Path, project: str, scheme: str, env: dict, settings: tuple[str,
         'ARCHS=arm64',
         'IPHONEOS_DEPLOYMENT_TARGET=17.0',
         'DEBUG_INFORMATION_FORMAT=dwarf',
-        'OTHER_LDFLAGS=$(inherited) -Wl,-segalign,0x1000 -Wl,-headerpad,0x1000',
+        'OTHER_LDFLAGS=$(inherited) -Wl,-segalign,0x1000 -Wl,-headerpad,0x1000 -Wl,-sectcreate,__TEXT,__a64x_target,/dev/null',
         'OTHER_SWIFT_FLAGS=$(inherited) -debug-prefix-map ' + str(work) + '=. -file-prefix-map ' + str(work) + '=.',
         'OTHER_CFLAGS=$(inherited) -ffile-prefix-map='
         + str(work)

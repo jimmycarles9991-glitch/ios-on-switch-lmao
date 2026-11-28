@@ -80,16 +80,20 @@ TEST(SwitchUsbHostSource, GicLevelSpiWithLic)
     EXPECT_THAT(gic, HasSubstr("uint32_t switch_interrupt_count(uint32_t intid)"));
 }
 
-// No timer and no soft path: a mailbox line that keeps firing with nothing to take panics, and nothing turns host mode
-// off on its own.
+// No polling timer and no soft path: the only timer in SwitchXHCI is the one-shot LFPS settle reply continuation
+// (never self-rearming), serviceMailbox never sleeps, a mailbox line that keeps firing with nothing to take panics,
+// and nothing turns host mode off on its own.
 TEST(SwitchUsbHostSource, NoTimersNoSoftPath)
 {
     const std::string events = SourceText("../SwitchXHCIEvents.cpp");
     const std::string xhci = SourceText("../SwitchXHCI.cpp");
-    for (const std::string &source : {events, xhci, SourceText("../SwitchUSBPort.cpp")}) {
-        EXPECT_THAT(source, Not(HasSubstr("IOTimerEventSource")));
-        EXPECT_THAT(source, Not(HasSubstr("setTimeout")));
-    }
+    const std::string port = SourceText("../SwitchUSBPort.cpp");
+    EXPECT_THAT(port, Not(HasSubstr("IOTimerEventSource")));
+    EXPECT_THAT(port, Not(HasSubstr("setTimeout")));
+    EXPECT_EQ(Count(events, "setTimeout"), 1u);
+    EXPECT_THAT(Body(events, "void SwitchXHCI::mailboxAction("), HasSubstr("self->mboxReplyTimer->setTimeoutMS("));
+    EXPECT_THAT(Body(events, "void SwitchXHCI::mboxReplyFired("), Not(HasSubstr("setTimeout")));
+    EXPECT_THAT(Body(SourceText("../XusbHost.cpp"), "bool Controller::serviceMailbox("), Not(HasSubstr("IOSleep")));
     EXPECT_THAT(SourceText("../SwitchUSB.cpp"), Not(HasSubstr("switch_usb_host_failed")));
     EXPECT_THAT(Body(events, "void SwitchXHCI::mailboxAction("), HasSubstr("if (self->mailboxStorm) {"));
     EXPECT_EQ(Count(Body(events, "void SwitchXHCI::mailboxAction("), "panic("), 2u);
@@ -120,9 +124,12 @@ TEST(SwitchUsbHostSource, SourcePowerIsReadyBeforeTheWaitSourceWindow)
     EXPECT_FALSE(promote.has("switch_battery_set_otg_boost"));
     EXPECT_TRUE(promote.has("sendPrSwap()"));
     const auto rails = Block(source, "bool SwitchPD::setRails(");
+    EXPECT_THAT(source, Not(HasSubstr("IOSleep")));
     EXPECT_TRUE(rails.before("if (vbus && switch_pd_vbus_ours(state.status1))", "tegra_gpio_output(kSourceRailGpio, 1)"));
-    EXPECT_TRUE(rails.before("tegra_gpio_output(kSourceRailGpio, 1)", "IOSleep(kRailRampMS)"));
-    EXPECT_TRUE(rails.before("IOSleep(kRailRampMS)", "tegra_gpio_output(kVconnGpio, 1)"));
+    EXPECT_TRUE(rails.before("tegra_gpio_output(kSourceRailGpio, 1)", "railTimer->setTimeoutMS(kRailRampMS)"));
+    const auto ramp = Block(source, "void SwitchPD::railRampFired(");
+    EXPECT_TRUE(ramp.has("tegra_gpio_output(kVconnGpio, 1)"));
+    EXPECT_TRUE(ramp.has("self->setVconnSwap(self->vconnOn);"));
 }
 
 TEST(SwitchUsbHostSource, ProvisionalSourcePowerHasLifecycleCleanup)
@@ -286,9 +293,14 @@ TEST(SwitchUsbHostSource, MailboxCommandsCompleteFromTheInterrupt)
     EXPECT_THAT(send, HasSubstr("constexpr uint32_t kAnswerMs = 250;"));
     EXPECT_THAT(send, HasSubstr("xusb_mbox_released(gHost.mailboxOwner())"));
     const std::string action = Body(events, "void SwitchXHCI::mailboxAction(");
-    EXPECT_LT(at(action, "gHost.serviceMailbox(answer, data)"),
+    EXPECT_LT(at(action, "gHost.serviceMailbox(answer, data, deferred)"),
               at(action, "commandGate->commandWakeup(&self->commandWait)"));
+    EXPECT_THAT(action, HasSubstr("self->mboxReplyTimer->setTimeoutMS(deferred.delay_ms)"));
+    const std::string fired = Body(events, "void SwitchXHCI::mboxReplyFired(");
+    EXPECT_THAT(fired, HasSubstr("gHost.finishMailboxReply("));
+    EXPECT_THAT(fired, HasSubstr("commandGate->commandWakeup(&self->deferredReply, false)"));
     const std::string asleep = Body(events, "IOReturn SwitchXHCI::systemSleep(");
+    EXPECT_LT(at(asleep, "mailbox->disable()"), at(asleep, "mboxReplyTimer->cancelTimeout()"));
     EXPECT_LT(at(asleep, "mailbox->disable()"), at(asleep, "xusb_mbox_wait_abandon(&commandWait)"));
     EXPECT_THAT(Body(events, "bool SwitchXHCI::enableMessages("), HasSubstr("tegraLoop->runAction(send, this)"));
     EXPECT_THAT(Body(xhci, "bool SwitchXHCI::start("), HasSubstr("enableMessages()"));

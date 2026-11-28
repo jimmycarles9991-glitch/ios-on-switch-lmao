@@ -49,7 +49,8 @@ thread_local std::function<void(uint32_t)> tBeforeWrite;
 struct DcModel {
     std::array<std::atomic<uint32_t>, 0x1000> words{};
     std::atomic<bool> assemblyEnable{false}, latchedEnable{false}, actRequest{false}, inBlank{true};
-    std::atomic<unsigned> lutWritesScanned{0}, lutWrites{0}, enableWrites{0};
+    std::atomic<unsigned> lutWritesScanned{0}, lutWrites{0}, cscWrites{0}, paletteWrites{0}, enableWrites{0},
+        mmioReads{0};
 
     struct Ref {
         DcModel *dc;
@@ -74,6 +75,7 @@ struct DcModel {
 
     uint32_t read(uint32_t word)
     {
+        ++mmioReads;
         if (word == kDcStateControl)
             return actRequest ? kGeneralActReq : 0u;
         if (word == kDcDispDbgTiming)
@@ -93,6 +95,12 @@ struct DcModel {
             luts[at & 0x3fffu] = value >> 16;
             return;
         }
+        if (word >= kDcCmuCsc && word < kDcCmuCsc + kCscWords)
+            ++cscWrites;
+        if ((word >= kPaletteBase[0] && word < kPaletteBase[0] + kPaletteWords) ||
+            (word >= kPaletteBase[1] && word < kPaletteBase[1] + kPaletteWords) ||
+            (word >= kPaletteBase[2] && word < kPaletteBase[2] + kPaletteWords))
+            ++paletteWrites;
         if (word == kDcDispColorControl) {
             ++enableWrites;
             assemblyEnable = (value & kCmuEnable) != 0u;
@@ -198,9 +206,9 @@ protected:
     }
 };
 
-// The filter adopts a snapshot and, its CMU off, writes it whole; two setter calls land while it writes. Neither takes
-// the snapshot it reads, and DC A gets exactly the tables it adopted.
-TEST_F(ColourPublish, TwoSettersDuringOneFilterReadNeverReuseItsSnapshot)
+// The action adopts a snapshot and, its CMU off, writes it whole on the work loop; two setter calls land while it
+// writes. Neither takes the snapshot it reads, and DC A gets exactly the tables it adopted.
+TEST_F(ColourPublish, TwoSettersDuringOneActionReadNeverReuseItsSnapshot)
 {
     setters.set(warmer);
     const Tables adopted = unit.newest().tables;
@@ -217,8 +225,122 @@ TEST_F(ColourPublish, TwoSettersDuringOneFilterReadNeverReuseItsSnapshot)
             return resume;
         });
     };
-    std::thread filter([&] {
+    std::thread action([&] {
         tBeforeWrite = pauseAtLut;
+        unit.frameEndAction(dc, true);
+    });
+    {
+        std::unique_lock<std::mutex> hold(m);
+        cv.wait(hold, [&] {
+            return writing;
+        });
+    }
+    const Snapshot *reading = &unit.newest();
+    Snapshot copy;
+    memcpy(&copy, reading, sizeof(copy));
+    setters.set(inverted);
+    EXPECT_NE(&unit.newest(), reading);
+    setters.set(warmer);
+    EXPECT_NE(&unit.newest(), reading);
+    EXPECT_EQ(memcmp(&copy, reading, sizeof(copy)), 0) << "a setter wrote the snapshot the action reads";
+    {
+        const std::lock_guard<std::mutex> hold(m);
+        resume = true;
+    }
+    cv.notify_all();
+    action.join();
+    for (unsigned i = 0; i < kLut1Entries; ++i)
+        EXPECT_EQ(dc.luts[0x2000 + i].load(), adopted.lut1[i]) << "LUT1 " << i;
+    for (unsigned k = 0; k < kLut2Entries; ++k)
+        EXPECT_EQ(dc.luts[0x3000 + k].load(), adopted.lut2[k]) << "LUT2 " << k;
+    settle();
+    EXPECT_EQ(dc.lutWritesScanned.load(), 0u);
+    EXPECT_EQ(dc.differs(unit.newest().tables), "");
+    EXPECT_EQ(gHolds.load(), 0);
+}
+
+// Primary-IRQ frameEnd writes zero LUT and zero palette registers (all bulk programming runs on the work loop in
+// frameEndAction), writes at most 9 CSC words when CMU is already live, and touches zero MMIO on steady-state frames.
+TEST_F(ColourPublish, PrimaryFilterWritesZeroLutsAndZeroPalettesAndSteadyStateDoesZeroMmio)
+{
+    setters.set(warmer);
+    unit.frameEnd(dc);
+    EXPECT_EQ(dc.lutWrites.load(), 0u);
+    EXPECT_EQ(dc.paletteWrites.load(), 0u);
+    EXPECT_EQ(dc.cscWrites.load(), 0u);
+
+    unit.frameEndAction(dc, true);
+    dc.boundary();
+    EXPECT_GT(dc.lutWrites.load(), 0u);
+    EXPECT_EQ(dc.lutWritesScanned.load(), 0u);
+    EXPECT_TRUE(dc.latchedEnable.load());
+    EXPECT_EQ(gHolds.load(), 0);
+
+    unit.frameEnd(dc);
+    const unsigned readsBefore = dc.mmioReads.load();
+    const unsigned lutsBefore = dc.lutWrites.load();
+    const unsigned cscBefore = dc.cscWrites.load();
+    const unsigned palBefore = dc.paletteWrites.load();
+    for (int i = 0; i < 8; ++i) {
+        unit.frameEnd(dc);
+        unit.frameEndAction(dc, true);
+    }
+    EXPECT_EQ(dc.mmioReads.load(), readsBefore);
+    EXPECT_EQ(dc.lutWrites.load(), lutsBefore);
+    EXPECT_EQ(dc.cscWrites.load(), cscBefore);
+    EXPECT_EQ(dc.paletteWrites.load(), palBefore);
+
+    setters.set([](Inputs &in) {
+        in.correction = kUnity16 / 2;
+    });
+    unit.frameEnd(dc);
+    EXPECT_EQ(dc.lutWrites.load(), lutsBefore);
+    EXPECT_GT(dc.cscWrites.load(), cscBefore);
+    EXPECT_LE(dc.cscWrites.load() - cscBefore, kCscWords);
+    unit.frameEndAction(dc, true);
+    EXPECT_EQ(gHolds.load(), 0);
+
+    {
+        const std::lock_guard<std::mutex> hold(setters.lock);
+        Snapshot &next = unit.spare();
+        build(setters.in, next.tables);
+        for (uint32_t i = 0; i < kPaletteWords; ++i)
+            next.palette[i] = i | (i << 8) | ((255u - i) << 16);
+        unit.publish(true, true, true);
+    }
+    unit.frameEnd(dc);
+    EXPECT_EQ(dc.paletteWrites.load(), palBefore);
+    unit.frameEndAction(dc, true);
+    EXPECT_EQ(dc.paletteWrites.load() - palBefore, 3u * kPaletteWords);
+    EXPECT_EQ(unit.windowOptions(), kCpEnable);
+    EXPECT_EQ(gHolds.load(), 0);
+}
+
+// Two setter calls during a primary-IRQ CSC write never reuse the snapshot the filter reads.
+TEST_F(ColourPublish, TwoSettersDuringOneFilterCscReadNeverReuseItsSnapshot)
+{
+    setters.set(warmer);
+    settle();
+    ASSERT_TRUE(dc.latchedEnable.load());
+
+    setters.set([](Inputs &in) {
+        in.correction = kUnity16 / 2;
+    });
+    std::mutex m;
+    std::condition_variable cv;
+    bool writing = false, resume = false;
+    const auto pauseAtCsc = [&](uint32_t word) {
+        if (word != kDcCmuCsc || writing)
+            return;
+        std::unique_lock<std::mutex> hold(m);
+        writing = true;
+        cv.notify_all();
+        cv.wait(hold, [&] {
+            return resume;
+        });
+    };
+    std::thread filter([&] {
+        tBeforeWrite = pauseAtCsc;
         unit.frameEnd(dc);
     });
     {
@@ -241,100 +363,10 @@ TEST_F(ColourPublish, TwoSettersDuringOneFilterReadNeverReuseItsSnapshot)
     }
     cv.notify_all();
     filter.join();
-    for (unsigned i = 0; i < kLut1Entries; ++i)
-        EXPECT_EQ(dc.luts[0x2000 + i].load(), adopted.lut1[i]) << "LUT1 " << i;
-    for (unsigned k = 0; k < kLut2Entries; ++k)
-        EXPECT_EQ(dc.luts[0x3000 + k].load(), adopted.lut2[k]) << "LUT2 " << k;
-    settle();
-    EXPECT_EQ(dc.differs(unit.newest().tables), "");
-    EXPECT_EQ(gHolds.load(), 0);
-}
-
-// The action has decided to enable and checked the filter has not moved; the filter then adopts a LUT change. It must
-// not write whole tables: the CMU is about to scan them.
-TEST_F(ColourPublish, AnEnableUnderWayKeepsTheFilterOffTheLuts)
-{
-    setters.set(warmer);
-    unit.frameEnd(dc);
-    ASSERT_EQ(dc.enableWrites.load(), 0u);
-    std::mutex m;
-    std::condition_variable cv;
-    bool enabling = false, resume = false;
-    const auto pauseAtEnable = [&](uint32_t word) {
-        if (word != kDcDispColorControl)
-            return;
-        std::unique_lock<std::mutex> hold(m);
-        enabling = true;
-        cv.notify_all();
-        cv.wait(hold, [&] {
-            return resume;
-        });
-    };
-    std::thread action([&] {
-        tBeforeWrite = pauseAtEnable;
-        unit.frameEndAction(dc, true);
-    });
-    {
-        std::unique_lock<std::mutex> hold(m);
-        cv.wait(hold, [&] {
-            return enabling;
-        });
-    }
-    setters.set(inverted);
-    const unsigned luts = dc.lutWrites;
-    unit.frameEnd(dc);
-    EXPECT_EQ(dc.lutWrites.load(), luts) << "whole tables written while the CMU was being enabled";
-    {
-        const std::lock_guard<std::mutex> hold(m);
-        resume = true;
-    }
-    cv.notify_all();
-    action.join();
-    EXPECT_TRUE(unit.actionState().enableAsked);
     settle();
     EXPECT_EQ(dc.lutWritesScanned.load(), 0u);
     EXPECT_EQ(dc.differs(unit.newest().tables), "");
     EXPECT_EQ(gHolds.load(), 0);
-}
-
-// The filter writes whole tables with the CMU off; the action, meanwhile, does not enable it.
-TEST_F(ColourPublish, TheFiltersWholeWriteKeepsTheActionFromEnabling)
-{
-    setters.set(warmer);
-    std::mutex m;
-    std::condition_variable cv;
-    bool writing = false, resume = false;
-    const auto pauseAtLut = [&](uint32_t word) {
-        if (word != kDcCmuLut1 || writing)
-            return;
-        std::unique_lock<std::mutex> hold(m);
-        writing = true;
-        cv.notify_all();
-        cv.wait(hold, [&] {
-            return resume;
-        });
-    };
-    std::thread filter([&] {
-        tBeforeWrite = pauseAtLut;
-        unit.frameEnd(dc);
-    });
-    {
-        std::unique_lock<std::mutex> hold(m);
-        cv.wait(hold, [&] {
-            return writing;
-        });
-    }
-    unit.frameEndAction(dc, true);
-    EXPECT_EQ(dc.enableWrites.load(), 0u) << "enabled under the filter's whole write";
-    {
-        const std::lock_guard<std::mutex> hold(m);
-        resume = true;
-    }
-    cv.notify_all();
-    filter.join();
-    settle();
-    EXPECT_EQ(dc.enableWrites.load(), 1u);
-    EXPECT_EQ(dc.differs(unit.newest().tables), "");
 }
 
 // The bypass's GENERAL_ACT_REQ is in DC A before the filter can read the bypass as latched: a LUT change with the CMU on
@@ -374,6 +406,10 @@ TEST_F(ColourPublish, WritersOnTheirOwnThreads)
     });
     std::thread action([&] {
         std::mt19937 random(11);
+        tBeforeWrite = [&](uint32_t) {
+            if (random() % 512 == 0)
+                dc.boundary();
+        };
         while (!stop) {
             unit.frameEndAction(dc, random() % 4 != 0);
             std::this_thread::yield();

@@ -1,6 +1,8 @@
+import CryptoKit
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// The system shader compiler's store (drivers/TegraGM20BMetal/compiler) across requesters and processes. Each run salts a
@@ -16,6 +18,13 @@ struct CompileSharedTest: HWTest {
 
     static let saltKey = "gpu.compile.shared.salt"
     static let storeKey = "gpu.compile.shared.store"
+
+    static func libraryDigest() -> String {
+        guard let url = Bundle.main.url(forResource: "default", withExtension: "metallib"),
+              let data = try? Data(contentsOf: url, options: .mappedIfSafe)
+        else { return "" }
+        return SHA256.hash(data: data).prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
 
     struct Made {
         var how = "none"
@@ -33,10 +42,12 @@ struct CompileSharedTest: HWTest {
         var checks: [(String, Bool)] = []
 
         let store = GM20BFacade.compilerStore(of: gpu.device) ?? ""
+        let library = Self.libraryDigest()
+        let identity = library.isEmpty ? store : "\(store):\(library)"
         metrics.set("store", store.isEmpty ? "none" : String(store.prefix(16)))
         checks.append(("the process maps the shader compiler's store", !store.isEmpty))
         let previousStore = UserDefaults.standard.string(forKey: Self.storeKey)
-        if let previous = UserDefaults.standard.object(forKey: Self.saltKey) as? Int, previousStore == store {
+        if let previous = UserDefaults.standard.object(forKey: Self.saltKey) as? Int, previousStore == identity {
             let again = try made(try pipeline(gpu, salt: UInt32(previous)))
             metrics.set("relaunch_how", again.how)
             checks.append(("the previous run's state came from the store with no request", again.how == "store"))
@@ -46,7 +57,7 @@ struct CompileSharedTest: HWTest {
 
         let salt = UInt32.random(in: 1 ... UInt32.max)
         UserDefaults.standard.set(Int(salt), forKey: Self.saltKey)
-        UserDefaults.standard.set(store, forKey: Self.storeKey)
+        UserDefaults.standard.set(identity, forKey: Self.storeKey)
         let pair = try await together(gpu, salt: salt)
         let compiled = pair.filter { $0.how == "compiled" }.count
         let shared = pair.filter { ["joined", "stored", "table", "store"].contains($0.how) }.count

@@ -1,11 +1,23 @@
 """The analyses of a `run` of batches/*.json, chosen by the families their experiments name, and one line per answer."""
 
 from tools.benchloop import store2fma
-from tools.benchloop.sm53 import affinity, fit, hsetp2, icache, int3, interlock_spin, measure, overlap, powr_verdict
+from tools.benchloop.sm53 import (
+    affinity,
+    dualclock,
+    fit,
+    hsetp2,
+    icache,
+    int3,
+    interlock_spin,
+    measure,
+    overlap,
+    powr_verdict,
+    readers,
+)
 
 # The clock the ladder measured (loop1, 11 Nov), for a run without a ladder of its own
 MEASURED_CLOCK_HZ = 769.1e6
-TIMING = {'ladder', 'stall', 'throughput'}
+TIMING = {'ladder', 'stall', 'throughput', 'dual', 'reuse'}
 
 
 def clock_hz(planned: list[dict], results: dict[str, dict]) -> float:
@@ -26,7 +38,10 @@ STEPS = {
     'store2fma': ('store2fma', lambda planned, results, _: store2fma.analyse(planned, results)),
     'hsetp2': ('hsetp2', lambda planned, results, _: hsetp2.analyse(planned, results)),
     'interlock': ('interlock', lambda planned, results, _: interlock_spin.analyse(planned, results)),
+    'interlock-clock': ('interlock_clock', interlock_spin.analyse_clock_probe),
     'powr-native': ('powr_native', lambda planned, results, _: powr_verdict.analyse(planned, results)),
+    'reader': ('readers', lambda planned, results, _: readers.analyse(planned, results)),
+    'dual-clock': ('dual_clock', lambda planned, results, _: dualclock.analyse(planned, results)),
 }
 
 
@@ -46,7 +61,7 @@ def analyse(planned: list[dict], results: dict[str, dict]) -> dict:
     out: dict = {'clock_hz': hz}
     if families & TIMING:
         found = fit.analyse([x for x in planned if x['meta'].get('family') in TIMING], results)
-        out['latency'] = {k: found[k] for k in ('clock', 'fixed', 'throughput', 'nak')}
+        out['latency'] = {k: found[k] for k in ('clock', 'fixed', 'throughput', 'dual', 'reuse', 'nak')}
     for family, (key, run) in STEPS.items():
         if family in families:
             out[key] = run(planned, results, hz)
@@ -63,6 +78,9 @@ def _latency_lines(found: dict) -> list[str]:
     for op, s in found['fixed'].items():
         lines.append(f'stall {op} {s["pattern"]} latency {s["latency"]} (NAK {s["nak"]})')
     lines += [f'throughput {op} {_f(t["cycles"])} cycles/warp-instr' for op, t in found['throughput'].items()]
+    for op, d in found.get('dual', {}).items():
+        lines.append(f'dual {op} {_f(d["d0"]["cycles"])} at delay 0, {_f(d["d1"]["cycles"])} at 1 dual {d["dual"]}')
+    lines += [f'reuse {v} {_f(r["cycles"])} cycles' for v, r in found.get('reuse', {}).items() if isinstance(r, dict)]
     return lines
 
 
@@ -110,6 +128,14 @@ def _interlock(found: dict) -> list[str]:
     return [line(eid, r) for eid, r in found.items()]
 
 
+def _readers(found: dict) -> list[str]:
+    return [
+        f'{family} {op} {r["pattern"]} right from {r["right_from"]}'
+        for family, ops in found.items()
+        for op, r in ops.items()
+    ]
+
+
 def _hsetp2(found: dict) -> list[str]:
     lines = []
     for eid, v in found.items():
@@ -123,6 +149,19 @@ def _hsetp2(found: dict) -> list[str]:
     return lines
 
 
+def _interlock_clock(found: dict) -> list[str]:
+    lines = [
+        f'interlock_clock safety {arm} {r["status"]} dt {r.get("dt", "-")} monotonic {r["monotonic"]}'
+        for arm, r in found['safety'].items()
+    ]
+    lines += [
+        f'interlock_clock latency {arm} {r["status"]} {_f(r.get("cycles_per_op"))} cycles/op'
+        for arm, r in found['latency'].items()
+    ]
+    lines += _interlock(found['spin'])
+    return lines
+
+
 LINES = {
     'stall_wide': _wide,
     'xmad_mul': _mul,
@@ -131,8 +170,11 @@ LINES = {
     'affinity': _affinity,
     'store2fma': _store,
     'interlock': _interlock,
+    'interlock_clock': _interlock_clock,
     'hsetp2': _hsetp2,
     'powr_native': powr_verdict.lines,
+    'readers': _readers,
+    'dual_clock': lambda found: [f'dual {op} {d}' for op, d in found.items()],
 }
 
 

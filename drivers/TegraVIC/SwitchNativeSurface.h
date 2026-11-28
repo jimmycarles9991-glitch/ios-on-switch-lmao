@@ -5,6 +5,7 @@
 #include "../TegraGM20B/SwitchGpuBacking.h"
 
 struct SwitchVICEvents;
+struct SwitchVICWriteReservation;
 
 struct SwitchNativeSurfaceCrop {
     uint32_t x, y, width, height;
@@ -45,13 +46,17 @@ void switch_native_surface_release(SwitchNativeSurfaceView *view);
 // a surface.
 int switch_native_surface_publish(const TegraVICSurface *surface, const TegraVICPicture *picture,
                                   const char **why = nullptr, bool *fresh = nullptr, bool *first = nullptr);
+int switch_native_surface_publish_gpu(const TegraVICSurface *surface, SwitchNativeSurfaceView *view);
+extern "C" void switch_native_surface_gpu_written(void *owner);
 // `destination` (a whole NV12 surface) is `source`'s picture turned by `op` (a quarter turn of a source rectangle onto
 // the whole destination): its rows are made by VIC only when something other than the display reads them. `events`
 // (the request's, prepared): taken by the record when it is published, its waits ordered before every reader and its
-// signals delivered once (switch_native_surface_deliver, a reader's VIC job, or the record replaced or freed).
+// signals delivered once (switch_native_surface_deliver, a reader's VIC job, or the record replaced or freed). `held`:
+// the request's own write reservation on `destination`, if it took one; the record is made under it.
 int switch_native_surface_publish_turned(const TegraVICSurface *destination, const SwitchNativeSurfaceView &source,
                                          const TegraVICOp &op, uint32_t chromaSite, const char **why = nullptr,
-                                         SwitchVICEvents *events = nullptr);
+                                         SwitchVICEvents *events = nullptr,
+                                         const SwitchVICWriteReservation *held = nullptr);
 // The display latched (or dropped) the frame `view` shows: a recorded turn's signals go now, bound to its picture's
 // completion, unless something delivered them already.
 void switch_native_surface_deliver(const SwitchNativeSurfaceView &view);

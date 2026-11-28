@@ -182,4 +182,28 @@ TEST(XusbMailbox, ReleasedMeansNoLongerOurs)
     EXPECT_TRUE(xusb_mbox_released(0));
     EXPECT_TRUE(xusb_mbox_released(1));
 }
+
+TEST(XusbMailbox, DeferredReplySetTakeCancel)
+{
+    xusb_mbox_deferred d{};
+    xusb_mbox_deferred taken{};
+    EXPECT_FALSE(xusb_mbox_deferred_take(&d, &taken));
+    EXPECT_FALSE(xusb_mbox_deferred_cancel(&d));
+
+    xusb_mbox_deferred_set(&d, 17u, XUSB_MBOX_REPLY_ACK, 1u << 1, XUSB_MBOX_LFPS_SETTLE_MS);
+    EXPECT_TRUE(d.pending);
+    EXPECT_EQ(d.delay_ms, 1u);
+    EXPECT_TRUE(xusb_mbox_deferred_take(&d, &taken));
+    EXPECT_FALSE(d.pending);
+    EXPECT_EQ(taken.request_cmd, 17u);
+    EXPECT_EQ(taken.reply_cmd, XUSB_MBOX_REPLY_ACK);
+    EXPECT_EQ(taken.data, 1u << 1);
+    EXPECT_FALSE(xusb_mbox_deferred_take(&d, &taken));
+
+    xusb_mbox_deferred_set(&d, 17u, XUSB_MBOX_REPLY_ACK, 1u << 1, XUSB_MBOX_LFPS_SETTLE_MS);
+    EXPECT_TRUE(xusb_mbox_deferred_cancel(&d));
+    EXPECT_FALSE(d.pending);
+    EXPECT_FALSE(xusb_mbox_deferred_cancel(&d));
+    EXPECT_FALSE(xusb_mbox_deferred_take(&d, &taken));
+}
 }  // namespace

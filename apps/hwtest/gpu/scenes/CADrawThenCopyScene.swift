@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// What a pass draws is what the next work in its command buffer reads: Core Animation's untextured fill draws 64

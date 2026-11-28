@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A linear texture's row of a format the driver does not lay out (drivers/TegraGM20BMetal/

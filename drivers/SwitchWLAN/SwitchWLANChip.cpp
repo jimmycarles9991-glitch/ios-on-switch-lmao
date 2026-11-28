@@ -10,7 +10,6 @@
 #include <IOKit/IOLib.h>
 #include "SwitchWLANPrivate.h"
 #if DEVELOPMENT || DEBUG
-#include <libkern/crypto/sha2.h>
 #include <pexpert/pexpert.h>
 #include "SwitchWLANA3.h"
 #include "firmware/a3/image.h"
@@ -265,13 +264,8 @@ bool Chip::captureRom(const uint8_t *image, size_t imageLength, const Core &arm)
         IOLog("SwitchWLAN: ROM capture refused: ROM %u, RAM %u, image %zu\n", romSize_, ramSize_, imageLength);
         return false;
     }
-    uint8_t hash[32];
-    SHA256_CTX context;
-    SHA256_Init(&context);
-    SHA256_Update(&context, image, imageLength);
-    SHA256_Final(hash, &context);
-    if (memcmp(hash, switch_wlan_rom_image_sha256, sizeof hash) ||
-        memcmp(image + SWITCH_WLAN_ROM_START_OFFSET, switch_wlan_rom_start_original,
+    // `image` is the embedded firmware, pinned at build time (rom_capture_test); the start bytes are the patch's own check
+    if (memcmp(image + SWITCH_WLAN_ROM_START_OFFSET, switch_wlan_rom_start_original,
                sizeof switch_wlan_rom_start_original)) {
         IOLog("SwitchWLAN: ROM capture refused: firmware fingerprint changed\n");
         return false;

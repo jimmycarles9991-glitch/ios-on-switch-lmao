@@ -25,6 +25,7 @@ mod opt_out;
 mod opt_prmt;
 mod opt_sm53_half_probe;
 mod opt_uniform_instrs;
+mod opt_unorm_outputs;
 mod qmd;
 mod reg_banks;
 mod reg_tracker;

@@ -7,8 +7,9 @@
 //! the ordered pixel interlock, the mechanism of raster order groups and imageblocks: each color
 //! attachment the function reads becomes a storage image of the attachment
 //! (`ResourceKind::TileAttachment(n)`), read at the fragment's pixel (the integer part of
-//! `FragCoord.xy`) at each use, and, when the function writes that attachment through its first
-//! (index 0) output, written there at the return in place of the output
+//! `FragCoord.xy`), at each use or, where the function decodes it itself, once in its first
+//! block ([`emit_entry`]), and, when the function writes that attachment through
+//! its first (index 0) output, written there at the return in place of the output
 //! (`GraphicsState::storage_attachments`; colors it writes but does not read stay ordinary outputs,
 //! but those the pipeline's state names: a color its draw's render pass instance keeps out of its
 //! subpass for other draws' storage form, `VariantKey::interlocked_colors`). The whole body runs
@@ -27,8 +28,10 @@
 //! only where nothing after the shader would drop or change Metal's color write ([`storage_form`],
 //! which link applies again to the pipeline it links into):
 //!
-//! - one view and one layer: no vertex amplification (the binder also refuses a pass of more
-//!   than one layer);
+//! - one view at a time: an amplified pipeline's draws are drawn one amplification each, every
+//!   one into its layer of the pass (the binder refuses its storage form where they would be
+//!   multiview views, which one image of the pass's layers does not address), and so in the
+//!   layered form, which a multisampled function has none of ([`plan_layer`]);
 //! - for a written attachment whose write mask covers some of its format's channels (one that
 //!   covers none stores nothing, so none of this bears on it): no blending but one and zero, added,
 //!   for color and alpha, which stores the source as no blending does (a signed normalized format's
@@ -117,7 +120,7 @@ use std::collections::BTreeSet;
 
 use crate::air::abi::{AbiInt, OutputRole, ParamRole};
 use crate::air::intrinsics::{AirIntrinsic, Fragment, PackDir, PackFormat};
-use crate::air::ir::{Callee, InstKind, Type as AirType, TypeId as AirTypeId, Value};
+use crate::air::ir::{ArgIdx, Callee, InstKind, Type as AirType, TypeId as AirTypeId, Value};
 use crate::device::profile::{DriverWorkaround, FramebufferFetchPolicy};
 use crate::device::requirements::{FormatUsage, VkFeature};
 use crate::device::DeviceProfile;
@@ -531,8 +534,8 @@ pub(crate) fn storage_form(
     }
     let shader_blends = blend.is_some();
     let blends = attachment.blending_enabled && !(attachment.replaces && !snorm) && !shader_blends;
-    let not_modelled = inputs.amplified
-        || mapping.emulation != FormatEmulation::Direct
+    let not_modelled = mapping.emulation != FormatEmulation::Direct
+        || (inputs.amplified && multisampled)
         || (srgb && uint_view.is_none())
         // Metal's blend into an sRGB attachment, a replacing one too, is not measured: the device's
         // is modelled.
@@ -1474,6 +1477,44 @@ fn as_held(fb: &mut FunctionBuilder<'_>, texel: SValue, numeric: SampledType) ->
     })?;
     let uvec4 = fb.module().ty(SType::Vector { elem: u32_, len: 4 })?;
     fb.convert(ConvOp::Bitcast, texel, uvec4)
+}
+
+/// Read once, in the function's first block, each storage-form color input the function decodes
+/// itself (an sRGB or packed format's word, through its integer view) and uses more than once. The
+/// body runs inside the interlock, where no other fragment of the pixel writes the texel and the
+/// invocation's own write comes at its return, so every use reads the same value: Hillshade's
+/// `Blending::blend` reads `dst` and decodes its sRGB bytes in each of 19 modes. A color the image
+/// unit converts is read at its uses: a repeated read there is one surface load, which the stage
+/// compile merges within a block, and holding it from the first block lengthens its live range
+/// over paths that never read it (RenderBox's gradients: 32 registers to 40).
+pub(super) fn emit_entry(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>) -> BResult<()> {
+    let fragment = &cx.plan.families.fragment;
+    let uses = |param: u32| {
+        let mut n = 0usize;
+        for inst in cx.body.insts.values() {
+            inst.kind.for_each_value(|v| n += usize::from(v == Value::Arg(ArgIdx::new(param))));
+        }
+        n
+    };
+    let held: Vec<ColorInput> = fragment
+        .colors
+        .iter()
+        .filter(|c| {
+            fragment
+                .fetch
+                .get(&c.color)
+                .is_some_and(|sc| sc.view.uint_view.is_some() && uses(c.param) > 1)
+        })
+        .copied()
+        .collect();
+    for c in held {
+        let Some(v) = cx.plan.values.id(Value::Arg(ArgIdx::new(c.param))) else {
+            return Err(cx.fail(format!("color input parameter {} is out of range", c.param)));
+        };
+        let x = value(cx, fb, c)?;
+        cx.hold(v, x);
+    }
+    Ok(())
 }
 
 /// The value of storage-form color input `c` in its lowered representation, read at its pixel

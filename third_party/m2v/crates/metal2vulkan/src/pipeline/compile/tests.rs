@@ -6,8 +6,7 @@
 //! with L3 (`spirv-val` under the profile, requirements ⊆ profile) when `spirv-val` is present.
 
 mod native;
-
-use std::path::Path;
+mod read_inputs;
 
 use crate::air::container::sha256;
 use crate::air::error::{AbiError, ContainerError, InputErrorKind};
@@ -70,8 +69,8 @@ fn device(stem: &str) -> Device {
 
 /// Committed profile `stem` as the Khronos reader describes it.
 fn description(stem: &str) -> DeviceDescription {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../metal2vulkan-validation/profiles")
+    let path = crate::pipeline::testing::fixtures_dir()
+        .join("../../profiles")
         .join(format!("{stem}.json"));
     let text = std::fs::read_to_string(&path).expect("profile");
     DeviceDescription::from_khronos_json(&text, None).expect("description")
@@ -116,7 +115,7 @@ fn from_air_enumerates_every_entry() {
     };
     let lib = Library::from_air(&bc).expect("library");
     assert_eq!(lib, Library::parse(&bc).expect("parse"));
-    assert_eq!(lib.content_hash(), &sha256(&bc));
+    assert_eq!(lib.code_identity(), &sha256(&bc));
     let names: Vec<(&str, FunctionStage)> = lib.functions().map(|f| (f.name, f.stage)).collect();
     // The fixture declares five vertex and four fragment entries.
     assert_eq!(names.len(), 9, "{names:?}");

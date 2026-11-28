@@ -40,7 +40,7 @@ void switch_gm20b_compute_inline_words(struct nv_push *p, uint64_t va, const uin
 // with NO_PREFETCH after it (GP_ENTRY1_SYNC_WAIT) sees what the work before wrote (NVK's pre-Hopper host WFI)
 void switch_gm20b_fetch_after_idle(struct nv_push *p);
 
-#define SWITCH_GM20B_COMPUTE_IDLE_WORDS 2u
+#define SWITCH_GM20B_COMPUTE_IDLE_WORDS 1u
 
 // The compute work before has finished and its stores reached L2, for the copy engine to read
 void switch_gm20b_compute_idle_flushed(struct nv_push *p);

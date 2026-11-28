@@ -54,6 +54,8 @@ extern "C" bool switch_display_landscape_ready(void);
 // TegraVIC's transform worker, before it copies: 1 when the job is recorded on its destination instead (nothing to
 // submit, the caller completes it), 0 to copy as before. `events` (the job's, prepared, or null): a recorded job's go
 // with the record (*events nulled), which orders every reader after their waits and delivers their signals once.
+// `held`: the job's write reservation on `destination` from when it was queued (null or empty if it took none).
 int switch_vic_turn_defer(const TegraVICSurface *source, const TegraVICSurface *destination, const TegraVICPlan *plan,
                           uint32_t chromaSite, SwitchVICEvents **events,
-                          const SwitchDisplayTraits &traits = kSwitchDisplayTraits);
+                          const SwitchDisplayTraits &traits = kSwitchDisplayTraits,
+                          const SwitchVICWriteReservation *held = nullptr);

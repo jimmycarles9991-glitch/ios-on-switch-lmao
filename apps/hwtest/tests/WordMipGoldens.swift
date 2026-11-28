@@ -1,7 +1,7 @@
 /// An M4 Max's levels 1 and down of each WordMipFormat chain (WordMipmapCases.run there, validation off), base64 with
 /// line breaks (Data(base64Encoded:options: .ignoreUnknownCharacters))
 extension WordMipmapCases {
-    static let apple: [String: String] = [
+    public static let apple: [String: String] = [
         "f552": """
         ALMAoUCJwL7Ac4DBAHnAn8BzwHAAhECFQJOAgcBKQJWAicBtAEIAZYBrgIOAcECJwE2Ag4AwQIFAYICYQKQAvIB3AMRAgQCTAHXA
         oICHgJgAngCjAH8AjQCCgI5AbQCGQHlAk4BHQIAAZQBxgLEAjABVAGUATYCYAHxAywCmQJfApIC+QBlAr4C+gKfAVQCAQJFAoUBd

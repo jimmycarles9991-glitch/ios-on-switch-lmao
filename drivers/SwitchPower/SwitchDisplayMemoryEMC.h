@@ -32,6 +32,15 @@ bool SwitchEMC::programMemory(uint32_t before, uint32_t after, bool force)
     return true;
 }
 
+void SwitchEMC::publishMemorySnapshot()
+{
+    const uint32_t seq = __atomic_load_n(&memorySeq, __ATOMIC_RELAXED);
+    __atomic_store_n(&memorySeq, seq + 1u, __ATOMIC_RELEASE);
+    __atomic_thread_fence(__ATOMIC_ACQ_REL);
+    memoryCommitted = memoryState;
+    __atomic_store_n(&memorySeq, seq + 2u, __ATOMIC_RELEASE);
+}
+
 IOReturn SwitchEMC::memoryAction(OSObject *owner, void *argument, void *result, void *, void *)
 {
     auto *self = static_cast<SwitchEMC *>(owner);
@@ -66,6 +75,7 @@ IOReturn SwitchEMC::memoryAction(OSObject *owner, void *argument, void *result, 
                 (void)self->programMemory(self->khz[self->cur], self->khz[self->cur], true);
                 error = -28;
             } else {
+                self->publishMemorySnapshot();
                 if (!request.head)
                     __atomic_store_n(&gDisplayBytes, request.peak_bytes_per_second, __ATOMIC_RELEASE);
                 if (self->governing)
@@ -79,6 +89,19 @@ IOReturn SwitchEMC::memoryAction(OSObject *owner, void *argument, void *result, 
 
 int SwitchEMC::reserveMemory(const switch_display_memory_head &request)
 {
+    if (request.head > 1)
+        return -22;
+    if (!__atomic_load_n(&memoryQualified, __ATOMIC_ACQUIRE))
+        return -95;
+    // Seqlock fast path: avoids blocking on the EMC work loop (or an in-flight BPMP IPC) when this head's committed
+    // plan already matches `request`.
+    const uint32_t seq0 = __atomic_load_n(&memorySeq, __ATOMIC_ACQUIRE);
+    if ((seq0 & 1u) == 0) {
+        const bool same = memoryCommitted.same(request);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (same && __atomic_load_n(&memorySeq, __ATOMIC_RELAXED) == seq0)
+            return 0;
+    }
     int error = 0;
     loop->runAction(memoryAction, this, const_cast<switch_display_memory_head *>(&request), &error);
     return error;

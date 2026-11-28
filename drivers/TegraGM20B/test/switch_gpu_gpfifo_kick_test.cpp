@@ -6,8 +6,10 @@
 #include <gtest/gtest.h>
 #include "drivers/TegraGM20B/test/kick_include/nvif/chan.h"
 
-unsigned switch_gpu_test_delays, switch_gpu_test_warnings, switch_gpu_test_barriers,
-	switch_gpu_test_doorbells;
+unsigned switch_gpu_test_delays, switch_gpu_test_sleeps, switch_gpu_test_warnings,
+	switch_gpu_test_barriers, switch_gpu_test_doorbells;
+unsigned long switch_gpu_test_sleep_us;
+int switch_gpu_test_can_sleep = 1;
 u32 switch_gpu_test_doorbell;
 
 namespace

@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A plain buffer of a struct has an encoder (newArgumentEncoderWithBufferIndex:) whose arguments sit where the

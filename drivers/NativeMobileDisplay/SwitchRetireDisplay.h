@@ -30,12 +30,16 @@ uint64_t oldestPendingFrame() const
 }
 
 // A swap that waited for a frame end (a busy overlay source, a scanned slot) goes again at one where nothing else
-// will kick: no window A flip or overlay set out, no console scroll, probe or overlay recovery in progress.
+// will kick: no window A flip or overlay set out, no console scroll, probe or overlay recovery in progress. A head
+// held only for its requested presentation goes again at every frame end: a flip or an overlay set still out would
+// kick it at its own latch, a period after the frame end its stamp names.
 // NOLINTNEXTLINE(misc-no-recursion): kickSwapQueue's kicking flag stops re-entry; a nested kick only loops
 void kickAtIdleFrameEnd()
 {
-    if (!kickDeferred || ring.pending != kNoBuffer || planeLatch.requested() || tapeSettle || probeRequest ||
-        probe.active() || planeProbe.active() || planeRecoveryWaits() || hwSuspended || scanoutStopped)
+    if (!kickDeferred || tapeSettle || probeRequest || probe.active() || planeProbe.active() || planeRecoveryWaits() ||
+        hwSuspended || scanoutStopped)
+        return;
+    if (!headHeldForTime && (ring.pending != kNoBuffer || planeLatch.requested()))
         return;
     kickDeferred = false;
     kickSwapQueue();

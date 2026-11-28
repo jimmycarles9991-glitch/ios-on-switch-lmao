@@ -29,6 +29,27 @@ gm20b::RuntimeRecord plainRecord(uint64_t key)
     return r;
 }
 
+// A runtime record whose buffers' Metal address words a draw could not write (one past the root push words, or on a word
+// the record pushes) is refused, as the pack's scan refuses a packed one (guest_bases.h)
+using DeviceGuestBases = harness::DeviceTest;
+
+TEST_F(DeviceGuestBases, ARecordOfUnwritableGuestBaseWordsIsRefused)
+{
+    std::string why;
+    gm20b::RuntimeRecord past = plainRecord(0x6b01);
+    past.pipeline.guestBaseWord[0] = 32;
+    EXPECT_EQ(dev.addRecord(past, false, why), nullptr);
+    EXPECT_NE(why.find("Metal address"), std::string::npos) << why;
+    gm20b::RuntimeRecord pushed = plainRecord(0x6b02);
+    pushed.pipeline.guestBaseWord[0] = 3;
+    pushed.pipeline.pushMask = 1u << 2;
+    EXPECT_EQ(dev.addRecord(pushed, false, why), nullptr);
+    gm20b::RuntimeRecord fine = plainRecord(0x6b03);
+    fine.pipeline.guestBaseWord[0] = 3;
+    fine.pipeline.guestBaseSlot[0] = 5;
+    EXPECT_NE(dev.addRecord(fine, false, why), nullptr) << why;
+}
+
 class DeviceClientErrors : public harness::DeviceTest {
 protected:
     gm20b::Pipeline *pl = nullptr;

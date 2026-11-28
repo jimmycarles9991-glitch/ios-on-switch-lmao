@@ -653,4 +653,136 @@ TEST_F(DeviceComputeStatedMaps, ARecordMadeUnderItsKeysMapsBindsItsHeaderAsMade)
     EXPECT_EQ(why, "a kernel sampler whose modes a converted texture's address map changes, compiled without that map");
 }
 
+class DeviceComputeViews : public harness::DeviceTest {};
+
+TEST_F(DeviceComputeViews, RawUnormReadOfSrgbTextureBindsLinearViewWhileSrgbReadKeepsOwn)
+{
+    constexpr uint32_t kRgba8Srgb = 71;
+    gm20b::Texture srgb;
+    ASSERT_TRUE(dev.createTexture(16, 16, kRgba8Srgb, srgb));
+    const gm20b::FormatInfo *info = gm20b::formatInfo(kRgba8Srgb);
+    ASSERT_NE(info, nullptr);
+    ASSERT_NE(gm20b::DeviceHarness::header(dev, srgb.tic)[4] & (1u << 22), 0u);
+
+    auto run = [&](uint32_t window) -> uint32_t {
+        gm20b::ComputeRecord r;
+        r.code.assign(64, 0);
+        r.cbufType[0] = gm20b::CbufRoot;
+        r.cbufs = 1;
+        r.kernel.regionWord = -1;
+        r.kernel.qmd[kQmdCbufValid] |= 1;
+        r.kernel.setBytes = 4;
+        r.kernel.entries = 1;
+        r.kernel.entry[0] = {0, gm20b::KernelTexture, 0, window};
+        r.kernel.readOnlyEntries = 1;
+        const gm20b::ComputeState *k = gm20b::placeCompute(dev, r);
+        EXPECT_NE(k, nullptr);
+        gm20b::CommandBuffer *cb = dev.begin();
+        EXPECT_NE(cb, nullptr);
+        uint32_t tic = 0;
+        {
+            gm20b::ComputeEncoder e(*cb, dev);
+            e.setState(k);
+            e.setTexture(0, &srgb);
+            const uint32_t groups[3] = {1, 1, 1}, threads[3] = {1, 1, 1};
+            const char *why = nullptr;
+            EXPECT_TRUE(e.dispatch(groups, threads, &why)) << (why ? why : "");
+            if (const uint32_t *set = gm20b::DeviceHarness::kernelSet(e))
+                tic = set[0] & 0xfffffu;
+            e.end();
+        }
+        uint32_t seqno = 0;
+        EXPECT_TRUE(cb->commit(seqno));
+        return tic;
+    };
+
+    const uint32_t rawTic = run(info->tic0);
+    ASSERT_NE(rawTic, 0u);
+    EXPECT_NE(rawTic, srgb.tic);
+    const auto rawHeader = gm20b::DeviceHarness::header(dev, rawTic);
+    EXPECT_EQ(rawHeader[0], info->tic0);
+    EXPECT_EQ(rawHeader[4] & (1u << 22), 0u) << "RawTexture UNORM view strips S_R_G_B_CONVERSION";
+
+    const uint32_t sampledTic = run(info->tic0 | gm20b::kKernelWindowSrgb);
+    EXPECT_EQ(sampledTic, srgb.tic) << "sRGB sampled view keeps the texture's own sRGB header";
+
+    dev.destroyTexture(srgb);
+}
+
+TEST_F(DeviceComputeViews, CubeAsArrayEntryBindsTwoDArrayHeaderAndCombinesWithSrgbStrip)
+{
+    constexpr uint32_t kRgba8Srgb = 71;
+    gm20b::Texture cube, srgbCube, array;
+    ASSERT_TRUE(dev.createArray(16, 16, 6, kRGBA8, gm20b::fx::kTexCube, cube, 2));
+    ASSERT_TRUE(dev.createArray(16, 16, 6, kRgba8Srgb, gm20b::fx::kTexCube, srgbCube, 2));
+    ASSERT_TRUE(dev.createArray(16, 16, 6, kRGBA8, gm20b::fx::kTexTwoDArray, array, 2));
+    const gm20b::FormatInfo *linearInfo = gm20b::formatInfo(kRGBA8);
+    const gm20b::FormatInfo *srgbInfo = gm20b::formatInfo(kRgba8Srgb);
+    ASSERT_NE(linearInfo, nullptr);
+    ASSERT_NE(srgbInfo, nullptr);
+
+    auto run = [&](const gm20b::Texture &tex, uint8_t slot, uint32_t window) -> uint32_t {
+        gm20b::ComputeRecord r;
+        r.code.assign(64, 0);
+        r.cbufType[0] = gm20b::CbufRoot;
+        r.cbufs = 1;
+        r.kernel.regionWord = -1;
+        r.kernel.qmd[kQmdCbufValid] |= 1;
+        r.kernel.setBytes = 4;
+        r.kernel.entries = 1;
+        r.kernel.entry[0] = {0, gm20b::KernelTexture, slot, window};
+        r.kernel.readOnlyEntries = 1;
+        const gm20b::ComputeState *k = gm20b::placeCompute(dev, r);
+        EXPECT_NE(k, nullptr);
+        gm20b::CommandBuffer *cb = dev.begin();
+        EXPECT_NE(cb, nullptr);
+        uint32_t tic = 0;
+        {
+            gm20b::ComputeEncoder e(*cb, dev);
+            e.setState(k);
+            e.setTexture(0, &tex);
+            const uint32_t groups[3] = {1, 1, 1}, threads[3] = {1, 1, 1};
+            const char *why = nullptr;
+            EXPECT_TRUE(e.dispatch(groups, threads, &why)) << (why ? why : "");
+            if (const uint32_t *set = gm20b::DeviceHarness::kernelSet(e))
+                tic = set[0] & 0xfffffu;
+            e.end();
+        }
+        uint32_t seqno = 0;
+        EXPECT_TRUE(cb->commit(seqno));
+        return tic;
+    };
+
+    const uint8_t arraySlot = uint8_t(0 | gm20b::kKernelTextureArray);
+    const uint32_t cubeTic = run(cube, arraySlot, linearInfo->tic0);
+    ASSERT_NE(cubeTic, 0u);
+    EXPECT_NE(cubeTic, cube.tic);
+    const auto cubeW = gm20b::DeviceHarness::header(dev, cubeTic);
+    EXPECT_EQ((cubeW[4] >> 23) & 0xfu, gm20b::fx::kTexTwoDArray);
+    EXPECT_EQ((cubeW[5] >> 16) & 0x3fffu, 5u);
+
+    const uint32_t srgbRawTic = run(srgbCube, arraySlot, srgbInfo->tic0);
+    ASSERT_NE(srgbRawTic, 0u);
+    EXPECT_NE(srgbRawTic, srgbCube.tic);
+    const auto srgbRawW = gm20b::DeviceHarness::header(dev, srgbRawTic);
+    EXPECT_EQ((srgbRawW[4] >> 23) & 0xfu, gm20b::fx::kTexTwoDArray);
+    EXPECT_EQ((srgbRawW[5] >> 16) & 0x3fffu, 5u);
+    EXPECT_EQ(srgbRawW[4] & (1u << 22), 0u);
+
+    const uint32_t srgbSampledTic = run(srgbCube, arraySlot, srgbInfo->tic0 | gm20b::kKernelWindowSrgb);
+    ASSERT_NE(srgbSampledTic, 0u);
+    EXPECT_NE(srgbSampledTic, srgbCube.tic);
+    const auto srgbSampledW = gm20b::DeviceHarness::header(dev, srgbSampledTic);
+    EXPECT_EQ((srgbSampledW[4] >> 23) & 0xfu, gm20b::fx::kTexTwoDArray);
+    EXPECT_EQ((srgbSampledW[5] >> 16) & 0x3fffu, 5u);
+    EXPECT_NE(srgbSampledW[4] & (1u << 22), 0u);
+
+    const uint32_t arrayTic = run(array, arraySlot, linearInfo->tic0);
+    EXPECT_EQ(arrayTic, array.tic);
+
+    dev.destroyTexture(array);
+    dev.destroyTexture(srgbCube);
+    dev.destroyTexture(cube);
+}
+
 }  // namespace

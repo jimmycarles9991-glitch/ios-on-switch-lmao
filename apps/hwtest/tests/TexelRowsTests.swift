@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// An 80-texel BGRA8Unorm texel buffer over a 'BGRA' 64x16 of rows 320 a BGRA8 target drew into first, which on the

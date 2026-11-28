@@ -36,6 +36,32 @@
 
 __BEGIN_DECLS
 
+#if defined(SWITCH_ARMV8_PMUV3)
+
+#define CPC_CPMU_MAX_COUNT ((UINT64_C(1) << 63) - 1)
+#define CPC_COUNTERS_WRAP  1
+
+union cpc_machine_regs {
+	struct _cpc_arm64_cpmu_regs {
+		uint32_t cacr_pmcnten;
+		uint32_t cacr_pminten;
+		uint32_t cacr_pmevtyper[CPMU_PMC_COUNT - 1];
+		cpc_event_t cacr_events[CPMU_PMC_COUNT - 2];
+		bool cacr_has_events;
+	} cmr_cpmu;
+};
+
+static inline bool
+cpc_pmi_pending(uint64_t * restrict pmcr0_out,
+    uint64_t * restrict upmsr_out)
+{
+	*pmcr0_out = 0;
+#pragma unused(upmsr_out)
+	return false;
+}
+
+#else // defined(SWITCH_ARMV8_PMUV3)
+
 #if CPMU_64BIT_PMCS
 #define CPC_CPMU_MAX_COUNT ((1ULL << 63) - 1)
 #else // CPMU_64BIT_PMCS
@@ -113,6 +139,8 @@ cpc_pmi_pending(uint64_t * restrict pmcr0_out,
 
 	return pmi;
 }
+
+#endif // !defined(SWITCH_ARMV8_PMUV3)
 
 // Called by the second level exception handler when a PMI FIQ occurs.
 void cpc_fiq(void *cpu, uint64_t pmcr0, uint64_t upmsr);

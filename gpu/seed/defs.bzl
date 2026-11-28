@@ -297,6 +297,7 @@ _METAL_LINK = [
     "layouts.py",
     "packfile.py",
     "probelog.py",
+    "segments.py",
     "splits.py",
     "archives.py",
     "draw_context.txt",
@@ -470,7 +471,7 @@ seed_pipeline_pack = rule(
         # The Core Animation preferences the device runs with decide which colour precision its QuartzCore names
         # states with (pack/ca/deepcolour.py)
         "_ca_preferences": attr.label(
-            default = "//drivers/TegraGM20BMetal:stage-tegra-gm20b-metal.py",
+            default = "//tools/gpu:stage_format.py",
             allow_single_file = True,
         ),
         "_tool": attr.label(default = "//tools/gpu:make_pack", executable = True, cfg = "exec"),

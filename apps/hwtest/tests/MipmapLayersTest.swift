@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// generateMipmaps of arrays and cubes whose steps are the 3D engine's (formats with a pack mip state and no 2D-engine
@@ -139,8 +140,10 @@ struct MipmapLayersTest: HWTest {
             for layer in 0 ..< layers {
                 for level in 0 ..< 6 {
                     var expected = initial[layer * 6 + level]
-                    if (firstSlice ..< firstSlice + sliceCount).contains(layer) && (firstLevel + 1 ..< 4)
-                        .contains(level) {
+                    let generatedLevel =
+                        (firstSlice ..< firstSlice + sliceCount).contains(layer) && (firstLevel + 1 ..< 4)
+                        .contains(level)
+                    if generatedLevel {
                         let color: UInt8 = arm.srgb ? 188 : 128
                         for p in 0 ..< (expected.count / 4) {
                             expected[4 * p] = color
@@ -149,7 +152,12 @@ struct MipmapLayersTest: HWTest {
                         }
                     }
                     let bytes = try await gpu.read(texture, bytesPerPixel: 4, level: level, slice: layer)
-                    for i in expected.indices where bytes[i] != expected[i] { off += 1 }
+                    // 0/255 averages to 127.5; GM20B breaks unorm8 half-code ties downward to 127 (rule mip.twod: within
+                    // one code), while alpha and untouched levels/slices stay exact.
+                    for i in expected.indices {
+                        let tol = generatedLevel && (i & 3) != 3 ? 1 : 0
+                        if abs(Int(bytes[i]) - Int(expected[i])) > tol { off += 1 }
+                    }
                 }
             }
             metrics.set("\(arm.name)_path", generated)

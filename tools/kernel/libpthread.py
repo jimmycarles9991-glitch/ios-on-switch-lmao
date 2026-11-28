@@ -85,6 +85,7 @@ def main() -> None:
             'clang',
             '-target',
             'arm64-apple-ios17.0',
+            '-mcpu=cortex-a57',
             '-isysroot',
             xcode['IPHONEOS_SDK'],
             '-mkernel',

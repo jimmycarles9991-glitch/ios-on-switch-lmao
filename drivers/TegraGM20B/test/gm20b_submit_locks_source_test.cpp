@@ -21,7 +21,7 @@ std::string unit(const char *name)
 }
 }  // namespace
 
-TEST(GM20BSubmitLocksSource, ProducerChannelsResolveUnderOneLiveLock)
+TEST(GM20BSubmitLocksSource, ProducerChannelsResolveWithoutLiveLock)
 {
 	const std::string exec = unit("gpu_exec.c");
 	const CodeText status = Block(exec, "static u32 backing_unsettled(");
@@ -29,15 +29,20 @@ TEST(GM20BSubmitLocksSource, ProducerChannelsResolveUnderOneLiveLock)
 	EXPECT_FALSE(status.has("mutex_lock("));
 	const CodeText all =
 		Block(exec, "static inline __attribute__((always_inline)) int chan_exec_body(");
-	EXPECT_EQ(all.count("mutex_lock(&tgm_live_lock)"), 1u);
+	EXPECT_EQ(all.count("mutex_lock(&tgm_live_lock)"), 0u);
 	EXPECT_TRUE(all.before("backing_unsettled(dependencies, dependency_count, unsettled)",
-			       "mutex_lock(&tgm_live_lock)"));
-	EXPECT_TRUE(all.before("mutex_lock(&tgm_live_lock)",
 			       "backing_waits(chan, dependencies, dependency_count, unsettled)"));
 	const CodeText one = Block(exec, "static int backing_dependency(");
-	EXPECT_TRUE(one.has("live_by_uid(token->queue)"));
+	EXPECT_TRUE(one.has("switch_gpu_live_dir_find(&tgm_live_dir, token->queue, &source)"));
+	EXPECT_FALSE(one.has("live_by_uid("));
 	EXPECT_FALSE(one.has("mutex_lock("));
 	EXPECT_FALSE(one.has("switch_gpu_backing_token_status("));
+	const CodeText words =
+		Block(exec, "static inline __attribute__((always_inline)) void chan_word_waits(");
+	EXPECT_FALSE(words.has("live_by_uid("));
+	EXPECT_FALSE(words.has("mutex_lock("));
+	const CodeText deps = Block(exec, "int tgm_backing_dependencies(");
+	EXPECT_FALSE(deps.has("mutex_lock(&tgm_live_lock)"));
 }
 
 TEST(GM20BSubmitLocksSource, SubmitJobTakesNoReferencePerUse)
@@ -59,7 +64,7 @@ TEST(GM20BSubmitLocksSource, AJobsRecordsGoUpBeforeItsKick)
 	EXPECT_TRUE(body.before("chan->chan.defer_kick = true;",
 				"backing_waits(chan, dependencies, dependency_count, unsettled)"));
 	EXPECT_TRUE(body.afterLast("backing_waits(chan, dependencies, dependency_count, unsettled)")
-			    .before("mutex_unlock(&tgm_live_lock);",
+			    .before("PUSH_KICK(&chan->chan.push);",
 				    "switch_gpu_backing_publish(owned);"));
 	const CodeText published = body.afterLast("switch_gpu_backing_publish(owned);");
 	EXPECT_FALSE(published.has("goto rollback;"));

@@ -200,4 +200,46 @@ static inline unsigned int switch_slot_free_gone(struct switch_slots *s, const s
     return freed;
 }
 
+static inline bool switch_slot_free_tid(struct switch_slots *s, uint64_t tid)
+{
+    const int i = switch_slot_find(s, tid);
+
+    if (i < 0) {
+        return false;
+    }
+    uint64_t expected = tid;
+    return __atomic_compare_exchange_n(&s->tids[i], &expected, 0, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+}
+
+static inline void switch_slot_prune_filter(struct switch_slots *s)
+{
+    uint64_t keep[SWITCH_SLOT_WORDS] = {0};
+
+    for (unsigned int i = 0; i < SWITCH_SLOTS; i++) {
+        const uint64_t tid = __atomic_load_n(&s->tids[i], __ATOMIC_RELAXED);
+
+        if (switch_slot_taken(tid)) {
+            keep[switch_slot_hash(tid) >> 6] |= switch_slot_bit(switch_slot_hash(tid));
+        }
+    }
+    for (unsigned int w = 0; w < SWITCH_SLOT_WORDS; w++) {
+        const uint64_t stale = __atomic_load_n(&s->filter[w], __ATOMIC_RELAXED) & ~keep[w];
+
+        if (stale != 0) {
+            __atomic_fetch_and(&s->filter[w], ~stale, __ATOMIC_ACQ_REL);
+        }
+    }
+    for (unsigned int i = 0; i < SWITCH_SLOTS; i++) {
+        const uint64_t tid = __atomic_load_n(&s->tids[i], __ATOMIC_RELAXED);
+
+        if (switch_slot_taken(tid)) {
+            __atomic_fetch_or(&s->filter[switch_slot_hash(tid) >> 6], switch_slot_bit(switch_slot_hash(tid)),
+                              __ATOMIC_RELAXED);
+        }
+    }
+    for (unsigned int w = 0; w < SWITCH_SLOT_WORDS; w++) {
+        __atomic_store_n(&s->refused[w], 0, __ATOMIC_RELAXED);
+    }
+}
+
 #endif /* SWITCH_SCHED_SLOTS_H */

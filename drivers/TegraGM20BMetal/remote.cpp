@@ -4,6 +4,7 @@
 #include "lock.h"
 #include "remote.h"
 #include "stats.h"
+#include "store_key.h"
 
 #include <IOKit/IOKitLib.h>
 #include <dispatch/dispatch.h>
@@ -53,10 +54,32 @@ bool Remote::capable()
         refresh(info);
     if (methods != CompilerMethods::Unknown)
         methods_.store(methods, std::memory_order_release);
+    else if (called == kIOReturnBadArgument)
+        os_log_error(
+            OS_LOG_DEFAULT,
+            "SwitchMetal: the kernel's CompilerInfo refused this build's reply size: the GPU kext is of another "
+            "build than this process's Metal driver, so no state the pack lacks is compiled");
     else
         os_log_error(OS_LOG_DEFAULT,
                      "SwitchMetal: the kernel's CompilerInfo failed (0x%x): this ask has no shader compiler", called);
     return methods == CompilerMethods::Present;
+}
+
+StoreScope Remote::scope()
+{
+    if (scopeKnown_.load(std::memory_order_acquire))
+        return scope_;
+    std::lock_guard<gm20b::UnfairMutex> l(scopeLock_);
+    if (scopeKnown_.load(std::memory_order_relaxed))
+        return scope_;
+    TegraGM20BAbiCompilerInfoReply info = {};
+    if (call(TegraGM20BMethodCompilerInfo, nullptr, 0, &info, sizeof info) == kIOReturnSuccess && info.scope.kind) {
+        scope_.kind = info.scope.kind;
+        scope_.identity.assign(reinterpret_cast<const char *>(info.scope.identity),
+                               std::min<size_t>(info.scope.bytes, sizeof info.scope.identity));
+        scopeKnown_.store(true, std::memory_order_release);
+    }
+    return scope_;
 }
 
 void Remote::refresh(const TegraGM20BAbiCompilerInfoReply &info)
@@ -64,6 +87,8 @@ void Remote::refresh(const TegraGM20BAbiCompilerInfoReply &info)
     if (info.flags & (TegraGM20BCompilerExpected | TegraGM20BCompilerRegistered))
         expected_.store(true, std::memory_order_release);
     declined_.store(info.flags & TegraGM20BCompilerDeclined, std::memory_order_release);
+    if (info.flags & TegraGM20BCompilerLibraries)
+        librariesSupported_.store(true, std::memory_order_release);
     if ((info.flags & TegraGM20BCompilerStore) && info.stack == stack_)
         map(info.generation);
 }
@@ -107,24 +132,33 @@ bool Remote::declined()
 
 Remote::~Remote()
 {
-    std::map<uint64_t, Done> pending;
+    std::map<uint64_t, Pending> pending;
     std::vector<Held> held;
+    std::array<Port, std::size(kAnswerClasses)> ports{};
     {
-        std::lock_guard<gm20b::Mutex> l(asyncLock_);
-        for (Port &p : ports_) {
-            if (p.port)
-                IONotificationPortDestroy(static_cast<IONotificationPortRef>(p.port));
-            p.port = nullptr;
-        }
+        std::unique_lock<gm20b::Mutex> l(asyncLock_);
+        closing_ = true;
+        if (asyncWaiters_)
+            asyncDrained_.notify_all();
         pending.swap(pending_);
+        confirmedPending_ = 0;
         held.swap(held_);
+        asyncDrained_.wait(l, [&] {
+            return asyncInFlight_ == 0;
+        });
+        ports.swap(ports_);
     }
     heldChanged_.changed();
-    for (auto &[cookie, done] : pending)
-        done(Answer::Unavailable, Answered{});
+    for (Port &p : ports) {
+        if (p.port)
+            IONotificationPortDestroy(static_cast<IONotificationPortRef>(p.port));
+        p.port = nullptr;
+    }
+    for (auto &[cookie, entry] : pending)
+        entry.done(Answer::Unavailable, Answered{});
     for (auto &h : held)
         h.done(Answer::Unavailable, Answered{});
-    for (Port &p : ports_)
+    for (Port &p : ports)
         if (p.queue)
             dispatch_release(static_cast<dispatch_queue_t>(p.queue));
 }
@@ -184,7 +218,7 @@ uint32_t Remote::portAt(qos_class_t cls)
 // installed pack)
 void Remote::map(uint32_t generation)
 {
-    std::lock_guard<gm20b::Mutex> l(mapLock_);
+    std::lock_guard<gm20b::UnfairMutex> l(mapLock_);
     const Mapping *current = mapping_.load(std::memory_order_acquire);
     if (current && current->generation >= generation)
         return;
@@ -209,7 +243,7 @@ void Remote::map(uint32_t generation)
     mapping_.store(made, std::memory_order_release);
 }
 
-bool Remote::find(const Digest &name, std::string &bytes)
+bool Remote::find(const Digest &name, std::string_view &bytes)
 {
     const uint32_t latest = latest_.load(std::memory_order_acquire);
     const Mapping *m = mapping_.load(std::memory_order_acquire);
@@ -220,7 +254,16 @@ bool Remote::find(const Digest &name, std::string &bytes)
     switch_seed_pack::Bytes found;
     if (!m || !m->reader.find(name.data(), found))
         return false;
-    bytes.assign(reinterpret_cast<const char *>(found.data), found.size);
+    bytes = std::string_view(reinterpret_cast<const char *>(found.data), found.size);
+    return true;
+}
+
+bool Remote::find(const Digest &name, std::string &bytes)
+{
+    std::string_view view;
+    if (!find(name, view))
+        return false;
+    bytes.assign(view.data(), view.size());
     return true;
 }
 
@@ -303,9 +346,11 @@ bool Remote::compileAsync(const std::string &request, bool waited, uint32_t qos,
 {
     if (!serving() || !taking())
         return false;
-    std::lock_guard<gm20b::Mutex> l(asyncLock_);
+    std::unique_lock<gm20b::Mutex> l(asyncLock_);
+    if (closing_)
+        return false;
     const uint64_t cookie = nextCookie_++;
-    if (!ask({request, waited, qos, std::move(done), cookie}))
+    if (!ask(l, {request, waited, qos, std::move(done), cookie}, false))
         return false;
     if (cookieOut)
         *cookieOut = cookie;
@@ -320,21 +365,34 @@ bool Remote::waitAsync(uint64_t cookie)
     for (;;) {
         uint64_t active = 0;
         bool isHeld = false;
+        bool unconfirmedSelf = false;
         uint64_t snapshotHead = 0;
+        bool waitable = false;
         {
             std::lock_guard<gm20b::Mutex> l(asyncLock_);
-            if (pending_.count(cookie)) {
-                active = cookie;
+            if (const auto self = pending_.find(cookie); self != pending_.end()) {
+                if (self->second.confirmed)
+                    active = cookie;
+                else
+                    unconfirmedSelf = true;
             } else {
                 isHeld = std::any_of(held_.begin(), held_.end(), [cookie](const Held &h) {
                     return h.cookie == cookie;
                 });
                 if (isHeld) {
-                    const auto it = pending_.upper_bound(skipThrough);
-                    if (it != pending_.end())
-                        active = it->first;
-                    else if (!pending_.empty())
-                        snapshotHead = pending_.begin()->first;
+                    for (auto it = pending_.upper_bound(skipThrough); it != pending_.end(); ++it)
+                        if (it->second.confirmed) {
+                            active = it->first;
+                            break;
+                        }
+                    if (!active) {
+                        for (const auto &[c, p] : pending_)
+                            if (p.confirmed) {
+                                snapshotHead = c;
+                                break;
+                            }
+                        waitable = snapshotHead != 0 || asyncInFlight_ > 0 || promoting_;
+                    }
                 }
             }
         }
@@ -353,26 +411,82 @@ bool Remote::waitAsync(uint64_t cookie)
             }
             return r == kIOReturnAborted || r == kIOReturnSuccess;
         }
-        if (!isHeld || !snapshotHead)
+        if (!unconfirmedSelf && (!isHeld || !waitable))
             return false;
         heldChanged_.waitOnce([&] {
             std::lock_guard<gm20b::Mutex> l(asyncLock_);
-            if (pending_.count(cookie))
-                return true;
+            if (const auto self = pending_.find(cookie); self != pending_.end())
+                return self->second.confirmed;
             const bool stillHeld = std::any_of(held_.begin(), held_.end(), [cookie](const Held &h) {
                 return h.cookie == cookie;
             });
-            if (!stillHeld || pending_.empty())
+            if (!stillHeld)
                 return true;
-            return pending_.upper_bound(skipThrough) != pending_.end() || pending_.begin()->first != snapshotHead;
+            uint64_t firstConfirmed = 0;
+            for (const auto &[c, p] : pending_) {
+                if (!p.confirmed)
+                    continue;
+                if (!firstConfirmed)
+                    firstConfirmed = c;
+                if (c > skipThrough)
+                    return true;
+            }
+            if (!firstConfirmed)
+                return asyncInFlight_ == 0 && !promoting_;
+            return firstConfirmed != snapshotHead;
         });
     }
 }
 
-bool Remote::ask(Held &&held)
+uint64_t Remote::registerLibrary(const void *bytes, size_t size, uint64_t source)
 {
+    if (!bytes || !size || size > TegraGM20BCompileRequestLimit || !capable() ||
+        !librariesSupported_.load(std::memory_order_acquire))
+        return 0;
+    const RegisteredLibrary key{bytes, size, source};
+    std::unique_lock<gm20b::Mutex> l(libraryLock_);
+    for (;;) {
+        if (!librariesSupported_.load(std::memory_order_acquire))
+            return 0;
+        if (const auto found = registeredLibraries_.find(key); found != registeredLibraries_.end())
+            return found->second;
+        if (!registeringLibraries_.count(key)) {
+            registeringLibraries_.insert(key);
+            break;
+        }
+        ++libraryWaiters_;
+        libraryReady_.wait(l, [&] {
+            return !registeringLibraries_.count(key);
+        });
+        --libraryWaiters_;
+    }
+    l.unlock();
+    const TegraGM20BAbiCompilerRegisterLibrary in = {uint64_t(uintptr_t(bytes)), size, 0, 0};
+    TegraGM20BAbiCompilerRegisterLibraryReply reply = {};
+    const int called = call(TegraGM20BMethodCompilerRegisterLibrary, &in, sizeof in, &reply, sizeof reply);
+    if (called == kIOReturnUnsupported)
+        librariesSupported_.store(false, std::memory_order_release);
+    l.lock();
+    registeringLibraries_.erase(key);
+    uint64_t id = 0;
+    if (called == kIOReturnSuccess && reply.id) {
+        registeredLibraries_.emplace(key, reply.id);
+        id = reply.id;
+    }
+    if (libraryWaiters_)
+        libraryReady_.notify_all();
+    return id;
+}
+
+bool Remote::ask(std::unique_lock<gm20b::Mutex> &l, Held &&held, bool fromHeld)
+{
+    if (closing_)
+        return false;
     const uint64_t cookie = held.cookie ? held.cookie : nextCookie_++;
     held.cookie = cookie;
+    const uint32_t port = portAt(held.waited ? answerClass(held.qos) : QOS_CLASS_BACKGROUND);
+    if (!port)
+        return false;
     const TegraGM20BAbiCompile in = {uint64_t(uintptr_t(held.request.data())),
                                      held.request.size(),
                                      cookie,
@@ -382,20 +496,67 @@ bool Remote::ask(Held &&held)
     uint64_t reference[kOSAsyncRef64Count] = {};
     reference[kIOAsyncCalloutFuncIndex] = uint64_t(reinterpret_cast<uintptr_t>(&delivered));
     reference[kIOAsyncCalloutRefconIndex] = uint64_t(reinterpret_cast<uintptr_t>(this));
-    const uint32_t port = portAt(held.waited ? answerClass(held.qos) : QOS_CLASS_BACKGROUND);
-    if (!port)
+
+    for (;;) {
+        if (closing_)
+            return false;
+        const uint64_t seenDeliveries = deliveredCount_;
+        pending_.emplace(cookie, Pending{held.done, false});
+        ++asyncInFlight_;
+        l.unlock();
+        const int asked = call_(TegraGM20BMethodCompile, &in, sizeof in, nullptr, 0, reference, port);
+        if (asked == kIOReturnNotReady)
+            recheck();
+        l.lock();
+        --asyncInFlight_;
+        if (asked == kIOReturnSuccess) {
+            if (const auto it = pending_.find(cookie); it != pending_.end()) {
+                it->second.confirmed = true;
+                ++confirmedPending_;
+            }
+            if ((closing_ && asyncInFlight_ == 0) || asyncWaiters_)
+                asyncDrained_.notify_all();
+            if (fromHeld)
+                heldChanged_.changed();
+            return true;
+        }
+        const bool stillPending = pending_.erase(cookie) > 0;
+        if ((closing_ && asyncInFlight_ == 0) || asyncWaiters_)
+            asyncDrained_.notify_all();
+        if (!stillPending)
+            return true;
+        if (asked != kIOReturnNoResources || closing_) {
+            if (fromHeld)
+                heldChanged_.changed();
+            return false;
+        }
+        if (confirmedPending_ == 0 && deliveredCount_ == seenDeliveries && asyncInFlight_ > 0) {
+            ++asyncWaiters_;
+            asyncDrained_.wait(l, [&] {
+                return closing_ || confirmedPending_ > 0 || deliveredCount_ != seenDeliveries || asyncInFlight_ == 0;
+            });
+            --asyncWaiters_;
+        }
+        if (closing_) {
+            if (fromHeld)
+                heldChanged_.changed();
+            return false;
+        }
+        if (confirmedPending_ > 0) {
+            if (fromHeld) {
+                held_.insert(held_.begin(), std::move(held));
+                heldChanged_.changed();
+            } else {
+                held_.push_back(std::move(held));
+            }
+            return true;
+        }
+        if (deliveredCount_ != seenDeliveries)
+            continue;
+        if (fromHeld)
+            heldChanged_.changed();
         return false;
-    pending_.emplace(cookie, held.done);
-    const int asked = call_(TegraGM20BMethodCompile, &in, sizeof in, nullptr, 0, reference, port);
-    if (asked == kIOReturnSuccess)
-        return true;
-    pending_.erase(cookie);
-    if (asked == kIOReturnNotReady)
-        recheck();
-    if (asked != kIOReturnNoResources || pending_.empty())
-        return false;
-    held_.push_back(std::move(held));
-    return true;
+    }
 }
 
 void Remote::delivered(void *refcon, int result, void **words, uint32_t count)
@@ -408,33 +569,60 @@ void Remote::delivered(void *refcon, int result, void **words, uint32_t count)
     const uint64_t packed = word[1];
     const Answered answered = {
         0, {word[2], word[3], word[4], uint32_t(word[5]), uint32_t(word[5] >> 32)}, answeredAt()};
+    const int32_t answer = int32_t(uint32_t(packed));
+    const bool needRecheck = result == kIOReturnSuccess && answer == TegraGM20BCompileUnavailable;
     Done done;
     std::vector<Done> refused;
+    bool runRecheck = false;
     {
-        std::lock_guard<gm20b::Mutex> l(remote->asyncLock_);
+        std::unique_lock<gm20b::Mutex> l(remote->asyncLock_);
         const auto found = remote->pending_.find(word[0]);
         if (found == remote->pending_.end())
             return;
-        done = std::move(found->second);
+        done = std::move(found->second.done);
+        if (found->second.confirmed)
+            --remote->confirmedPending_;
         remote->pending_.erase(found);
-        while (!remote->held_.empty()) {
-            Held next = std::move(remote->held_.front());
-            remote->held_.erase(remote->held_.begin());
-            Done nextDone = next.done;
-            if (remote->ask(std::move(next)))
-                break;
-            refused.push_back(std::move(nextDone));
+        ++remote->deliveredCount_;
+        if (remote->asyncWaiters_)
+            remote->asyncDrained_.notify_all();
+        if (result == kIOReturnSuccess)
+            remote->latest_.store(uint32_t(packed >> 32), std::memory_order_release);
+        if (!remote->closing_) {
+            if (remote->promoting_) {
+                remote->promoteAgain_ = true;
+            } else if (!remote->held_.empty()) {
+                remote->promoting_ = true;
+                do {
+                    remote->promoteAgain_ = false;
+                    while (!remote->held_.empty() && !remote->closing_) {
+                        Held next = std::move(remote->held_.front());
+                        remote->held_.erase(remote->held_.begin());
+                        Done nextDone = next.done;
+                        if (remote->ask(l, std::move(next), true))
+                            break;
+                        refused.push_back(std::move(nextDone));
+                    }
+                } while (remote->promoteAgain_ && !remote->held_.empty() && !remote->closing_);
+                remote->promoting_ = false;
+            }
+            if (needRecheck && !remote->closing_) {
+                ++remote->asyncInFlight_;
+                runRecheck = true;
+            }
         }
+        remote->heldChanged_.changed();
     }
-    remote->heldChanged_.changed();
+    if (runRecheck) {
+        remote->recheck();
+        std::lock_guard<gm20b::Mutex> l(remote->asyncLock_);
+        if (--remote->asyncInFlight_ == 0 && remote->closing_)
+            remote->asyncDrained_.notify_all();
+    }
     for (const auto &r : refused)
         r(Answer::Unavailable, Answered{});
     if (result != kIOReturnSuccess)
         return done(Answer::Unavailable, Answered{});
-    remote->latest_.store(uint32_t(packed >> 32), std::memory_order_release);
-    const int32_t answer = int32_t(uint32_t(packed));
-    if (answer == TegraGM20BCompileUnavailable)
-        remote->recheck();
     done(answerOf(answer), answered);
 }
 

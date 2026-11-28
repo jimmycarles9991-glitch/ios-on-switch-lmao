@@ -5,6 +5,7 @@
 #include <sys/cdefs.h>
 #include <switch/bootstrap_rules.h>
 
+struct mount;
 struct vnode;
 struct proc;
 struct cs_blob;
@@ -14,6 +15,9 @@ struct image_params;
 
 __BEGIN_DECLS
 void switch_bootstrap_capture(void);
+bool switch_bootstrap_active(void);
+bool switch_bootstrap_on_data(struct vnode *vp);
+struct mount *switch_bootstrap_data_mount(void);
 bool switch_bootstrap_member(struct vnode *vp, bool directory);
 bool switch_bootstrap_image(struct vnode *vp);
 int switch_bootstrap_signature(struct vnode *vp, struct cs_blob *blob, unsigned int *flags, bool *admitted);

@@ -3,6 +3,7 @@
 #import "TegraGM20BMetalBinaryArchive.h"
 #import "TegraGM20BMetalComputeState.h"
 #import "TegraGM20BMetalReflection.h"
+#import "TegraGM20BMetalStatesKey.h"
 #include "TegraGM20BMetalComplete.h"
 #include "TegraGM20BMetalCompileRequest.h"
 #include "compute_key.h"
@@ -97,6 +98,13 @@ static bool archivesAnswer(SwitchMetalComputeState *s, SwitchMetalFunction *f, c
     if (answer != gm20b::ArchiveAnswer::Missed ||
         gm20bPackHoldsKernels(gm20b::computeStateKey(s->_air, s->_constants, s->_maxThreads, s->_multipleOfWidth)))
         return true;
+    const uint64_t keyHash = gm20b::Pack::fnv(key.data(), key.size());
+    if (gm20bFirstNaming(keyHash, 1))
+        os_log_error(gm20bLog(),
+                     "SwitchMetal: %{public}s: no compute state %{public}s (%{public}s): the archives it lists miss "
+                     "%016llx under FailOnBinaryArchiveMiss",
+                     getprogname(), f.name.UTF8String ?: "-", s->_direct.label.UTF8String ?: "-",
+                     (unsigned long long)keyHash);
     if (error)
         *error = gm20bArchiveMissError(f.name, "compute");
     return false;
@@ -109,7 +117,16 @@ static bool compilerAnswers(SwitchMetalComputeState *s, SwitchMetalFunction *f, 
     std::string failure = "no shader compiler comes this boot";
     gm20b::PackComputeFacts made = {};
     const std::string key = gm20b::computeStateKey(s->_air, s->_constants, s->_maxThreads, s->_multipleOfWidth);
+    const uint64_t keyHash = gm20b::Pack::fnv(key.data(), key.size());
+#if SWITCH_METAL_STATS
+    gm20bNoteMiss("compute", keyHash, key, s->_direct.label);
+#endif
     if (!gRM->completion || !gRM->completion->facts(f, s->_direct, key, made, failure)) {
+        if (gm20bFirstNaming(keyHash, 2))
+            os_log_error(gm20bLog(),
+                         "SwitchMetal: %{public}s: no compute state %{public}s (%{public}s) %016llx: %{public}s",
+                         getprogname(), f.name.UTF8String ?: "-", s->_direct.label.UTF8String ?: "-",
+                         (unsigned long long)keyHash, failure.c_str());
         if (error)
             *error = gm20bCreationError(failure);
         return false;

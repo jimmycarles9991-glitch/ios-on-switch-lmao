@@ -8,16 +8,16 @@
 
 namespace gm20b {
 
-PassUses RenderEncoder::passUses() const
+const PassUses &RenderEncoder::passUses()
 {
-    PassUses uses = planned_;
+    PassUses &uses = planned_;
     uses.vertexSamples = vertexSamples_;
     uses.areaWidth = areaW_;
     uses.areaHeight = areaH_;
     uses.depthStencil = pass_.depthStencil.texture != nullptr;
     if (pass_.depthStencil.texture)
         uses.depth = hazardImage(*pass_.depthStencil.texture);
-    if (rot_.turned() || pass_.storageMask || cb_->passBufferWrites_ || passShaderWrites_ || planned_.shaderWrites ||
+    if (rot_.turned() || pass_.storageMask || cb_->passBufferWrites_ || passShaderWrites_ || uses.shaderWrites ||
         separate_.depth || separate_.stencil)
         uses.known = false;
     for (uint32_t j = 0; j < pass_.count && j < 8 && uses.known; j++) {

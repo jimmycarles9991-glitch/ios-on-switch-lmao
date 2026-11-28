@@ -190,9 +190,7 @@ struct Gpu {
                 ADD_FAILURE() << "copy render enable mode " << v;
             break;
         case NVB0B5_LAUNCH_DMA: {
-            if (!enabled)
-                break;
-            if (bits(v, 1, 0) != NVB0B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NONE)
+            if (enabled && bits(v, 1, 0) != NVB0B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NONE)
                 for (uint32_t i = 0; i < ceLength; i += 4)
                     put(ceOut + i, word(ceIn + i));
             if (bits(v, 4, 3) != NVB0B5_LAUNCH_DMA_SEMAPHORE_TYPE_NONE) {

@@ -2,19 +2,25 @@
 // The memory controller's error interrupt, the one owner of MC_INTSTATUS, INTMASK and the capture registers (see
 // TegraSMMU.h tegra_mc_errors_start). MC General Interrupt: global 77 (Tegra X1 TRM ch.3, p.35), INTID 109, level.
 //
-// The filter takes the error (TegraMCErrors.h) into a slot only it writes; IOKit keeps a level line masked from a
-// filter that returns true until its action has run, so the action reads that slot with no other writer. The action
+// A fatal kind (TegraMCErrors.h kFatal) panics in the filter with the error's line. The filter takes any other error
+// into a slot only it writes; IOKit keeps a level line masked from a filter that returns true until its action has
+// run, so the action reads that slot with no other writer. The action
 // prints the line (the first Runs::kFullLines of a client's run, then one count line when the run ends) and publishes
 // the error to readers in other drivers (GM20B's stats and hang lines, the engines' stall lines) under a spin lock: they
-// read it from any context, and a published error is three words that must stay together. The runs are the work
+// read it from any context, and a published error is several words that must stay together. The runs are the work
 // loop's: a detach or SC7 ends them through its gate.
 //
 // The start returns at once: its own thread waits for the GIC, attaches, and takes what latched meanwhile, so nothing
 // later in the board thread's order waits on the GIC for it.
+//
+// Debug kernels: an expected fault (TegraSMMU.h switch_mc_errors_expect) is taken by the filter, counted and handed to
+// the action, which wakes the probe waiting in switch_mc_errors_expect_end and prints nothing.
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOFilterInterruptEventSource.h>
 #include <IOKit/IOWorkLoop.h>
+#include <kern/clock.h>
+#include <kern/sched_prim.h>
 #include <kern/thread.h>
 #include "TegraSMMU.h"
 #include "TegraMCErrors.h"
@@ -53,7 +59,11 @@ constexpr Swgroup kSwgroups[] = {
     {TEGRA_SMMU_NVJPG_ASID, {0x7e, 0x7f}, 2},
     {TEGRA_SMMU_NVDEC_ASID, {0x78, 0x79}, 2},
     {TEGRA_SMMU_NVENC_ASID, {0x1c, 0x2b}, 2},
-    {TEGRA_SMMU_GPU_ASID, {0x58, 0x59, 0x88, 0x89}, 4},
+    {TEGRA_SMMU_GPUB_ASID, {0x58, 0x59, 0x88, 0x89}, 4},
+    {TEGRA_SMMU_SDMMC1A_ASID, {0x60, 0x64}, 2},
+    {TEGRA_SMMU_HC_ASID, {0x16, 0x17, 0x36}, 3},
+    {TEGRA_SMMU_HC1_ASID, {0x16}, 1},
+    {TEGRA_SMMU_APE_ASID, {0x7a, 0x7b}, 2},
 };
 
 Io gIo;
@@ -66,10 +76,60 @@ IOSimpleLock *gLatestLock;
 switch_mc::Error gLatest;
 uint32_t gCount;
 
+#if DEVELOPMENT || DEBUG
+// The probe's thread writes the range and arms it before its DMA starts and disarms it after the end has seen every
+// expected error taken; the filter alone writes `first` and then `taken` (release) meanwhile.
+struct Expected {
+    uint32_t client, low, high;
+    bool armed;
+    uint32_t taken;
+    switch_mc::Error first;
+};
+
+Expected gExpected;
+bool gTakenExpected;  // the filter's, for the action: gTaken was expected
+
+bool takeExpected(const switch_mc::Error &error)
+{
+    if (!__atomic_load_n(&gExpected.armed, __ATOMIC_ACQUIRE) ||
+        !switch_mc::expected(error, gExpected.client, gExpected.low, gExpected.high))
+        return false;
+    const uint32_t taken = __atomic_load_n(&gExpected.taken, __ATOMIC_RELAXED);
+    if (!taken)
+        gExpected.first = error;
+    __atomic_store_n(&gExpected.taken, taken + 1, __ATOMIC_RELEASE);
+    return true;
+}
+#endif
+
+// In the filter, interrupts off: a fatal error panics there, before the faulting client's next access, and with no
+// work loop needed (a wedged fabric never runs the action).
+void panicIfFatal(const switch_mc::Error &error)
+{
+    if (!(error.intstatus & switch_mc::kFatal))
+        return;
+    char line[384];
+    panic("TegraSMMU: MC error %s", switch_mc::describe(error, line, sizeof(line)));
+}
+
+// gTaken from the registers; false when no error is pending. A fatal one panics unless it was expected.
+bool takeError()
+{
+    if (!switch_mc::take(gIo, &gTaken))
+        return false;
+#if DEVELOPMENT || DEBUG
+    gTakenExpected = takeExpected(gTaken);
+    if (gTakenExpected)
+        return true;
+#endif
+    panicIfFatal(gTaken);
+    return true;
+}
+
 // NOLINTNEXTLINE(misc-const-correctness): IOFilterInterruptEventSource::Filter's signature
 bool filter(OSObject *, IOFilterInterruptEventSource *)
 {
-    return switch_mc::take(gIo, &gTaken);
+    return takeError();
 }
 
 void printEnded(const switch_mc::Runs::Ended *ended, unsigned count)
@@ -81,6 +141,12 @@ void printEnded(const switch_mc::Runs::Ended *ended, unsigned count)
 
 void occurred(OSObject *, IOInterruptEventSource *, int)
 {
+#if DEVELOPMENT || DEBUG
+    if (gTakenExpected) {
+        thread_wakeup(&gExpected);
+        return;
+    }
+#endif
     const switch_mc::Error error = gTaken;
     const IOInterruptState state = IOSimpleLockLockDisableInterrupt(gLatestLock);
     gLatest = error;
@@ -90,14 +156,14 @@ void occurred(OSObject *, IOInterruptEventSource *, int)
     unsigned count = 0;
     const bool full = gRuns.error(error, ended, count);
     printEnded(ended, count);
-    char line[256];
+    char line[384];
     if (full)
         IOLog("TegraSMMU: MC error %s\n", switch_mc::describe(error, line, sizeof(line)));
 }
 
 IOReturn takeLatched(OSObject *, void *, void *, void *, void *)
 {
-    if (switch_mc::take(gIo, &gTaken))
+    if (takeError())
         occurred(nullptr, nullptr, 0);
     return kIOReturnSuccess;
 }
@@ -122,16 +188,26 @@ IOReturn endRuns(OSObject *, void *swgroup, void *, void *, void *)
     return kIOReturnSuccess;
 }
 
+// A missing or masked MC error interrupt would leave every confined client's fault squashed with nothing said
+// (TRM 18.5.12.2: the MC drops a faulting write's bytes and returns ones for a read), so either panics.
 void unmask()
 {
     gIo.write(switch_mc::kIntMask, switch_mc::kErrors);
-    (void)gIo.read(switch_mc::kIntMask);
+    const uint32_t mask = gIo.read(switch_mc::kIntMask);
+    if ((mask & switch_mc::kRequired) != switch_mc::kRequired)
+        panic("TegraSMMU: MC error interrupt (INTID %u) masked: INTMASK reads %#x after %#x was written", kIntid, mask,
+              switch_mc::kErrors);
+    static bool told;
+    if ((mask & switch_mc::kErrors) != switch_mc::kErrors && !told) {
+        told = true;
+        IOLog("TegraSMMU: MC INTMASK keeps %#x of %#x: DECERR_GENERALIZED_CARVEOUT stays masked\n", mask,
+              switch_mc::kErrors);
+    }
 }
 
-void notAttached()
+[[noreturn]] void notAttached(const char *why)
 {
-    IOLog("TegraSMMU: MC error interrupt (INTID %u) could not be attached: memory controller errors go unreported\n",
-          kIntid);
+    panic("TegraSMMU: MC error interrupt (INTID %u) could not be attached: %s", kIntid, why);
 }
 
 IOFilterInterruptEventSource *source()
@@ -143,16 +219,18 @@ IOFilterInterruptEventSource *source()
 void attach(void *, wait_result_t)
 {
     IOService *nub = switch_interrupt_nub(kIntid, false);
+    if (!nub)
+        notAttached("no interrupt nub");
     IOFilterInterruptEventSource *made =
-        nub ? IOFilterInterruptEventSource::filterInterruptEventSource(gLoop, &occurred, &filter, nub, 0) : nullptr;
-    if (!made || gLoop->addEventSource(made) != kIOReturnSuccess) {
-        notAttached();
-    } else {
-        gLoop->runAction(&takeLatched, nullptr);
-        made->enable();
-        unmask();
-        __atomic_store_n(&gSource, made, __ATOMIC_RELEASE);
-    }
+        IOFilterInterruptEventSource::filterInterruptEventSource(gLoop, &occurred, &filter, nub, 0);
+    if (!made)
+        notAttached("no event source");
+    if (gLoop->addEventSource(made) != kIOReturnSuccess)
+        notAttached("the work loop refused the event source");
+    gLoop->runAction(&takeLatched, nullptr);
+    made->enable();
+    unmask();
+    __atomic_store_n(&gSource, made, __ATOMIC_RELEASE);
 }  // returning ends the thread (Call_continuation -> thread_terminate)
 }  // namespace
 
@@ -162,10 +240,10 @@ extern "C" int tegra_mc_errors_start(void)
     gLatestLock = IOSimpleLockAlloc();
     gLoop = IOWorkLoop::workLoop();
     thread_t thread = nullptr;
-    if (!gIo.mc || !gLatestLock || !gLoop || kernel_thread_start(&attach, nullptr, &thread) != KERN_SUCCESS) {
-        notAttached();
-        return -1;
-    }
+    if (!gIo.mc || !gLatestLock || !gLoop)
+        notAttached("no registers, lock or work loop");
+    if (kernel_thread_start(&attach, nullptr, &thread) != KERN_SUCCESS)
+        notAttached("no thread to attach it");
     thread_deallocate(thread);
     return 0;
 }
@@ -205,3 +283,56 @@ extern "C" uint32_t tegra_mc_error_latest(uint32_t *intstatus, uint32_t *status,
     *address = latest.address;
     return count;
 }
+
+#if DEVELOPMENT || DEBUG
+extern "C" void switch_mc_errors_expect(uint32_t client, uint32_t low, uint32_t high)
+{
+    gExpected.client = client;
+    gExpected.low = low;
+    gExpected.high = high;
+    gExpected.first = {};
+    __atomic_store_n(&gExpected.taken, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&gExpected.armed, true, __ATOMIC_RELEASE);
+}
+
+namespace {
+// Every expected error the DMA raised is taken: one was, and no SMMU fault is latched behind it.
+bool settled()
+{
+    return __atomic_load_n(&gExpected.taken, __ATOMIC_ACQUIRE) &&
+           !(gIo.read(switch_mc::kIntStatus) & switch_mc::kInvalidSmmuPage);
+}
+}  // namespace
+
+extern "C" void switch_mc_errors_expect_end(uint32_t ms, switch_mc_expected *out)
+{
+    *out = {};
+    if (!source()) {
+        __atomic_store_n(&gExpected.armed, false, __ATOMIC_RELEASE);
+        return;
+    }
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(ms, kMillisecondScale, &deadline);
+    while (!settled()) {
+        assert_wait_deadline(&gExpected, THREAD_UNINT, deadline);
+        if (settled()) {
+            clear_wait(current_thread(), THREAD_AWAKENED);
+            break;
+        }
+        if (thread_block(THREAD_CONTINUE_NULL) == THREAD_TIMED_OUT)
+            break;
+    }
+    const uint32_t latched = gIo.read(switch_mc::kIntStatus) & switch_mc::kErrors;
+    __atomic_store_n(&gExpected.armed, false, __ATOMIC_RELEASE);
+    const uint32_t taken = __atomic_load_n(&gExpected.taken, __ATOMIC_ACQUIRE);
+    if (latched & switch_mc::kInvalidSmmuPage)
+        panic("TegraSMMU: MC error interrupt (INTID %u) lost: INTSTATUS %#x still latched %u ms after a deliberate "
+              "SMMU fault, %u expected errors delivered",
+              kIntid, latched, ms, taken);
+    // `first` is written before `taken` moves (release); with none taken a late filter may still be writing it.
+    if (taken)
+        *out = {1, taken, gExpected.first.intstatus, gExpected.first.status, gExpected.first.address};
+    else
+        *out = {1, 0, 0, 0, 0};
+}
+#endif

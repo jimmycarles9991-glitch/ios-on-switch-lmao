@@ -1,6 +1,7 @@
 # ArmCpuTmr.h on the host: C7's wake count against the clock TMR10-13 count. SwitchGicV2.h (switch_gic_barrier_test):
 # the barriers of ArmCpu's acknowledge loop per interrupt class, of an SGI send and of ArmGIC's SPI vector run, and that
 # vector run against IOKit's disableInterrupt on another thread (switch_gic_barrier_tsan_test under TSAN).
+# armcpu_source_test: ArmCpu registers its cores with 25 us powergate_latency for short IODelay() spins.
 #
 #   bazel test //drivers/ArmCpu/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -15,6 +16,12 @@ host_test(
         "//drivers/ArmCpu:ArmCpuTmr.h",
         "//kits/SwitchIdle:switch_idle_governor.h",
     ],
+)
+
+host_test(
+    name = "armcpu_source_test",
+    srcs = ["armcpu_source_test.cpp"],
+    data = ["//drivers/ArmCpu:ArmCpu.cpp"],
 )
 
 host_test(

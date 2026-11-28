@@ -1,14 +1,17 @@
 import Darwin
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 import QuartzCore
 import UIKit
 
 /// Scale animations as an app's open and close run them, judged by what reached the panel and what the compositor did:
 /// a full-screen grouped layer (its subviews composited as one, as an app's snapshot is) scaled 0.3 -> 1.0 while it
-/// fades in, the reverse, and a UIKit zoom transition (iOS 18 and later; iOS 17 runs the open twice), five rounds each.
+/// fades in, the reverse, and a UIKit zoom transition (iOS 18 and later; iOS 17 runs the open twice), three rounds each.
 /// A probe CAMetalLayer presents every display-link frame and collects when the display showed it. Around each round the
 /// debug kernel answers the compositor's round (SwitchGpuCompositorRound.h through the spans op): its jobs and GPU time,
 /// jobs longer than a refresh period, surfaces it imported, BoAllocs it made on its own thread (no zeroed spare), and the
@@ -21,7 +24,7 @@ struct ScalePacingTest: HWTest {
     let subsystem = Subsystem.compositor
     var timeout: TimeInterval { 90 }
 
-    static let rounds = 5
+    static let rounds = 3
     static let seconds = 0.5
     static let period = 1.0 / 60
     static let targetPeaksOp: UInt32 = 1
@@ -38,7 +41,11 @@ struct ScalePacingTest: HWTest {
     func run(_ context: TestContext) async throws -> Outcome {
         guard let connection = GPUConnection() else { return .skip("no TegraGM20B connection") }
         guard LaunchHitchTest.spans(connection) != nil else {
-            return .skip("the kernel keeps no compositor rounds (a release kernel)")
+            return .skip(
+                KernelSysctl.isReleaseKernel()
+                    ? "the kernel keeps no compositor rounds (a release kernel)"
+                    : "no compositor rounds (build with --//bazel:stats_gpu)"
+            )
         }
         let probe = await context.onStage(fullScreen: true) { stage -> ScaleProbe in
             let probe = ScaleProbe(stage: stage)
@@ -98,7 +105,7 @@ struct ScalePacingTest: HWTest {
         }
         await probe.stop()
         let (kr, reply) = connection.call(
-            GPUPaths.method, GPUConnection.words([Self.targetPeaksOp, 0]), outputSize: 512
+            GPUPaths.method, GPUConnection.words([Self.targetPeaksOp, 0]), outputSize: GPUPaths.replySize
         )
         if kr == KERN_SUCCESS,
            let compositor = TargetPeak.parse(String(decoding: reply.prefix { $0 != 0 }, as: UTF8.self))

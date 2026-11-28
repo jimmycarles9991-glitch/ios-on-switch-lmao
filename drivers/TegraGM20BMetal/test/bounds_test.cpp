@@ -606,4 +606,45 @@ TEST(GM20BRegion, UnavailableAndOverBudgetInputsKeepTheEntireScissorWithoutReadi
     EXPECT_EQ(exhausted.cachedBox().y1, 700u);
 }
 
+TEST(GM20BRegion, MeetsTilesGroupsSameTileWritesAndElidesDisjointTiles)
+{
+    std::vector<float> a, b, c, d, e;
+    gm20b::WrittenRegion written;
+    written.add(quad(a, 2, 2, 10, 10));
+    EXPECT_FALSE(written.meets(quad(b, 14, 14, 24, 24)));
+    EXPECT_TRUE(written.meetsTiles(quad(b, 14, 14, 24, 24)));
+    EXPECT_TRUE(written.meetsTiles(quad(c, 32, 32, 48, 48)));
+    EXPECT_FALSE(written.meetsTiles(quad(d, 36, 36, 48, 48)));
+
+    written.clear();
+    written.add(scissored(a, 0, 0, 32, 32));
+    EXPECT_FALSE(written.meetsTiles(scissored(b, 32, 0, 64, 32)));
+    EXPECT_FALSE(written.meetsTiles(scissored(c, 0, 32, 32, 64)));
+    EXPECT_TRUE(written.meetsTiles(scissored(d, 31, 31, 40, 40)));
+
+    written.clear();
+    gm20b::DrawGeometry outWrite = quad(a, 0, 0, 10, 10);
+    outWrite.bounded = false;
+    outWrite.limit = {2050, 10, 2060, 20};
+    written.add(outWrite);
+    gm20b::DrawGeometry outSame = outWrite;
+    outSame.limit = {2065, 22, 2075, 30};
+    EXPECT_FALSE(written.meets(outSame));
+    EXPECT_TRUE(written.meetsTiles(outSame));
+    gm20b::DrawGeometry outDisjoint = outWrite;
+    outDisjoint.limit = {2080, 10, 2100, 20};
+    EXPECT_FALSE(written.meetsTiles(outDisjoint));
+
+    written.clear();
+    const uint32_t count = gm20b::WrittenRegion::kMaxDraws + 8;
+    std::vector<std::vector<float>> mem(count + 1);
+    for (uint32_t i = 0; i < count; ++i)
+        written.add(scissored(mem[i], 0, 0, 16, 16));
+    written.add(outWrite);
+    EXPECT_TRUE(written.meetsTiles(scissored(e, 20, 20, 28, 28)));
+    EXPECT_FALSE(written.meetsTiles(scissored(e, 64, 64, 80, 80)));
+    EXPECT_TRUE(written.meetsTiles(outSame));
+    EXPECT_FALSE(written.meetsTiles(outDisjoint));
+}
+
 }  // namespace

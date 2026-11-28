@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <utility>
 #include <vector>
 #include "spill_table.h"
@@ -24,13 +25,14 @@ constexpr uint32_t renderSetBytes(uint32_t layoutBytes)
 class DescriptorSnapshot {
 public:
     // `bytes`: the upload's size; a set of other bytes is uploaded again whatever its words
-    template <typename Upload> uint64_t resolve(const DescriptorWords &words, Upload upload, uint32_t bytes = 256)
+    template <typename Upload>
+    uint64_t resolve(const DescriptorWords &words, Upload upload, uint32_t bytes = kRenderSetBytes)
     {
-        if (!address_ || words_ != words || bytes_ != bytes) {
+        if (!address_ || bytes_ != bytes || memcmp(words_.data(), words.data(), bytes) != 0) {
             const uint64_t address = upload(words);
             if (!address)
                 return 0;
-            words_ = words;
+            memcpy(words_.data(), words.data(), bytes);
             bytes_ = bytes;
             address_ = address;
         }
@@ -73,8 +75,13 @@ public:
         const bool same = value_.address && pipeline_ == pipeline;
         if (same && !moved)
             return &value_;
-        if (!same)
-            value_ = {};
+        if (!same) {
+            memset(value_.words.data(), 0, bytes);
+            value_.residualMask = 0;
+            value_.spilled[0].mask = 0;
+            value_.spilled[1].mask = 0;
+            value_.address = 0;
+        }
         pipeline_ = nullptr;  // until this build succeeds
         if (!build(value_, same ? moved : ~0u))
             return nullptr;
@@ -105,6 +112,13 @@ public:
     {
         value_ = {};
         pipeline_ = nullptr;
+        snapshot_.forget();
+    }
+
+    void resetLight()
+    {
+        pipeline_ = nullptr;
+        value_.address = 0;
         snapshot_.forget();
     }
 
@@ -170,6 +184,26 @@ public:
         return true;
     }
 
+    bool heapRootChanged(uint64_t heapVa, uint32_t heapBytes)
+    {
+        if (heapBound_ && heapVa_ == heapVa && heapBytes_ == heapBytes)
+            return false;
+        heapBound_ = true;
+        heapVa_ = heapVa;
+        heapBytes_ = heapBytes;
+        return true;
+    }
+
+    bool heapBindChanged(const void *pipeline, uint64_t heapVa, uint32_t heapBytes)
+    {
+        if (heapBindPipeline_ == pipeline && heapBindVa_ == heapVa && heapBindBytes_ == heapBytes)
+            return false;
+        heapBindPipeline_ = pipeline;
+        heapBindVa_ = heapVa;
+        heapBindBytes_ = heapBytes;
+        return true;
+    }
+
     bool uboMoved(uint32_t ubo, const uint32_t *descriptor)
     {
         const std::array<uint32_t, 3> bound = {descriptor[0], descriptor[1], descriptor[2]};
@@ -182,9 +216,22 @@ public:
         return true;
     }
 
+    void reset()
+    {
+        pipeline_ = nullptr;
+        address_ = 0;
+        ubosBound_ = 0;
+    }
+
 private:
     const void *pipeline_ = nullptr;
     uint64_t address_ = 0;
+    bool heapBound_ = false;
+    uint64_t heapVa_ = 0;
+    uint32_t heapBytes_ = 0;
+    const void *heapBindPipeline_ = nullptr;
+    uint64_t heapBindVa_ = 0;
+    uint32_t heapBindBytes_ = 0;
     uint32_t ubosBound_ = 0;
     std::array<std::array<uint32_t, 3>, kUbos> ubos_{};
 };

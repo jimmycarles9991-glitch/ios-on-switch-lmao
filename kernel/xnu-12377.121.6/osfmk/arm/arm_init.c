@@ -898,7 +898,7 @@ arm_init_idle_cpu(
 #if __arm64__
 	wfe_timeout_init();
 	pmap_clear_user_ttb();
-	flush_mmu_tlb();
+	flush_core_tlb();
 #endif
 
 #ifdef  APPLETYPHOON

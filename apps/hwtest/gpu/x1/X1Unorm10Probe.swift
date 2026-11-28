@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// gpu.x1.rop_unorm10_rounding (METALMAP d23): how a float colour becomes a 10-bit unorm code.

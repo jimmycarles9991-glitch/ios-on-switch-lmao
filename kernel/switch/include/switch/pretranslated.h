@@ -43,7 +43,7 @@ struct mount *switch_pretranslated_system_volume(struct vnode *vp);
 
 static inline void switch_pretranslated_lookup(struct nameidata *ndp)
 {
-    if (__improbable(__atomic_load_n(&switch_pretranslated_on, __ATOMIC_RELAXED))) {
+    if (switch_pretranslated_on) {
         switch_pretranslated_redirect(ndp);
     }
 }
@@ -52,7 +52,7 @@ static inline void switch_pretranslated_lookup(struct nameidata *ndp)
  * volume's file would. */
 static inline void switch_pretranslated_getattr(struct vnode *vp, struct vnode_attr *va)
 {
-    if (__improbable(__atomic_load_n(&switch_pretranslated_on, __ATOMIC_RELAXED))) {
+    if (switch_pretranslated_on) {
         switch_pretranslated_identity(vp, va);
     }
 }
@@ -60,7 +60,7 @@ static inline void switch_pretranslated_getattr(struct vnode *vp, struct vnode_a
 /* statfs and fstatfs (identity.c): the System volume for a Data copy, else NULL. */
 static inline struct mount *switch_pretranslated_volume(struct vnode *vp)
 {
-    if (__improbable(__atomic_load_n(&switch_pretranslated_on, __ATOMIC_RELAXED))) {
+    if (switch_pretranslated_on) {
         return switch_pretranslated_system_volume(vp);
     }
     return NULL;
@@ -70,7 +70,7 @@ static inline struct mount *switch_pretranslated_volume(struct vnode *vp)
 static inline int switch_pretranslated_check(enum switch_pt_op op, struct vnode *v0, struct vnode *v1, struct vnode *v2,
                                              struct vnode *v3, uint32_t intent)
 {
-    if (__improbable(__atomic_load_n(&switch_pretranslated_on, __ATOMIC_RELAXED))) {
+    if (switch_pretranslated_on) {
         return switch_pretranslated_refuse(op, v0, v1, v2, v3, intent);
     }
     return 0;
@@ -79,7 +79,7 @@ static inline int switch_pretranslated_check(enum switch_pt_op op, struct vnode 
 /* mmap: a shared mapping that can write a file of the tree is refused like any other write. */
 static inline int switch_pretranslated_mmap(struct fileglob *fg, int flags, int prot, int maxprot)
 {
-    if (__improbable(__atomic_load_n(&switch_pretranslated_on, __ATOMIC_RELAXED))) {
+    if (switch_pretranslated_on) {
         return switch_pretranslated_mmap_check(fg, flags, prot, maxprot);
     }
     return 0;

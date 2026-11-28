@@ -1,7 +1,9 @@
 import Darwin
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import IOSurface
 
 /// Core Animation's snapshots as boot 22 made them (522 of them, 1280x720 and 720x1280 BGRA, all pitch): one process

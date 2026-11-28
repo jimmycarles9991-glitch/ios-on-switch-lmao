@@ -1,6 +1,7 @@
 import CoreVideo
 import Foundation
 import HWTestCore
+import HWTestKit
 import HWTestVideo
 
 /// The luma VIC writes into an L008 for a direct IOSurfaceAccelerator client (video/ScalerClient.swift), 64x64, each

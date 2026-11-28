@@ -114,7 +114,11 @@ int switch_bootstrap_update_command(NSString *path, NSArray<NSString *> *argumen
         }
     } else {
         assert([path isEqual:@"/var/jb/usr/bin/apt-mark"]);
-        assert(([arguments isEqual:@[ @"hold", @"org.coolstar.sileo", @"ellekit", @"uikittools", @"launchctl" ]]));
+        NSArray<NSString *> *names = switch_bootstrap_core_names();
+        assert(names.count == switch_bootstrap_core_targets().count);
+        assert(([[names subarrayWithRange:NSMakeRange(0, 4)]
+            isEqual:@[ @"org.coolstar.sileo", @"ellekit", @"uikittools", @"launchctl" ]]));
+        assert(([arguments isEqual:[@[ @"hold" ] arrayByAddingObjectsFromArray:names]]));
         for (NSString *name in switch_bootstrap_core_names())
             switch_test_installed[name][@"status"] = @"hold ok installed";
     }
@@ -301,7 +305,7 @@ int main()
         switch_test_installed[@"ellekit"][@"version"] = @"old";
         switch_test_save_status();
         assert(!switch_test_update(NO, &updated) && updated);
-        assert(switch_test_commands[0].count == 8);
+        assert(switch_test_commands[0].count == 4 + switch_bootstrap_core_names().count);
 
         switch_test_reset(NO);
         NSString *candidate = [switch_test_base stringByAppendingPathComponent:@"core.extracting"];

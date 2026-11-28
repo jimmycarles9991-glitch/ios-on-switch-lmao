@@ -5,11 +5,13 @@ import HWTestGPU
 /// L993: kTegraVICTraits.blockLinearOut, VIC writing OutBlkKind GENERIC_16Bx2, which no caller has run
 /// (drivers/TegraVIC/SwitchVICLayoutProbe.h). A BGRA card into 1, 2 and 16 GOBs a block and NV12 into NVDEC's 2, read
 /// back in the kernel through the Tegra block-linear law, against pitch-linear copies of both. <case>_laws names every
-/// layout the destination reads back under exactly: the case's own (bl<k> or pitch) is the claim.
+/// layout the destination reads back under exactly: the case's own (bl<k> or pitch) is the claim. The last case reads:
+/// a BGRA source laid out in 16-GOB blocks by the law, copied to pitch (kTegraVICTraits.blockLinearRgbIn), named
+/// _from_bl4.
 enum X1VICLayoutProbe {
     static let magic: UInt32 = 0x5642_4C4B // 'VBLK'
-    static let cases = 6
-    static let caseWords = 11
+    static let cases = 7
+    static let caseWords = 12
     static let controls = 2
     static let replyBytes = 16 + 4 * caseWords * cases
 
@@ -31,7 +33,9 @@ enum X1VICLayoutProbe {
         var wrong: [String: Int] = [:]
         for i in 0 ..< min(Int(reply[1]), cases) {
             let r = Array(reply[(4 + caseWords * i) ..< (4 + caseWords * (i + 1))])
-            let name = X1VICKernelTest.name(r[0]) + (r[1] == 0xff ? "_pitch" : "_bl\(r[1])")
+            let name =
+                X1VICKernelTest.name(r[0]) + (r[1] == 0xff ? "_pitch" : "_bl\(r[1])")
+                + (r[11] == 0xff ? "" : "_from_bl\(r[11])")
             metrics.set(name + "_status", Int(Int32(bitPattern: r[2])))
             metrics.set(name + "_laws", laws(r[8]))
             metrics.set(name + "_pad", Int(r[9]))

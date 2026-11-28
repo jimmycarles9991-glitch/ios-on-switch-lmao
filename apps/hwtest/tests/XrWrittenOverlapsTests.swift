@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// A 550 32x8, ShaderRead, ShaderWrite and RenderTarget, over plane 0 of a 'b3a8' 32x4 (words rows 128 at 0, alpha rows

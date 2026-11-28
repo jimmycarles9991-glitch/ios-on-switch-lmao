@@ -223,6 +223,15 @@ pub(super) fn null_constant(cx: &SelectCx<'_>, v: Value) -> bool {
     ) && buffer_space(cx, v)
 }
 
+pub(super) fn undef_constant(cx: &SelectCx<'_>, v: Value) -> bool {
+    let Value::Const(c) = v else { return false };
+    let Some(k) = cx.entry.module.consts().get(c) else {
+        return false;
+    };
+    matches!(k.value, Const::Undef | Const::Poison)
+        && matches!(cx.entry.module.types().get(k.ty), Some(Type::Ptr { .. }))
+}
+
 /// The feature a handle of `class` is refused as, when no lowering here owns it: as its family
 /// is for a parameter of that role (`lower::select::param_family`).
 fn unlowered(class: HandleClass) -> Option<Feature> {
@@ -608,15 +617,38 @@ pub fn null_operand(
     null_value(fb, &DemoteTy::FatPtr { wide: false })
 }
 
-/// The value phi `phi`'s copy on an incoming edge stores for incoming value `src`: a null
-/// pointer constant in the phi's representation, else `src`'s value.
+fn undef_source(cx: &EmitCx<'_>, v: ValueId) -> bool {
+    let Some(Value::Const(c)) = cx.plan.values.value(v) else {
+        return false;
+    };
+    let Some(k) = cx.entry.module.consts().get(c) else {
+        return false;
+    };
+    matches!(k.value, Const::Undef | Const::Poison)
+        && matches!(cx.entry.module.types().get(k.ty), Some(Type::Ptr { .. }))
+}
+
+fn undef_value(fb: &mut FunctionBuilder<'_>, ty: &DemoteTy) -> BResult<Option<SValue>> {
+    match ty {
+        DemoteTy::FatPtr { .. } => null_value(fb, ty),
+        DemoteTy::ArenaOffset => k32(fb, 0).map(Some),
+        DemoteTy::HandleIndex => k32(fb, crate::memory::handles::NULL_HANDLE).map(Some),
+        _ => Ok(None),
+    }
+}
+
+/// The value phi `phi`'s copy on an incoming edge stores for incoming value `src`: an undefined
+/// or null pointer constant in the phi's representation, else `src`'s value.
 pub fn phi_incoming(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
     phi: ValueId,
     src: ValueId,
 ) -> BResult<SValue> {
-    if null_source(cx, src) {
+    // Check `undef`/`poison` before `null_source`: a device/constant `undef` feeding a handle or
+    // arena phi must take `undef_value` for the phi's representation rather than `null_value`.
+    let undef = undef_source(cx, src);
+    if undef || null_source(cx, src) {
         let ty = cx
             .plan
             .phis
@@ -625,7 +657,12 @@ pub fn phi_incoming(
             .and_then(|i| cx.plan.phis.get(i))
             .map(|(_, t)| t.clone());
         if let Some(ty) = ty {
-            if let Some(x) = null_value(fb, &ty)? {
+            let x = if undef {
+                undef_value(fb, &ty)?
+            } else {
+                null_value(fb, &ty)?
+            };
+            if let Some(x) = x {
                 return Ok(x);
             }
         }

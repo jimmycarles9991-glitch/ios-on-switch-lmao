@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestGPUForms
+import HWTestKit
 import Metal
 
 /// A 64-texel RGB10A8_2P_XR10 (550) and sRGB (551) texture buffer, ShaderRead and ShaderWrite, over a 16384x1 'BGRA'

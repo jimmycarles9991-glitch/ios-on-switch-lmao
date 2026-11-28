@@ -30,19 +30,19 @@ static SwitchSharedEventBinding *eventBinding(id event)
     SwitchSharedEventBinding *binding = objc_getAssociatedObject(event, &bindingKey);
     if (binding && binding->lease->owner() == gRM->sharedEvents)
         return binding;
-    @synchronized(event) {
-        binding = objc_getAssociatedObject(event, &bindingKey);
-        if (binding && binding->lease->owner() == gRM->sharedEvents)
-            return binding;
-        auto lease = gRM->sharedEvents->import([event eventPort]);
-        if (!lease)
-            return nil;
-        binding = [SwitchSharedEventBinding new];
-        binding->lease = std::move(lease);
-        binding->submittedValue.store(0, std::memory_order_relaxed);
-        objc_setAssociatedObject(event, &bindingKey, binding, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    static gm20b::UnfairMutex lock;
+    std::lock_guard<gm20b::UnfairMutex> hold(lock);
+    binding = objc_getAssociatedObject(event, &bindingKey);
+    if (binding && binding->lease->owner() == gRM->sharedEvents)
         return binding;
-    }
+    auto lease = gRM->sharedEvents->import([event eventPort]);
+    if (!lease)
+        return nil;
+    binding = [SwitchSharedEventBinding new];
+    binding->lease = std::move(lease);
+    binding->submittedValue.store(0, std::memory_order_relaxed);
+    objc_setAssociatedObject(event, &bindingKey, binding, OBJC_ASSOCIATION_RETAIN);
+    return binding;
 }
 
 std::shared_ptr<gm20b::SharedEventLease> sharedEventLease(id event)
@@ -90,7 +90,7 @@ bool sharedEventWord(id event, uint64_t value, uint64_t inlineStamp, uint64_t &a
 
 static void eventFailure(SwitchMetalCommandBuffer *cb, NSString *message)
 {
-    std::lock_guard<gm20b::Mutex> lock(cb->_lock);
+    std::lock_guard<gm20b::UnfairMutex> lock(cb->_lock);
     cb->_segError = [NSError errorWithDomain:MTLCommandBufferErrorDomain
                                         code:MTLCommandBufferErrorInternal
                                     userInfo:@{NSLocalizedDescriptionKey : message}];

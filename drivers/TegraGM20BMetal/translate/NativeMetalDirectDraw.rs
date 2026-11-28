@@ -2,7 +2,7 @@
 
 use crate::descriptors::e;
 use crate::direct::compile_error;
-use crate::direct_abi::{HEAP_ARRAYS, NmbDirectDraw, NmbDirectWrite};
+use crate::direct_abi::{GUEST_BASE_FRAGMENT, GUEST_BASES, HEAP_ARRAYS, NmbDirectDraw, NmbDirectWrite};
 use crate::direct_layout::{Layout, heap_of};
 use crate::direct_writes::residual_words;
 use ash::vk as avk;
@@ -82,8 +82,8 @@ pub(crate) struct Run {
     pub(crate) state: BindState,
 }
 
-/// Why a probe draw did not settle: a buffer slot m2v reaches by its device address was bound without one (the probe binds
-/// it a buffer then), or the translator's refusal
+/// Why a probe draw did not settle: a buffer slot m2v reaches by its device address, or whose Metal address its programs
+/// read, was bound without one (the probe binds it a buffer then), or the translator's refusal
 pub(crate) enum Unsettled {
     Address(SlotRef),
     Refused(String),
@@ -92,6 +92,17 @@ pub(crate) enum Unsettled {
 impl From<String> for Unsettled {
     fn from(why: String) -> Unsettled {
         Unsettled::Refused(why)
+    }
+}
+
+/// `plan` as a probe draw settles it: a slot bound with `set*Bytes` whose device or Metal address the plan needs is one the
+/// probe binds a buffer at; the runtime gives such a slot its upload copy's address (RenderEncoder::guestBaseWords)
+fn planned(plan: Result<BindingPlan, BindError>, what: &'static str) -> Result<BindingPlan, Unsettled> {
+    match plan {
+        Err(BindError::MissingDeviceAddress { slot } | BindError::MissingGuestAddress { slot }) => {
+            Err(Unsettled::Address(slot))
+        }
+        plan => Ok(plan.map_err(e(what))?),
     }
 }
 
@@ -104,10 +115,7 @@ pub(crate) fn settle(
     budget: &Budget,
 ) -> Result<Run, Unsettled> {
     let shape = state.shape();
-    let plan = match variants[0].1.plan(compile, &shape) {
-        Err(BindError::MissingDeviceAddress { slot }) => return Err(Unsettled::Address(slot)),
-        plan => plan.map_err(e("plan"))?,
-    };
+    let plan = planned(variants[0].1.plan(compile, &shape), "plan")?;
     let (variant, plan) = if plan.variant == variants[0].0 {
         (0, plan)
     } else {
@@ -121,10 +129,7 @@ pub(crate) fn settle(
                 variants.len() - 1
             }
         };
-        match variants[at].1.plan(compile, &shape) {
-            Err(BindError::MissingDeviceAddress { slot }) => return Err(Unsettled::Address(slot)),
-            plan => (at, plan.map_err(e("plan variant"))?),
-        }
+        (at, planned(variants[at].1.plan(compile, &shape), "plan variant")?)
     };
     let commands = plan.instantiate_draw(&state, draw).map_err(e("instantiate"))?;
     Ok(Run {
@@ -188,15 +193,22 @@ pub(crate) fn draw_of(
             residual_words(&run.plan, Stage::Vertex),
             residual_words(&run.plan, Stage::Fragment),
         ],
+        guest_base_word: [0; GUEST_BASES],
+        guest_base_slot: [0; GUEST_BASES],
     };
     holes_of(&run.commands, &mut draw)?;
     heap_of(pipeline, layout, &mut draw);
     dynamic_words(run, pipeline, &mut draw)?;
     for field in &run.plan.push.fields {
         let (word, bytes) = match field.field {
-            // a static root's guest address, which the probe's draws fill with their own
-            PushField::SlotGuestBase(_) => {
-                draw.other_holes += 1;
+            PushField::SlotGuestBase(slot) => {
+                guest_base(
+                    &mut draw.guest_base_word,
+                    &mut draw.guest_base_slot,
+                    slot,
+                    field.location,
+                    field.size,
+                )?;
                 continue;
             }
             PushField::HalfBlendColor => (&mut draw.half_blend_color_word, 16),
@@ -259,6 +271,46 @@ pub(crate) fn draw_of(
         };
     }
     Ok(draw)
+}
+
+/// A SlotGuestBase field as the record keeps it (PackPipeline::guestBaseWord, guestBaseSlot): its push word + 1, and the
+/// Metal buffer index whose bound address each draw writes there, bit 7 set for the fragment stage's
+fn guest_base(
+    words: &mut [u8; GUEST_BASES],
+    slots: &mut [u8; GUEST_BASES],
+    slot: SlotRef,
+    location: FieldLocation,
+    size: u32,
+) -> Result<(), String> {
+    let FieldLocation::PushWindow { offset } = location else {
+        return Err("a buffer's Metal address placed past the root push window".into());
+    };
+    if size != 8 || offset % 4 != 0 || offset > 128 - 8 {
+        return Err("invalid Metal address push placement".into());
+    }
+    let stage = match slot.stage {
+        Stage::Vertex => 0,
+        Stage::Fragment => GUEST_BASE_FRAGMENT,
+        _ => return Err(format!("a Metal address of a {:?} stage's buffer", slot.stage)),
+    };
+    if slot.index >= 31 {
+        return Err("a Metal address of a slot past the buffer slots".into());
+    }
+    let (word, bound) = ((offset / 4 + 1) as u8, stage | slot.index as u8);
+    if let Some(at) = words.iter().position(|&w| w == word) {
+        return if slots[at] == bound {
+            Ok(())
+        } else {
+            Err("two buffers' Metal addresses at one push word".into())
+        };
+    }
+    let at = words
+        .iter()
+        .position(|&w| w == 0)
+        .ok_or_else(|| format!("more than {GUEST_BASES} buffers' Metal addresses read"))?;
+    words[at] = word;
+    slots[at] = bound;
+    Ok(())
 }
 
 /// The push words a raw draw writes itself: each amplification's id, count and offsets, and each dynamic pulled layout's
@@ -336,8 +388,65 @@ pub(crate) fn stage_order(pipeline: &RenderPipeline) -> Result<Vec<usize>, Strin
 
 #[cfg(test)]
 mod tests {
-    use super::hole_stages;
+    use super::{GUEST_BASE_FRAGMENT, GUEST_BASES, guest_base, hole_stages};
+    use metal2vulkan::bind::FieldLocation;
+    use metal2vulkan::pipeline::{SlotClass, SlotRef, Stage};
     use metal2vulkan::vk::ShaderStageFlags as S;
+
+    fn buffer(stage: Stage, index: u32) -> SlotRef {
+        SlotRef {
+            stage,
+            class: SlotClass::Buffer,
+            index,
+        }
+    }
+
+    #[test]
+    fn a_buffers_metal_address_is_kept_as_its_push_word_and_slot() {
+        let (mut words, mut slots) = ([0; GUEST_BASES], [0; GUEST_BASES]);
+        let at = |offset| FieldLocation::PushWindow { offset };
+        guest_base(&mut words, &mut slots, buffer(Stage::Vertex, 5), at(24), 8).unwrap();
+        guest_base(&mut words, &mut slots, buffer(Stage::Fragment, 2), at(120), 8).unwrap();
+        guest_base(&mut words, &mut slots, buffer(Stage::Vertex, 5), at(24), 8).unwrap();
+        assert_eq!(words, [7, 31, 0, 0]);
+        assert_eq!(slots, [5, GUEST_BASE_FRAGMENT | 2, 0, 0]);
+    }
+
+    #[test]
+    fn a_metal_address_the_runtime_cannot_write_is_refused() {
+        let (mut words, mut slots) = ([0; GUEST_BASES], [0; GUEST_BASES]);
+        let at = |offset| FieldLocation::PushWindow { offset };
+        let vertex = buffer(Stage::Vertex, 1);
+        assert!(
+            guest_base(
+                &mut words,
+                &mut slots,
+                vertex,
+                FieldLocation::ArgumentTable { offset: 0 },
+                8
+            )
+            .is_err()
+        );
+        assert!(guest_base(&mut words, &mut slots, vertex, at(124), 8).is_err());
+        assert!(guest_base(&mut words, &mut slots, vertex, at(6), 8).is_err());
+        assert!(guest_base(&mut words, &mut slots, vertex, at(8), 4).is_err());
+        assert!(guest_base(&mut words, &mut slots, buffer(Stage::Kernel, 1), at(8), 8).is_err());
+        assert!(guest_base(&mut words, &mut slots, buffer(Stage::Vertex, 31), at(8), 8).is_err());
+        assert_eq!(words, [0; GUEST_BASES]);
+        guest_base(&mut words, &mut slots, vertex, at(8), 8).unwrap();
+        assert!(guest_base(&mut words, &mut slots, buffer(Stage::Vertex, 2), at(8), 8).is_err());
+        for (k, offset) in [16, 32, 40].into_iter().enumerate() {
+            guest_base(
+                &mut words,
+                &mut slots,
+                buffer(Stage::Vertex, 2 + k as u32),
+                at(offset),
+                8,
+            )
+            .unwrap();
+        }
+        assert!(guest_base(&mut words, &mut slots, buffer(Stage::Vertex, 9), at(56), 8).is_err());
+    }
 
     #[test]
     fn a_tessellation_states_evaluation_holes_are_its_vertex_stages() {

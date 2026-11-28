@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// An RGBA8 texture over a buffer at offset 48 with rows of 48 bytes (16 mod 32), which the texture header cannot address:

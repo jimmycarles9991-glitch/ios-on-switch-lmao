@@ -17,6 +17,7 @@
 #pragma once
 #include "../../kits/SwitchCAR/SwitchPMC.h"
 #include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
+#include "XusbMailbox.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -122,7 +123,8 @@ public:
     // answers it (ACK/NAK), passes on the firmware's own ACK or NAK in `answer` (0 for anything else) and returns false
     // only on a firmware hang. sendMailbox takes ownership for a command and writes it; false when the mailbox is busy.
     bool takeMailboxInterrupt();
-    bool serviceMailbox(uint32_t &answer, uint32_t &answerData);
+    bool serviceMailbox(uint32_t &answer, uint32_t &answerData, xusb_mbox_deferred &deferred);
+    void finishMailboxReply(uint32_t requestCmd, uint32_t replyCmd, uint32_t data);
     bool sendMailbox(uint32_t cmd, uint32_t data);
     uint32_t mailboxOwner() const;
     // One line of the interrupt path, xHCI to IPFS: USBCMD/USBSTS/IMAN0/ERDP0, the OTG port's PORTSC, FPCI CFG_1, the

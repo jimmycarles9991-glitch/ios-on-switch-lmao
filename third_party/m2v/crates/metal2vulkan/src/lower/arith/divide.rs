@@ -193,10 +193,17 @@ pub fn native_words(f: Form) -> u32 {
 
 /// Metal's precise division `x / y` on `float` or `half` lanes (form `f`) by native device maths
 /// (`FloatFunctions::Native`): the device's `OpFDiv`, within Vulkan's 2.5 ulp for a divisor in
-/// `[2^-126, 2^126]`, the operands of a divisor past `2^126` first scaled by `2^-2` into that range
-/// (exactly, but where the dividend becomes a denormal, whose quotient by such a divisor Metal
+/// `[2^-126, 2^126]`, the operands of a `float` divisor past `2^126` first scaled by `2^-2` into that
+/// range (exactly, but where the dividend becomes a denormal, whose quotient by such a divisor Metal
 /// flushes to zero anyway); a `half` quotient rounded to `half` (`PrecisionNote::NativeDivision`).
+/// A `half` divisor is at most 65504 or infinite, and an infinite one gives the same quotient
+/// scaled or not, so a `half` division takes no scale: the bound, rounded to `half`, is `+inf`, and
+/// a test against it would be false on every lane.
 pub fn native(fb: &mut FunctionBuilder<'_>, f: Form, x: Value, y: Value) -> BResult<Value> {
+    if f.float_fmt() == Some(FloatFmt::Half) {
+        let q = fb.binary(BinOp::FDiv, x, y)?;
+        return narrow::round(fb, f, q);
+    }
     let ay = fb.glsl(crate::spirv::ir::GlslOp::FAbs, &[y])?;
     let limit = fsplat(fb, f, 2f64.powi(126))?;
     let past = fb.binary(BinOp::FOrdGreaterThan, ay, limit)?;

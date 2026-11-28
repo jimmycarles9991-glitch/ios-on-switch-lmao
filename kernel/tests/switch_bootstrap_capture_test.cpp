@@ -12,14 +12,16 @@ namespace {
 #define SWITCH_IPSW_BUILD "TEST"
 #define SWITCH_BOOTSTRAP_BASE "/private/var/Switch/bootstrap/" SWITCH_IPSW_BUILD
 constexpr unsigned MNT_RDONLY = 1, MNT_IGNORE_OWNERSHIP = 2;
+constexpr int UIO_READ = 0, UIO_SYSSPACE = 1, IO_NOAUTH = 1;
 struct mount { unsigned flags = 0; };
 struct vnode {
     mount *volume;
     bool root = true, supported = true;
-    int attribute_error = 0, holds = 0;
+    int attribute_error = 0, read_error = 0, holds = 0;
     uint64_t id = 2;
     uint64_t size = 0;
     bool regular = false;
+    std::string content = {};
 };
 using vnode_t = vnode *;
 constexpr vnode_t NULLVP = nullptr;
@@ -66,12 +68,24 @@ bool vnode_isreg(vnode_t node) { return node->regular; }
 mount *vnode_mount(vnode_t node) { return node->volume; }
 unsigned vfs_flags(mount *volume) { return volume->flags; }
 int vfs_context_kernel() { return 0; }
+int vfs_context_ucred(int) { return 0; }
+int vfs_context_proc(int) { return 0; }
 int vnode_getattr(vnode_t node, vnode_attr *va, int)
 {
     va->supported = node->supported;
     va->va_fileid = node->id;
     va->va_data_size = node->size;
     return node->attribute_error;
+}
+int vn_rdwr(int, vnode_t node, char *base, int len, int64_t offset, int, int, int, int *resid, int)
+{
+    if (node->read_error) return node->read_error;
+    const size_t start = offset >= 0 ? static_cast<size_t>(offset) : node->content.size();
+    const size_t available = start < node->content.size() ? node->content.size() - start : 0;
+    const size_t copy = available < static_cast<size_t>(len) ? available : static_cast<size_t>(len);
+    if (copy) std::memcpy(base, node->content.data() + start, copy);
+    if (resid) *resid = len - static_cast<int>(copy);
+    return 0;
 }
 void vnode_put(vnode_t node) { --node->holds; }
 void switch_migration_home_prepare(bool has_seed, bool has_pending)
@@ -136,6 +150,62 @@ TEST_F(BootstrapCapture, MigrationHintsAreTypedBoundedFilesOnRealData)
     EXPECT_FALSE(packaged);
     EXPECT_FALSE(pending);
     EXPECT_EQ(marker.holds + manifest.holds + archive.holds, 0);
+}
+
+TEST_F(BootstrapCapture, BootOneAndNonActiveMigrationStateScheduleWindow)
+{
+    vnode manifest{&data_mount}, archive{&data_mount}, state{&data_mount}, marker{&data_mount};
+    manifest.regular = archive.regular = state.regular = marker.regular = true;
+    manifest.size = 32;
+    archive.size = 4096;
+    const std::string generation(64, 'a');
+    files = {
+        {"/private/var/Switch/overlay/usr/share/Switch/bootstrap/manifest.json", &manifest},
+        {"/private/var/Switch/overlay/usr/share/Switch/bootstrap/payload.tar", &archive},
+    };
+    switch_bootstrap_capture();
+    EXPECT_TRUE(packaged);
+    EXPECT_TRUE(pending);
+
+    state.content = "complete " + generation + "\n";
+    state.size = state.content.size();
+    files[SWITCH_BOOTSTRAP_BASE "/migration.state"] = &state;
+    switch_bootstrap_capture();
+    EXPECT_TRUE(packaged);
+    EXPECT_FALSE(pending);
+
+    files[SWITCH_BOOTSTRAP_BASE "/migration.pending"] = &marker;
+    switch_bootstrap_capture();
+    EXPECT_TRUE(packaged);
+    EXPECT_TRUE(pending);
+    files.erase(SWITCH_BOOTSTRAP_BASE "/migration.pending");
+
+    state.content = "repair " + generation + "\n";
+    state.size = state.content.size();
+    switch_bootstrap_capture();
+    EXPECT_TRUE(packaged);
+    EXPECT_FALSE(pending);
+
+    for (const std::string &non_active : {
+             "working " + generation + " preparation\n",
+             "failed " + generation + " unscheduled 89 3\n",
+             "complete " + generation + "x\n",
+         }) {
+        state.content = non_active;
+        state.size = state.content.size();
+        switch_bootstrap_capture();
+        EXPECT_TRUE(packaged);
+        EXPECT_TRUE(pending) << non_active;
+    }
+
+    mount foreign;
+    state.content = "complete " + generation + "\n";
+    state.size = state.content.size();
+    state.volume = &foreign;
+    switch_bootstrap_capture();
+    EXPECT_TRUE(packaged);
+    EXPECT_TRUE(pending);
+    EXPECT_EQ(state.holds + marker.holds + manifest.holds + archive.holds, 0);
 }
 
 TEST_F(BootstrapCapture, ReportsEveryDataCaptureFailure)

@@ -6,6 +6,7 @@
 #include <cstring>
 #include <string_view>
 #include "objc_layout.h"
+#include "xr.h"
 
 namespace {
 
@@ -238,18 +239,41 @@ bool keyObjects(const Layout &l, const uint8_t *object, const Objects &o, uint8_
 }  // namespace
 
 struct SwitchMetalPassCache {
+    static constexpr size_t kIndexSize = 128;
     std::array<SwitchMetalPassEntry, kEntries> entries{};
     std::array<uint64_t, kEntries> hashes{}, used{};
+    std::array<int8_t, kIndexSize> index{};
     uint64_t clock = 0, since = 0;  // since: the clock its last command buffer returned it at
     uint64_t bound =
         0;  // the entries whose copies name their textures: those its command buffer kept or gm20bPassBind named
     size_t keyBytes = 0, passes = 0, textures = 0;  // textures: the bound entries'
+
+    SwitchMetalPassCache()
+    {
+        index.fill(-1);
+    }
 
     ~SwitchMetalPassCache()
     {
         for (SwitchMetalPassEntry &e : entries)
             if (e.pass)
                 CFRelease((__bridge CFTypeRef)e.pass);
+    }
+
+    void indexInsert(size_t entry, uint64_t hash)
+    {
+        size_t s = size_t(hash) & (kIndexSize - 1);
+        while (index[s] >= 0)
+            s = (s + 1) & (kIndexSize - 1);
+        index[s] = int8_t(entry);
+    }
+
+    void indexRebuild()
+    {
+        index.fill(-1);
+        for (size_t i = 0; i < kEntries; i++)
+            if (entries[i].pass)
+                indexInsert(i, hashes[i]);
     }
 };
 
@@ -330,16 +354,24 @@ void release(const CFTypeRef (&gone)[kEntries])
 void dropIdle(SwitchMetalPassCache &c)
 {
     CFTypeRef gone[kEntries] = {};
+    bool dropped = false;
     for (size_t i = 0; i < kEntries; i++)
-        if (c.entries[i].pass && c.clock - c.used[i] > kIdleLookups)
+        if (c.entries[i].pass && c.clock - c.used[i] > kIdleLookups) {
             gone[i] = take(c, i);
+            dropped = true;
+        }
+    if (dropped)
+        c.indexRebuild();
     release(gone);
 }
 
 }  // namespace
 
-bool gm20bPassKey(MTLRenderPassDescriptor *d, std::vector<uint8_t> &key, uint64_t &hash)
+bool gm20bPassKey(__unsafe_unretained MTLRenderPassDescriptor *d, std::vector<uint8_t> &key, uint64_t &hash,
+                  bool *hasCounters)
 {
+    if (hasCounters)
+        *hasCounters = false;
     const Layout &l = layout();
     if (!l.ok || object_getClass(d) != l.descriptor)
         return false;
@@ -361,8 +393,11 @@ bool gm20bPassKey(MTLRenderPassDescriptor *d, std::vector<uint8_t> &key, uint64_
             if (object_getClass((__bridge id)sample) != l.sample)
                 return false;
             memcpy(&buffer, static_cast<const uint8_t *>(sample) + l.sampleBufferAt, sizeof buffer);
-            if (buffer)
+            if (buffer) {
+                if (hasCounters)
+                    *hasCounters = true;
                 return false;
+            }
         }
     }
     // the mask of the attachments that have a texture, the descriptor's bytes, then each of those attachments' bytes:
@@ -398,17 +433,18 @@ bool gm20bPassKey(MTLRenderPassDescriptor *d, std::vector<uint8_t> &key, uint64_
     // the arrays' own addresses are no content
     memset(out + l.attachmentsAt - sizeof(void *), 0, sizeof(void *));
     memset(out + l.sampleBuffersAt - sizeof(void *), 0, sizeof(void *));
-    memset(out + head, 0, headPadded - head);
+    if (headPadded > head)
+        memset(out + head, 0, headPadded - head);
     if (!keyObjects(l, base, l.head, out))
         return false;
     out += headPadded;
-    for (size_t slot = 0; slot < kAttachments; slot++) {
-        if (!attachments[slot])
-            continue;
+    for (uint64_t mask = present; mask; mask &= mask - 1) {
+        const size_t slot = size_t(__builtin_ctzll(mask));
         const size_t kind = slot < 8 ? 0 : slot - 7;
         const size_t taken = l.attachmentBytes[kind] - sizeof(void *), padded = (taken + 7) & ~size_t(7);
         memcpy(out, attachments[slot] + sizeof(void *), taken);
-        memset(out + taken, 0, padded - taken);
+        if (padded > taken)
+            memset(out + taken, 0, padded - taken);
         if (!keyObjects(l, attachments[slot], l.objects[kind], out))
             return false;
         out += padded;
@@ -417,21 +453,28 @@ bool gm20bPassKey(MTLRenderPassDescriptor *d, std::vector<uint8_t> &key, uint64_
     return true;
 }
 
-SwitchMetalPassEntry *gm20bPassFind(SwitchMetalCommandBuffer *cb, const std::vector<uint8_t> &key, uint64_t hash)
+SwitchMetalPassEntry *gm20bPassFind(__unsafe_unretained SwitchMetalCommandBuffer *cb, const std::vector<uint8_t> &key,
+                                    uint64_t hash)
 {
     SwitchMetalPassCache &c = *cb->_passCache;
     if (++c.clock % kEntries == 0)
         dropIdle(c);
-    for (size_t i = 0; i < kEntries; i++)
-        if (c.hashes[i] == hash && c.entries[i].pass && c.entries[i].key == key) {
+    size_t s = size_t(hash) & (SwitchMetalPassCache::kIndexSize - 1);
+    while (c.index[s] >= 0) {
+        const size_t i = size_t(c.index[s]);
+        if (c.hashes[i] == hash && c.entries[i].key.size() == key.size() &&
+            memcmp(c.entries[i].key.data(), key.data(), key.size()) == 0) {
             c.used[i] = c.clock;
             return &c.entries[i];
         }
+        s = (s + 1) & (SwitchMetalPassCache::kIndexSize - 1);
+    }
     return nullptr;
 }
 
-void gm20bPassKeep(SwitchMetalCommandBuffer *cb, const std::vector<uint8_t> &key, uint64_t hash,
-                   MTLRenderPassDescriptor *copy, const SwitchMetalPass &facts, const SwitchMetalRenderEncoder *e)
+void gm20bPassKeep(__unsafe_unretained SwitchMetalCommandBuffer *cb, const std::vector<uint8_t> &key, uint64_t hash,
+                   __unsafe_unretained MTLRenderPassDescriptor *copy, const SwitchMetalPass &facts,
+                   __unsafe_unretained const SwitchMetalRenderEncoder *e)
 {
     SwitchMetalPassCache &c = *cb->_passCache;
     size_t at = 0;
@@ -444,9 +487,28 @@ void gm20bPassKeep(SwitchMetalCommandBuffer *cb, const std::vector<uint8_t> &key
             at = i;
     }
     SwitchMetalPassEntry *slot = &c.entries[at];
-    CFTypeRef gone = slot->pass ? take(c, at) : nullptr;
+    const bool evicted = slot->pass != nil;
+    CFTypeRef gone = evicted ? take(c, at) : nullptr;
     slot->pass = (__bridge MTLRenderPassDescriptor *)CFBridgingRetain(copy);
     slot->facts = facts;
+    uint8_t colorMask = 0;
+    bool hasResolve = facts.depthResolve != nil || facts.stencilResolve != nil;
+    bool hasXr = false;
+    for (unsigned i = 0; i < 8; i++) {
+        __unsafe_unretained SwitchMetalTexture *x = (SwitchMetalTexture *)facts.color[i].texture;
+        if (!x)
+            continue;
+        colorMask |= uint8_t(1u << i);
+        if (facts.color[i].resolve)
+            hasResolve = true;
+        if (x->_gm20bOk && gm20b::xrForm(x->_raw.format) != gm20b::XrForm::None)
+            hasXr = true;
+    }
+    slot->facts.colorMask = colorMask;
+    slot->colorMask = colorMask;
+    slot->hasZeta = facts.zeta[0].texture != nil || facts.zeta[1].texture != nil;
+    slot->hasResolve = hasResolve;
+    slot->hasXr = hasXr;
     std::copy(std::begin(e->_formats), std::end(e->_formats), slot->formats.begin());
     slot->count = e->_count;
     slot->zeta = e->_zeta;
@@ -463,6 +525,10 @@ void gm20bPassKeep(SwitchMetalCommandBuffer *cb, const std::vector<uint8_t> &key
     ++c.passes;
     c.bound |= uint64_t(1) << at;
     c.textures += texturesOf(facts);
+    if (evicted)
+        c.indexRebuild();
+    else
+        c.indexInsert(at, hash);
     if (gone)
         CFRelease(gone);
 }
@@ -488,7 +554,7 @@ void gm20bPassCacheUnbind(SwitchMetalPassCache *cache)
     cache->since = cache->clock;
 }
 
-void gm20bPassBind(SwitchMetalCommandBuffer *cb, MTLRenderPassDescriptor *pass)
+void gm20bPassBind(__unsafe_unretained SwitchMetalCommandBuffer *cb, __unsafe_unretained MTLRenderPassDescriptor *pass)
 {
     SwitchMetalPassCache *c = cb->_passCache.get();
     if (!c || !pass)
@@ -513,6 +579,7 @@ SwitchMetalPassTrim gm20bPassCacheTrim(SwitchMetalPassCache *cache)
         for (size_t i = 0; i < kEntries; i++)
             if (cache->entries[i].pass)
                 gone[i] = take(*cache, i);
+        cache->index.fill(-1);
         release(gone);
     }
     return held;

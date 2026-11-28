@@ -74,9 +74,14 @@ struct nak_fs_key {
 
    /** Switch: the 16-bit float colour attachments (bit j: attachment j) */
    uint8_t half_targets;
+
+   /** Switch: the colour attachments that store a half denormal as they store
+    * zero, 8- and 10-bit unorm, sRGB and snorm (bit j: attachment j)
+    */
+   uint8_t unorm_targets;
 };
 PRAGMA_DIAGNOSTIC_POP
-static_assert(sizeof(struct nak_fs_key) == 55, "This struct has no holes");
+static_assert(sizeof(struct nak_fs_key) == 56, "This struct has no holes");
 
 struct nak_constant_offset_info {
    /**

@@ -9,6 +9,7 @@
 #include "XusbPorts.h"
 #include <IOKit/IOCommandGate.h>
 #include <IOKit/IOFilterInterruptEventSource.h>
+#include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
 
 extern "C" {
@@ -38,8 +39,10 @@ class SwitchXHCI : public AppleUSBXHCI {
     volatile bool sspiDue;  // RESET_SSPI owed since the host role began or the controller's last reset
     IOFilterInterruptEventSource *mailbox;
     IOCommandGate *commandGate;  // on tegraLoop: a command's sender sleeps on it until mailboxAction has its answer
-    xusb_mbox_wait commandWait;  // tegraLoop's gate
-    xusb_hold hold;              // AppleUSBXHCI's work loop, and systemSleep while AppleUSBXHCI is lowered
+    IOTimerEventSource *mboxReplyTimer;  // on tegraLoop: one-shot LFPS settle reply continuation
+    xusb_mbox_wait commandWait;          // tegraLoop's gate
+    xusb_mbox_deferred deferredReply;    // tegraLoop's gate
+    xusb_hold hold;                      // AppleUSBXHCI's work loop, and systemSleep while AppleUSBXHCI is lowered
     volatile uint32_t mailboxInterrupts;
     uint32_t unclaimed;  // primary interrupt context only
     volatile bool mailboxStorm;
@@ -56,6 +59,7 @@ class SwitchXHCI : public AppleUSBXHCI {
 
     static bool mailboxFilter(OSObject *owner, IOFilterInterruptEventSource *);
     static void mailboxAction(OSObject *owner, IOInterruptEventSource *, int);
+    static void mboxReplyFired(OSObject *owner, IOTimerEventSource *);
     uint32_t *shadowFor(uint64_t address);
     uint32_t heldWrite32(uint64_t address, uint32_t value);
     bool keepsEventRing(uint64_t address, uint64_t value, unsigned bytes);

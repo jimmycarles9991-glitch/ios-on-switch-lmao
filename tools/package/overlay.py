@@ -5,7 +5,8 @@ They are kept on Data under /private/var/Switch/overlay (the deploy copies the b
 
 Three steps of //boot:package, so that each overlay edit reruns only what reads it:
 
-    overlay.py plan --manifest M --portrait-header H --kind KIND [--given SOURCE]... [--release] --out PLAN
+    overlay.py plan --manifest M --portrait-header H --kind KIND [--given SOURCE]... [--release]
+                    [--hwtest|--no-hwtest] --out PLAN
         overlay/manifest.json, filtered and checked: the files to stage and the directories the kernel unions
         (each with the switch-no-<feature> boot-arg that hides it), which the ADT carries. Reads no overlay file.
     overlay.py trust --plan PLAN [--file SOURCE=PATH]... --out MODULE
@@ -16,9 +17,10 @@ Three steps of //boot:package, so that each overlay edit reruns only what reads 
 manifest.json: {"files": [{"path": absolute, "source": relative to the tree, "trust": bool, "mode": "0755",
 "boot-arg": name, "union": absolute}]}. The union directory is the file's own unless "union" names an existing
 ancestor (XNU unions are deep, so a new bundle directory can appear inside a sealed one). "portrait": true stages the
-file only for a portrait-native kernel, "debug": true only in a debug boot package (not with --release), "kind" only for
-that IPSW kind (a union over a directory the System volume lacks fails at boot). Under the Supplemental cryptex path
-only launchd plists and launchd's jetsam properties overlay are allowed (SUPPLEMENTAL).
+file only for a portrait-native kernel, "debug": true only in a debug boot package (not with --release), "hwtest": true
+only when HW Test is enabled (default: on without --release, off with --release; overridden by --hwtest/--no-hwtest),
+"kind" only for that IPSW kind (a union over a directory the System volume lacks fails at boot). Under the Supplemental
+cryptex path only launchd plists and launchd's jetsam properties overlay are allowed (SUPPLEMENTAL).
 "bundle": true makes the entry a whole bundle directory: its source is a rules_apple .ipa, whose Payload/<the path's
 name>/ becomes the directory at path, and "trust" covers every Mach-O inside it.
 """
@@ -37,6 +39,7 @@ import tempfile
 import zipfile
 from collections.abc import Iterable
 from pathlib import Path
+from typing import NamedTuple
 
 from boot_config import portrait_native
 
@@ -64,14 +67,35 @@ def _validate_bundle_entry(entry: dict) -> None:
         raise SystemExit(f'overlay: invalid bundle-signature entry {path}')
 
 
-def plan(manifest: dict, portrait: bool, kind: str, given: Iterable[str] | None = None, release: bool = False) -> dict:
+class BuildOptions(NamedTuple):
+    release: bool = False
+    hwtest: bool | None = None
+
+    @property
+    def include_hwtest(self) -> bool:
+        return (not self.release) if self.hwtest is None else self.hwtest
+
+
+def plan(
+    manifest: dict,
+    portrait: bool,
+    kind: str,
+    given: Iterable[str] | None = None,
+    options: BuildOptions | None = None,
+) -> dict:
     """Return the manifest's files for this kernel and IPSW kind.
 
     The plan: {"files": [{path, source, trust, mode, directory}], "dirs": [[d, gate]]}. `given`: the sources the build
-    gives; a manifest entry it lacks is an error, not a silent omission. `release`: debug entries are left out.
+    gives; a manifest entry it lacks is an error, not a silent omission. `options`: release/hwtest filtering (defaults
+    to debug with HW Test enabled).
     """
+    opts = options or BuildOptions()
     entries = [
-        entry for entry in manifest['files'] if not (release and entry.get('debug')) and entry.get('kind', kind) == kind
+        entry
+        for entry in manifest['files']
+        if not (opts.release and entry.get('debug'))
+        and not (not opts.include_hwtest and entry.get('hwtest'))
+        and entry.get('kind', kind) == kind
     ]
     if given is not None:
         missing = sorted({entry['source'] for entry in entries} - set(given))
@@ -256,6 +280,7 @@ def main() -> None:
     p.add_argument('--kind', required=True)
     p.add_argument('--given', action='append', default=[])
     p.add_argument('--release', action='store_true')
+    p.add_argument('--hwtest', action=argparse.BooleanOptionalAction, default=None)
     for name in ('trust', 'tree'):
         p = step.add_parser(name)
         p.add_argument('--plan', required=True, type=Path)
@@ -268,7 +293,7 @@ def main() -> None:
             portrait_native(args.portrait_header),
             args.kind,
             args.given,
-            args.release,
+            BuildOptions(release=args.release, hwtest=args.hwtest),
         )
         args.out.write_text(json.dumps(result, indent=1) + '\n')
         return

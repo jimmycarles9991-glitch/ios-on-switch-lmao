@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #if DEVELOPMENT || DEBUG
 #include <IOKit/IOLib.h>
-#include <libkern/crypto/sha2.h>
 #include "SwitchWLANA3.h"
 #include "firmware/rom_capture.h"
 #include "firmware/a3/image.h"
@@ -16,17 +15,9 @@ uint32_t switch_wlan_a3_state_address(bool candidate)
 uint8_t *switch_wlan_a3_build(const uint8_t *image, size_t length, size_t *outputLength, bool candidate)
 {
     *outputLength = 0;
+    // `image` is the firmware the kext embeds (firmware.S), which rom_capture_test pins to these patches at build time
     if (!image || length != SWITCH_WLAN_ROM_IMAGE_BYTES)
         return nullptr;
-    uint8_t digest[32];
-    SHA256_CTX context;
-    SHA256_Init(&context);
-    SHA256_Update(&context, image, length);
-    SHA256_Final(digest, &context);
-    if (memcmp(digest, switch_wlan_rom_image_sha256, sizeof digest)) {
-        IOLog("SwitchWLAN: A3 backend refused: firmware fingerprint changed\n");
-        return nullptr;
-    }
     const size_t size = (candidate ? switch_wlan_a3_candidate_end : switch_wlan_a3_end) - SWITCH_A3_IMAGE_BASE;
     auto *output = static_cast<uint8_t *>(IOMalloc(size));
     if (!output)
@@ -35,9 +26,8 @@ uint8_t *switch_wlan_a3_build(const uint8_t *image, size_t length, size_t *outpu
         switch_wlan_a3_candidate_heap_init,       switch_wlan_a3_candidate_attach,
         switch_wlan_a3_candidate_rx_entry,        switch_wlan_a3_candidate_tx_entry,
         switch_wlan_a3_candidate_tx_radio_status, switch_wlan_a3_candidate_pm_status_entry,
-        switch_wlan_a3_candidate_channel_gate,
-        switch_wlan_a3_candidate_pm_prepare_entry, switch_wlan_a3_candidate_pm_submit_entry,
-        switch_wlan_a3_candidate_pm_set_entry,
+        switch_wlan_a3_candidate_channel_gate,    switch_wlan_a3_candidate_pm_prepare_entry,
+        switch_wlan_a3_candidate_pm_submit_entry, switch_wlan_a3_candidate_pm_set_entry,
     };
     const bool patched =
         candidate

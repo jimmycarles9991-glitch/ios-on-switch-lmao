@@ -39,7 +39,7 @@ void Device::beginDrawTimes(CommandBuffer &cb, Push &p)
     if (drawTimes_.asking()) {
         if (!drawTimeMarks_.va && !openDrawTimes()) {
             drawTimes_.cancel();
-            os_log_error(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "gm20b"),
+            os_log_error(gm20b::log(),
                          "SwitchMetal: fw refused: no memory the GPU may write for the capture's marks");
             return;
         }
@@ -95,7 +95,7 @@ void Device::reportDrawTimes()
         return gpuNanoseconds(stamp, ns) ? int64_t(ns) : int64_t(-1);
     };
     const auto *marks = reinterpret_cast<const volatile TimedMark *>(drawTimeMarks_.cpu);
-    const os_log_t log = os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "gm20b");
+    const os_log_t log = gm20b::log();
     for (const std::string &line : drawTimes_.report(marks, getprogname(), ran, stamps, gpuNs))
         os_log(log, "SwitchMetal: fw %{public}s", line.c_str());
 }
@@ -131,13 +131,17 @@ void RenderEncoder::timePassBegin()
 
 TimedState RenderEncoder::timedState(const Pipeline &drawn) const
 {
-    const Pipeline &named = drawn.caName || drawn.spanName || !pipeline_ ? drawn : *pipeline_;
+    const char *drawnCa = __atomic_load_n(&drawn.caName, __ATOMIC_ACQUIRE);
+    const char *drawnSpan = __atomic_load_n(&drawn.spanName, __ATOMIC_ACQUIRE);
+    const Pipeline &named = drawnCa || drawnSpan || !pipeline_ ? drawn : *pipeline_;
+    const char *namedCa = &named == &drawn ? drawnCa : __atomic_load_n(&named.caName, __ATOMIC_ACQUIRE);
+    const char *namedSpan = &named == &drawn ? drawnSpan : __atomic_load_n(&named.spanName, __ATOMIC_ACQUIRE);
     TimedState s;
     s.key = named.rec ? named.rec->keyHash : drawn.rec ? drawn.rec->keyHash : 0;
-    s.name = named.caName ? named.caName : named.spanName;
+    s.name = namedCa ? namedCa : namedSpan;
     s.fragmentWords = drawn.fragmentInstructions;
     s.vertexWords = drawn.vertexInstructions;
-    s.gprs = uint8_t(std::min<uint32_t>(pixelRegisters(drawn.methods.data(), drawn.methods.size()), 0xff));
+    s.gprs = uint8_t(std::min<uint32_t>(pixelRegisters(drawn.methodWords(), drawn.methodCount()), 0xff));
     s.samplePasses = drawn.samplePasses;
     s.form = uint8_t(drawn.splitOf                      ? SpanForm::Twin
                      : drawn.freeForm.rung != FetchNone ? SpanForm::FetchFree

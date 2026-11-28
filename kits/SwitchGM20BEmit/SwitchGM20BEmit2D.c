@@ -83,7 +83,8 @@ void switch_gm20b_2d_scale(struct nv_push *p, const struct switch_gm20b_2d_surfa
     source(p, src);
     if (s->rop)
         rop_on(p, s->rop);
-    P_IMMD(p, NV902D, TWOD_INVALIDATE_TEXTURE_DATA_CACHE, V_L1_ONLY);
+    if (!s->skip_tex_invalidate)
+        P_IMMD(p, NV902D, TWOD_INVALIDATE_TEXTURE_DATA_CACHE, V_L1_ONLY);
     P_IMMD(
         p, NV902D, SET_PIXELS_FROM_MEMORY_SAMPLE_MODE,
         {.origin = s->corner ? ORIGIN_CORNER : ORIGIN_CENTER, .filter = s->bilinear ? FILTER_BILINEAR : FILTER_POINT});

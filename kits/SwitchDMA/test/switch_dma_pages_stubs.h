@@ -19,7 +19,8 @@ using vm_size_t = uint64_t;
 using vm_offset_t = uint64_t;
 using task_t = void *;
 constexpr IOReturn kIOReturnSuccess = 0, kIOReturnNoResources = 0x2be;
-constexpr IOOptionBits kIODirectionInOut = 3, kIOMemoryMapperNone = 0x800, kIOMemoryKernelUserShared = 0x2000;
+constexpr IOOptionBits kIODirectionInOut = 3, kIOMemoryMapperNone = 0x800, kIOMemoryKernelUserShared = 0x2000,
+                       kIOMapCacheMask = 0x700, kIOMapInhibitCache = 0x100, kIOMapWriteCombineCache = 0x400;
 constexpr uint64_t PAGE_SIZE = 16384;
 inline task_t kernel_task = nullptr;
 

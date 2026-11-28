@@ -6,7 +6,8 @@ action with declared inputs, so Bazel reruns only what an edit reaches:
 The shader seed and the pack are gpu/seed's.
 """
 
-load("//bazel:profile.bzl", "PROFILE_ATTR", "switch_debug_define")
+load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
+load("//bazel:profile.bzl", "METAL_STATS_ATTR", "PROFILE_ATTR", "metal_stats_defines", "switch_debug_define")
 load("//gpu/seed:defs.bzl", "SeedInfo")
 load("//ipsw:ipsw.bzl", "IpswInfo")
 load("//kernel/rules:layout.bzl", "MOVED_ROOTS", "OLD_TREE", "TREE_ROOT")
@@ -33,7 +34,7 @@ def _xcode_run(ctx, mnemonic, message, command, inputs, outputs, env = {}):
         progress_message = message,
     )
 
-_IOS = ["-target", "arm64-apple-ios17.0", "-isysroot", "@IPHONEOS_SDK@"]
+_IOS = ["-target", "arm64-apple-ios17.0", "-mcpu=cortex-a57", "-isysroot", "@IPHONEOS_SDK@"]
 
 # The old script's one clang++ line, split into compile and link so each object is its own cached action. Paths in
 # debug info and __FILE__ are mapped to /switch-ios, and the link keeps no object paths (oso_prefix) or times.
@@ -48,7 +49,10 @@ _PLUGIN_CFLAGS = [
     "-Wall",
     "-Wextra",
     "-Werror",
-    "-fstack-protector-strong",
+    "-fno-stack-protector",
+    "-fvisibility=hidden",
+    "-fvisibility-inlines-hidden",
+    "-fno-rtti",
     "-std=c++17",
     "-fobjc-arc",
     "-Wno-deprecated-declarations",
@@ -67,35 +71,68 @@ _PLUGIN_CFLAGS = [
     if TREE_ROOT != OLD_TREE
 ]
 
+_PLUGIN_EXPORTS = [
+    "_OBJC_CLASS_$_TegraGM20BMetalDevice",
+    "_OBJC_METACLASS_$_TegraGM20BMetalDevice",
+    "_switch_shader_compiler_main",
+]
+
+_OUTPUT_SPELLING = "bazel-out/bin"
+
 def _plugin_objects(ctx, name, stack):
     """Each unit of the plugin compiled on its own (objects in link order), with `stack` as the stack key's file."""
+    is_release = ctx.attr._profile[BuildSettingInfo].value == "release"
 
     # -I in the old build's order (NativeMetal, drivers/TegraGM20BMetal, TegraGM20B), and the driver's stack key as a define.
     includes = ["-I", ctx.bin_dir.path]
     for marker in ctx.files.include_markers:
         includes += ["-I", marker.dirname]
-    defines = [switch_debug_define(ctx)]
+    defines = [switch_debug_define(ctx)] + metal_stats_defines(ctx)
     if stack:
         defines.append("-DTEGRA_STACK_KEY=0x@FILE:%s@ull" % stack.path)
     headers = ctx.files.hdrs + ctx.files.include_markers + ([stack] if stack else [])
+
+    # A generated header's path names its configuration's output directory, which a platform suffix or a transition
+    # (the release catalog's) renames: __FILE__ and the line tables spell every output root one way, so the objects
+    # are the same bytes in every configuration.
+    roots = {ctx.bin_dir.path: None} | {f.root.path: None for f in headers if f.root.path}
+    output_maps = ["-ffile-prefix-map={}={}".format(r, _OUTPUT_SPELLING) for r in sorted(roots)]
     objects = []
     for language, sources in (("objective-c++", ctx.files.srcs), ("c++", ctx.files.cc_srcs), ("c", ctx.files.c_srcs)):
-        # Plain C++ sends no Objective-C messages (clang calls the flag unused there, an error under -Werror); C takes
-        # neither the C++ standard nor ARC.
-        cflags = [f for f in _PLUGIN_CFLAGS if language == "objective-c++" or f != "-fno-objc-msgsend-selector-stubs"]
         compiler = "clang++"
-        if language == "c":
+        if language == "objective-c++":
+            cflags = list(_PLUGIN_CFLAGS) + ["-fno-exceptions"]
+            if is_release:
+                cflags += ["-DNDEBUG", "-flto=thin"]
+        elif language == "c++":
+            cflags = [
+                f
+                for f in _PLUGIN_CFLAGS
+                if f not in ("-fobjc-arc", "-fno-objc-msgsend-selector-stubs")
+            ] + ["-fno-exceptions"]
+            if is_release:
+                cflags = ["-O3" if f == "-O2" else f for f in cflags] + ["-DNDEBUG", "-flto=thin"]
+        else:
             # The C units are kits/SwitchGM20BEmit's emitters: their asserts are Mesa's debug checks, off as in Mesa's
             # release builds rather than new ways for a render server to abort.
-            cflags = [f for f in cflags if f not in ("-std=c++17", "-fobjc-arc")] + ["-std=c11", "-DNDEBUG"]
+            cflags = [
+                f
+                for f in _PLUGIN_CFLAGS
+                if f not in ("-std=c++17", "-fobjc-arc", "-fvisibility-inlines-hidden", "-fno-rtti", "-fno-objc-msgsend-selector-stubs")
+            ] + ["-std=c11", "-DNDEBUG"]
+            if is_release:
+                cflags += ["-flto=thin"]
             compiler = "clang"
         for src in sources:
+            # TegraGM20BMetalDevice is the bundle's principal class; its TU puts all helpers in an anonymous namespace.
+            src_cflags = [f for f in cflags if f != "-fvisibility=hidden"] if src.basename == "TegraGM20BMetalPlugin.mm" else cflags
             obj = ctx.actions.declare_file("%s_objs/%s.o" % (name, src.basename))
             _xcode_run(
                 ctx,
                 "ObjcxxCompile",
                 "Compiling %s" % src.short_path,
-                [compiler] + _IOS + cflags + includes + defines + ["-x", language, "-c", src.path, "-o", obj.path],
+                [compiler] + _IOS + src_cflags + output_maps + includes + defines +
+                ["-x", language, "-c", src.path, "-o", obj.path],
                 [src] + headers,
                 [obj],
             )
@@ -109,28 +146,59 @@ def _frameworks(ctx):
     return frameworks
 
 def _metal_plugin_impl(ctx):
+    is_release = ctx.attr._profile[BuildSettingInfo].value == "release"
     objects = _plugin_objects(ctx, ctx.attr.name, ctx.file.stack)
     out = ctx.actions.declare_file(ctx.attr.name + "/TegraGM20BMetal")
     frameworks = _frameworks(ctx)
+
+    # The debug map names each object below the output directory, which a transition renames: an archive with debug
+    # information from another one would be named by its worker's absolute path instead.
+    if ctx.file.translate.root.path != ctx.bin_dir.path:
+        fail("{}: the translation ({}) is not in the plugin's output directory {}".format(
+            ctx.label,
+            ctx.file.translate.path,
+            ctx.bin_dir.path,
+        ))
+    objects_root = "@PWD@/" + ctx.bin_dir.path
+    link_flags = [
+        "-bundle",
+        "-O2",
+        "-Wl,-deduplicate",
+        "-Wl,-dead_strip",
+        "-Wl,-oso_prefix,{}/".format(objects_root),
+        "-lobjc",
+    ]
+    link_inputs = list(objects) + [ctx.file.translate, ctx.file.compile]
+    link_outputs = [out]
+    dsym_inputs = list(objects) + [ctx.file.translate, ctx.file.compile, out]
+    if is_release:
+        exports = ctx.actions.declare_file(ctx.attr.name + "/TegraGM20BMetal.exports")
+        ctx.actions.write(exports, "".join([s + "\n" for s in _PLUGIN_EXPORTS]))
+        lto_dir = ctx.actions.declare_directory(ctx.attr.name + "/lto")
+        link_flags += [
+            "-flto=thin",
+            "-Wl,-object_path_lto," + lto_dir.path,
+            "-Wl,-exported_symbols_list," + exports.path,
+        ]
+        link_inputs.append(exports)
+        link_outputs.append(lto_dir)
+        dsym_inputs.append(lto_dir)
     _xcode_run(
         ctx,
         "MetalPluginLink",
         "Linking the TegraGM20BMetal plugin",
-        # The compile flags again, as the old one-line build had them: clang passes -O2 on to ld, whose code
-        # deduplication it turns on (118 KB less __text).
-        ["clang++"] + _IOS + _PLUGIN_CFLAGS + ["-bundle"] + [o.path for o in objects] + [ctx.file.translate.path] +
-        [ctx.file.compile.path] +
-        ["-Wl,-dead_strip", "-Wl,-oso_prefix,@PWD@/", "-lobjc"] + frameworks + ctx.attr.linkopts + ["-o", out.path],
-        objects + [ctx.file.translate, ctx.file.compile],
-        [out],
+        ["clang++"] + _IOS + link_flags + [o.path for o in objects] + [ctx.file.translate.path] +
+        [ctx.file.compile.path] + frameworks + ctx.attr.linkopts + ["-o", out.path],
+        link_inputs,
+        link_outputs,
     )
     dsym = ctx.actions.declare_directory(ctx.attr.name + "/TegraGM20BMetal.dSYM")
     _xcode_run(
         ctx,
         "Dsymutil",
         "Writing the plugin's dSYM",
-        ["dsymutil", "--oso-prepend-path=@PWD@", out.path, "-o", dsym.path],
-        objects + [ctx.file.translate, ctx.file.compile, out],
+        ["dsymutil", "--oso-prepend-path=" + objects_root, out.path, "-o", dsym.path],
+        dsym_inputs,
         [dsym],
     )
     return [
@@ -138,7 +206,7 @@ def _metal_plugin_impl(ctx):
         OutputGroupInfo(debug = depset([dsym]), objects = depset(objects)),
     ]
 
-_PLUGIN_ATTRS = _XCODE | PROFILE_ATTR | {
+_PLUGIN_ATTRS = _XCODE | PROFILE_ATTR | METAL_STATS_ATTR | {
     "srcs": attr.label_list(mandatory = True, allow_files = [".mm"], doc = "Objective-C++ units, in link order"),
     "cc_srcs": attr.label_list(allow_files = [".cpp"], doc = "C++ units, linked after srcs"),
     "c_srcs": attr.label_list(allow_files = [".c"], doc = "C units, linked after cc_srcs"),
@@ -383,25 +451,53 @@ def _gpu_stage_impl(ctx):
     args.add("--base", base.path)
     args.add("--base-rlocation", _rlocation(ctx, base))
     args.add("--from-part", part)
+    args.add("--kext-digest", ctx.file.kext_digest)
     args.add("--out", manifest)
     ctx.actions.run(
         executable = ctx.executable._tool,
         arguments = [args],
-        inputs = [base, part],
+        inputs = [base, part, ctx.file.kext_digest],
         outputs = [manifest],
         mnemonic = "GpuStageManifest",
         progress_message = "Listing the GPU bundle, the shader seed and the pack for the Data volume",
     )
     files = [manifest, base, seed.replies, seed.native, ctx.file.raw]
-    return [DefaultInfo(files = depset([manifest]), runfiles = ctx.runfiles(files = files))]
+
+    # The same files copied out, at their paths below the Data volume: only for what takes the tree whole (a release
+    # asset), so a deploy, which reads the runfiles, never copies the seed and the pack.
+    tree = ctx.actions.declare_directory(ctx.attr.name + ".tree")
+    args = ctx.actions.args()
+    args.add("--tree", manifest)
+    for directory in (base, seed.replies, ctx.file.raw, seed.native):
+        args.add("--root", "{}={}".format(_rlocation(ctx, directory), directory.path))
+    args.add("--out", tree.path)
+    ctx.actions.run(
+        executable = ctx.executable._tool,
+        arguments = [args],
+        inputs = files,
+        outputs = [tree],
+        mnemonic = "GpuStageTree",
+        progress_message = "Copying the GPU stage into a tree",
+    )
+    return [
+        DefaultInfo(files = depset([manifest]), runfiles = ctx.runfiles(files = files)),
+        OutputGroupInfo(tree = depset([tree])),
+    ]
 
 gpu_stage = rule(
     implementation = _gpu_stage_impl,
-    doc = "The file deploy's stager syncs the Data volume to: every file, its sha256 and where it is in the runfiles.",
+    doc = """The file deploy's stager syncs the Data volume to (tools/gpu/stage_format.py): every file, its sha256 and
+    where it is in the runfiles, and the preferences merged there. Output group `tree`: the stage tree, every file at its
+    path below the Data volume with the same records in its gpu.stage.""",
     attrs = {
         "base": attr.label(mandatory = True, doc = "//gpu:base: the signed bundle"),
         "seed": attr.label(mandatory = True, providers = [SeedInfo]),
         "raw": attr.label(mandatory = True, allow_single_file = True, doc = "the pack's directory"),
+        "kext_digest": attr.label(
+            default = "//kernel:gpu_kext_digest",
+            allow_single_file = True,
+            doc = "the GPU kext's build identity, for the icon cache record (the stager's `# kext` line)",
+        ),
         "_tool": attr.label(default = "//tools/gpu:stage_manifest", executable = True, cfg = "exec"),
     },
 )

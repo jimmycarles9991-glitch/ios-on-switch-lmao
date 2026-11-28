@@ -113,16 +113,16 @@ TEST(SwitchGicBarriers, TimerPpiEndsAfterAnIsb)
     EXPECT_EQ(run({27}), (Trace{"ack 27", "timer", "isb", "eoi 27", "ack 1023"}));
 }
 
-// An SPI: the driver's status clear (or ArmGIC's mask) reaches its device before the EOI, so a level line is not taken
-// again.
-TEST(SwitchGicBarriers, SpiEndsAfterAFullDsb)
+// An SPI: no unconditional barrier before the EOI; direct handlers clear their own device status, and soft-disabled
+// lines masked by ArmGIC issue dsb oshst inside runVector().
+TEST(SwitchGicBarriers, SpiEndsWithoutUnconditionalDsb)
 {
-    EXPECT_EQ(run({kDisplay}), (Trace{"ack 105", "spi 105", "dsb sy", "eoi 105", "ack 1023"}));
+    EXPECT_EQ(run({kDisplay}), (Trace{"ack 105", "spi 105", "eoi 105", "ack 1023"}));
 }
 
 // A display period as P.md counts it on the frame core and its neighbours: 9 SGIs, 4 timer PPIs, 2 frame SPIs, each loop
 // ended by a spurious read.
-TEST(SwitchGicBarriers, AFramesInterruptsCostOneBarrierEach)
+TEST(SwitchGicBarriers, AFramesInterruptsCostOnlyNeededBarriers)
 {
     gTrace.clear();
     Trace all;
@@ -137,7 +137,7 @@ TEST(SwitchGicBarriers, AFramesInterruptsCostOneBarrierEach)
     const Trace spis = run({kDisplay, 32 + 158});
     all.insert(all.end(), spis.begin(), spis.end());
     gTrace = all;
-    EXPECT_EQ(barriers(), (Counts{{"dmb ishld", 9}, {"isb", 4}, {"dsb sy", 2}}));
+    EXPECT_EQ(barriers(), (Counts{{"dmb ishld", 9}, {"isb", 4}}));
 }
 
 // Linux gic_ipi_send_mask: one store barrier before GICD_SGIR and none after. A sender that then waits for the target's
@@ -154,7 +154,7 @@ TEST(SwitchGicBarriers, AnSgiIsOneStoreBarrierAndTheWrite)
 
 // interruptActive against IOInterruptController::disableInterrupt: a full barrier between setting it and reading
 // interruptDisabledSoft (the other side stores the flag, DMBs, then reads interruptActive). The clear is a release
-// store. A line the handler soft-disabled is masked with no barrier of its own: the SPI's DSB before the EOI covers it.
+// store. A line the handler soft-disabled is masked followed by dsb oshst before the EOI.
 TEST(SwitchGicBarriers, AVectorRunIsOneFullBarrier)
 {
     Vector vector;
@@ -180,7 +180,7 @@ TEST(SwitchGicBarriers, AVectorRunIsOneFullBarrier)
         [] {
             note("mask");
         });
-    EXPECT_EQ(gTrace, (Trace{"dmb ish", "handler", "mask"}));
+    EXPECT_EQ(gTrace, (Trace{"dmb ish", "handler", "mask", "dsb oshst"}));
     EXPECT_EQ(vector.interruptDisabledHard, 1);
 }
 

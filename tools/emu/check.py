@@ -66,7 +66,7 @@ class Watch:
         ring = msgbuf.read(monitor, self.kernel, registers)
         if ring:
             # Kept across polls: a small ring (a release kernel's 16 KiB) can wrap past a milestone between two.
-            self.ring, self.log = ring, sorted(set(self.log).union(report.kernel_log(ring.data)))
+            self.ring, self.log = ring, report.merge(self.log, report.kernel_log(ring.data))
         if not self.log and msgbuf.kernel_cpu(registers) is not None:
             self.quiet += 1
         self.reached = self.reach(self.log)

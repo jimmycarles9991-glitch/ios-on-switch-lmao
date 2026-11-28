@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 /* The largest colour-target image each process drew or cleared into since boot (debug kernels): the push scan's record
- * (TegraGM20BUserClientChannel.cpp scanPushes, one submission in kScanEvery), which TegraGM20BMethodPaths' target-peaks op
- * answers, so a HW Test sees a lock screen poster's targets after the poster stopped drawing. An image is the target's
- * pixels, a multisampled target's sample grid over its grid (TegraGM20BPushScan.h targetImage). Plain C++ for the host
- * test (test/gm20b_target_peaks_test.cpp). */
+ * (TegraGM20BPushScanRun.cpp: a connection's first kScanFirst submissions, then one in kScanEvery), which
+ * TegraGM20BMethodPaths' target-peaks op answers, so a HW Test sees a lock screen poster's targets after the poster
+ * stopped drawing. An image is the target's pixels, a multisampled target's sample grid over its grid
+ * (TegraGM20BPushScan.h targetImage). Plain C++ for the host test (test/gm20b_target_peaks_test.cpp). */
 #pragma once
 #include <stddef.h>
 #include <stdint.h>

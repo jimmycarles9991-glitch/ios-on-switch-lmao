@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
+#define SWITCH_LINUX_IMPL 1
 #include "SwitchLinux.h"
 #include <os/log.h>
 #include <IOKit/IOLib.h>
@@ -132,6 +133,11 @@ extern "C" bool switch_linux_irqs_disabled(void)
     return ml_get_interrupts_enabled() == FALSE;
 }
 
+extern "C" bool switch_linux_can_sleep(void)
+{
+    return ml_get_interrupts_enabled() && get_preemption_level() == 0;
+}
+
 extern "C" int switch_linux_cpu(void)
 {
     return cpu_number();
@@ -147,9 +153,22 @@ extern "C" uint64_t switch_linux_abstime_to_ns(uint64_t abstime)
     return switch_abs_to_ns(abstime);
 }
 
+// Short Linux udelay() hardware settles spin directly without going through XNU's timer/sleep machinery;
+// longer delays delegate to delay_for_interval(), which spins when interrupts or preemption are off.
+constexpr uint64_t kSpinDelayUs = 20;
+
 extern "C" void switch_linux_udelay(uint64_t us)
 {
-    delay_for_interval(static_cast<uint32_t>(us), NSEC_PER_USEC);
+    if (us > kSpinDelayUs) {
+        delay_for_interval(static_cast<uint32_t>(us), NSEC_PER_USEC);
+        return;
+    }
+    const uint64_t end = mach_absolute_time() + switch_abs_from_us(us);
+    while (mach_absolute_time() < end) {
+#if defined(__aarch64__)
+        __asm__ volatile("yield");
+#endif
+    }
 }
 
 extern "C" void switch_linux_usleep_range(uint64_t min_us, uint64_t max_us)
@@ -273,6 +292,20 @@ extern "C" void *switch_linux_call_alloc(void (*fn)(void *arg), void *arg)
                                              THREAD_CALL_PRIORITY_HIGH, THREAD_CALL_OPTIONS_ONCE);
 }
 
+extern "C" void *switch_linux_call_alloc_deferrable(void (*fn)(void *arg), void *arg)
+{
+    void *const entry = reinterpret_cast<void *>(fn);
+    return thread_call_allocate_with_options(reinterpret_cast<thread_call_func_t>(entry), arg,
+                                             THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+}
+
+extern "C" void *switch_linux_call_alloc_low(void (*fn)(void *arg), void *arg)
+{
+    void *const entry = reinterpret_cast<void *>(fn);
+    return thread_call_allocate_with_options(reinterpret_cast<thread_call_func_t>(entry), arg, THREAD_CALL_PRIORITY_LOW,
+                                             THREAD_CALL_OPTIONS_ONCE);
+}
+
 extern "C" void switch_linux_call_free(void *call)
 {
     if (call)
@@ -289,6 +322,15 @@ extern "C" bool switch_linux_call_enter_after(void *call, uint64_t delay_ns)
     if (!delay_ns)
         return switch_linux_call_enter(call);
     return thread_call_enter_delayed(callOf(call), mach_absolute_time() + switch_abs_from_ns(delay_ns)) != FALSE;
+}
+
+extern "C" bool switch_linux_call_enter_after_leeway(void *call, uint64_t delay_ns, uint64_t leeway_ns)
+{
+    if (!delay_ns)
+        return switch_linux_call_enter(call);
+    return thread_call_enter_delayed_with_leeway(
+               callOf(call), nullptr, mach_absolute_time() + switch_abs_from_ns(delay_ns),
+               switch_abs_from_ns(leeway_ns), THREAD_CALL_DELAY_LEEWAY | THREAD_CALL_DELAY_SYS_BACKGROUND) != FALSE;
 }
 
 extern "C" bool switch_linux_call_cancel(void *call)

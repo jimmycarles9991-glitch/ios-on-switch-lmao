@@ -13,6 +13,7 @@ struct switch_gpu_resource_set {
 		uint32_t seq;
 		switch_gpu_backing_token job;
 	} slots[SWITCH_GPU_SET_SLOTS];
+	uint8_t slot_inside[SWITCH_GPU_SET_SLOTS];
 
 	switch_gpu_set_member *members;
 	uint32_t count, capacity;
@@ -83,15 +84,26 @@ void leave(switch_gpu_backing *backing, const switch_gpu_resource_set *set)
 	switch_gpu_backing_unclaim(backing);
 }
 
+bool any_inside(const switch_gpu_resource_set *set)
+{
+	if (__atomic_load_n(&set->inside, __ATOMIC_ACQUIRE))
+		return true;
+	for (uint32_t slot = 0; slot < SWITCH_GPU_SET_SLOTS; ++slot)
+		if (__atomic_load_n(&set->slot_inside[slot], __ATOMIC_ACQUIRE))
+			return true;
+	return false;
+}
+
 void wait_inside(switch_gpu_resource_set *set)
 {
-	if (!__atomic_load_n(&set->inside, __ATOMIC_SEQ_CST))
+	if (!any_inside(set))
 		return;
 	IOLockLock(set->lock);
-	__atomic_add_fetch(&set->waiting, 1u, __ATOMIC_SEQ_CST);
-	while (__atomic_load_n(&set->inside, __ATOMIC_SEQ_CST))
+	__atomic_store_n(&set->waiting, set->waiting + 1u, __ATOMIC_RELEASE);
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	while (any_inside(set))
 		IOLockSleep(set->lock, &set->inside, THREAD_UNINT);
-	__atomic_sub_fetch(&set->waiting, 1u, __ATOMIC_SEQ_CST);
+	__atomic_store_n(&set->waiting, set->waiting - 1u, __ATOMIC_RELAXED);
 	IOLockUnlock(set->lock);
 }
 
@@ -166,7 +178,7 @@ extern "C" int switch_gpu_set_create(volatile uint32_t *mirror, switch_gpu_resou
 
 extern "C" uint32_t switch_gpu_set_generation(const switch_gpu_resource_set *set)
 {
-	return __atomic_load_n(&set->generation, __ATOMIC_SEQ_CST);
+	return __atomic_load_n(&set->generation, __ATOMIC_ACQUIRE);
 }
 
 namespace
@@ -178,7 +190,7 @@ void bump(switch_gpu_resource_set *set)
 		return;
 	// Two bumps can race their stores: the word ends at the newest generation either way.
 	for (uint32_t seen = 0;;) {
-		const uint32_t now = __atomic_load_n(&set->generation, __ATOMIC_SEQ_CST);
+		const uint32_t now = __atomic_load_n(&set->generation, __ATOMIC_ACQUIRE);
 		if (now == seen)
 			break;
 		__atomic_store_n(set->mirror, now, __ATOMIC_RELEASE);
@@ -278,8 +290,10 @@ extern "C" void switch_gpu_set_destroy(switch_gpu_resource_set *set)
 
 extern "C" int switch_gpu_set_enter(switch_gpu_resource_set *set, uint32_t generation)
 {
+	if (!generation || __atomic_load_n(&set->generation, __ATOMIC_RELAXED) != generation)
+		return 0;
 	__atomic_add_fetch(&set->inside, 1u, __ATOMIC_SEQ_CST);
-	if (generation && __atomic_load_n(&set->generation, __ATOMIC_SEQ_CST) == generation)
+	if (__atomic_load_n(&set->generation, __ATOMIC_SEQ_CST) == generation)
 		return 1;
 	switch_gpu_set_leave(set);
 	return 0;
@@ -288,7 +302,37 @@ extern "C" int switch_gpu_set_enter(switch_gpu_resource_set *set, uint32_t gener
 extern "C" void switch_gpu_set_leave(switch_gpu_resource_set *set)
 {
 	if (__atomic_sub_fetch(&set->inside, 1u, __ATOMIC_SEQ_CST) ||
-	    !__atomic_load_n(&set->waiting, __ATOMIC_SEQ_CST))
+	    !__atomic_load_n(&set->waiting, __ATOMIC_SEQ_CST) || any_inside(set))
+		return;
+	IOLockLock(set->lock);
+	IOLockWakeup(set->lock, &set->inside, false);
+	IOLockUnlock(set->lock);
+}
+
+extern "C" int switch_gpu_set_enter_slot(switch_gpu_resource_set *set, uint32_t slot,
+					 uint32_t generation)
+{
+	if (slot >= SWITCH_GPU_SET_SLOTS)
+		return switch_gpu_set_enter(set, generation);
+	if (!generation || __atomic_load_n(&set->generation, __ATOMIC_RELAXED) != generation)
+		return 0;
+	__atomic_store_n(&set->slot_inside[slot], 1u, __ATOMIC_RELEASE);
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	if (__atomic_load_n(&set->generation, __ATOMIC_ACQUIRE) == generation)
+		return 1;
+	switch_gpu_set_leave_slot(set, slot);
+	return 0;
+}
+
+extern "C" void switch_gpu_set_leave_slot(switch_gpu_resource_set *set, uint32_t slot)
+{
+	if (slot >= SWITCH_GPU_SET_SLOTS) {
+		switch_gpu_set_leave(set);
+		return;
+	}
+	__atomic_store_n(&set->slot_inside[slot], 0u, __ATOMIC_RELEASE);
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	if (!__atomic_load_n(&set->waiting, __ATOMIC_RELAXED) || any_inside(set))
 		return;
 	IOLockLock(set->lock);
 	IOLockWakeup(set->lock, &set->inside, false);
@@ -335,11 +379,13 @@ extern "C" uint32_t switch_gpu_set_waits(const switch_gpu_resource_set *set, uin
 					 uint32_t live, const uint32_t *completed,
 					 switch_gpu_set_wait *waits)
 {
-	const uint32_t others = switch_gpu_set_used(set) & live & ~(1u << slot);
+	uint32_t others = switch_gpu_set_used(set) & live & ~(1u << slot);
 	uint32_t count = 0;
-	for (uint32_t other = 0; other < SWITCH_GPU_SET_SLOTS; ++other) {
+	while (others) {
+		const uint32_t other = uint32_t(__builtin_ctz(others));
+		others &= others - 1;
 		const uint32_t seqno = switch_gpu_set_seqno(set, other);
-		if ((others & (1u << other)) && int32_t(completed[other] - seqno) < 0)
+		if (int32_t(completed[other] - seqno) < 0)
 			waits[count++] = {other, seqno};
 	}
 	return count;

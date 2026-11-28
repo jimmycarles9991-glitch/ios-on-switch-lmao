@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A slice-choosing state whose fetching fragment function may discard, depth-tested with writes, in a layered pass of two

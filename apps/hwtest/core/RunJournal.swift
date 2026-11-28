@@ -1,6 +1,7 @@
 import Foundation
 
-/// A run on the card while it goes: Documents/hwtest/<run id>.journal. The first line is the whole report as the batch
+/// A run on the card while it goes: Library/Application Support/hwtest/<run id>.journal (AppFiles.working). The first
+/// line is the whole report as the batch
 /// started; each later line is one change, appended as it happens: a test begun, a test's result, the app going away
 /// or coming back, the run finished. Lines are JSON without newlines inside. Each append is one write of whole lines,
 /// so a process that dies mid-write leaves at most a torn last line, which a read leaves out. A test's result and the

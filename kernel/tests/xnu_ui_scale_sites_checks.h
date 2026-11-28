@@ -154,8 +154,9 @@ inline void ExpectEveryEditInItsSitesChunk(const switch_us_cache &cache, const s
             if (edit.kind == SWITCH_US_FIXED) {
                 EXPECT_LE(edit.size, sizeof(edit.patched)) << i;
             }
-            // at scale 1 the scale's kinds write nothing
-            EXPECT_TRUE(!site.every_scale || edit.kind == SWITCH_US_FIXED) << i;
+            // at scale 1 the scale's kinds write nothing but MobileGestalt's 1.0, the stock answer for the display
+            // probe's /chosen/display-scale of 1
+            EXPECT_TRUE(!site.every_scale || edit.kind == SWITCH_US_FIXED || edit.kind == SWITCH_US_MG_SCALE) << i;
         }
     }
 }

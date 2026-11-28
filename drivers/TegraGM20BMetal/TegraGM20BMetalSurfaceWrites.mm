@@ -14,14 +14,14 @@ struct SurfaceWriteCount {
     std::atomic<uint64_t> writes{0};
 };
 
-static gm20b::Mutex gLock;
+static gm20b::UnfairMutex gLock;
 // IOSurfaceID -> its count, while a texture holds it
 static std::unordered_map<uint32_t, SurfaceWriteCount *> gSurfaces;
 static std::atomic<uint32_t> gConverted{0};
 
 SurfaceWriteCount *holdSurfaceWrites(IOSurfaceRef s)
 {
-    std::lock_guard<gm20b::Mutex> l(gLock);
+    std::lock_guard<gm20b::UnfairMutex> l(gLock);
     SurfaceWriteCount *&count = gSurfaces[IOSurfaceGetID(s)];
     if (!count)
         count = new SurfaceWriteCount;
@@ -31,7 +31,7 @@ SurfaceWriteCount *holdSurfaceWrites(IOSurfaceRef s)
 
 void releaseSurfaceWrites(IOSurfaceRef s, SurfaceWriteCount *count)
 {
-    std::lock_guard<gm20b::Mutex> l(gLock);
+    std::lock_guard<gm20b::UnfairMutex> l(gLock);
     if (--count->holders)
         return;
     gSurfaces.erase(IOSurfaceGetID(s));

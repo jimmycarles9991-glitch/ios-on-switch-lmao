@@ -1,5 +1,7 @@
 import Foundation
 import HWTestCore
+import HWTestKit
+import HWTestShared
 import UIKit
 
 /// An asset catalog image compiled GPU-compressed (assets/Compressed.xcassets, ASTC): CoreUI hands Core Animation its blocks,

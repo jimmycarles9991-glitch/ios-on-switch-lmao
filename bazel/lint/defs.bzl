@@ -111,7 +111,10 @@ def _clang_tidy_targets_impl(name, visibility, clean):
     for rule in native.existing_rules().values():
         if rule["kind"] not in RULE_KINDS or "no-lint" in rule.get("tags", []):
             continue
-        constraints = [str(c).rpartition("//")[2] for c in rule.get("target_compatible_with", [])]
+        compatible = rule.get("target_compatible_with", [])
+
+        # A select (an IPSW kind's test) names no device constraint.
+        constraints = [str(c).rpartition("//")[2] for c in compatible] if type(compatible) == "list" else []
         if [c for c in constraints if c in _DEVICE_CONSTRAINTS]:
             continue
         targets.append(":" + rule["name"])

@@ -141,6 +141,8 @@ pub struct ModuleBuilder {
     /// ([`ModuleBuilder::native_half`]).
     native_half: bool,
     native_half_conversions: bool,
+    /// Whether a `half` `fast::powr` is the device's composition alone ([`ModuleBuilder::ieee_half_powr`])
+    ieee_half_powr: bool,
     /// Whether a `half` texel keeps the NaN the device decoded under native half rounding too
     /// ([`ModuleBuilder::texel_nans`]).
     texel_nans: bool,
@@ -280,6 +282,16 @@ impl ModuleBuilder {
 
     pub(crate) fn native_half_conversions(&self) -> bool {
         self.native_half_conversions
+    }
+
+    pub(crate) fn set_ieee_half_powr(&mut self, enabled: bool) {
+        self.ieee_half_powr = enabled;
+    }
+
+    /// Whether the device's `exp2(y · log2(x))` is Metal's `fast::powr` of `half` operands at every
+    /// special operand (`NativeShaderTarget::ieee_half_powr`), so that it needs no selects.
+    pub(crate) fn ieee_half_powr(&self) -> bool {
+        self.ieee_half_powr
     }
 
     /// Whether a `half` texel keeps the NaN the device decoded even where the module's `half`

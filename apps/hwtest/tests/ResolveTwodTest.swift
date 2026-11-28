@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Rule resolve.twod (drivers/TegraGM20BMetal/resolve_rule.h): a 720x1280 BGRA8 4x pass, every sample
@@ -14,7 +15,9 @@ import Metal
 /// <n>x_read_differ=0`), and at 2x the box and its complement byte for byte the engine's reading the rule rests on
 /// (X1TwodResolveReading: `2x_twod_model_differ=0 2x_exact_model_differ=0`). The compressed-grid arm resolves a
 /// memoryless (compressed) grid the same way: `<n>x_compressed=twod:<compressed grids>:<bytes off the private grid's>`.
-/// Then the format arms (ResolveFormatArms.swift).
+/// A route or complement with a channel beyond one code adds `<n>x[_exact]_beyond_texels` against Metal's rule to
+/// the report (BeyondOneTexels). Then the format arms (ResolveFormatArms.swift) and the engine arms
+/// (ResolveEngineArms.swift).
 struct ResolveTwodTest: HWTest {
     let id = "gpu.gm20b.resolve_twod"
     let name = "MSAA resolves by the 2D engine, directly and through the complement, against the resolve pass"
@@ -60,8 +63,8 @@ struct ResolveTwodTest: HWTest {
             let read = try await readInCommandBuffer(gpu, state, samples: samples)
             let reference = Self.reference(samples: samples)
             let tag = "\(samples)x"
-            let readDiffer = zip(read.bytes, reference).filter { $0 != $1 }.count
-            let passReferenceDiffer = zip(pass.bytes, reference).filter { $0 != $1 }.count
+            let readDiffer = ByteCompare.diffCount(read.bytes, reference)
+            let passReferenceDiffer = ByteCompare.diffCount(pass.bytes, reference)
             metrics.set("\(tag)_read_route", read.exact > 0 ? "exact" : read.twod > 0 ? "twod" : "pass")
             metrics.set("\(tag)_read_differ", readDiffer)
             metrics.set("\(tag)_read_gpu_ms", read.gpuMs, digits: 3)
@@ -72,7 +75,13 @@ struct ResolveTwodTest: HWTest {
             let (beyond, oneOff) = Self.compare(picked.bytes, pass.bytes)
             let (exactBeyond, exactOff) = Self.compare(exact.bytes, pass.bytes)
             let exactDiffer = exactOff.reduce(0, +) + exactBeyond
-            let keptDiffer = zip(kept, pass.bytes).filter { $0 != $1 }.count
+            let beyondArms = [(tag, picked.bytes, beyond), (tag + "_exact", exact.bytes, exactBeyond)]
+            for (key, bytes, count) in beyondArms {
+                Self.noteBeyond(
+                    key, BeyondOneTexels.bgra8(bytes, reference, width: Self.width, samples: samples), count, &metrics
+                )
+            }
+            let keptDiffer = ByteCompare.diffCount(kept, pass.bytes)
             let route = picked.exact > 0 ? "exact" : picked.twod > 0 ? "twod" : "pass"
             metrics.set("\(tag)_route", route)
             metrics.set("\(tag)_beyond_one", beyond)
@@ -91,8 +100,8 @@ struct ResolveTwodTest: HWTest {
             if exactBeyond > 0 { wrong.append("\(tag)_exact_beyond_one") }
             if samples == 2 {
                 let model = Self.engineReading()
-                let twodModel = zip(picked.bytes, model.box).filter { $0 != $1 }.count
-                let exactModel = zip(exact.bytes, model.complement).filter { $0 != $1 }.count
+                let twodModel = ByteCompare.diffCount(picked.bytes, model.box)
+                let exactModel = ByteCompare.diffCount(exact.bytes, model.complement)
                 metrics.set("2x_twod_model_differ", twodModel)
                 metrics.set("2x_exact_model_differ", exactModel)
                 if twodModel > 0 { wrong.append("2x_twod_model_differ") }
@@ -101,7 +110,7 @@ struct ResolveTwodTest: HWTest {
             if keptDiffer > 0 { wrong.append("\(tag)_kept_differ") }
             if [picked.path, exact.path, pass.path].contains(where: { $0 != "gm20b" }) { wrong.append("\(tag)_paths") }
             if let compressed {
-                let compressedDiffer = zip(compressed.bytes, picked.bytes).filter { $0 != $1 }.count
+                let compressedDiffer = ByteCompare.diffCount(compressed.bytes, picked.bytes)
                 let compressedRoute = compressed.twod > 0 ? "twod" : "pass"
                 metrics.set(
                     "\(tag)_compressed", "\(compressedRoute):\(compressed.compressedGrids):\(compressedDiffer)"
@@ -118,11 +127,7 @@ struct ResolveTwodTest: HWTest {
     }
 
     static func compare(_ a: [UInt8], _ b: [UInt8]) -> (beyond: Int, oneOff: [Int]) {
-        var oneOff = [0, 0, 0, 0], beyond = 0
-        for i in 0 ..< min(a.count, b.count) where a[i] != b[i] {
-            if abs(Int(a[i]) - Int(b[i])) > 1 { beyond += 1 } else { oneOff[i % 4] += 1 }
-        }
-        return (beyond, oneOff)
+        ByteCompare.compareBGRA(a, b)
     }
 
     func switched<T>(_ facade: NSObject, _ selector: Selector, _ body: () async throws -> T) async rethrows -> T {

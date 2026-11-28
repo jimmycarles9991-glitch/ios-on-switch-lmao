@@ -25,6 +25,12 @@ static inline int allocatedMemorySmmu(struct switch_gpu_backing *backing, uint32
 	return switch_gpu_backing_tgm_mem(backing, count, out);
 }
 
+static inline int allocatedMemoryBig(struct switch_gpu_backing *backing, uint32_t count,
+				     struct tgm_mem **out)
+{
+	return switch_gpu_backing_tgm_mem_big(backing, count, out);
+}
+
 static inline int allocatedMemoryExisting(struct switch_gpu_backing *backing, uint32_t count,
 					  struct tgm_mem **out)
 {

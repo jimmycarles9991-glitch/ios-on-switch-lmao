@@ -10,7 +10,8 @@
 extern "C" {
 #endif
 
-#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+#if ((defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)) && \
+	defined(SWITCH_STATS_GPU) && SWITCH_STATS_GPU
 #define SWITCH_GPU_JOB_STATS 1
 /* ns: TegraGM20BGpu.h's TGM_SUBMIT_* phases */
 void switch_gpu_job_submitted(const uint64_t *ns, int named_set, uint32_t shared_uses,

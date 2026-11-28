@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A shared event's signal in the middle of a raw command buffer (drivers/TegraGM20BMetal/TegraGM20BMetalInlineSignals.mm

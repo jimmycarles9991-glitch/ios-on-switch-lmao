@@ -15,6 +15,9 @@ struct cpu_data;
 
 __BEGIN_DECLS
 
+/* Record a timestamp already read on this core right before switch_idle_wfi to avoid a second counter read. */
+void switch_idle_note_now(struct cpu_data *cdp, uint64_t now);
+
 /* Interrupts masked, the idle thread's context saved (machine_idle's Idle_context). Returns after WFI, or after a C7
  * request the firmware returned from; a core that powered down comes back through switch_idle_resumed instead. */
 void switch_idle_wfi(struct cpu_data *cdp);

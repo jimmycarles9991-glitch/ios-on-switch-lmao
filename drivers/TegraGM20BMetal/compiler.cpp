@@ -169,7 +169,7 @@ Compiler::~Compiler()
     dispatch_release(static_cast<dispatch_queue_t>(persistence_));
 }
 
-Compiler::State Compiler::ask(const CacheKey &k, Done done, const RuntimeRecord **record)
+Compiler::State Compiler::ask(const CacheKey &k, Done done, std::shared_ptr<const RuntimeRecord> *record)
 {
     std::lock_guard<gm20b::Mutex> l(lock_);
     const auto [it, first] = entries_.try_emplace(k.name());
@@ -184,7 +184,7 @@ Compiler::State Compiler::ask(const CacheKey &k, Done done, const RuntimeRecord 
     if (e.state == State::Pending && done)
         e.waiters.push_back(std::move(done));
     if (record)
-        *record = e.record.get();
+        *record = e.record;
     return e.state;
 }
 
@@ -206,7 +206,7 @@ RecordCache::Found Compiler::lookup(const CacheKey &k, RuntimeRecord &record, st
                                                : RecordCache::Found::None;
         }
     }
-    auto loaded = std::make_unique<RuntimeRecord>();
+    auto loaded = std::make_shared<RuntimeRecord>();
     bool seeded = false;
     const RecordCache::Found found =
         cache_ ? cache_->load(k, *loaded, why, SWITCH_METAL_DIAGNOSTICS ? &seeded : nullptr) : RecordCache::Found::None;
@@ -237,7 +237,23 @@ void Compiler::keep(const CacheKey &k, RecordCache::Found found, const RuntimeRe
     it->second.state = found == RecordCache::Found::Record ? State::Ready : State::Refused;
     it->second.why = why;
     if (found == RecordCache::Found::Record)
-        it->second.record = std::make_unique<RuntimeRecord>(record);
+        it->second.record = std::make_shared<const RuntimeRecord>(record);
+}
+
+size_t Compiler::trim()
+{
+    std::lock_guard<gm20b::Mutex> l(lock_);
+    size_t removed = 0;
+    for (auto it = entries_.begin(); it != entries_.end();) {
+        const Entry &e = it->second;
+        if (e.state != State::Pending && e.waiters.empty() && !e.maker && e.waiting == 0) {
+            it = entries_.erase(it);
+            ++removed;
+        } else {
+            ++it;
+        }
+    }
+    return removed;
 }
 
 // lock_ held
@@ -272,20 +288,20 @@ void Compiler::store(void *context)
     pending->cache->store(pending->key, pending->record.get(), pending->why);
 }
 
-// The state's entry set to `outcome`; the asks that waited for it, and in *made its record (null: none)
+// The state's entry set to `outcome`; the asks that waited for it, and in `made` its record (null: none)
 std::vector<Compiler::Done> Compiler::settle(const CacheKey &k, Outcome outcome, RecordCache::Found found,
-                                             std::unique_ptr<RuntimeRecord> record, const std::string &why,
-                                             uint64_t began, const RuntimeRecord **made)
+                                             std::shared_ptr<const RuntimeRecord> record, const std::string &why,
+                                             uint64_t began, std::shared_ptr<const RuntimeRecord> &made)
 {
     std::lock_guard<gm20b::Mutex> l(lock_);
     Entry &e = entries_[k.name()];
     std::vector<Done> waiters;
     waiters.swap(e.waiters);
     e.why = why;
-    *made = nullptr;
+    made.reset();
     if (outcome == Outcome::Made) {
         e.record = std::move(record);
-        *made = e.record.get();
+        made = e.record;
     }
 #if SWITCH_METAL_DIAGNOSTICS
     (found == RecordCache::Found::None ? stats_.misses : stats_.hits)++;
@@ -318,12 +334,12 @@ void Compiler::run(void *context)
     }
     uint64_t began = 0;
     SWITCH_METAL_DIAGNOSTIC(began = nowUs());
-    auto record = std::make_unique<RuntimeRecord>();
+    auto record = std::make_shared<RuntimeRecord>();
     std::string why;
     RecordCache::Found found;
     const Outcome outcome = c.produce(job->key, *record, why, found);
-    const RuntimeRecord *made = nullptr;
-    for (const Done &done : c.settle(job->key, outcome, found, std::move(record), why, began, &made))
+    std::shared_ptr<const RuntimeRecord> made;
+    for (const Done &done : c.settle(job->key, outcome, found, std::move(record), why, began, made))
         done(made, why);
     std::lock_guard<gm20b::Mutex> l(c.lock_);
     c.queued_--;
@@ -349,6 +365,7 @@ Compiler::State Compiler::makeNow(const CacheKey &k, RuntimeRecord &record, std:
         if (!first && e.state != State::Pending && e.state != State::Failed) {
             if (e.state == State::Ready)
                 record = *e.record;
+            why = e.why;
             return e.state;
         }
         e.state = State::Pending;
@@ -356,13 +373,13 @@ Compiler::State Compiler::makeNow(const CacheKey &k, RuntimeRecord &record, std:
     }
     uint64_t began = 0;
     SWITCH_METAL_DIAGNOSTIC(began = nowUs());
-    auto made = std::make_unique<RuntimeRecord>();
+    auto made = std::make_shared<RuntimeRecord>();
     RecordCache::Found found;
     const Outcome outcome = produce(k, *made, why, found);
     if (outcome == Outcome::Made)
         record = *made;
-    const RuntimeRecord *kept = nullptr;
-    for (const Done &done : settle(k, outcome, found, std::move(made), why, began, &kept))
+    std::shared_ptr<const RuntimeRecord> kept;
+    for (const Done &done : settle(k, outcome, found, std::move(made), why, began, kept))
         done(kept, why);
     return outcome == Outcome::Made ? State::Ready : outcome == Outcome::Refused ? State::Refused : State::Failed;
 }
@@ -370,6 +387,7 @@ Compiler::State Compiler::makeNow(const CacheKey &k, RuntimeRecord &record, std:
 // lock_ held in `l`: until the thread making `e` settles it, that thread runs at least at the caller's class
 void Compiler::waitForMaker(std::unique_lock<gm20b::Mutex> &l, Entry &e)
 {
+    ++e.waiting;
     const qos_class_t mine = qos_class_self();
     pthread_override_t lent =
         mine == QOS_CLASS_UNSPECIFIED ? nullptr : pthread_override_qos_class_start_np(e.maker, mine, 0);
@@ -378,6 +396,7 @@ void Compiler::waitForMaker(std::unique_lock<gm20b::Mutex> &l, Entry &e)
     });
     if (lent)
         pthread_override_qos_class_end_np(lent);
+    --e.waiting;
 }
 
 void Compiler::drain()

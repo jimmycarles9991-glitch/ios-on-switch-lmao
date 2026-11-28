@@ -4,21 +4,53 @@
 #include "pass_fusion.h"
 #include "attachment_lifetime.h"
 
+inline bool canFusePassHeaders(const SwitchMetalPass &first, const SwitchMetalPass &next)
+{
+    if (first.width != next.width || first.height != next.height || first.layers != next.layers ||
+        first.positions.count || next.positions.count || (!first.depth && first.testsHiddenZeta) ||
+        (!next.depth && next.testsHiddenZeta))
+        return false;
+    bool target = false;
+    for (size_t i = 0; i < 8; ++i) {
+        const auto &a = first.color[i], &b = next.color[i];
+        if (a.texture != b.texture || a.level != b.level || a.slice != b.slice)
+            return false;
+        if (!a.texture)
+            continue;
+        target = true;
+        if (a.store != MTLStoreActionStore || b.load != MTLLoadActionLoad || a.resolve || b.resolve)
+            return false;
+    }
+    for (size_t i = 0; i < 2; ++i) {
+        const auto &a = first.zeta[i], &b = next.zeta[i];
+        if (a.texture != b.texture || a.level != b.level || a.slice != b.slice)
+            return false;
+        if (!a.texture)
+            continue;
+        target = true;
+        if (a.store != MTLStoreActionStore || b.load != MTLLoadActionLoad || a.resolve || b.resolve)
+            return false;
+    }
+    return target;
+}
+
 // The pass's attachments and resources from what its recording kept (SwitchMetalPass, the plan's range facts): no message to
 // its descriptor or its objects, and nothing retained. `shadows`: the command buffer binds a texture sampled through a pool
 // image or a stand-in (as of the encode)
 __attribute__((objc_externally_retained)) inline gm20b::FusionPass fusionPass(SwitchMetalCommandBuffer *cb,
-                                                                              size_t begin, bool shadows)
+                                                                              size_t begin, bool shadows,
+                                                                              bool own = false)
 {
     SWITCH_METAL_ENCODE_SPAN(Fusion);
-    const Cmd command = cb->_plan.legacy(begin);
-    const SwitchMetalPass &pass = cb->_passes[command.x];
+    const auto &header = own ? cb->_plan.ownBegin(begin) : cb->_plan.begin(begin);
+    const SwitchMetalPass &pass = own ? cb->_passes.own(header.pass) : cb->_passes[header.pass];
     gm20b::FusionPass result;
     result.width = pass.width;
     result.height = pass.height;
     result.layers = pass.layers;
     // a fused pass's draws take the first pass's sample layout; each Metal pass's hidden depth starts at 1.0
-    result.bodySafe = !shadows && !pass.positions.count && (pass.depth || !pass.testsHiddenZeta);
+    result.bodySafe = !shadows && !pass.positions.count && (pass.depth || !pass.testsHiddenZeta) && !header.hasNonDraw &&
+                      !header.unfinalDraws;
     std::array<__unsafe_unretained SwitchMetalTexture *, 10> targets{};
     auto attachment = [&](size_t slot, __unsafe_unretained id object, NSUInteger level, NSUInteger slice,
                           MTLLoadAction load, MTLStoreAction store, bool resolve) {
@@ -44,14 +76,7 @@ __attribute__((objc_externally_retained)) inline gm20b::FusionPass fusionPass(Sw
         const auto &z = pass.zeta[i];
         attachment(8 + i, z.texture, z.level, z.slice, z.load, z.store, z.resolve);
     }
-    const size_t end = cb->_plan.encoderEnd(begin);
-    for (size_t i = begin + 1; i + 1 < end; ++i) {
-        const Op op = cb->_plan.operation(i).op;
-        if (!isPlanDraw(op) && op != OpBarrier)
-            result.bodySafe = false;
-        if (isPlanDraw(op) && !cb->_plan.renderStates[cb->_plan.draw(i).state].usesFinal)
-            result.bodySafe = false;
-    }
+    const size_t end = header.end;
     if (!result.bodySafe)
         return result;
     const auto overlapsTarget = [&](__unsafe_unretained SwitchMetalTexture *texture, uint64_t va, uint64_t cpu,

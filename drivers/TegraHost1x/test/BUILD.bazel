@@ -3,6 +3,123 @@ load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
 
 lint_files()
 
+# host1x's general interrupt on a sync-unit model: attach and masks, a stopped channel taken once and masked until its
+# restart, its jobs failed, and the illegal-opcode probe's error delivered or lost.
+host_test(
+    name = "switch_host1x_errors_test",
+    srcs = [
+        "switch_host1x_errors_test.cpp",
+        "//drivers/ArmGIC:SwitchInterrupts.h",
+        "//drivers/TegraHost1x:SwitchHost1xChannels.h",
+        "//drivers/TegraHost1x:SwitchHost1xErrorProbe.h",
+        "//drivers/TegraHost1x:SwitchHost1xErrors.h",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraHost1x:SwitchHost1xErrors.cpp"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_MMIO_HOST_MODEL=1",
+    ],
+    deps = [":fence_kernel"],
+)
+
+# An illegal opcode on VIC's channel, from host1x's general interrupt to VIC's own cancellation: the real host1x and
+# VIC's real queue, each in its own translation unit, on one set of kernel stand-ins.
+host_test(
+    name = "switch_host1x_vic_failure_test",
+    srcs = [
+        "switch_host1x_vic_failure.h",
+        "switch_host1x_vic_failure_host1x.cpp",
+        "switch_host1x_vic_failure_test.cpp",
+        "//drivers/ArmGIC:SwitchInterrupts.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuBridge.h",
+        "//drivers/TegraGM20B:SwitchGpuSharedEvent.h",
+        "//drivers/TegraHost1x:SwitchHost1xArena.h",
+        "//drivers/TegraHost1x:SwitchHost1xChannels.h",
+        "//drivers/TegraHost1x:SwitchHost1xCpuIncrement.h",
+        "//drivers/TegraHost1x:SwitchHost1xDependencies.h",
+        "//drivers/TegraHost1x:SwitchHost1xDisplay.h",
+        "//drivers/TegraHost1x:SwitchHost1xDisplayChannel.h",
+        "//drivers/TegraHost1x:SwitchHost1xErrorProbe.h",
+        "//drivers/TegraHost1x:SwitchHost1xErrors.h",
+        "//drivers/TegraHost1x:SwitchHost1xFailureRelease.h",
+        "//drivers/TegraHost1x:SwitchHost1xFence.h",
+        "//drivers/TegraHost1x:SwitchHost1xFenceList.h",
+        "//drivers/TegraHost1x:SwitchHost1xGatherStats.h",
+        "//drivers/TegraHost1x:SwitchHost1xIntr.h",
+        "//drivers/TegraHost1x:SwitchHost1xResults.cpp",
+        "//drivers/TegraHost1x:SwitchHost1xResults.h",
+        "//drivers/TegraHost1x:SwitchHost1xStages.h",
+        "//drivers/TegraHost1x:SwitchHost1xSyncptPool.h",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:SwitchVICDependencies.h",
+        "//drivers/TegraVIC:SwitchVICEvents.h",
+        "//drivers/TegraVIC:SwitchVICJobs.h",
+        "//drivers/TegraVIC:SwitchVICQueue.h",
+        "//drivers/TegraVIC:SwitchVICSemantics.h",
+        "//drivers/TegraVIC:TegraVIC.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICEngine.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchDMA:SwitchDMABuffer.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+        "//kits/SwitchIdle:switch_idle.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+        "//kits/SwitchTime:SwitchTime.h",
+    ],
+    additional_compiler_inputs = [
+        "//drivers/TegraHost1x:SwitchHost1xChannels.cpp",
+        "//drivers/TegraHost1x:SwitchHost1xErrors.cpp",
+        "//drivers/TegraHost1x:SwitchHost1xFence.cpp",
+        "//drivers/TegraHost1x:TegraHost1x.cpp",
+        "//drivers/TegraVIC:SwitchVICJobs.cpp",
+        "//drivers/TegraVIC:TegraVICCancel.cpp",
+    ],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+    deps = [":vic_failure_kernel"],
+)
+
+host_shims(
+    name = "vic_failure_kernel",
+    headers = [
+        "IOKit/IOBufferMemoryDescriptor.h",
+        "IOKit/IOFilterInterruptEventSource.h",
+        "IOKit/IOInterruptEventSource.h",
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "IOKit/IOWorkLoop.h",
+        "kern/clock.h",
+        "kern/sched_prim.h",
+        "kern/thread.h",
+        "kern/thread_call.h",
+        "os/log.h",
+    ],
+    stubs = "switch_host1x_fence_stubs.h",
+)
+
+host_test(
+    name = "switch_host1x_syncpt_pool_test",
+    srcs = [
+        "switch_host1x_syncpt_pool_test.cpp",
+        "//drivers/TegraHost1x:SwitchHost1xSyncptPool.h",
+    ],
+)
+
+host_test(
+    name = "switch_host1x_smmu_source_test",
+    srcs = ["switch_host1x_smmu_source_test.cpp"],
+    data = ["//drivers/TegraHost1x:SwitchHost1xSmmu.cpp"],
+)
+
 host_test(
     name = "switch_host1x_release_test",
     srcs = [
@@ -91,18 +208,23 @@ host_test(
 host_test(
     name = "switch_host1x_submit_test",
     srcs = [
+        "switch_host1x_submit_harness.h",
         "switch_host1x_submit_test.cpp",
         "//drivers/ArmGIC:SwitchInterrupts.h",
         "//drivers/TegraHost1x:SwitchHost1xArena.h",
         "//drivers/TegraHost1x:SwitchHost1xChannels.h",
         "//drivers/TegraHost1x:SwitchHost1xDisplay.h",
         "//drivers/TegraHost1x:SwitchHost1xDisplayChannel.h",
+        "//drivers/TegraHost1x:SwitchHost1xErrorProbe.h",
+        "//drivers/TegraHost1x:SwitchHost1xErrors.h",
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuBridge.h",
         "//drivers/TegraHost1x:SwitchHost1xGatherStats.h",
         "//drivers/TegraHost1x:SwitchHost1xCpuIncrement.h",
         "//drivers/TegraHost1x:SwitchHost1xFailureRelease.h",
         "//drivers/TegraHost1x:SwitchHost1xFence.h",
         "//drivers/TegraHost1x:SwitchHost1xIntr.h",
+        "//drivers/TegraHost1x:SwitchHost1xSyncptPool.h",
         "//drivers/TegraHost1x:TegraHost1x.h",
         "//drivers/TegraSMMU:TegraSMMU.h",
         "//kits/SwitchCAR:SwitchCAR.h",
@@ -122,8 +244,195 @@ host_test(
         "//drivers/TegraNVDEC:TegraNVDEC.cpp",
         "//drivers/TegraNVENC:TegraNVENC.cpp",
         "//drivers/TegraNVJPG:TegraNVJPG.cpp",
+        "//drivers/TegraNVJPG:TegraNVJPGFlight.cpp",
         "//drivers/TegraVIC:SwitchVICJobs.cpp",
         "//drivers/TegraVIC:TegraVIC.cpp",
+    ],
+    deps = [":submit_kernel"],
+)
+
+# The same with DEVELOPMENT: the channels' tick and stall counters and the stats line that reads them.
+host_test(
+    name = "switch_host1x_submit_debug_test",
+    srcs = [
+        "switch_host1x_submit_harness.h",
+        "switch_host1x_submit_test.cpp",
+        "//drivers/ArmGIC:SwitchInterrupts.h",
+        "//drivers/TegraHost1x:SwitchHost1xArena.h",
+        "//drivers/TegraHost1x:SwitchHost1xChannels.h",
+        "//drivers/TegraHost1x:SwitchHost1xDisplay.h",
+        "//drivers/TegraHost1x:SwitchHost1xDisplayChannel.h",
+        "//drivers/TegraHost1x:SwitchHost1xErrors.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuBridge.h",
+        "//drivers/TegraHost1x:SwitchHost1xGatherStats.h",
+        "//drivers/TegraHost1x:SwitchHost1xCpuIncrement.h",
+        "//drivers/TegraHost1x:SwitchHost1xFailureRelease.h",
+        "//drivers/TegraHost1x:SwitchHost1xFence.h",
+        "//drivers/TegraHost1x:SwitchHost1xIntr.h",
+        "//drivers/TegraHost1x:SwitchHost1xSyncptPool.h",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchDMA:SwitchDMABuffer.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+        "//kits/SwitchIdle:switch_idle.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+        "//kits/SwitchTime:SwitchTime.h",
+    ],
+    additional_compiler_inputs = [
+        "//drivers/TegraHost1x:SwitchHost1xChannels.cpp",
+        "//drivers/TegraHost1x:TegraHost1x.cpp",
+    ],
+    data = [
+        "//drivers/TegraNVDEC:SwitchNVDECJobs.cpp",
+        "//drivers/TegraNVDEC:TegraNVDEC.cpp",
+        "//drivers/TegraNVENC:TegraNVENC.cpp",
+        "//drivers/TegraNVJPG:TegraNVJPG.cpp",
+        "//drivers/TegraNVJPG:TegraNVJPGFlight.cpp",
+        "//drivers/TegraVIC:SwitchVICJobs.cpp",
+        "//drivers/TegraVIC:TegraVIC.cpp",
+    ],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_IO=1",
+    ],
+    deps = [":submit_kernel"],
+)
+
+# The display stream's publication raced against a jobless bridge's failed release on two threads (real locks), plain
+# and under ThreadSanitizer.
+host_test(
+    name = "switch_host1x_publish_race_test",
+    srcs = [
+        "switch_host1x_submit_harness.h",
+        "switch_host1x_publish_race_test.cpp",
+        "//drivers/ArmGIC:SwitchInterrupts.h",
+        "//drivers/TegraHost1x:SwitchHost1xArena.h",
+        "//drivers/TegraHost1x:SwitchHost1xChannels.h",
+        "//drivers/TegraHost1x:SwitchHost1xDisplay.h",
+        "//drivers/TegraHost1x:SwitchHost1xDisplayChannel.h",
+        "//drivers/TegraHost1x:SwitchHost1xErrors.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuBridge.h",
+        "//drivers/TegraHost1x:SwitchHost1xGatherStats.h",
+        "//drivers/TegraHost1x:SwitchHost1xCpuIncrement.h",
+        "//drivers/TegraHost1x:SwitchHost1xFailureRelease.h",
+        "//drivers/TegraHost1x:SwitchHost1xFence.h",
+        "//drivers/TegraHost1x:SwitchHost1xIntr.h",
+        "//drivers/TegraHost1x:SwitchHost1xSyncptPool.h",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchDMA:SwitchDMABuffer.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+        "//kits/SwitchIdle:switch_idle.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+        "//kits/SwitchTime:SwitchTime.h",
+    ],
+    additional_compiler_inputs = [
+        "//drivers/TegraHost1x:SwitchHost1xChannels.cpp",
+        "//drivers/TegraHost1x:TegraHost1x.cpp",
+    ],
+    deps = [":submit_kernel"],
+)
+
+host_test(
+    name = "switch_host1x_publish_race_tsan_test",
+    srcs = [
+        "switch_host1x_submit_harness.h",
+        "switch_host1x_publish_race_test.cpp",
+        "//drivers/ArmGIC:SwitchInterrupts.h",
+        "//drivers/TegraHost1x:SwitchHost1xArena.h",
+        "//drivers/TegraHost1x:SwitchHost1xChannels.h",
+        "//drivers/TegraHost1x:SwitchHost1xDisplay.h",
+        "//drivers/TegraHost1x:SwitchHost1xDisplayChannel.h",
+        "//drivers/TegraHost1x:SwitchHost1xErrors.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuBridge.h",
+        "//drivers/TegraHost1x:SwitchHost1xGatherStats.h",
+        "//drivers/TegraHost1x:SwitchHost1xCpuIncrement.h",
+        "//drivers/TegraHost1x:SwitchHost1xFailureRelease.h",
+        "//drivers/TegraHost1x:SwitchHost1xFence.h",
+        "//drivers/TegraHost1x:SwitchHost1xIntr.h",
+        "//drivers/TegraHost1x:SwitchHost1xSyncptPool.h",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchDMA:SwitchDMABuffer.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+        "//kits/SwitchIdle:switch_idle.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+        "//kits/SwitchTime:SwitchTime.h",
+    ],
+    additional_compiler_inputs = [
+        "//drivers/TegraHost1x:SwitchHost1xChannels.cpp",
+        "//drivers/TegraHost1x:TegraHost1x.cpp",
+    ],
+    copts = ["-fsanitize=thread"],
+    linkopts = ["-fsanitize=thread"],
+    sanitize = False,
+    deps = [":submit_kernel"],
+)
+
+host_test(
+    name = "switch_host1x_release_shape_test",
+    srcs = [
+        "switch_host1x_release_shape_test.cpp",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+    ],
+    # apple_support's host compiles add -DDEBUG outside --config=release.
+    copts = [
+        "-UDEBUG",
+        "-UDEVELOPMENT",
+    ],
+)
+
+# The same harness built as a debug kernel (DEVELOPMENT=1): VIC's probe channels made at the module lock probe's first
+# ask, and the probes' one shared set of syncpoints.
+host_test(
+    name = "switch_host1x_probe_resources_test",
+    srcs = [
+        "switch_host1x_submit_harness.h",
+        "switch_host1x_probe_resources_test.cpp",
+        "//drivers/ArmGIC:SwitchInterrupts.h",
+        "//drivers/TegraHost1x:SwitchHost1xArena.h",
+        "//drivers/TegraHost1x:SwitchHost1xChannels.h",
+        "//drivers/TegraHost1x:SwitchHost1xDisplay.h",
+        "//drivers/TegraHost1x:SwitchHost1xDisplayChannel.h",
+        "//drivers/TegraHost1x:SwitchHost1xErrors.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuBridge.h",
+        "//drivers/TegraHost1x:SwitchHost1xGatherStats.h",
+        "//drivers/TegraHost1x:SwitchHost1xCpuIncrement.h",
+        "//drivers/TegraHost1x:SwitchHost1xFailureRelease.h",
+        "//drivers/TegraHost1x:SwitchHost1xFence.h",
+        "//drivers/TegraHost1x:SwitchHost1xIntr.h",
+        "//drivers/TegraHost1x:SwitchHost1xSyncptPool.h",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchDMA:SwitchDMABuffer.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+        "//kits/SwitchIdle:switch_idle.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+        "//kits/SwitchTime:SwitchTime.h",
+    ],
+    additional_compiler_inputs = [
+        "//drivers/TegraHost1x:SwitchHost1xChannels.cpp",
+        "//drivers/TegraHost1x:TegraHost1x.cpp",
+    ],
+    data = [
+        "//drivers/TegraHost1x:SwitchHost1xChannels.cpp",
+        "//drivers/TegraHost1x:SwitchHost1xMlockProbe.cpp",
+    ],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_STATS_IO=1",
     ],
     deps = [":submit_kernel"],
 )
@@ -147,6 +456,7 @@ host_shims(
         "IOKit/IOLocks.h",
         "IOKit/IOWorkLoop.h",
         "kern/clock.h",
+        "kern/sched_prim.h",
         "kern/thread_call.h",
         "os/log.h",
     ],
@@ -164,13 +474,17 @@ host_test(
         "//drivers/TegraHost1x:SwitchHost1xChannels.h",
         "//drivers/TegraHost1x:SwitchHost1xDisplay.h",
         "//drivers/TegraHost1x:SwitchHost1xDisplayChannel.h",
+        "//drivers/TegraHost1x:SwitchHost1xErrorProbe.h",
+        "//drivers/TegraHost1x:SwitchHost1xErrors.h",
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuBridge.h",
         "//drivers/TegraHost1x:SwitchHost1xGatherStats.h",
         "//drivers/TegraHost1x:SwitchHost1xCpuIncrement.h",
         "//drivers/TegraHost1x:SwitchHost1xFailureRelease.h",
         "//drivers/TegraHost1x:SwitchHost1xFence.h",
         "//drivers/TegraHost1x:SwitchHost1xFenceList.h",
         "//drivers/TegraHost1x:SwitchHost1xIntr.h",
+        "//drivers/TegraHost1x:SwitchHost1xSyncptPool.h",
         "//drivers/TegraHost1x:TegraHost1x.h",
         "//drivers/TegraSMMU:TegraSMMU.h",
         "//kits/SwitchCAR:SwitchCAR.h",
@@ -183,6 +497,7 @@ host_test(
     ],
     additional_compiler_inputs = [
         "//drivers/TegraHost1x:SwitchHost1xChannels.cpp",
+        "//drivers/TegraHost1x:SwitchHost1xErrors.cpp",
         "//drivers/TegraHost1x:SwitchHost1xFence.cpp",
         "//drivers/TegraHost1x:TegraHost1x.cpp",
     ],
@@ -212,4 +527,13 @@ host_test(
     ],
     additional_compiler_inputs = ["//drivers/TegraHost1x:SwitchHost1xTokenFence.cpp"],
     deps = [":token_fence_kernel"],
+)
+
+host_test(
+    name = "switch_host1x_mlock_probe_test",
+    srcs = [
+        "switch_host1x_mlock_probe_test.cpp",
+        "//drivers/TegraHost1x:SwitchHost1xMlockProbe.h",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+    ],
 )

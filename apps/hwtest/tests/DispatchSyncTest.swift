@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestKit
 
 /// One serial hierarchy driven the way locationd's silos drive their cohort queue: waiters (here plain threads,
 /// workqueue threads in system.dispatch_sync_workloops) each dispatch_sync onto a serial queue whose target is one

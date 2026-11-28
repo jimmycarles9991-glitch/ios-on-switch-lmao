@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "SwitchGpuOwnershipInternal.h"
+#include "TegraGM20BGpu.h"
 #include "SwitchGpuPathStats.h"
-extern "C" void switch_gpu_surface_sweep(void) __attribute__((weak));
 
 using namespace switch_gpu_ownership;
 
@@ -99,21 +99,32 @@ void switch_gpu_backing_prune_locked(switch_gpu_backing *backing)
 		}
 	}
 	bool pending = false;
-	for (uint32_t i = 0; i < backing->access_count; ++i)
-		pending |= switch_gpu_backing_access_status(backing->accesses[i]) == 0;
-	for (uint32_t i = 0; i < backing->access_count;) {
+	bool droppable = false;
+	for (uint32_t i = 0; i < backing->access_count; ++i) {
 		auto &access = backing->accesses[i];
 		const int status = switch_gpu_backing_access_status(access);
-		if (status < 0)
-			switch_gpu_backing_note_failure_locked(backing, access, status);
-		// Pending consumers may still have a hardware acquire referencing a completed producer's fence allocation.
-		const bool current_writer = (access.access & SWITCH_GPU_BACKING_WRITE) &&
-					    access.content == backing->content;
-		if (status != 0 && !pending && !current_writer) {
-			switch_gpu_backing_drop_token(access.token);
-			backing->accesses[i] = backing->accesses[--backing->access_count];
+		if (status == 0) {
+			pending = true;
 		} else {
-			++i;
+			if (status < 0)
+				switch_gpu_backing_note_failure_locked(backing, access, status);
+			const bool current_writer = (access.access & SWITCH_GPU_BACKING_WRITE) &&
+						    access.content == backing->content;
+			droppable |= !current_writer;
+		}
+	}
+	// Pending consumers may still have a hardware acquire referencing a completed producer's fence allocation.
+	if (!pending && droppable) {
+		for (uint32_t i = 0; i < backing->access_count;) {
+			auto &access = backing->accesses[i];
+			const bool current_writer = (access.access & SWITCH_GPU_BACKING_WRITE) &&
+						    access.content == backing->content;
+			if (!current_writer) {
+				switch_gpu_backing_drop_token(access.token);
+				backing->accesses[i] = backing->accesses[--backing->access_count];
+			} else {
+				++i;
+			}
 		}
 	}
 }
@@ -126,18 +137,56 @@ uint32_t merge(uint32_t a, uint32_t b)
 	return ((a | b) & ~kBesideCpu) | (a & b & kBesideCpu);
 }
 
-// A dead client's IOSurface lease can refuse or slow down only a job that uses its backing, and keep waiting only what
-// waits for CPU holders to leave. With neither, the job takes no global lock for it.
-bool sweep_wanted(const switch_gpu_backing_use *uses, uint32_t count)
+int prepare_access_slot_locked(switch_gpu_backing *backing,
+			       const switch_gpu_backing_token &completion, uint32_t access,
+			       uint32_t *out_slot)
 {
-	if (__atomic_load_n(&switch_gpu_cpu_sleepers, __ATOMIC_ACQUIRE) ||
-	    switch_gpu_ready_waiting())
-		return true;
-	for (uint32_t i = 0; i < count; ++i)
-		if (__atomic_load_n(&uses[i].backing->cpu_readers, __ATOMIC_RELAXED) ||
-		    __atomic_load_n(&uses[i].backing->cpu_writers, __ATOMIC_RELAXED))
-			return true;
-	return false;
+	const uint32_t kind = access_kind(access);
+	if (!backing->host_acquire.engine) {
+		if (!backing->access_count) {
+			*out_slot = 0;
+			return 0;
+		}
+		uint32_t match = backing->access_count;
+		bool pending = false;
+		bool can_drop_other = false;
+		bool invalid_order = false;
+		for (uint32_t j = 0; j < backing->access_count; ++j) {
+			auto &entry = backing->accesses[j];
+			const bool same = switch_gpu_backing_same_timeline(entry.token, completion);
+			if (same) {
+				if (!switch_gpu_backing_later(completion, entry.token)) {
+					invalid_order = true;
+					break;
+				}
+				if (entry.access == kind)
+					match = j;
+			}
+			const int st = switch_gpu_backing_access_status(entry);
+			if (st == 0) {
+				pending = true;
+			} else {
+				if (st < 0)
+					switch_gpu_backing_note_failure_locked(backing, entry, st);
+				const bool current_writer =
+					(entry.access & SWITCH_GPU_BACKING_WRITE) &&
+					entry.content == backing->content;
+				if (!current_writer && !(same && entry.access == kind))
+					can_drop_other = true;
+			}
+		}
+		if (!invalid_order && (pending || !can_drop_other)) {
+			*out_slot = match;
+			return 0;
+		}
+	}
+	switch_gpu_backing_prune_locked(backing);
+	for (uint32_t j = 0; j < backing->access_count; ++j)
+		if (switch_gpu_backing_same_timeline(backing->accesses[j].token, completion) &&
+		    !switch_gpu_backing_later(completion, backing->accesses[j].token))
+			return -22;
+	*out_slot = access_slot(backing, completion, access);
+	return 0;
 }
 
 // An engine with timeline references takes the job's at once, after every use is checked: one for each record commit
@@ -191,8 +240,6 @@ int begin(switch_gpu_backing_use *uses, uint32_t count, switch_gpu_cpu_lease *co
 		else
 			uses[unique++] = uses[i];
 	}
-	if (!lease_count && switch_gpu_surface_sweep && sweep_wanted(uses, unique))
-		switch_gpu_surface_sweep();
 	for (uint32_t i = 0; i < guard_count; ++i) {
 		if (!guards[i].backing || !guards[i].generation ||
 		    (uintptr_t(guards[i].generation) & 7) || !guards[i].expected)
@@ -249,17 +296,13 @@ int begin(switch_gpu_backing_use *uses, uint32_t count, switch_gpu_cpu_lease *co
 		if (!result && !(uses[i].access & kBesideCpu) &&
 		    (writers || (readers && (uses[i].access & SWITCH_GPU_BACKING_WRITE))))
 			result = -16;
+		uint32_t slot = backing->access_count;
 		if (!result)
-			switch_gpu_backing_prune_locked(backing);
+			result = prepare_access_slot_locked(backing, *completion, uses[i].access,
+							    &slot);
 		if (completion->engine == SWITCH_GPU_ENGINE_GM20B &&
 		    backing->host_visible_epoch != backing->host_epoch)
 			transaction->host_written = 1;
-		for (uint32_t j = 0; !result && j < backing->access_count; ++j)
-			if (switch_gpu_backing_same_timeline(backing->accesses[j].token,
-							     *completion) &&
-			    !switch_gpu_backing_later(*completion, backing->accesses[j].token))
-				result = -22;
-		const uint32_t slot = access_slot(backing, *completion, uses[i].access);
 		const bool fresh = slot == backing->access_count;
 		if (!fresh && !replaced)
 			replaced = backing->accesses[slot].handle;
@@ -269,6 +312,9 @@ int begin(switch_gpu_backing_use *uses, uint32_t count, switch_gpu_cpu_lease *co
 			result = ops->retain_token(completion);
 		if (result)
 			break;
+		if (slot < (1u << (32 - kUseSlotShift)))
+			uses[i].reserved = (uses[i].reserved & ((1u << kUseSlotShift) - 1u)) |
+					   kUseHasSlot | (slot << kUseSlotShift);
 		refs += fresh + host_acquire_wanted(*backing, *completion);
 		++transaction->prepared;
 		if (uses[i].access & SWITCH_GPU_BACKING_WRITE)
@@ -278,10 +324,16 @@ int begin(switch_gpu_backing_use *uses, uint32_t count, switch_gpu_cpu_lease *co
 		if (backing->dirty & SWITCH_GPU_BACKING_CPU_DIRTY) {
 			transaction->host_written = 1;
 			const uint64_t size = uint64_t(backing->pages->count) << 12;
-			if (!(uses[i].reserved & kUseCleaned) && backing->clean_start < size)
+			if (!(uses[i].reserved & kUseCleaned) && backing->clean_start < size) {
+#if TGM_STATS
+				if (backing->cpu_writers)
+					switch_gpu_concurrent_clean_note(
+						backing->surface_id, size - backing->clean_start);
+#endif
 				switch_gpu_backing_cache(
 					backing->pages->addresses, backing->pages->count,
 					backing->clean_start, size - backing->clean_start, 0);
+			}
 			backing->clean_start = 0;
 			// A CPU writer still holding the backing (a submission proceeds beside it) may write more before the
 			// next job reads it: that job cleans again.

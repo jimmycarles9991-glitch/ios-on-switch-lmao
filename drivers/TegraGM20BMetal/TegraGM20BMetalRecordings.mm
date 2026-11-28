@@ -18,6 +18,8 @@ struct SwitchMetalRecording {
     std::vector<id> owners;
     gm20b::PointerMap<bool> ownerKeys;
     SwitchMetalPassCachePtr passCache;
+    std::vector<uint8_t> passKey;
+    SwitchMetalRenderSlots renderSlots;
     size_t kept = 0;
 };
 
@@ -29,15 +31,22 @@ static std::atomic<size_t> gRecordingBytes{0};
 
 static void swapRecording(SwitchMetalCommandBuffer *b, SwitchMetalRecording &r)
 {
-    std::swap(b->_plan, r.plan);
+    b->_plan.swapClean(r.plan);
     b->_passes.swap(r.passes);
-    std::swap(b->_bytes, r.bytes);
+    b->_bytes.chunks.swap(r.bytes.chunks);
+    std::swap(b->_bytes.at, r.bytes.at);
+    std::swap(b->_bytes.used, r.bytes.used);
+    std::swap(b->_bytes.curCpu, r.bytes.curCpu);
+    std::swap(b->_bytes.curLen, r.bytes.curLen);
+    std::swap(b->_bytes.curOk, r.bytes.curOk);
     b->_retirements.swap(r.retirements);
     b->_shadow.swap(r.shadow);
     b->_extra.swap(r.extra);
     b->_owners.swap(r.owners);
-    std::swap(b->_ownerKeys, r.ownerKeys);
+    b->_ownerKeys.swap(r.ownerKeys);
     b->_passCache.swap(r.passCache);
+    b->_passKey.swap(r.passKey);
+    b->_renderSlots.swapClean(r.renderSlots);
 }
 
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
@@ -175,6 +184,7 @@ void gm20bBytesDone(SwitchMetalCommandBuffer *cb)
     s.chunks.clear();  // its capacity goes on with the recording to the next command buffer
     s.at = 0;
     s.used = 0;
+    s.resetCursor();
     if (gaveBack)
         growBytesChunksAhead();
 }
@@ -214,6 +224,7 @@ void gm20bRecordingDone(SwitchMetalCommandBuffer *b)
              gm20bPassCacheBytes(b->_passCache.get());
     if (bytes > kKeptBytes) {
         SWITCH_METAL_RECORDING_COUNT(gRecordingDropsLarge);
+        b->_plan.clear();
         SwitchMetalRecording dropped;
         swapRecording(b, dropped);
         dropBytes(dropped.bytes);
@@ -225,14 +236,16 @@ void gm20bRecordingDone(SwitchMetalCommandBuffer *b)
     if (!r) {
         SWITCH_METAL_RECORDING_COUNT(*(fits ? &gRecordingDropsSlots : &gRecordingDropsTotal));
         gRecordingBytes.fetch_sub(bytes, std::memory_order_relaxed);
+        b->_plan.clear();
         SwitchMetalRecording dropped;
         swapRecording(b, dropped);
         dropBytes(dropped.bytes);
         return;
     }
+    b->_plan.clear();
+    b->_renderSlots.reset();
     swapRecording(b, *r);
     r->kept = bytes;
-    r->plan.clear();
     r->passes.clear();
     r->bytes.at = 0;
     r->bytes.used = 0;

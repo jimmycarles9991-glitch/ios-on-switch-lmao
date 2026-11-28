@@ -1,6 +1,8 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
+import HWTestShared
 import Metal
 
 /// Stored one-sample depth/stencil textures in the driver's own zeta memory: each of Metal's four formats made private

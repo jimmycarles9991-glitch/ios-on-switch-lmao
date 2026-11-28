@@ -7,7 +7,8 @@
 #pragma once
 #include <stdint.h>
 
-#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+#if ((defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)) && defined(SWITCH_STATS_FRAME) && \
+    SWITCH_STATS_FRAME
 #define SWITCH_FRAME_TIMELINE 1
 #else
 #define SWITCH_FRAME_TIMELINE 0
@@ -49,9 +50,11 @@ void tegra_gm20b_frame_take(struct SwitchFrameGpu *out);
 int tegra_gm20b_gpu_load(uint64_t *busy, uint64_t *total);
 // Provided by XNU (kernel/switch/sched/render.c), weak and empty in the drivers that call them: Core Animation's display
 // thread from each vsync to its swap. The display reports each vsync (its stamp and refresh period, mach) and, on the
-// swapping thread, each swap; the GPU driver each compositor submission, on the submitting thread.
+// swapping thread, each swap; the GPU driver each compositor submission, on the submitting thread. Before its swap the
+// display reads the thread's window for the frame: its vsync (mach), wake and first submission (us after it, -1: none).
 void switch_sched_render_vsync(uint64_t stamp, uint64_t period);
 void switch_sched_render_submitted(void);
+bool switch_sched_render_window(uint64_t *vsync, int64_t *woke_us, int64_t *first_us);
 void switch_sched_render_swapped(void);
 #ifdef __cplusplus
 }

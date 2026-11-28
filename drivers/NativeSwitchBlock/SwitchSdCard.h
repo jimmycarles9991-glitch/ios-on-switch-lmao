@@ -348,6 +348,8 @@ inline uint32_t switchSdPowerWriteAddress(const SwitchSdExtFunction &power, uint
 constexpr uint32_t kSdPerfCqSupport = 6, kSdPerfCacheControl = 260, kSdPerfFlushControl = 261, kSdPerfCqControl = 262;
 constexpr uint32_t kSdPerfLength = kSdPerfCqControl + 1;
 constexpr uint8_t kSdCacheEnable = 1, kSdFlushCache = 1;
+constexpr uint64_t kSdFlushCacheLimitNs = 1500000000ULL;
+constexpr uint32_t kSdFlushCacheSleepMs = 1;
 constexpr uint32_t kSdR1Errors = 0xfdf90008u;
 
 struct SwitchSdPerf {
@@ -383,17 +385,101 @@ inline bool switchSdPerfFits(const SwitchSdExtFunction &perf)
     return perf.found && switchSdExtRange(perf.address, kSdPerfLength);
 }
 
-// The only extension-register writes this driver may issue: flushing a cache found enabled at boot (byte 261 = 01h)
-// and disabling it (byte 260 = 00h). Returns 0 for every other byte or value, or when the register set crosses a page.
+// Permitted Performance Enhancement writes: Cache Enable (byte 260 = 00h or 01h) and Flush Cache (byte 261 = 01h).
 inline uint32_t switchSdPerfWriteAddress(const SwitchSdExtFunction &perf, uint32_t byte, uint8_t value)
 {
     if (!switchSdPerfFits(perf))
         return 0;
     if (byte == kSdPerfFlushControl && value == kSdFlushCache)
         return perf.address + kSdPerfFlushControl;
-    if (byte == kSdPerfCacheControl && value == 0)
+    if (byte == kSdPerfCacheControl && (value == 0 || value == kSdCacheEnable))
         return perf.address + kSdPerfCacheControl;
     return 0;
+}
+
+enum class SwitchSdCacheOnStep : uint8_t {
+    kSkipped,
+    kDone,
+    kBadAddress,
+    kEnableFailed,
+    kReadBackFailed,
+    kNotEnabled,
+};
+
+struct SwitchSdCacheOn {
+    SwitchSdCacheOnStep step;
+    int error;
+    uint32_t r1;
+    uint8_t cacheEnable;
+};
+
+// SD 6.00 4.17: enable the card's volatile write cache (byte 260 bit 0 = 1) and verify via read-back.
+template <typename Bus>
+inline SwitchSdCacheOn switchSdEnableCache(bool havePerf, const SwitchSdExtFunction &perfFunc, const SwitchSdPerf &perf,
+                                           Bus &bus)
+{
+    if (!havePerf || !perf.cache)
+        return {SwitchSdCacheOnStep::kSkipped, 0, 0, perf.cacheEnable};
+    const uint32_t cacheAddress = switchSdPerfWriteAddress(perfFunc, kSdPerfCacheControl, kSdCacheEnable);
+    if (!cacheAddress || !switchSdExtRange(cacheAddress, 1))
+        return {SwitchSdCacheOnStep::kBadAddress, 0, 0, perf.cacheEnable};
+    uint32_t r1 = 0;
+    if (const int err = bus.writeByte(perfFunc.fno, cacheAddress, kSdCacheEnable, &r1); err || (r1 & kSdR1Errors))
+        return {SwitchSdCacheOnStep::kEnableFailed, err, r1, perf.cacheEnable};
+    uint8_t readBack = 0;
+    r1 = 0;
+    if (const int err = bus.readBytes(perfFunc.fno, cacheAddress, 1, &readBack, &r1); err || (r1 & kSdR1Errors))
+        return {SwitchSdCacheOnStep::kReadBackFailed, err, r1, perf.cacheEnable};
+    if (!(readBack & kSdCacheEnable))
+        return {SwitchSdCacheOnStep::kNotEnabled, 0, 0, readBack};
+    return {SwitchSdCacheOnStep::kDone, 0, 0, readBack};
+}
+
+enum class SwitchSdFlushStep : uint8_t {
+    kSkipped,
+    kDone,
+    kBadAddress,
+    kFlushFailed,
+    kReadBackFailed,
+    kStillPending,
+};
+
+struct SwitchSdFlush {
+    SwitchSdFlushStep step;
+    int error;
+    uint32_t r1;
+    uint8_t flushCache;
+};
+
+// SD 6.00 4.17 / 5.7.2.2 / Table 5-30: set Flush Cache (byte 261 bit 0 = 1), wait for CMD49 DAT0 busy end, then
+// confirm bit 0 cleared via CMD48 (required by spec: cards may release DAT0 before flushing asynchronously).
+template <typename Bus>
+inline SwitchSdFlush switchSdFlushCache(bool havePerf, const SwitchSdExtFunction &perfFunc, Bus &bus)
+{
+    if (!havePerf)
+        return {SwitchSdFlushStep::kSkipped, 0, 0, 0};
+    const uint32_t flushAddress = switchSdPerfWriteAddress(perfFunc, kSdPerfFlushControl, kSdFlushCache);
+    if (!flushAddress || !switchSdExtRange(flushAddress, 1))
+        return {SwitchSdFlushStep::kBadAddress, 0, 0, 0};
+    uint32_t r1 = 0;
+    if (const int err = bus.writeByte(perfFunc.fno, flushAddress, kSdFlushCache, &r1); err || (r1 & kSdR1Errors))
+        return {SwitchSdFlushStep::kFlushFailed, err, r1, 0};
+    const uint64_t busyEndedNs = bus.nowNs();
+    uint32_t waitMs = kSdFlushCacheSleepMs;
+    for (;;) {
+        uint8_t status = 0;
+        r1 = 0;
+        if (const int err = bus.readBytes(perfFunc.fno, flushAddress, 1, &status, &r1); err || (r1 & kSdR1Errors))
+            return {SwitchSdFlushStep::kReadBackFailed, err, r1, 0};
+        if (!(status & kSdFlushCache))
+            return {SwitchSdFlushStep::kDone, 0, 0, status};
+        const uint64_t now = bus.nowNs();
+        if (now >= busyEndedNs && now - busyEndedNs >= kSdFlushCacheLimitNs)
+            return {SwitchSdFlushStep::kStillPending, 0, 0, status};
+        bus.sleepMs(waitMs);
+        if (waitMs < 16u)
+            waitMs *= 2u;
+    }
 }
 
 enum class SwitchSdCacheOffStep : uint8_t {
@@ -489,6 +575,40 @@ inline SwitchSdPowerOff switchSdPowerOffNotify(bool havePower, const SwitchSdExt
             return {SwitchSdPowerOffStep::kNotReady, 0, 0, status};
         bus.sleepMs(kSdPowerOffSleepMs);
     }
+}
+
+// ---- Manual DDR200 tap tuning (Tegra X1 SDMMC1) -------------------------------------------------------------------
+// Tegra X1 has no hardware tuning in DDR mode; manual tuning sweeps CMD19 across 128 taps and picks the midpoint of
+// the widest passing window, rejecting windows narrower than kSdMinTuneWindow (DLL-only cards fail this check).
+constexpr uint32_t kSdManualTuneTaps = 128;
+constexpr uint32_t kSdMinTuneWindow = 8;
+
+struct SwitchSdTapWindow {
+    bool ok;
+    uint32_t tap;
+    uint32_t window;
+};
+
+inline SwitchSdTapWindow switchSdBestTapWindow(const uint32_t results[4], uint32_t count = kSdManualTuneTaps,
+                                               uint32_t minWindow = kSdMinTuneWindow)
+{
+    uint32_t runStart = count, runLen = 0, bestTap = 0, bestLen = 0;
+    for (uint32_t i = 0; i <= count; ++i) {
+        const bool pass = i < count && ((results[i / 32] >> (i % 32)) & 1u) != 0u;
+        if (pass) {
+            if (runStart == count)
+                runStart = i;
+            ++runLen;
+        } else if (runStart != count) {
+            if (runLen > bestLen) {
+                bestLen = runLen;
+                bestTap = (runStart + (i - 1)) / 2;
+            }
+            runStart = count;
+            runLen = 0;
+        }
+    }
+    return {bestTap != 0 && bestLen >= minWindow, bestTap, bestLen};
 }
 
 // ---- Data command framing ------------------------------------------------------------------------------------------

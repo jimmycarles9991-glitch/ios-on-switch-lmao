@@ -71,9 +71,12 @@ IOReturn SwitchAudio::setHostClock(task_t task, uint64_t address)
 IOReturn SwitchAudio::sleepGated(OSObject *owner, void *entering, void *, void *, void *)
 {
     auto *self = static_cast<SwitchAudio *>(owner);
+    const HwTransitionGuard guard(self);
     if (entering) {
-        if (self->control->state)
+        if (self->control->state || self->ahubDraining) {
+            self->ahubDraining = false;
             self->tegraStop();
+        }
         self->timer->cancelTimeout();
         return kIOReturnSuccess;
     }
@@ -95,8 +98,11 @@ IOReturn SwitchAudio::sleepGated(OSObject *owner, void *entering, void *, void *
 IOReturn SwitchAudio::shutdownGated(OSObject *owner, void *, void *, void *, void *)
 {
     auto *self = static_cast<SwitchAudio *>(owner);
-    if (self->control->state)
+    const HwTransitionGuard guard(self);
+    if (self->control->state || self->ahubDraining) {
+        self->ahubDraining = false;
         self->tegraStop();
+    }
     self->hardwareLost = true;
     return kIOReturnSuccess;
 }
@@ -110,7 +116,8 @@ IOReturn SwitchAudio::powerMessage(void *target, void *, UInt32 type, IOService 
 
 void SwitchAudio::systemShutdown()
 {
-    gate->runAction(&SwitchAudio::displaySleepGated, this);
+    if (displayGate)
+        displayGate->runAction(&SwitchAudio::displaySleepGated, this);
     if (!tegra)
         return;
     codecStep(kCodecMute);
@@ -120,7 +127,8 @@ void SwitchAudio::systemShutdown()
 
 void SwitchAudio::systemSleep(bool entering)
 {
-    gate->runAction(&SwitchAudio::displaySleepGated, entering ? this : nullptr);
+    if (displayGate)
+        displayGate->runAction(&SwitchAudio::displaySleepGated, entering ? this : nullptr);
     if (!tegra)
         return;
     if (entering) {
@@ -230,12 +238,28 @@ void SwitchAudio::free()
         jackSource->disable();
     if (pv6Source)
         pv6Source->disable();
-#if DEVELOPMENT || DEBUG
+    if (codecEvent)
+        codecEvent->disable();
+    if (jackTimer)
+        jackTimer->cancelTimeout();
+    if (idleTimer)
+        idleTimer->cancelTimeout();
+    if (codecTimer)
+        codecTimer->cancelTimeout();
+    if (headsetTimer)
+        headsetTimer->cancelTimeout();
+    if (unmuteTimer)
+        unmuteTimer->cancelTimeout();
+    if (pauseTimer)
+        pauseTimer->cancelTimeout();
+#if SWITCH_STATS_IO
     if (statsTimer)
         statsTimer->cancelTimeout();
-    IOEventSource *const codecSources[] = {jackSource, pv6Source, jackTimer, idleTimer, statsTimer, codecGate};
+    IOEventSource *const codecSources[] = {jackSource,   pv6Source,   codecEvent, jackTimer,  idleTimer, codecTimer,
+                                           headsetTimer, unmuteTimer, pauseTimer, statsTimer, codecGate};
 #else
-    IOEventSource *const codecSources[] = {jackSource, pv6Source, jackTimer, idleTimer, codecGate};
+    IOEventSource *const codecSources[] = {jackSource, pv6Source,    codecEvent,  jackTimer,  idleTimer,
+                                           codecTimer, headsetTimer, unmuteTimer, pauseTimer, codecGate};
 #endif
     removeSources(codecLoop, codecSources, sizeof(codecSources) / sizeof(codecSources[0]));
 
@@ -244,7 +268,7 @@ void SwitchAudio::free()
         wire->release();
     }
     OSSafeReleaseNULL(timer);
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
     OSSafeReleaseNULL(statsTimer);
 #endif
     OSSafeReleaseNULL(cascade);
@@ -252,8 +276,13 @@ void SwitchAudio::free()
     OSSafeReleaseNULL(loop);
     OSSafeReleaseNULL(jackSource);
     OSSafeReleaseNULL(pv6Source);
+    OSSafeReleaseNULL(codecEvent);
     OSSafeReleaseNULL(jackTimer);
     OSSafeReleaseNULL(idleTimer);
+    OSSafeReleaseNULL(codecTimer);
+    OSSafeReleaseNULL(headsetTimer);
+    OSSafeReleaseNULL(unmuteTimer);
+    OSSafeReleaseNULL(pauseTimer);
     OSSafeReleaseNULL(codecGate);
     OSSafeReleaseNULL(codecLoop);
     for (auto &m : memory)
@@ -357,6 +386,27 @@ OSDefineMetaClassAndStructors(SwitchAudioUserClient, IOUserClient)
 
     static SwitchAudio *gAudio;
 static SwitchAudioSink gDisplaySink;
+
+bool SwitchAudio::waitMmioActive(const volatile uint8_t *base, uint32_t offset, uint32_t mask, uint32_t value,
+                                 uint32_t timeoutUs)
+{
+    if (SwitchAudio *audio = __atomic_load_n(&gAudio, __ATOMIC_ACQUIRE))
+        return audio->waitMmio(base, offset, mask, value, timeoutUs);
+    constexpr uint32_t kFastUs = 50u;
+    const uint32_t fastUs = timeoutUs < kFastUs ? timeoutUs : kFastUs;
+    if (switch_mmio_wait32(base, offset, mask, value, fastUs))
+        return true;
+    if (timeoutUs <= kFastUs)
+        return false;
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(timeoutUs - kFastUs, NSEC_PER_USEC, &deadline);
+    while (mach_absolute_time() < deadline) {
+        delay_for_interval(250u, NSEC_PER_USEC);
+        if ((switch_mmio_read32(base, offset) & mask) == value)
+            return true;
+    }
+    return (switch_mmio_read32(base, offset) & mask) == value;
+}
 
 SwitchAudioSink switch_audio_display_sink()
 {

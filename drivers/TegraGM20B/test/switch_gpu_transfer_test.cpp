@@ -306,6 +306,17 @@ TEST_F(Transfer, InactiveClientReleasesUnimportedDescriptorReservations)
 	EXPECT_EQ(client.refs, 1u);
 }
 
+TEST_F(Transfer, TerminatedClientReleasesUnimportedDescriptorReservationsAutomatically)
+{
+	IOUserClient client;
+	ASSERT_EQ(switch_gpu_surface_lock_will(&client, 1, 0), 0);
+	switch_gpu_surface_lock_did(&client, 1, 0);
+	ASSERT_EQ(switch_gpu_surface_lock_will(&client, 1, 1), 0);
+	client.terminate();
+	EXPECT_EQ(descriptorUsers, 0u);
+	EXPECT_EQ(client.refs, 1u);
+}
+
 TEST_F(Transfer, MaterializationLeaseTransfersThroughTheActualSurfaceLockPath)
 {
 	IOUserClient client;

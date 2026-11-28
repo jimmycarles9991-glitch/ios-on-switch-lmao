@@ -139,10 +139,13 @@ TEST(SwitchVICColor, FixedPointMatricesMatchIndependent6017092020ColorEquations)
             for (unsigned a = 0; a <= 255; a += 17)
                 for (unsigned b = 0; b <= 255; b += 17)
                     for (unsigned c = 0; c <= 255; c += 17) {
+                        const auto widen = [](unsigned v) {
+                            return (v << 2) | (v >> 6);
+                        };
                         uint32_t input[3] = {}, output[3] = {};
-                        input[0] = a * 4;
-                        input[kTegraVICTraits.in.cbChannel] = b * 4;
-                        input[kTegraVICTraits.in.crChannel] = c * 4;
+                        input[0] = widen(a);
+                        input[kTegraVICTraits.in.cbChannel] = widen(b);
+                        input[kTegraVICTraits.in.crChannel] = widen(c);
                         tegra_vic_matrix_apply(&decode, input, output);
                         const double y = full ? a : (double(a) - 16) * 255 / 219;
                         const double cb = (double(b) - 128) * (full ? 1 : 255.0 / 224);
@@ -152,9 +155,9 @@ TEST(SwitchVICColor, FixedPointMatricesMatchIndependent6017092020ColorEquations)
                                                y + 2 * (1 - kb) * cb};
                         for (unsigned channel = 0; channel != 3; ++channel)
                             ASSERT_NEAR(output[channel] >> 2, code(rgb[channel]), 1);
-                        input[0] = a * 4;
-                        input[1] = b * 4;
-                        input[2] = c * 4;
+                        input[0] = widen(a);
+                        input[1] = widen(b);
+                        input[2] = widen(c);
                         tegra_vic_matrix_apply(&encode, input, output);
                         const double luma = kr * a + kg * b + kb * c;
                         const double encodedY = full ? luma : 16 + luma * 219 / 255;

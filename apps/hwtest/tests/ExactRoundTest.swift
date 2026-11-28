@@ -2,6 +2,7 @@ import CoreVideo
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// Metal's exact roundings in compute (ExactRoundModel, which an M4 Max follows on every value here). packs: MSL's

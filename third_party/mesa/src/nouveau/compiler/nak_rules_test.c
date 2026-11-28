@@ -247,6 +247,75 @@ strips(uint8_t half_targets)
    return reads_y;
 }
 
+static unsigned
+count_compares_of(nir_shader *nir, unsigned src_bit_size)
+{
+   unsigned n = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_alu)
+               continue;
+            nir_alu_instr *alu = nir_instr_as_alu(instr);
+            n += nir_op_infos[alu->op].output_type == nir_type_bool1 &&
+                 nir_src_bit_size(alu->src[0].src) == src_bit_size;
+         }
+      }
+   }
+   return n;
+}
+
+/* Core Animation's transfer curve on a half held widened: its magnitude
+ * compared with a half parameter and narrowed, its sign tested against zero
+ * and given back to the curve's half value by a select
+ */
+static void
+widened_half_curve(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, &options, "half-curve");
+   nir_def *zero = nir_imm_int(&b, 0);
+   nir_def *h = nir_f2f16_rtne(&b, nir_load_ssbo(&b, 1, 32, zero, zero));
+   nir_def *p = nir_f2f16_rtne(&b, nir_load_ssbo(&b, 1, 32, zero, nir_imm_int(&b, 4)));
+   nir_def *w = nir_f2f32(&b, h);
+   nir_def *m = nir_fabs(&b, w);
+   nir_def *below = nir_flt(&b, m, nir_f2f32(&b, p));
+   nir_def *m16 = nir_f2f16_rtne(&b, m);
+   nir_def *v = nir_f2f32(&b, nir_bcsel(&b, below, nir_fmul(&b, m16, p), nir_fadd(&b, m16, p)));
+   nir_def *negative = nir_flt(&b, w, nir_imm_float(&b, 0.0f));
+   nir_def *signed_v = nir_bcsel(&b, negative, nir_fneg(&b, v), v);
+   nir_store_ssbo(&b, nir_f2f16_rtne(&b, signed_v), zero, nir_imm_int(&b, 8));
+   late_rules(b.shader);
+   require(count_alu(b.shader, nir_op_f2f32, 0) == 0, "a half widened for its magnitude, compare or sign");
+   require(count_alu(b.shader, nir_op_f2f16_rtne, 0) == 2, "a half narrowed again");
+   require(count_compares_of(b.shader, 16) == 2 && count_compares_of(b.shader, 32) == 0,
+           "a half compared widened");
+   require(count_alu(b.shader, nir_op_bcsel, 16) == 2, "the curve's selects not made of halves");
+   ralloc_free(b.shader);
+}
+
+/* A half's max and min metal2vulkan takes in f32 and narrows: the halves' own
+ * after the late rules, a clamp to a half constant included
+ */
+static void
+widened_half_min_max(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, &options, "half-min-max");
+   nir_def *zero = nir_imm_int(&b, 0);
+   nir_def *h = nir_f2f16_rtne(&b, nir_load_ssbo(&b, 1, 32, zero, zero));
+   nir_def *p = nir_f2f16_rtne(&b, nir_load_ssbo(&b, 1, 32, zero, nir_imm_int(&b, 4)));
+   nir_def *hi = nir_f2f16_rtne(&b, nir_fmax(&b, nir_f2f32(&b, h), nir_f2f32(&b, p)));
+   nir_def *lo = nir_f2f16_rtne(&b, nir_fmin(&b, nir_f2f32(&b, hi), nir_imm_float(&b, 0.5f)));
+   nir_store_ssbo(&b, lo, zero, nir_imm_int(&b, 8));
+   /* a clamp whose max is narrowed only through its min */
+   nir_def *clamped = nir_fmin(&b, nir_fmax(&b, nir_f2f32(&b, h), nir_imm_float(&b, 0.0f)), nir_f2f32(&b, p));
+   nir_store_ssbo(&b, nir_f2f16_rtne(&b, clamped), zero, nir_imm_int(&b, 12));
+   late_rules(b.shader);
+   require(count_alu(b.shader, nir_op_f2f32, 0) == 0, "a half widened for its max or min");
+   require(count_alu(b.shader, nir_op_fmax, 16) == 2 && count_alu(b.shader, nir_op_fmin, 16) == 2,
+           "a half's max or min taken in f32");
+   ralloc_free(b.shader);
+}
+
 int
 main(void)
 {
@@ -265,8 +334,10 @@ main(void)
    half_target_rounding();
    nearest_even_output_survives();
    half_phis();
+   widened_half_curve();
+   widened_half_min_max();
    require(strips(1u << 1), "a half target's output kept its rounding");
    require(!strips(1u << 0), "another target's output lost its rounding");
-   printf("%u float tests, 3 half target outputs, 2 phis and 2 strips passed\n", n);
+   printf("%u float tests, 3 half target outputs, 2 phis, a half curve, a half clamp and 2 strips passed\n", n);
    return 0;
 }

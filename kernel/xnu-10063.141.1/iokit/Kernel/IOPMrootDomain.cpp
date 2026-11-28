@@ -1315,7 +1315,6 @@ static SYSCTL_PROC(_kern, OID_AUTO, consoleoptions,
 extern "C" void switch_boot_band_lift(const char *why);
 /* drivers/SwitchPower/SwitchPerfGovernor.cpp (SwitchPower.h SWITCH_PERF_HINT_BOOT_DONE = 4): the boot's clock window ends */
 extern "C" void switch_perf_hint(unsigned int hint);
-extern "C" void switch_gpu_boot_complete(void) __attribute__((weak));
 
 static int
 sysctl_progressoptions SYSCTL_HANDLER_ARGS
@@ -8020,14 +8019,11 @@ IOPMrootDomain::dispatchPowerEvent(
 		if (systemBooting) {
 			systemBooting = false;
 			/* Switch: SpringBoard finished startup (backboardd sets this): the boot band's daemons get their CPU back
-			 * (if its 60 s bound has not already), and the boot's full clocks end: from here the CPU governor and the
+			 * (if its 120 s bound has not already), and the boot's full clocks end: from here the CPU governor and the
 			 * GPU's idle clock decide, whenever this comes (r8a: 74 s of uptime, after the band's bound). */
 			switch_boot_band_lift("System Boot Complete");
 			switch_perf_hint(4); /* SWITCH_PERF_HINT_BOOT_DONE */
 			switch_sched_boot_complete();
-			if (switch_gpu_boot_complete) {
-				switch_gpu_boot_complete();
-			}
 
 			if (PE_get_default("sleep-disabled", &gSleepDisabledFlag, sizeof(gSleepDisabledFlag))) {
 				DLOG("Setting gSleepDisabledFlag to %u from device tree\n", gSleepDisabledFlag);

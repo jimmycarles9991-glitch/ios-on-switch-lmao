@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A placement heap's private texture (PTE kind 0xfe) and aliased private buffer (PTE kind 0) at offset 0: writing the

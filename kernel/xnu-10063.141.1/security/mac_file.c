@@ -195,9 +195,9 @@ mac_file_check_mmap(struct ucred *cred, struct fileglob *fg, int prot,
 	    switch_bootstrap_access(vp, FREAD);
 	kauth_cred_t mapping_cred = !tweak_read && vp &&
 	    switch_bootstrap_exec_mapping(p, vp, offset, prot) ? cred : NULL;
-	const bool package_read = vp && !(prot & (VM_PROT_WRITE | VM_PROT_EXECUTE)) &&
+	const bool package_read = !tweak_read && !mapping_cred && vp && !(prot & (VM_PROT_WRITE | VM_PROT_EXECUTE)) &&
 	    switch_bootstrap_app_access(vp, FREAD);
-	if (package_read && !tweak_read && !mapping_cred) maxp &= VM_PROT_READ;
+	if (package_read) maxp &= VM_PROT_READ;
 	SWITCH_BOOTSTRAP_MAC_CHECK_WITH_CRED(tweak_read || package_read, mapping_cred,
 	    vp && ((switch_app_code_process(p) && switch_app_code_image(vp)) ||
 	    (switch_bootstrap_process(p) && switch_bootstrap_image(vp))),

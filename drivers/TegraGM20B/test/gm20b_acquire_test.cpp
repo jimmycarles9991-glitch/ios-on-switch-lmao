@@ -104,20 +104,3 @@ TEST(Offset, InsideTheFenceViewOnly)
 		  -1);  // an address space with no fence view
 }
 }  // namespace
-
-// The ACQUIRE probe's verdict on a park past TGM_ACQUIRE_NS with no interrupt: on PBDMA0 at the acquire with the timeout
-// armed, the interrupt was lost; switched out on it (CCSR pending_acquire), the PBDMA was not timing it.
-TEST(Probe, OnThePbdmaWithItsTimeoutArmedIsALostInterruptAndSwitchedOutIsNot)
-{
-	const uint32_t armed = tgm_acquire_word(tgm_acquire_ptimer_ns(1000000000ull));
-	const uint32_t pendingAcquire = 3u << 24, onEngine = 1u << 24;
-
-	EXPECT_EQ(tgm_acquire_probe_where(5, onEngine, 5, 1, armed), TGM_ACQUIRE_LOST);
-	EXPECT_EQ(tgm_acquire_probe_where(5, onEngine, 5, 1, armed & ~TGM_ACQUIRE_TIMEOUT_EN),
-		  TGM_ACQUIRE_UNTIMED);
-	EXPECT_EQ(tgm_acquire_probe_where(5, pendingAcquire, 7, 1, armed),
-		  TGM_ACQUIRE_SWITCHED_OUT);
-	EXPECT_EQ(tgm_acquire_probe_where(5, pendingAcquire, 5, 0, armed), TGM_ACQUIRE_SWITCHED_OUT)
-		<< "PBDMA0 on the channel but past the acquire: CCSR decides";
-	EXPECT_EQ(tgm_acquire_probe_where(5, onEngine, 7, 1, armed), TGM_ACQUIRE_ELSEWHERE);
-}

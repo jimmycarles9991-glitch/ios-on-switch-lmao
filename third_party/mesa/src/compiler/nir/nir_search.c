@@ -730,6 +730,7 @@ nir_replace_instr(nir_builder *build, nir_alu_instr *instr,
    /* Note that NIR builder will elide the MOV if it's a no-op, which may
     * allow more work to be done in a single pass through algebraic.
     */
+   nir_invalidate_fp_analysis_users(search_state->range_ht, &instr->def);
    nir_def *mov = nir_def_rewrite_uses_with_alu_src(build, &instr->def, val);
 
    if (mov) {
@@ -828,7 +829,7 @@ nir_algebraic_instr(nir_builder *build, nir_instr *instr,
           nir_replace_instr(build, alu, state, states, table,
                             &table->values[xform->search].expression,
                             &table->values[xform->replace].value, worklist, dead_instrs)) {
-         nir_invalidate_fp_analysis_state(state->range_ht);
+         nir_grow_fp_analysis_state(state->range_ht);
          if (state->numlsb_ht->entries)
             _mesa_hash_table_clear(state->numlsb_ht, NULL);
          return true;

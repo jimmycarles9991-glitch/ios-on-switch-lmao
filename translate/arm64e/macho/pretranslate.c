@@ -129,7 +129,16 @@ struct hole {
 struct shared {
     uint32_t word;
     uint8_t variant;
+    bool spills;
     uint64_t off;
+};
+
+struct pt_site {
+    uint64_t off;
+    uint32_t w, dead, vdead;
+    uint8_t cls;
+    bool can_share;
+    bool placed;
 };
 
 struct pt {
@@ -255,7 +264,7 @@ static void liveness(const struct pt *p, uint64_t site, bool vtemps, uint32_t *d
 static uint32_t vtemps_of(uint32_t w)
 {
     uint32_t st[A64X_STUB_MAX], m = 0, r, wr;
-    int n = a64x_stub_v(w, 0x100000, 0x200000, (1u << 16) | (1u << 17), 0xFFFF0000u, st, A64X_STUB_MAX);
+    int n = a64x_stub_v(w, 0x100000, 0x200000, (1u << 16) | (1u << 17), 0xFFFF0000u, true, st, A64X_STUB_MAX);
     for (int k = 0; k < n && k < A64X_STUB_MAX; k++) {
         a64x_vregs_public(st[k], &r, &wr);
         m |= r | wr;
@@ -323,18 +332,63 @@ static uint64_t place_split(struct pt *p, const uint32_t *st, int n, uint64_t la
     return 0;
 }
 
-/* a stub for w at a place of its own; shared: ends in RET instead of `b site + 4`. Returns its offset or 0. */
-static uint64_t emit(struct pt *p, uint32_t w, uint64_t site, uint32_t dead, uint32_t vdead, bool shared)
+static uint32_t sh_hash(uint32_t w, uint8_t variant)
+{
+    return (w * 2654435761u) ^ ((uint32_t)variant * 40503u);
+}
+
+static const struct shared *sh_find(const struct pt *p, uint32_t w, uint8_t variant)
+{
+    if (!p->capsh)
+        return NULL;
+    size_t mask = p->capsh - 1;
+    for (size_t idx = sh_hash(w, variant) & mask;; idx = (idx + 1) & mask) {
+        if (!p->sh[idx].off)
+            return NULL;
+        if (p->sh[idx].word == w && p->sh[idx].variant == variant)
+            return &p->sh[idx];
+    }
+}
+
+static bool sh_put(struct pt *p, uint32_t w, uint8_t variant, bool spills, uint64_t off)
+{
+    if ((p->nsh + 1) * 2 > p->capsh) {
+        size_t nc = p->capsh ? p->capsh * 2 : 128;
+        struct shared *ns = calloc(nc, sizeof(*ns));
+        if (!ns)
+            return false;
+        size_t mask = nc - 1;
+        for (size_t i = 0; i < p->capsh; i++) {
+            if (!p->sh[i].off)
+                continue;
+            size_t idx = sh_hash(p->sh[i].word, p->sh[i].variant) & mask;
+            while (ns[idx].off)
+                idx = (idx + 1) & mask;
+            ns[idx] = p->sh[i];
+        }
+        free(p->sh);
+        p->sh = ns;
+        p->capsh = nc;
+    }
+    size_t mask = p->capsh - 1;
+    size_t idx = sh_hash(w, variant) & mask;
+    while (p->sh[idx].off)
+        idx = (idx + 1) & mask;
+    p->sh[idx] = (struct shared){w, variant, spills, off};
+    p->nsh++;
+    return true;
+}
+
+/* a stub for w at a place of its own; shared: returns with RET instead of `b site + 4`. Returns its offset or 0. */
+static uint64_t emit(struct pt *p, uint32_t w, uint64_t site, uint32_t dead, uint32_t vdead, bool shared, bool *spills)
 {
     uint32_t st[A64X_STUB_MAX];
-    int n = a64x_stub_v(w, site, site + 8, dead, vdead, st, A64X_STUB_MAX);
+    int n = a64x_stub_v(w, site, site + 8, dead, vdead, shared, st, A64X_STUB_MAX);
     if (n <= 0 || n > A64X_STUB_MAX)
         return 0;
     uint64_t at = take(p, (uint32_t)n), words = (uint64_t)n;
-    if (at && a64x_stub_v(w, site, at, dead, vdead, st, A64X_STUB_MAX) != n)
+    if (at && !shared && a64x_stub_v(w, site, at, dead, vdead, false, st, A64X_STUB_MAX) != n)
         return 0;
-    if (shared)
-        st[n - 1] = RET;
     if (at) {
         for (int k = 0; k < n; k++)
             wr32(p->out + at + 4ull * k, st[k]);
@@ -342,8 +396,8 @@ static uint64_t emit(struct pt *p, uint32_t w, uint64_t site, uint32_t dead, uin
         return 0;
     }
     p->r->stub_words += words;
-    if ((st[0] & 0xFFC003FFu) == 0xD10003FFu)
-        p->r->spill_sites++;
+    if (spills)
+        *spills = a64x_stub_spills(st, n);
     return at;
 }
 
@@ -359,52 +413,59 @@ static bool needs_stub(enum a64x_class c, uint32_t w)
 {
     uint32_t one;
     return c == A64X_LSE_CAS || c == A64X_LSE_CASP || c == A64X_LSE_LDOP || c == A64X_LSE_SWP || c == A64X_JSCVT ||
-           c == A64X_FCMA || c == A64X_FP16 || c == A64X_RDM || c == A64X_SB ||
-           (c == A64X_PAC_LDRA && !a64x_rewrite1(w, &one));
+           c == A64X_FCMA || c == A64X_RDM || c == A64X_SB ||
+           ((c == A64X_PAC_LDRA || c == A64X_FP16) && !a64x_rewrite1(w, &one));
 }
 
-static bool place_site(struct pt *p, uint64_t site, uint32_t w, enum a64x_class c)
+static bool place_shared_site(struct pt *p, struct pt_site *s)
 {
-    uint32_t dead, vdead, branch = 0;
-    bool vt = a64x_class_uses_vtemps(c);
-    liveness(p, site, vt, &dead, &vdead);
-    if ((dead >> 30) & 1 && c != A64X_PAC_LDRA && !(a64x_stub_gprs(w) & (1u << 30))) {
-        uint32_t need = vt ? vtemps_of(w) : 0;
-        bool two = (dead & ((1u << 16) | (1u << 17))) == ((1u << 16) | (1u << 17)),
-             vfree = need && (vdead & need) == need;
-        uint8_t variant = (uint8_t)((two ? 1 : 0) | (vfree ? 2 : 0));
-        uint64_t at = 0;
-        for (size_t i = 0; i < p->nsh && !at; i++)
-            if (p->sh[i].word == w && p->sh[i].variant == variant)
-                at = p->sh[i].off;
-        if (!at) {
-            at = emit(p, w, site, two ? (1u << 16) | (1u << 17) : 0, vfree ? 0xFFFF0000u : 0, true);
-            if (at && p->nsh == p->capsh) {
-                size_t nc = p->capsh ? p->capsh * 2 : 64;
-                struct shared *ns = realloc(p->sh, nc * sizeof(*ns));
-                if (!ns)
-                    return false;
-                p->sh = ns;
-                p->capsh = nc;
-            }
-            if (at) {
-                p->sh[p->nsh++] = (struct shared){w, variant, at};
-                p->r->shared_copies++;
-            }
+    enum a64x_class c = (enum a64x_class)s->cls;
+    uint32_t need = a64x_class_uses_vtemps(c) ? vtemps_of(s->w) : 0;
+    bool two = (s->dead & ((1u << 16) | (1u << 17))) == ((1u << 16) | (1u << 17));
+    bool vfree = need && (s->vdead & need) == need;
+    uint8_t variant = (uint8_t)((two ? 1 : 0) | (vfree ? 2 : 0));
+    const struct shared *hit = sh_find(p, s->w, variant);
+    uint64_t at = hit ? hit->off : 0;
+    bool spills = hit ? hit->spills : false;
+    if (!at) {
+        at = emit(p, s->w, s->off, two ? (1u << 16) | (1u << 17) : 0, vfree ? 0xFFFF0000u : 0, true, &spills);
+        if (!at)
+            return false;
+        if (!sh_put(p, s->w, variant, spills, at)) {
+            p->oom = true;
+            return false;
         }
-        if (at && (branch = enc_bl(site, at)))
-            p->r->shared_sites++;
+        p->r->shared_copies++;
     }
-    if (!branch) {
-        uint64_t at = emit(p, w, site, dead & ~(1u << 30), vdead, false);
-        branch = at ? a64x_branch(site, at) : 0;
-    }
+    uint32_t branch = enc_bl(s->off, at);
     if (!branch)
         return false;
-    wr32(p->out + site, branch);
+    wr32(p->out + s->off, branch);
+    p->r->shared_sites++;
+    if (spills)
+        p->r->spill_sites++;
     p->r->stats.stubs[c]++;
     p->r->stats.left[c]--;
     p->r->sites++;
+    s->placed = true;
+    return true;
+}
+
+static bool place_unique_site(struct pt *p, struct pt_site *s)
+{
+    enum a64x_class c = (enum a64x_class)s->cls;
+    bool spills = false;
+    uint64_t at = emit(p, s->w, s->off, s->dead & ~(1u << 30), s->vdead, false, &spills);
+    uint32_t branch = at ? a64x_branch(s->off, at) : 0;
+    if (!branch)
+        return false;
+    wr32(p->out + s->off, branch);
+    if (spills)
+        p->r->spill_sites++;
+    p->r->stats.stubs[c]++;
+    p->r->stats.left[c]--;
+    p->r->sites++;
+    s->placed = true;
     return true;
 }
 
@@ -419,7 +480,7 @@ static void free_pt(struct pt *p)
     free((void *)p->entries);
 }
 
-/* pass 1: one-word rewrites and dead checks, page by page as the loader would; pass 2: every stub site */
+/* pass 1: one-word rewrites and dead checks, page by page; pass 2: shared BL stubs contiguously first, then per-site */
 static int translate(struct pt *p, uint32_t map_flags, char *why, size_t whylen)
 {
     const struct a64x_macho *m = p->m;
@@ -437,6 +498,8 @@ static int translate(struct pt *p, uint32_t map_flags, char *why, size_t whylen)
     }
     if (p->oom)
         return fail(why, whylen, "out of memory");
+    struct pt_site *sites = NULL;
+    size_t nsites = 0, capsites = 0;
     for (uint64_t off = m->exec_fileoff; off + 4 <= m->exec_fileoff + m->exec_filesize; off += 4) {
         uint32_t w = rd32(m->base + off);
         enum a64x_class c = a64x_classify(w);
@@ -444,10 +507,41 @@ static int translate(struct pt *p, uint32_t map_flags, char *why, size_t whylen)
             continue;
         if ((map_flags & A64X_MAP_NO_PAC) && a64x_class_is_pac(c))
             continue;
-        if (!place_site(p, off, w, c))
+        if (nsites == capsites) {
+            size_t nc = capsites ? capsites * 2 : 128;
+            struct pt_site *ns = realloc(sites, nc * sizeof(*ns));
+            if (!ns) {
+                free(sites);
+                return fail(why, whylen, "out of memory");
+            }
+            sites = ns;
+            capsites = nc;
+        }
+        uint32_t dead, vdead;
+        liveness(p, off, a64x_class_uses_vtemps(c), &dead, &vdead);
+        bool can_share = ((dead >> 30) & 1) && c != A64X_PAC_LDRA && !(a64x_stub_gprs(w) & (1u << 30));
+        sites[nsites++] = (struct pt_site){off, w, dead, vdead, (uint8_t)c, can_share, false};
+    }
+    for (size_t i = 0; i < nsites; i++) {
+        if (sites[i].can_share)
+            (void)place_shared_site(p, &sites[i]);
+        if (p->oom) {
+            free(sites);
+            return fail(why, whylen, "out of memory");
+        }
+    }
+    for (size_t i = 0; i < nsites; i++) {
+        if (sites[i].placed)
+            continue;
+        if (!place_unique_site(p, &sites[i])) {
+            uint32_t w = sites[i].w;
+            uint64_t off = sites[i].off;
+            free(sites);
             return fail(why, whylen, "no room for the stub of %08x at 0x%llx (%llu tail words, holes used)", w,
                         (unsigned long long)off, (unsigned long long)p->r->tail_words);
+        }
     }
+    free(sites);
     return 0;
 }
 

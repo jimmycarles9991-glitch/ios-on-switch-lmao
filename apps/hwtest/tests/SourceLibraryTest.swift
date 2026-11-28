@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A library from Metal source is made by the system shader compiler's Metal front end and read as the device's own

@@ -4,7 +4,7 @@
 #include "SwitchGpuPin.h"
 #include "TegraGM20BGpu.h"
 void switch_gpu_cached_retire(SwitchGpuCachedBuffer buffer, uint64_t *pages, uint32_t count,
-			      switch_gpu_cached_mapping *mapping);
+			      switch_gpu_spare_kind kind, switch_gpu_cached_mapping *mapping);
 
 namespace
 {
@@ -32,12 +32,14 @@ struct Cached {
 	SwitchGpuCachedBuffer buffer;
 	uint64_t *pages;
 	uint32_t count;
+	switch_gpu_spare_kind kind;
 };
 
 void release_cached(void *owner)
 {
 	auto *cached = static_cast<Cached *>(owner);
-	switch_gpu_cached_retire(cached->buffer, cached->pages, cached->count, cached->mapping);
+	switch_gpu_cached_retire(cached->buffer, cached->pages, cached->count, cached->kind,
+				 cached->mapping);
 	IODelete(cached, Cached, 1);
 }
 
@@ -94,6 +96,7 @@ switch_gpu_backing *switch_gpu_pin_chunks(const uint64_t *pages, uint32_t count)
 switch_gpu_backing *switch_gpu_pin_cached(const uint64_t *pages, uint32_t count,
 					  uint32_t visible_count,
 					  const SwitchGpuCachedBuffer &buffer,
+					  switch_gpu_spare_kind kind,
 					  switch_gpu_cached_mapping *mapping)
 {
 	auto *cached = IONew(Cached, 1);
@@ -110,6 +113,7 @@ switch_gpu_backing *switch_gpu_pin_cached(const uint64_t *pages, uint32_t count,
 	cached->mapping = mapping;
 	cached->count = count;
 	cached->buffer = buffer;
+	cached->kind = kind;
 	memory->retain();
 	auto *backing =
 		switch_gpu_backing_register(pages, visible_count, 0, cached, release_cached);

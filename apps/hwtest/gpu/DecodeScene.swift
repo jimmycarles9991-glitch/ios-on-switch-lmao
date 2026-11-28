@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// The decode tests' Metal work: textures of the formats the driver decodes on upload (PVRTC, ASTC 4x2/8x4, ASTC HDR:

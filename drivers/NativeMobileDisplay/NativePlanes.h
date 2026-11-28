@@ -171,6 +171,12 @@ struct Limits {
     uint32_t maxLayers = 3;
     bool packedYuvUnsupported = false;    // published as IOMFBYUVPackedUnSupported (24B119 only, see kLimits24B119)
     bool compressionUnsupported = false;  // published as IOMFBMaxSrcPixels' IOMFBCompressionSupport 0 (24B119 only)
+    bool flipUnsupported = false;         // published as IOMFBDisableFlip
+    bool rotation = false;                // published as IOMFBSupportsRotation and MaxSrcRotRectTotal (24B119 only)
+    // A turned surface Core Animation hands over has fewer whole-1024 pixels than this (display_supports_rotation_p):
+    // one past the largest buffer, so every surface the other limits allow may come turned.
+    uint64_t maxSrcRotRectTotal =
+        static_cast<uint64_t>(switch_window_caps::kSourceWidth) * switch_window_caps::kSourceHeight + 1;
 };
 
 // QuartzCore 24B119 [V] reads every key above the same way (update_display_limits 0x1844e82f0; MaxSrcRectWidthForPipe and
@@ -194,7 +200,16 @@ struct Limits {
 // sets the flag bit 29 that 0x18443c378 tests (render_contents_background builds the flags at 0x18437cc6c-0x18437ce98,
 // OGLDisplay::detach_layer adds bit 22, detach_layer keeps bits 31-27, 7 and 3-0 of the layer's earlier flags and
 // detachable_layer_impl adds bits 7 and 23-27).
-constexpr Limits kLimits24B119 = {.packedYuvUnsupported = true, .compressionUnsupported = true};
+//
+// Flips and turns: 24B119's update_display_limits (0x1844e82f0) fills AppleDisplay's capability halfword at
+// display+0x77c8: bit 15 (flips) set unless IOMFBDisableFlip, bit 14 from IOMFBSupportsRotation, and MaxSrcRotRectTotal
+// from IOMFBMaxSrcPixels into display+0x7718. AppleInternalDisplay::display_supports_rotation_p (0x1844401a4) then lets a
+// layer through turned when its surface's max_src_rect_width >= height, its format is not already a compressed one and
+// align32(w) * align32(h) & ~0x3ff < MaxSrcRotRectTotal: any format, video included. Every transformed layer checkDetached
+// accepts is shown, by window B or C or by the plane conversion job (NativePlanesTurn.h), so 24B119 publishes both and
+// Core Animation leaves detached layers' turns to the display. 21H461's reading of the keys is unverified: iOS 17
+// publishes neither and keeps Core Animation's own turns.
+constexpr Limits kLimits24B119 = {.packedYuvUnsupported = true, .compressionUnsupported = true, .rotation = true};
 
 // The row and plane-base alignment published for every surface iPadOS sizes for this display (Core Animation's
 // framebuffers through update_display_limits, VideoToolbox's and MediaToolbox's outputs through
@@ -213,7 +228,7 @@ enum Reason : unsigned {
     kSurface = 4,      // the IOSurface or its memory is not what its own fields say
     kBlank = 5,        // accepted: everything off over black
     kTwoUi = 6,        // more layers with surfaces than published (IOMFBNumLayers)
-    kTransformed = 7,  // a transform (the display publishes no flips or rotation: Core Animation copies those)
+    kTransformed = 7,  // a transform where the display publishes no rotation (Limits::rotation)
     kScale = 8,        // a scale outside 1/4 .. 4x, or a source wider than published
     kFormat = 9,       // a format no window reads
     kAlignment = 10,   // a plane base or row not aligned as published
@@ -427,19 +442,22 @@ inline bool blockReads(const tgm_layout &b, const Surface &f, const Axis &y, Ima
 }
 
 #include "SwitchWindowFormatImage.h"
+#include "NativePlanesTurn.h"
 
 // The image of a layer checkDetached accepted: the destination clipped to the display with the source cut exactly where
 // the clipped edge samples it. block: the surface's layout when the GPU renders it block-linear.
 inline bool imageOf(const Layer &l, uint32_t width, uint32_t height, Image &image, const tgm_layout *block = nullptr)
 {
+    if (l.transform)
+        return turnImageOf(l, width, height, image, block);
     if (l.kind == kKindExtraYuv)
         return extraImageOf(l, width, height, image, block);
     image = Image();
     image.yuv = isYuv(l.kind);
     image.convert = image.yuv && !switch_surface_dc_siting(l.surface.chromaTop, l.surface.chromaBottom);
     const uint32_t bpp = image.yuv ? 1 : 4;  // bytes per pixel the offsets and PRESCALED count (luma)
-    const uint32_t hMax = image.yuv ? 8 : 4;
-    const uint32_t vMax = 15;  // DDA limits (4:2:0 and 4:2:2 count as 2 bytes per pixel)
+    const uint32_t hMax = image.yuv ? 8 : kRgbShrinkAcross;
+    const uint32_t vMax = kShrinkDown;  // DDA limits (4:2:0 and 4:2:2 count as 2 bytes per pixel)
     Axis x;
     Axis y;
     if (!axisOf(l.src.x, l.src.w, l.dst.x, l.dst.w, width, l.surface.width, hMax, image.yuv, x) ||
@@ -480,10 +498,11 @@ inline unsigned checkDetached(const Layer &l, uint32_t width, uint32_t height, c
 {
     if (l.kind == kKindNone)
         return kFormat;
-    if (l.transform)
+    if (l.transform && !limits.rotation)
         return kTransformed;
     const Rect s = l.src;
-    const Rect d = l.dst;
+    // A quarter turn's destination width is its source height: the scale limits hold per output axis.
+    const Rect d = turnOf(l.transform).transpose ? Rect{l.dst.x, l.dst.y, l.dst.h, l.dst.w} : l.dst;
     if (s.x < 0 || s.y < 0 || s.w <= 0 || s.h <= 0 || d.w <= 0 || d.h <= 0 ||
         static_cast<uint64_t>(s.x) + static_cast<uint64_t>(s.w) > l.surface.width ||
         static_cast<uint64_t>(s.y) + static_cast<uint64_t>(s.h) > l.surface.height ||
@@ -501,8 +520,12 @@ inline unsigned checkDetached(const Layer &l, uint32_t width, uint32_t height, c
         static_cast<uint32_t>(s.w) > limits.maxSrcRectWidth ||
         static_cast<uint64_t>(s.w) * static_cast<uint64_t>(s.h) > limits.maxSrcRectTotal)
         return kScale;
-    if (l.kind == kKindExtraYuv)
-        return extraCheck(l, width, height, limits);
+    if (l.kind == kKindExtraYuv) {
+        Layer untransformed = l;
+        untransformed.transform = 0;
+        untransformed.dst = d;
+        return extraCheck(untransformed, width, height, limits);
+    }
     const unsigned planes = isYuv(l.kind) ? 2 : 1;
     for (unsigned p = 0; p < planes; ++p) {
         const uint64_t base = planes == 1 ? 0 : l.surface.offset[p];

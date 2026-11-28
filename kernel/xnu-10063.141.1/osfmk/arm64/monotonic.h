@@ -56,7 +56,11 @@ extern const bool mt_core_supported;
 #define MT_CORE_CYCLES 0
 #define MT_CORE_INSTRS 1
 #define MT_CORE_NFIXED 2
+#if defined(SWITCH_ARMV8_PMUV3)
+#define MT_CORE_MAXVAL UINT64_MAX
+#else /* defined(SWITCH_ARMV8_PMUV3) */
 #define MT_CORE_MAXVAL ((UINT64_C(1) << 48) - 1)
+#endif /* !defined(SWITCH_ARMV8_PMUV3) */
 
 __END_DECLS
 
@@ -67,6 +71,19 @@ __END_DECLS
 #include <stdbool.h>
 
 __BEGIN_DECLS
+
+#if defined(SWITCH_ARMV8_PMUV3)
+
+static inline bool
+mt_pmi_pending(uint64_t * restrict pmcr0_out,
+    uint64_t * restrict upmsr_out)
+{
+	*pmcr0_out = 0;
+#pragma unused(upmsr_out)
+	return false;
+}
+
+#else /* defined(SWITCH_ARMV8_PMUV3) */
 
 /* set by hardware if a PMI was delivered */
 #define PMCR0_PMAI (UINT64_C(1) << 11)
@@ -107,6 +124,8 @@ mt_pmi_pending(uint64_t * restrict pmcr0_out,
 
 	return pmi;
 }
+
+#endif /* !defined(SWITCH_ARMV8_PMUV3) */
 
 void mt_fiq(void *cpu, uint64_t pmcr0, uint64_t upmsr);
 

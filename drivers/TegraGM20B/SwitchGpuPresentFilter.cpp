@@ -40,10 +40,14 @@ struct Dropped {
 	bool held;
 };
 
+struct alignas(64) RunSlot {
+	uint32_t value;
+};
+
 Published gView;
 Callout gCallout;
 const void *gOwner;
-uint32_t gRuns[kCpus];  // each written by its own CPU's filter alone, with interrupts off
+RunSlot gRuns[kCpus];  // each written by its own CPU's filter alone, with interrupts off
 
 // the writers' own: the attached view's reference, and a dropped one still waiting for the filters to leave it
 switch_gpu_backing_token gHeld;
@@ -75,7 +79,7 @@ bool leftBy(const uint32_t *marked)
 {
 	for (unsigned cpu = 0; cpu < kCpus; cpu++) {
 		if ((marked[cpu] & 1) &&
-		    __atomic_load_n(&gRuns[cpu], __ATOMIC_ACQUIRE) == marked[cpu])
+		    __atomic_load_n(&gRuns[cpu].value, __ATOMIC_ACQUIRE) == marked[cpu])
 			return false;
 	}
 	return true;
@@ -105,7 +109,7 @@ void drop()
 		return;
 	}
 	for (unsigned cpu = 0; cpu < kCpus; cpu++)
-		gDropped.runs[cpu] = __atomic_load_n(&gRuns[cpu], __ATOMIC_ACQUIRE);
+		gDropped.runs[cpu] = __atomic_load_n(&gRuns[cpu].value, __ATOMIC_ACQUIRE);
 	gDropped.token = gHeld;
 	gDropped.held = true;
 	releaseDropped();
@@ -196,16 +200,16 @@ extern "C" void tgm_present_filter(void)
 	void (*fn)(void *, int) = nullptr;
 	void *context = nullptr;
 
-	if ((seq & 1) || !readView(seq, &view))
+	if ((seq & 1) || !load(gView.timeline))
 		return;
 	const unsigned cpu = static_cast<unsigned>(cpu_number()) % kCpus;
-	const uint32_t runs = __atomic_load_n(&gRuns[cpu], __ATOMIC_RELAXED);
-	__atomic_store_n(&gRuns[cpu], runs + 1, __ATOMIC_RELAXED);
+	const uint32_t runs = __atomic_load_n(&gRuns[cpu].value, __ATOMIC_RELAXED);
+	__atomic_store_n(&gRuns[cpu].value, runs + 1, __ATOMIC_RELAXED);
 	__atomic_thread_fence(__ATOMIC_SEQ_CST);
 	if (readView(seq, &view) && switch_gpu_timeline_view_visible(&view) == 1 &&
 	    readCallout(&fn, &context) &&
 	    __atomic_exchange_n(&gView.called, seq, __ATOMIC_RELAXED) != seq &&
 	    load(gView.seq) == seq)
 		fn(context, 0);
-	__atomic_store_n(&gRuns[cpu], runs + 2, __ATOMIC_RELEASE);
+	__atomic_store_n(&gRuns[cpu].value, runs + 2, __ATOMIC_RELEASE);
 }

@@ -2,6 +2,7 @@ import Foundation
 import HWTestCore
 import HWTestGPU
 import HWTestKit
+import HWTestShared
 import SwiftUI
 import UIKit
 
@@ -48,7 +49,6 @@ struct PocketKeylineTest: HWTest {
             return .fail("UIKit made no Keyline layer for the hard scroll edge effect", metrics)
         }
         metrics.merge(found)
-        Self.armRawProbe()
         try? await Task.sleep(nanoseconds: 100_000_000)
         let picture = await MainActor.run { Snapshots.composited(host.view) }
         guard let row = Self.lineRow(picture, keyline: row, &metrics) else {
@@ -102,15 +102,6 @@ struct PocketKeylineTest: HWTest {
             try? image.png()?.place(at: directory.appendingPathComponent("\(name).png"))
         }
         return .fail(LogLine.fitted(reasons), all)
-    }
-
-    /// The render server's debug lines for its Core Animation draws and short writes, for 30 s from its notification
-    /// handler (pipeline.h armKeylineProbe): their budgets were spent long before this test
-    static func armRawProbe() {
-        CFNotificationCenterPostNotification(
-            CFNotificationCenterGetDarwinNotifyCenter(),
-            CFNotificationName("com.brunostjohn.switch.debug.keyline-probe" as CFString), nil, nil, true
-        )
     }
 
     /// The purple or fresh row nearest the keyline's last pixel row, within two rows of it (a fractional edge at the UI's

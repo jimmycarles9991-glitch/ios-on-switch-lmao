@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A 4x Depth16Unorm beside a 4x Stencil8 resolved into a one-sample Depth16Unorm (sample 0). The driver renders the

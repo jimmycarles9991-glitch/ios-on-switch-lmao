@@ -168,6 +168,9 @@ typedef struct NmbDirectDraw {
     // By stage and buffer slot, the record's word + 1 of the slot's SlotBindOffset residual as the plan places it: a root
     // push word (1-32) or the stage's argument table word + 33 (33-63); 0: none; 255: placed past what a record names
     uint8_t residualWord[2][32];
+    // m2v's SlotGuestBase fields (PackPipeline::guestBaseWord, guestBaseSlot): push word + 1 (0: no more), and the Metal
+    // buffer index whose bound address each draw writes there, kGuestBaseFragment set for the fragment stage's
+    uint8_t guestBaseWord[4], guestBaseSlot[4];
 } NmbDirectDraw;
 
 typedef struct NmbDirectStorage {
@@ -246,9 +249,11 @@ typedef struct NmbDirectBoundTexture {
     uint64_t pixelFormat, textureType, usage, levels, arrayLength, samples;
 } NmbDirectBoundTexture;
 
-#define NMB_DIRECT_BOUND_TWO_PLANES 1u
-#define NMB_DIRECT_BOUND_MAP_SHIFT  8u
-#define NMB_DIRECT_BOUND_MAP_STATED (1u << 15)
+#define NMB_DIRECT_BOUND_TWO_PLANES     1u
+#define NMB_DIRECT_BOUND_MAP_SHIFT      8u
+#define NMB_DIRECT_BOUND_MAP_STATED     (1u << 15)
+#define NMB_DIRECT_BOUND_SWIZZLE_SHIFT  16u
+#define NMB_DIRECT_BOUND_SWIZZLE_STATED (1u << 28)
 
 typedef struct NmbDirectBoundSampler {
     uint32_t slot;

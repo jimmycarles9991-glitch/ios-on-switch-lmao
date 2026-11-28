@@ -21,7 +21,7 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <stdint.h>
 
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
 // After a successful map, whichever path took it.
 void usb_dma_probe_map(IOMemoryDescriptor *memory, uint64_t offset, uint64_t length, uint32_t mapOptions,
                        uint64_t physical, uint64_t address, const char *path);

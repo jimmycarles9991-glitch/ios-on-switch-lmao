@@ -6,7 +6,7 @@
 // meanwhile; a partial first or last line is cleaned and invalidated instead (Linux dcache_inval_poc), so bytes that
 // share a line with the range survive.
 //
-// The plain forms end with one DSB SY, which is what makes the maintenance visible to a device outside the inner
+// The plain forms end with one DSB OSH, which is what makes the maintenance visible to a device outside the inner
 // shareable domain; issue it before the doorbell. The *_lines forms leave it out so a batch pays for one
 // switch_dcache_sync(). No barrier is needed before the first DC: DC by VA is ordered after earlier stores to the
 // same line.
@@ -29,7 +29,7 @@ extern "C" {
 #define SWITCH_DCACHE_OP(op, address) __asm__ volatile("dc " op ", %0" ::"r"(address) : "memory")
 #endif
 #ifndef SWITCH_DCACHE_BARRIER
-#define SWITCH_DCACHE_BARRIER() __asm__ volatile("dsb sy" ::: "memory")
+#define SWITCH_DCACHE_BARRIER() __asm__ volatile("dsb osh" ::: "memory")
 #endif
 
 typedef enum switch_dcache_op {
@@ -177,9 +177,21 @@ static inline void switch_dcache_phys_lines(switch_dcache_op op, uint64_t pa, ui
 // task mapped) has no cacheable alias to maintain. A page's offset bits are ignored.
 static inline void switch_dcache_hw_pages(switch_dcache_op op, const uint64_t *pages, size_t count)
 {
-    for (size_t i = 0; i < count; ++i) {
-        if (switch_dma_pa_managed(pages[i]))
-            switch_dcache_phys_lines(op, pages[i] & ~SWITCH_HW_PAGE_MASK, SWITCH_HW_PAGE_SIZE);
+    size_t i = 0;
+    while (i < count) {
+        if (!switch_dma_pa_managed(pages[i])) {
+            ++i;
+            continue;
+        }
+        const uint64_t start = pages[i] & ~SWITCH_HW_PAGE_MASK;
+        uint64_t length = SWITCH_HW_PAGE_SIZE;
+        ++i;
+        while (i < count && switch_dma_pa_managed(pages[i]) &&
+               (pages[i] & ~SWITCH_HW_PAGE_MASK) == start + length) {
+            length += SWITCH_HW_PAGE_SIZE;
+            ++i;
+        }
+        switch_dcache_phys_lines(op, start, length);
     }
 }
 #endif

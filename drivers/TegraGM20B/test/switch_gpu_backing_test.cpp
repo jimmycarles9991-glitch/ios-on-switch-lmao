@@ -568,9 +568,9 @@ TEST_F(Backing, DeadSurfaceClientReleasesCpuReservationsBeforeNextEngineSubmissi
 	auto *allocation = switch_gpu_backing_register(&page, 1, 702, nullptr, nullptr);
 	ASSERT_EQ(switch_gpu_surface_lock_will(&client, 702, 0), 0);
 	switch_gpu_surface_lock_did(&client, 702, 0);
-	client.inactive = true;
-	EXPECT_EQ(publish(allocation, SWITCH_GPU_BACKING_WRITE, token(1)), 0);
+	client.terminate();
 	EXPECT_EQ(client.refs, 1u);
+	EXPECT_EQ(publish(allocation, SWITCH_GPU_BACKING_WRITE, token(1)), 0);
 	switch_gpu_backing_release(allocation);
 }
 
@@ -605,8 +605,8 @@ TEST_F(Backing, UsesAreOrderedByBackingWhetherOrNotTheyCameSorted)
 		switch_gpu_backing_release(allocation);
 }
 
-// The sweep a dead client's leases wait for runs only for a job they could refuse or for a waiter they could hold.
-TEST_F(Backing, ADeadClientsLeaseIsSweptByAJobOnItsBackingNotByEveryJob)
+// Dead client leases are released on client termination, never swept from SubmitJob / begin.
+TEST_F(Backing, ADeadClientsLeaseIsReleasedOnTerminationNeverBySubmitJob)
 {
 	IOUserClient client;
 	const uint64_t page = next_page += 4096;
@@ -614,16 +614,30 @@ TEST_F(Backing, ADeadClientsLeaseIsSweptByAJobOnItsBackingNotByEveryJob)
 	auto *other = backing();
 	ASSERT_EQ(switch_gpu_surface_lock_will(&client, 704, 0), 0);
 	switch_gpu_surface_lock_did(&client, 704, 0);
-	client.inactive = true;
-	EXPECT_EQ(publish(other, SWITCH_GPU_BACKING_WRITE, token(1)), 0);
+	// A held job (SubmitJob) running while a client holds a lease takes zero global lease lock.
+	const auto submitHeld = [](switch_gpu_backing *b, uint32_t access,
+				   const switch_gpu_backing_token &t) {
+		switch_gpu_backing_use use = {b, access, 0};
+		switch_gpu_backing_transaction tx = {};
+		const int err =
+			switch_gpu_backing_begin_held(&use, 1, nullptr, 0, nullptr, 0, &t, &tx);
+		if (!err)
+			switch_gpu_backing_commit(&tx);
+		return err;
+	};
+	const uint64_t before = ioLockTakes().load();
+	EXPECT_EQ(submitHeld(other, SWITCH_GPU_BACKING_WRITE, token(1)), 0);
+	EXPECT_EQ(ioLockTakes().load() - before, 1u) << "only other->lock, no surface sweep lock";
 	EXPECT_EQ(client.refs, 2u);
-	EXPECT_EQ(publish(held, SWITCH_GPU_BACKING_WRITE, token(1, 2)), 0);
+	// Terminating the client releases its lease immediately without waiting for any job.
+	client.terminate();
 	EXPECT_EQ(client.refs, 1u);
+	EXPECT_EQ(publish(held, SWITCH_GPU_BACKING_WRITE, token(1, 2)), 0);
 	switch_gpu_backing_release(other);
 	switch_gpu_backing_release(held);
 }
 
-TEST_F(Backing, AReadinessWatchGetsADeadClientsLeaseSweptByAnyJob)
+TEST_F(Backing, AReadinessWatchDoesNotMakeSubmitJobSweepSurfaceLeases)
 {
 	IOUserClient client;
 	const uint64_t page = next_page += 4096;
@@ -631,16 +645,24 @@ TEST_F(Backing, AReadinessWatchGetsADeadClientsLeaseSweptByAnyJob)
 	auto *other = backing();
 	ASSERT_EQ(switch_gpu_surface_lock_will(&client, 705, 0), 0);
 	switch_gpu_surface_lock_did(&client, 705, 0);
-	client.inactive = true;
 	switch_gpu_test_ready_waiting = 1;
-	EXPECT_EQ(publish(other, SWITCH_GPU_BACKING_READ, token(1)), 0);
+	const uint64_t before = ioLockTakes().load();
+	switch_gpu_backing_use use = {other, SWITCH_GPU_BACKING_READ, 0};
+	switch_gpu_backing_transaction tx = {};
+	const auto completion = token(1);
+	EXPECT_EQ(switch_gpu_backing_begin_held(&use, 1, nullptr, 0, nullptr, 0, &completion, &tx),
+		  0);
+	switch_gpu_backing_commit(&tx);
+	EXPECT_EQ(ioLockTakes().load() - before, 1u)
+		<< "ready waiter must not cause SubmitJob to take the global lease lock";
 	switch_gpu_test_ready_waiting = 0;
+	client.terminate();
 	EXPECT_EQ(client.refs, 1u);
 	switch_gpu_backing_release(other);
 	switch_gpu_backing_release(held);
 }
 
-TEST_F(Backing, ACpuWaiterBehindADeadClientsLeaseIsWokenByAnUnrelatedJob)
+TEST_F(Backing, ACpuWaiterBehindADeadClientsLeaseIsWokenOnTerminationWithoutAJob)
 {
 	IOUserClient client;
 	const uint64_t page = next_page += 4096;
@@ -648,7 +670,6 @@ TEST_F(Backing, ACpuWaiterBehindADeadClientsLeaseIsWokenByAnUnrelatedJob)
 	auto *other = backing();
 	ASSERT_EQ(switch_gpu_surface_lock_will(&client, 706, 0), 0);
 	switch_gpu_surface_lock_did(&client, 706, 0);
-	client.inactive = true;
 	const uint64_t bytes = 4096;
 	std::thread waiter([&] {
 		EXPECT_EQ(switch_gpu_backing_cpu_acquire(held, 0, bytes, SWITCH_GPU_BACKING_WRITE),
@@ -658,7 +679,16 @@ TEST_F(Backing, ACpuWaiterBehindADeadClientsLeaseIsWokenByAnUnrelatedJob)
 	});
 	while (!__atomic_load_n(&switch_gpu_cpu_sleepers, __ATOMIC_ACQUIRE))
 		std::this_thread::yield();
-	EXPECT_EQ(publish(other, SWITCH_GPU_BACKING_READ, token(1)), 0);
+	const uint64_t before = ioLockTakes().load();
+	switch_gpu_backing_use use = {other, SWITCH_GPU_BACKING_READ, 0};
+	switch_gpu_backing_transaction tx = {};
+	const auto completion = token(1);
+	EXPECT_EQ(switch_gpu_backing_begin_held(&use, 1, nullptr, 0, nullptr, 0, &completion, &tx),
+		  0);
+	switch_gpu_backing_commit(&tx);
+	EXPECT_EQ(ioLockTakes().load() - before, 1u)
+		<< "a CPU sleeper elsewhere must not make SubmitJob sweep";
+	client.terminate();
 	waiter.join();
 	EXPECT_EQ(client.refs, 1u);
 	EXPECT_EQ(switch_gpu_cpu_sleepers, 0u);
@@ -1045,6 +1075,50 @@ TEST_F(Backing, PitchProxyRequiresItsGenerationAndNeverAuthorizesWrites)
 						   &transaction),
 		  SWITCH_GPU_BACKING_STALE);
 	switch_gpu_backing_release(logical);
+}
+
+TEST_F(Backing, WritableNativeViewAuthorizesWritesOnNativeAndGuardsLogical)
+{
+	auto *logical = backing(), *native = backing();
+	volatile uint64_t payload = 1, representation = 5;
+	switch_gpu_native_surface_view view = {};
+	view.logical = logical;
+	view.native = native;
+	view.payload = {logical, &payload, 1};
+	view.representation = {logical, &representation, 5};
+	switch_gpu_backing_use uses[2] = {};
+	switch_gpu_backing_guard guards[2] = {};
+	uint32_t useCount = 0, guardCount = 0;
+	EXPECT_EQ(switch_gpu_native_surface_add_use(view, true, SWITCH_GPU_BACKING_WRITE, uses,
+						    guards, 2, useCount, guardCount),
+		  -22);
+	ASSERT_EQ(switch_gpu_native_surface_add_use(view, false, SWITCH_GPU_BACKING_WRITE, uses,
+						    guards, 2, useCount, guardCount),
+		  0);
+	EXPECT_EQ(useCount, 2u);
+	EXPECT_EQ(guardCount, 2u);
+	EXPECT_EQ(uses[0].backing, native);
+	EXPECT_EQ(uses[0].access, uint32_t(SWITCH_GPU_BACKING_WRITE));
+	EXPECT_EQ(uses[1].backing, logical);
+	EXPECT_EQ(uses[1].access, uint32_t(SWITCH_GPU_BACKING_READ));
+	switch_gpu_backing_transaction transaction = {};
+	const auto writer = token(108);
+	ASSERT_EQ(switch_gpu_backing_begin_checked(uses, useCount, guards, guardCount, &writer,
+						   &transaction),
+		  0);
+	switch_gpu_backing_commit(&transaction);
+	const auto reader = token(109, 1, SWITCH_GPU_ENGINE_VIC);
+	switch_gpu_backing_use readUse = {native, SWITCH_GPU_BACKING_READ, 0};
+	ASSERT_EQ(switch_gpu_backing_begin(&readUse, 1, &reader, &transaction), 0);
+	switch_gpu_backing_token dependency = {};
+	uint32_t needed = 0;
+	ASSERT_EQ(switch_gpu_backing_dependencies(&transaction, &dependency, 1, &needed), 0);
+	EXPECT_EQ(needed, 1u);
+	EXPECT_EQ(dependency.value, writer.value);
+	switch_gpu_backing_abort(&transaction);
+	complete(writer);
+	switch_gpu_backing_release(logical);
+	switch_gpu_backing_release(native);
 }
 
 namespace

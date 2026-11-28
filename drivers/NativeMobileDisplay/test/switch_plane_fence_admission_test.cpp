@@ -20,8 +20,14 @@ void native_legacy_gpu_complete(void *, int status)
         onComplete();
 }
 
-int switch_gpu_bridge_fence(const switch_gpu_backing_token *tokens, uint32_t count, void (*completed)(void *, int),
-                            void *context)
+struct switch_gpu_bridge {
+    unsigned notifies = 0, releases = 0;
+};
+
+switch_gpu_bridge theBridge;
+int notifyError;
+
+int switch_gpu_bridge_submit(const switch_gpu_backing_token *tokens, uint32_t count, switch_gpu_bridge **bridge)
 {
     EXPECT_LE(count, 2u);
     submittedCount = count;
@@ -33,9 +39,26 @@ int switch_gpu_bridge_fence(const switch_gpu_backing_token *tokens, uint32_t cou
         return -16;
     if (submitError)
         return submitError;
+    *bridge = &theBridge;
+    return 0;
+}
+
+// A notify counts as the bridge's waiter: the hang check covers its producers. The completion may already run on the
+// retirement thread before the notify returns.
+int switch_gpu_bridge_notify(const switch_gpu_bridge *bridge, void (*completed)(void *, int), void *context)
+{
+    ++const_cast<switch_gpu_bridge *>(bridge)->notifies;
+    if (notifyError)
+        return notifyError;
     if (onComplete)
         completed(context, 0);
     return 0;
+}
+
+void switch_gpu_bridge_release(switch_gpu_bridge **bridge)
+{
+    ++(*bridge)->releases;
+    *bridge = nullptr;
 }
 
 int switch_gpu_bridge_wait_room()
@@ -95,6 +118,15 @@ struct Display {
         return 0x80000000;
     }
 
+    uint32_t planeBridgeArmed = 0;
+    unsigned bridgeWorks = 0, bridgeWorkCount = 0;
+
+    void planeBridgeWork(const switch_gpu_backing_token *, unsigned count)
+    {
+        ++bridgeWorks;
+        bridgeWorkCount = count;
+    }
+
 #include "../SwitchPlaneFenceAdmission.h"
 };
 
@@ -108,6 +140,8 @@ protected:
         busy = submitError = roomError = completedStatus = 0;
         submitted = submittedSecond = {};
         submittedCount = 0;
+        theBridge = {};
+        notifyError = 0;
         onRoom = onComplete = {};
         display.snapshot[0].lease = &display;
         display.snapshot[0].view.producer = {0x100000123ULL, 5, SWITCH_GPU_ENGINE_NVDEC, 162};
@@ -115,10 +149,26 @@ protected:
     }
 };
 
+// A set whose flip the gate armed for a stream goes to the bridge and the stream (SwitchGpuPlaneStream.h), with its
+// producers, and never to the bridge fence's CPU completion.
+TEST_F(PlaneFenceAdmission, AnArmedGpuSetGoesToItsStreamNotTheBridgeFence)
+{
+    display.planeBridgeArmed = 7;
+    display.snapshot[0].view.producer = {12, 1, SWITCH_GPU_ENGINE_GM20B, 3};
+    display.planeFenceWork();
+    EXPECT_EQ(display.bridgeWorks, 1u);
+    EXPECT_EQ(display.bridgeWorkCount, 1u);
+    EXPECT_EQ(submissions, 0u);
+    EXPECT_EQ(completions, 0u);
+    EXPECT_FALSE(display.planeFenceQueued);
+}
+
 TEST_F(PlaneFenceAdmission, DispatchPreservesExactProducerAndDoesNotWaitForCompletion)
 {
     display.planeFenceWork();
     EXPECT_EQ(submissions, 1u);
+    EXPECT_EQ(theBridge.notifies, 1u) << "the completion is the bridge's waiter";
+    EXPECT_EQ(theBridge.releases, 1u);
     EXPECT_EQ(roomWaits, 0u);
     EXPECT_EQ(completions, 0u);
     EXPECT_EQ(legacyCalls, 0u);
@@ -176,6 +226,15 @@ TEST_F(PlaneFenceAdmission, StopBeforeAdmissionAndDuringRoomWaitCompletesAborted
     display.planeFenceWork();
     EXPECT_EQ(completions, 2u);
     EXPECT_EQ(completedStatus, kIOReturnAborted);
+}
+
+TEST_F(PlaneFenceAdmission, ANotifyThatCannotBeTakenFailsTheSetAndLetsTheBridgeGo)
+{
+    notifyError = -16;
+    display.planeFenceWork();
+    EXPECT_EQ(completions, 1u);
+    EXPECT_EQ(completedStatus, -16);
+    EXPECT_EQ(theBridge.releases, 1u);
 }
 
 TEST_F(PlaneFenceAdmission, FailedRoomReservationIsReportedOnce)

@@ -38,12 +38,17 @@ extern Signal gSignal;
 extern void *gCtx;
 
 extern switch_cpu_load gLoad[kCpus];
+#if SWITCH_STATS_POWER
+// Busy with a utility or background thread (XNU's perfcontrol classes: base priority at or below BASEPRI_UTILITY), the
+// work CLPC would keep off the performance cores: logged beside the busy share, not part of the decision.
+extern switch_cpu_load gLoadEfficiency[kCpus];
+#endif
 
 // A boost's deadline, one writer each: the touch filter, the display gate, exec and a foreground role in the slot of the
 // CPU they ran on.
 struct Boost {
     uint64_t until;
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_POWER
     uint32_t hints, wakes;  // since boot, by the same writer
     uint32_t foreground;    // a launch slot's hints from a foreground role
 #endif
@@ -60,7 +65,7 @@ extern uint32_t gApplied, gAppliedKhz;
 
 extern uint32_t gDecided;  // the tick's index | gGeneration << 8
 
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_POWER
 extern uint32_t gBootHints;  // under gThreadLock
 #endif
 

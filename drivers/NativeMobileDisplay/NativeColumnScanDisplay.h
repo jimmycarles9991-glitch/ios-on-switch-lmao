@@ -6,7 +6,7 @@
 // and maps them into two plane slots; everything after that runs at DC A's frame ends under the gate, swaps held, the
 // frame end held routed. Its state is static: the instance is at the 16 KiB a kalloc_type class may have.
 
-#if SWITCH_FRAME_TIMELINE
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
 struct ColumnScanState {
     native_column_scan::Run run;
     IOBufferMemoryDescriptor *surface = nullptr, *reference = nullptr;

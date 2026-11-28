@@ -134,6 +134,7 @@ bool Device::takeHeader(const uint32_t words[8], uint32_t &slot)
     if (!takeTsc(slot))
         return false;
     memcpy(tsc_.cpu + 32 * slot, words, 32);
+    noteTscWrite();
     sharedTsc_[header] = {slot, 1};
     tscHeaders_[slot] = header;
     return true;
@@ -170,6 +171,7 @@ bool Device::createSampler(const SamplerDesc &d, Sampler &s)
         return false;
     }
     memcpy(tsc_.cpu + 32 * s.tsc, w, 32);
+    noteTscWrite();
     return true;
 }
 
@@ -299,6 +301,7 @@ bool Device::placeConstexprMaps(uint32_t index, const uint32_t words[8])
             return false;
         }
         memcpy(tsc_.cpu + 32 * taken[map], w, sizeof w);
+        noteTscWrite();
         constexprMapped_[index][map] = taken[map];
     }
     constexprMapped_[index][0] = own;

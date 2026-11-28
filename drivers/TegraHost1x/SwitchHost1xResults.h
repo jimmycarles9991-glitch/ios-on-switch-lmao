@@ -10,7 +10,7 @@ struct switch_gpu_bridge;
 struct SwitchHost1xResult {
     SwitchHost1xResult *next = nullptr;
     uint64_t first = 0, last = 0, generation = 0;
-    uint32_t references = 0;
+    uint32_t references = 0, waiters = 0;
     int result = 0, physicalResult = 0;
     int why = 0;  // a failed job's: SwitchGpuBacking.h WRITER_GONE, WRITER_FAILED or WRITE_REFUSED
     bool registered = false, completed = false;
@@ -26,7 +26,7 @@ struct SwitchHost1xResultState {
     IOLock *lock = nullptr;
     SwitchHost1xResult initial[kRecent] = {};
     SwitchHost1xResult *buckets[kBuckets] = {}, *recent[kRecent] = {}, *free = nullptr;
-    uint32_t syncpoint = 0, allocated = kRecent, nextRecent = 0, nextFailure = 0;
+    uint32_t syncpoint = 0, allocated = kRecent, nextRecent = 0, nextFailure = 0, inspecting = 0;
     uint64_t generation = 1, retiredThrough = 0;
     // A completed job whose record is gone reads as completed, or as its failure while it is among the newest
     // kRecent failures kept here. An older failure pushed out by newer ones reads as completed.
@@ -58,10 +58,11 @@ class SwitchHost1xResults {
     {
         if (record.last > State.retiredThrough)
             State.retiredThrough = record.last;
-        if (record.result >= 0 && record.physicalResult >= 0)
+        const int physical = __atomic_load_n(&record.physicalResult, __ATOMIC_ACQUIRE);
+        if (record.result >= 0 && physical >= 0)
             return;
-        State.failures[State.nextFailure] = {record.first,  record.last,           record.generation,
-                                             record.result, record.physicalResult, record.why};
+        State.failures[State.nextFailure] = {record.first,  record.last, record.generation,
+                                             record.result, physical,    record.why};
         State.nextFailure = (State.nextFailure + 1) % kRecent;
     }
 
@@ -157,11 +158,8 @@ public:
         return record;
     }
 
-    static int prepare(SwitchHost1xResult *record, uint64_t first, uint64_t last, switch_gpu_backing_token *token)
+    static int prepareLocked(SwitchHost1xResult *record, uint64_t first, uint64_t last, switch_gpu_backing_token *token)
     {
-        if (!record || !first || last < first || !token)
-            return -22;
-        IOLockLock(State.lock);
         *token = {last, State.generation, Engine, State.syncpoint};
         const int error = !State.generation ? -75 : record->registered || find(*token) ? -16 : 0;
         if (!error) {
@@ -172,6 +170,57 @@ public:
             record->next = State.buckets[last % kBuckets];
             State.buckets[last % kBuckets] = record;
         }
+        return error;
+    }
+
+    static int prepare(SwitchHost1xResult *record, uint64_t first, uint64_t last, switch_gpu_backing_token *token)
+    {
+        if (!record || !first || last < first || !token)
+            return -22;
+        IOLockLock(State.lock);
+        const int error = prepareLocked(record, first, last, token);
+        IOLockUnlock(State.lock);
+        return error;
+    }
+
+    static int acquire(SwitchHost1xResult **owned, uint64_t first, uint64_t last, switch_gpu_backing_token *token)
+    {
+        if (!owned || !first || last < first || !token)
+            return -22;
+        IOLockLock(State.lock);
+        auto *record = *owned;
+        if (record && record->registered) {
+            if (record->references > 1 && record->generation == State.generation)
+                ++State.generation;
+            record->result = -125;
+            if (record->waiters)
+                IOLockWakeup(State.lock, record, false);
+            drop(record);
+            *owned = record = nullptr;
+        }
+        if (!record) {
+            record = State.free;
+            if (record) {
+                State.free = record->next;
+            } else if (State.allocated < kMaximum) {
+                ++State.allocated;
+                IOLockUnlock(State.lock);
+                record = IONewZero(SwitchHost1xResult, 1);
+                IOLockLock(State.lock);
+                if (!record) {
+                    --State.allocated;
+                    IOLockUnlock(State.lock);
+                    return -12;
+                }
+            } else {
+                IOLockUnlock(State.lock);
+                return -12;
+            }
+            *record = {};
+            record->references = 1;
+            *owned = record;
+        }
+        const int error = prepareLocked(record, first, last, token);
         IOLockUnlock(State.lock);
         return error;
     }
@@ -187,7 +236,8 @@ public:
             ++State.generation;
         }
         record->result = -125;
-        IOLockWakeup(State.lock, record, false);
+        if (record->waiters)
+            IOLockWakeup(State.lock, record, false);
         drop(record);
         IOLockUnlock(State.lock);
     }
@@ -208,7 +258,8 @@ public:
             drop(old);
         State.recent[State.nextRecent] = record;
         State.nextRecent = (State.nextRecent + 1) % kRecent;
-        IOLockWakeup(State.lock, record, false);
+        if (record->waiters)
+            IOLockWakeup(State.lock, record, false);
         IOLockUnlock(State.lock);
     }
 
@@ -217,12 +268,33 @@ public:
     {
         if (!record)
             return false;
+        // Lock-free fast path for normal success; pairs with sourceFailure()'s State.inspecting Dekker fence.
+        if (result >= 0 && !__atomic_load_n(&State.inspecting, __ATOMIC_ACQUIRE)) {
+            int expected = 0;
+            if (__atomic_compare_exchange_n(&record->physicalResult, &expected, 1, false, __ATOMIC_SEQ_CST,
+                                            __ATOMIC_ACQUIRE)) {
+                if (__atomic_load_n(&State.inspecting, __ATOMIC_SEQ_CST)) {
+                    IOLockLock(State.lock);
+                    IOLockUnlock(State.lock);
+                }
+                return false;
+            }
+            if (expected != 0)
+                return false;
+        }
         IOLockLock(State.lock);
-        const bool failed = record->physicalResult >= 0 && result < 0;
-        if (record->physicalResult >= 0)
-            record->physicalResult = result < 0 ? result : 1;
-        if (failed)
-            record->why = why;
+        bool failed = false;
+        int cur = __atomic_load_n(&record->physicalResult, __ATOMIC_ACQUIRE);
+        while (cur >= 0) {
+            const int next = result < 0 ? result : 1;
+            if (__atomic_compare_exchange_n(&record->physicalResult, &cur, next, false, __ATOMIC_SEQ_CST,
+                                            __ATOMIC_ACQUIRE)) {
+                failed = result < 0;
+                if (failed)
+                    record->why = why;
+                break;
+            }
+        }
         IOLockUnlock(State.lock);
         return failed;
     }
@@ -249,8 +321,10 @@ public:
         if (!record)
             return 0;
         IOLockLock(State.lock);
-        const int physical = record->physicalResult;
+        __atomic_add_fetch(&State.inspecting, 1u, __ATOMIC_SEQ_CST);
+        const int physical = __atomic_load_n(&record->physicalResult, __ATOMIC_SEQ_CST);
         const int result = physical ? physical : *bridge ? inspect(*bridge) : 0;
+        __atomic_sub_fetch(&State.inspecting, 1u, __ATOMIC_RELEASE);
         IOLockUnlock(State.lock);
         return result < 0 ? result : 0;
     }
@@ -261,7 +335,7 @@ public:
             return -22;
         IOLockLock(State.lock);
         const auto *record = find(*token);
-        const int result = record                 ? record->physicalResult
+        const int result = record                 ? __atomic_load_n(&record->physicalResult, __ATOMIC_ACQUIRE)
                            : retiredToken(*token) ? retiredPhysical(*token)
                                                   : SWITCH_GPU_BACKING_STALE;
         IOLockUnlock(State.lock);
@@ -273,7 +347,8 @@ public:
         IOLockLock(State.lock);
         if (auto *record = find(token)) {
             record->result = result < 0 ? result : 1;
-            IOLockWakeup(State.lock, record, false);
+            if (record->waiters)
+                IOLockWakeup(State.lock, record, false);
         }
         IOLockUnlock(State.lock);
     }
@@ -335,8 +410,10 @@ public:
             return -75;
         }
         ++record->references;
+        ++record->waiters;
         while (!record->result)
             IOLockSleep(State.lock, record, THREAD_UNINT);
+        --record->waiters;
         const int result = record->result;
         drop(record);
         IOLockUnlock(State.lock);
@@ -368,8 +445,10 @@ public:
             return -75;
         }
         ++found->references;
+        ++found->waiters;
         while (!found->result)
             IOLockSleep(State.lock, found, THREAD_UNINT);
+        --found->waiters;
         const int result = found->result;
         drop(found);
         IOLockUnlock(State.lock);
@@ -393,6 +472,11 @@ public:
             cancel(&value);
             value = allocate();
             return value ? 0 : -12;
+        }
+
+        int acquire(uint64_t first, uint64_t last, switch_gpu_backing_token *token)
+        {
+            return SwitchHost1xResults::acquire(&value, first, last, token);
         }
 
         SwitchHost1xResult *take()

@@ -57,8 +57,14 @@ void RenderEncoder::bindStream(Push &p, uint32_t stream, uint8_t slot, uint32_t 
         streamVa_[stream] = location;
         streamLimit_[stream] = limit;
     }
-    if (bindStride)
-        p.m(kStreamFormat + kStreamMethods * stream, kStreamEnable | stride);
+    if (bindStride) {
+        const uint32_t fmt = kStreamEnable | stride;
+        if (!(streamFormatKnown_ & (1u << stream)) || streamFormat_[stream] != fmt) {
+            p.m(kStreamFormat + kStreamMethods * stream, fmt);
+            streamFormat_[stream] = fmt;
+            streamFormatKnown_ |= 1u << stream;
+        }
+    }
     if (b.buffer && b.buffer->hostVisible && !b.buffer->wc && stride) {
         const uint64_t from = std::min(b.offset + (indexed ? 0 : uint64_t(vFirst) * stride), b.buffer->length);
         const uint64_t cleaned =

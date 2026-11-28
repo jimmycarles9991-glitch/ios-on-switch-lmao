@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// gpu.gm20b.zoom_target's passes over Core Animation's zoom window target (1792x1472 BGRA8), and its redrawn arm's: a

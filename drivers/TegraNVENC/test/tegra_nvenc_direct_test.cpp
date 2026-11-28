@@ -9,10 +9,13 @@
 namespace {
 constexpr uint32_t kSyncpt = 170, kBridgeSyncpt = 190;
 std::vector<switch_host1x_fence *> gRetirements;
-int gBridgesLive, gBridgesSubmitted;
+int gBridgesLive, gBridgesSubmitted, gBridgeSubmitError, gBridgeFailed;
+std::vector<const switch_gpu_bridge *> gBridgesWatched;
 IOReturn gLookupResult = -1;
 int gAcquireResult = -95;
 OSObject *gAcquireOwner = nullptr;
+SwitchNativeSurfaceView gAcquireView = {};
+void *gMapResult = nullptr;
 
 int nvencStatus(const switch_gpu_backing_token *token)
 {
@@ -79,6 +82,10 @@ protected:
         gLookupResult = -1;
         gAcquireResult = -95;
         gAcquireOwner = nullptr;
+        gAcquireView = {};
+        gMapResult = nullptr;
+        gBridgeSubmitError = 0;
+        gBridgeFailed = 0;
     }
 
     void TearDown() override
@@ -100,9 +107,13 @@ uint32_t tegra_nvenc_syncpt(void)
 void tegra_nvenc_native_unmap(void *)
 {}
 
-void *tegra_nvenc_native_map(switch_gpu_backing *, uint64_t *, uint64_t *)
+void *tegra_nvenc_native_map(switch_gpu_backing *, uint64_t *iova, uint64_t *size)
 {
-    return nullptr;
+    if (!gMapResult)
+        return nullptr;
+    *iova = 0x20000000u;
+    *size = 4u << 20;
+    return gMapResult;
 }
 
 IOReturn tegra_vic_surface_lookup(uint32_t, task_t, TegraVICSurface *)
@@ -139,6 +150,8 @@ struct switch_gpu_bridge {
 extern "C" {
 int switch_gpu_bridge_submit(const switch_gpu_backing_token *tokens, uint32_t count, switch_gpu_bridge **bridge)
 {
+    if (gBridgeSubmitError)
+        return gBridgeSubmitError;
     *bridge = new switch_gpu_bridge{{tokens, tokens + count}, 1000u + static_cast<uint32_t>(gBridgesSubmitted++)};
     gBridgesLive++;
     return 0;
@@ -163,6 +176,24 @@ void switch_gpu_bridge_syncpoint(const switch_gpu_bridge *bridge, uint32_t *sync
     *threshold = bridge->threshold;
 }
 
+int switch_gpu_bridge_failed(const switch_gpu_bridge *)
+{
+    return gBridgeFailed;
+}
+
+int switch_gpu_bridge_source_failure(const switch_gpu_bridge *)
+{
+    return 0;
+}
+
+int switch_gpu_bridge_submit_watched(const switch_gpu_backing_token *tokens, uint32_t count, switch_gpu_bridge **bridge)
+{
+    const int error = switch_gpu_bridge_submit(tokens, count, bridge);
+    if (!error)
+        gBridgesWatched.push_back(*bridge);
+    return error;
+}
+
 void switch_gpu_bridge_release(switch_gpu_bridge **bridge)
 {
     if (!*bridge)
@@ -182,8 +213,9 @@ int switch_native_surface_acquire(const TegraVICSurface *, SwitchNativeSurfaceVi
 {
     if (gAcquireResult)
         return gAcquireResult;
-    *view = {};
-    view->owner = gAcquireOwner;
+    *view = gAcquireView;
+    if (gAcquireOwner)
+        view->owner = gAcquireOwner;
     return 0;
 }
 
@@ -252,15 +284,18 @@ TEST_F(NVENCDirect, APendingDecodeIsWaitedForAndTheReadStillCommits)
 
 // A picture a GM20B job still writes (a GPU-rendered frame) is read in place behind the GPU-to-host1x bridge: prepare's
 // pass submits the bridge for the writer, the job's stream waits on the bridge's syncpoint with the writer as its
-// input's producer, and the bridge goes with the job's fence.
+// input's producer, and the bridge goes with the job's fence. No callback waits on the bridge, so it is watched: the
+// GPU's hang check covers a stalled writer.
 TEST_F(NVENCDirect, AGpuWriterIsOrderedOnTheBridge)
 {
     Picture picture;
     const auto render = token(9, 21, SWITCH_GPU_ENGINE_GM20B);
     ASSERT_EQ(publish(picture.native, SWITCH_GPU_BACKING_WRITE, render), 0);
     auto d = picture.direct();
+    gBridgesWatched.clear();
     ASSERT_EQ(bridgeGpuWriters(&d), 0);
     ASSERT_NE(d.bridge, nullptr);
+    EXPECT_EQ(gBridgesWatched, std::vector<const switch_gpu_bridge *>{d.bridge});
     TegraNVENCAfter waits[TEGRA_NVENC_ORDER_WAITS] = {};
     uint32_t count = 0;
     ASSERT_EQ(begin(&d, 44, waits, &count), 0);
@@ -322,4 +357,67 @@ TEST_F(NVENCDirect, DirectPrepareRefusalsNameTheirReason)
     EXPECT_EQ(tegra_nvenc_direct_prepare(&submit, nullptr, &direct, &patched, &why), -95);
     ASSERT_NE(why, nullptr);
     EXPECT_NE(std::string(why).find("owner"), std::string::npos) << why;
+}
+
+TEST_F(NVENCDirect, DirectPrepareBridgesGpuRenderedBL2AndNamesBridgeFailures)
+{
+    Picture picture;
+    const auto render = token(9, 31, SWITCH_GPU_ENGINE_GM20B);
+    ASSERT_EQ(publish(picture.native, SWITCH_GPU_BACKING_WRITE, render), 0);
+
+    TegraNVENCSubmit submit = {}, patched = {};
+    submit.source.surface_id = 42;
+    submit.source.format = 0x34323076u;
+    submit.source.width = 1280;
+    submit.source.height = 720;
+    submit.entry_count = 2;
+    submit.entries[0] = {NVC5B7_SET_IN_CUR_PIC, TEGRA_NVENC_ENTRY_RELOC, 1, 0};
+    submit.entries[1] = {NVC5B7_SET_IN_CUR_PIC_CHROMA_U, TEGRA_NVENC_ENTRY_RELOC, 1, 0};
+
+    gLookupResult = 0;
+    gAcquireResult = 0;
+    gAcquireView = picture.direct().view;
+    gAcquireView.owner = reinterpret_cast<OSObject *>(0x10);
+    gAcquireView.layout.format = 0x34323076u;
+    gAcquireView.layout.plane_count = 2;
+    gAcquireView.layout.planes[0] = {0, 1280 * 736, 1280, 736, 1280, 1, SWITCH_GPU_BACKING_BLOCK_LINEAR, 1};
+    gAcquireView.layout.planes[1] = {1280 * 736, 1280 * 368, 640, 368, 1280, 2, SWITCH_GPU_BACKING_BLOCK_LINEAR, 1};
+    gAcquireView.crop = {0, 0, 1280, 720};
+    gMapResult = reinterpret_cast<void *>(0x20);
+
+    TegraNVENCDirect direct = {};
+    const char *why = nullptr;
+    gBridgeSubmitError = -12;
+    EXPECT_EQ(tegra_nvenc_direct_prepare(&submit, nullptr, &direct, &patched, &why), -11);
+    ASSERT_NE(why, nullptr);
+    EXPECT_NE(std::string(why).find("bridge"), std::string::npos) << why;
+    tegra_nvenc_direct_release(&direct);
+
+    gBridgeSubmitError = 0;
+    why = nullptr;
+    ASSERT_EQ(tegra_nvenc_direct_prepare(&submit, nullptr, &direct, &patched, &why), 0);
+    EXPECT_EQ(why, nullptr);
+    ASSERT_NE(direct.bridge, nullptr);
+    EXPECT_EQ(patched.source.surface_id, 0u);
+    EXPECT_EQ(patched.entries[0].value, uint32_t(TEGRA_NVENC_DIRECT_HANDLE));
+    EXPECT_EQ(patched.entries[1].offset, 1280u * 736u);
+    tegra_nvenc_direct_release(&direct);
+    complete(render);
+}
+
+TEST_F(NVENCDirect, AFailedBridgeRefusesDirectBegin)
+{
+    Picture picture;
+    const auto render = token(9, 32, SWITCH_GPU_ENGINE_GM20B);
+    ASSERT_EQ(publish(picture.native, SWITCH_GPU_BACKING_WRITE, render), 0);
+    auto d = picture.direct();
+    ASSERT_EQ(bridgeGpuWriters(&d), 0);
+    ASSERT_NE(d.bridge, nullptr);
+    gBridgeFailed = -5;
+    TegraNVENCAfter waits[TEGRA_NVENC_ORDER_WAITS] = {};
+    uint32_t count = 0;
+    EXPECT_EQ(begin(&d, 46, waits, &count), -5);
+    EXPECT_TRUE(writerWaits(picture.logical).empty());
+    switch_gpu_bridge_release(&d.bridge);
+    complete(render);
 }

@@ -31,7 +31,7 @@ TEST(SwitchJoyConRailPairing, ThePairingOpensTheSession)
     EXPECT_THAT(Body(rail, "void SwitchJoyConRail::tick("),
                 HasSubstr("if (s.pairPending && hostKnown && s.unanswered == 0) {\n        endSession(s);"));
     const std::string end = Body(rail, "void SwitchJoyConRail::endSession(");
-    EXPECT_THAT(end, HasSubstr("stopDmaLocked(s);"));
+    EXPECT_THAT(end, HasSubstr("stopDma(s);"));
     EXPECT_THAT(end, HasSubstr("sendCommand(s, kInitHidDisconnect);"));
     // Its answer, or none, leads to detection, which handshakes a seated Joy-Con as on an attach.
     EXPECT_THAT(Body(rail, "void SwitchJoyConRail::received("),

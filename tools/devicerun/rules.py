@@ -28,7 +28,8 @@ OPS = {
     '<': lambda a, b: a < b,
     '>': lambda a, b: a > b,
 }
-REPORT, TIMELINE = 'report', 'timeline'
+# sums: an INFO row of each `show` field's total over the lines, for counters a line carries per window.
+REPORT, TIMELINE, SUMS = 'report', 'timeline', 'sums'
 DEBUG_LEVELS = {'info', 'debug'}
 LAUNCHD_PID = re.compile(r' \[\d+\]$')
 TOP_GROUPS = 6
@@ -52,17 +53,20 @@ class Check:
     cuts is pending, never missed). `after` keeps only the lines that come within `within` seconds after one of that
     check's lines, and no sooner than `after_min` seconds when set. `boot` limits the check to one of the morning's boot
     labels (A, B tiled cache, K kprof). `unless` names a check whose lines excuse this one's in the same boot, or only
-    within `unless_within` seconds of one of them when set. `outside` (an opening check, a closing one) drops the lines
-    that come while a span is open: after one of the opening check's lines with none of the closing one's since, in the
-    same boot. `failure` leads the observed text of a FAIL. `during` names a check whose lines are tests that kill this
-    check's subjects on purpose, each test's window its line's time less its `ms` field up to its time plus `within`
-    seconds: this check's lines in a window of the same boot that match `excusable` (searched; every line when empty)
-    are that test's, listed as expected ("killed by <its id>") and left out of the rule. A `process` of '!<name>'
-    matches every process whose name does not begin with <name>. `per` names a check whose lines are tests' runs, each a
-    window as `during`'s: the verdict is then each window's count of this check's lines in the same boot against
-    `per_count`, that line's field or a number (FAIL where any differs, NO_DATA with no run), and `rule` is not read.
-    `preceded` names a check: only this check's lines that one of its lines came within `within` seconds before, in the
-    same boot (with the same `key` value, when `key` is set), are judged.
+    within `unless_within` seconds of one of them when set (with the same `key` value, when `key` is set). `outside` (an
+    opening check, a closing one) drops the lines that come while a span is open: after one of the opening check's lines
+    with none of the closing one's since, in the same boot. `failure` leads the observed text of a FAIL. `during` names
+    a check whose lines are tests that kill this check's subjects on purpose, each test's window its line's time less
+    its `ms` field up to its time plus `within` seconds: this check's lines in a window of the same boot that match
+    `excusable` (searched; every line when empty) are that test's, listed as expected ("killed by <its id>") and left
+    out of the rule. A `process` of '!<name>' matches every process whose name does not begin with <name>. `per` names a
+    check whose lines are tests' runs, each a window as `during`'s: the verdict is then each window's count of this
+    check's lines in the same boot against `per_count`, that line's field or a number (FAIL where any differs, NO_DATA
+    with no run), and `rule` is not read. `preceded` names a check: only this check's lines that one of its lines came
+    within `within` seconds before, in the same boot (with the same `key` value, when `key` is set), are judged.
+    `boots` names a check: only this check's lines in a boot where one of its lines came are judged (an iPadOS 27
+    boot's, in an archive of several). `blocks`: a FAIL of this check keeps the build from counting as good, and the
+    table's top names it.
     """
 
     name: str
@@ -98,6 +102,8 @@ class Check:
     per: str = ''
     per_count: str = ''
     preceded: str = ''
+    boots: str = ''
+    blocks: bool = False
 
     def literals(self) -> tuple[str, ...]:
         return (self.contains,) if isinstance(self.contains, str) else self.contains
@@ -300,7 +306,7 @@ def failed_text(check: Check, verdict: str, observed: str) -> str:
 
 
 def excused(check: Check, matches: list[dict], by_name: dict[str, list[dict]]) -> list[dict]:
-    """Return the lines `unless` does not excuse: none in a boot it matched in, or only those near one of its lines."""
+    """Return the lines `unless` does not excuse: none in its boots, or only those near its lines (of the same key)."""
     excusers = by_name.get(check.unless, [])
     if not check.unless_within:
         boots = {fields['boot'] for fields in excusers}
@@ -309,7 +315,12 @@ def excused(check: Check, matches: list[dict], by_name: dict[str, list[dict]]) -
     return [
         fields
         for fields in matches
-        if not any(e['boot'] == fields['boot'] and abs(e['time'] - fields['time']) <= window for e in excusers)
+        if not any(
+            e['boot'] == fields['boot']
+            and abs(e['time'] - fields['time']) <= window
+            and (not check.key or e.get(check.key) == fields.get(check.key))
+            for e in excusers
+        )
     ]
 
 
@@ -375,6 +386,9 @@ def informational(check: Check, matches: list[dict], minutes: float, by_name: di
     """Return a 'timeline' or 'report' check's INFO row."""
     if check.rule == TIMELINE:
         return Result(check, INFO if matches else NO_DATA, timeline(matches) or 'no lines', matches)
+    if check.rule == SUMS:
+        totals = ', '.join(f'{k} {fmt(sum(values(matches, k)))}' for k in check.show)
+        return Result(check, INFO if matches else NO_DATA, f'{len(matches)} lines; {totals}', matches)
     observed = describe(check, matches, minutes)
     if check.against:
         observed += '; ' + lookup(check, matches, by_name.get(check.against, []))
@@ -439,6 +453,9 @@ def evaluate(
 ) -> Result:
     """Return the check's verdict over the events it matched (`log_end`: the last line's time, for `followed`)."""
     matches = filtered(check, matches)
+    if check.boots:
+        boots = {fields['boot'] for fields in by_name.get(check.boots, [])}
+        matches = [fields for fields in matches if fields['boot'] in boots]
     if check.unless:
         matches = excused(check, matches, by_name)
     if check.after:
@@ -473,7 +490,7 @@ def judge(
     if check.followed or check.per:
         runs = by_name.get(check.per, [])
         return follow(check, matches, minutes, by_name, log_end) if check.followed else per_run(check, matches, runs)
-    if check.rule in {TIMELINE, REPORT}:
+    if check.rule in {TIMELINE, REPORT, SUMS}:
         return informational(check, matches, minutes, by_name)
     got, observed = measure(check, matches, minutes)
     if got is None:

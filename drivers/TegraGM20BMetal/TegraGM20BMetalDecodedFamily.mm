@@ -12,6 +12,7 @@
 #import "TegraGM20BMetalBlitImages.h"
 #import "TegraGM20BMetalBlitRules.h"
 #include <algorithm>
+#include "blit_overlap.h"
 #include "decode_pass.h"
 
 namespace {
@@ -144,6 +145,15 @@ id<MTLTexture> gm20bFormView(SwitchMetalTexture *of, MTLPixelFormat format, MTLT
                              (unsigned long)format, (unsigned long)owner->_descriptor.pixelFormat, why);
         return nil;
     }
+    id<MTLCommandQueue> queue = gm20bDecodeQueue((id<MTLDevice>)of->_device);
+    if (!queue) {
+        SWITCH_REFUSE_DETAIL("gm20b", "tex.decoded_form_queue", uint32_t(format),
+                             "no view of format %lu of a format %lu texture: no command queue for the driver's own "
+                             "decode of its blocks (its handler thread could not be made): nil "
+                             "(MTLTexture.h newTextureViewWithPixelFormat:, nullable)",
+                             (unsigned long)format, (unsigned long)owner->_descriptor.pixelFormat);
+        return nil;
+    }
     const gm20b::shapes::Route route = gm20b::shapes::route(s);
     v->_gm20bOk = route != gm20b::shapes::Route::None && gm20b::shapes::create(*gRM->raw, s, route, true, 0, v->_raw);
     if (!v->_gm20bOk) {
@@ -159,7 +169,7 @@ id<MTLTexture> gm20bFormView(SwitchMetalTexture *of, MTLPixelFormat format, MTLT
         return true;
     });
     // its texels: the kept blocks blitted into it a level and a layer at a time, each decoded into it alone
-    id<MTLCommandBuffer> cb = [gm20bDecodeQueue((id<MTLDevice>)of->_device) commandBuffer];
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
     const bool volume = type == MTLTextureType3D;
     const NSUInteger layers = volume ? 1 : gm20b::textureLayers(uint32_t(type), uint32_t(d.arrayLength));
@@ -300,15 +310,46 @@ bool gm20bEncodeFamilyTextureCopy(gm20b::CommandBuffer *rc, SwitchMetalCommandBu
         useBuffer(rc, sourceOwner->_keptBlocks, false);
         const gm20b::KeptLevel sk = keptLevelOf(sourceOwner, s->_levelsBase + sourceLevel);
         const bool sourceVolume = sourceOwner->_raw.type == gm20b::fx::kTexThreeD;
-        for (uint32_t p = 0; p < planes; p++)
-            for (uint32_t r = 0; r < down; r++) {
-                const uint64_t a =
-                    sk.offset + (sourceVolume ? from[2] + p : s->_slicesBase + sourceSlice) * sk.planeBytes +
-                    uint64_t(from[1] / f.blockH + r) * sk.rowBytes + uint64_t(from[0] / f.blockW) * f.blockBytes;
-                be->copyBytes(sourceOwner->_keptBlocks->_raw.va + a,
-                              owner->_keptBlocks->_raw.va + at + p * k.planeBytes + r * k.rowBytes,
-                              uint64_t(across) * f.blockBytes);
+        const uint64_t rowBytes = uint64_t(across) * f.blockBytes;
+        const uint32_t sLevel = s->_levelsBase + sourceLevel, dLevel = t->_levelsBase + level;
+        const uint32_t sZ = sourceVolume ? from[2] : s->_slicesBase + sourceSlice;
+        const uint32_t dZ = volume ? origin[2] : t->_slicesBase + slice;
+        const uint32_t sx = from[0] / f.blockW, sy = from[1] / f.blockH;
+        const uint32_t dx = origin[0] / f.blockW, dy = origin[1] / f.blockH;
+        if (sourceOwner == owner && sLevel == dLevel && sZ == dZ && sx == dx && sy == dy)
+            return true;
+        if (sourceOwner == owner && sLevel == dLevel && sZ < dZ + planes && dZ < sZ + planes &&
+            gm20b::rectsOverlap(sx, sy, dx, dy, across, down)) {
+            const uint64_t planeStage = uint64_t(down) * rowBytes;
+            const uint64_t totalBytes =
+                planeStage && planes <= UINT64_MAX / planeStage ? uint64_t(planes) * planeStage : 0;
+            gm20b::Texture *scratch = totalBytes ? rc->copyScratch(totalBytes) : nullptr;
+            if (!scratch) {
+                *why = "no staging memory for an overlapping decoded texture copy";
+                return false;
             }
+            be->barrier();
+            for (uint32_t p = 0; p < planes; p++)
+                for (uint32_t r = 0; r < down; r++) {
+                    const uint64_t a = sk.offset + (sZ + p) * sk.planeBytes + uint64_t(sy + r) * sk.rowBytes +
+                                       uint64_t(sx) * f.blockBytes;
+                    be->copyBytes(sourceOwner->_keptBlocks->_raw.va + a,
+                                  scratch->va + (uint64_t(p) * down + r) * rowBytes, rowBytes);
+                }
+            be->barrier();
+            for (uint32_t p = 0; p < planes; p++)
+                for (uint32_t r = 0; r < down; r++)
+                    be->copyBytes(scratch->va + (uint64_t(p) * down + r) * rowBytes,
+                                  owner->_keptBlocks->_raw.va + at + p * k.planeBytes + r * k.rowBytes, rowBytes);
+        } else {
+            for (uint32_t p = 0; p < planes; p++)
+                for (uint32_t r = 0; r < down; r++) {
+                    const uint64_t a = sk.offset + (sZ + p) * sk.planeBytes + uint64_t(sy + r) * sk.rowBytes +
+                                       uint64_t(sx) * f.blockBytes;
+                    be->copyBytes(sourceOwner->_keptBlocks->_raw.va + a,
+                                  owner->_keptBlocks->_raw.va + at + p * k.planeBytes + r * k.rowBytes, rowBytes);
+                }
+        }
     } else if (s->_gm20bOk && s->_raw.blockW == f.blockW && s->_raw.blockH == f.blockH) {
         useTexture(rc, s, false);
         gm20b::Texture image;

@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestKit
 import notify
 import UIKit
 

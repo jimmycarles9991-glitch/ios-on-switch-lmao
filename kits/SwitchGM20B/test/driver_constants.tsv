@@ -10,6 +10,7 @@ gpu.cpp	kHeapStep	policy	heap growth step
 gpu.cpp	kHeapSlack	policy	instruction prefetch slack
 gpu.cpp	kHeapAtOpen	policy	heap bound at open
 gpu.cpp	kHeapCopiesWindow	policy	the program window after the pack's region that copied programs may take
+gpu.cpp	kTicketBytes	policy	interlock ticket buffer size (256 * 256 * 4 bytes)
 gm20b_gpu_internal.h	kClientFirstShare	policy	allocation policy
 gm20b_gpu_internal.h	kClientHeapFirstShare	policy	allocation policy
 draw.cpp	kInstanceWords	policy	push words per instance

@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #include "SwitchAudioAhub.h"
-#ifndef SWITCH_MMIO_HOST_MODEL
-#include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
-#endif
 
 namespace switch_audio_ahub {
 namespace {
@@ -32,21 +29,6 @@ constexpr int32_t kPeqStageBypass[5] = {1, 0, 0, 0, 0};
 constexpr uint32_t kPeqShiftTable[kPeqShiftWordsPerCh] = {
     30u, 30u, 30u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 28u,
 };
-
-bool waitReg(const volatile uint8_t *ahub, uint32_t offset, uint32_t mask, uint32_t value, uint32_t timeoutUs)
-{
-#ifdef SWITCH_MMIO_HOST_MODEL
-    const uint32_t limit = timeoutUs < 1024u ? timeoutUs : 1024u;
-    for (uint32_t i = 0; i < limit; ++i) {
-        if ((switch_mmio_read32(ahub, offset) & mask) == value) {
-            return true;
-        }
-    }
-    return (switch_mmio_read32(ahub, offset) & mask) == value;
-#else
-    return switch_mmio_wait32(ahub, offset, mask, value, timeoutUs);
-#endif
-}
 
 void writePeqStage(volatile uint8_t *ahub, const int32_t stage[5])
 {

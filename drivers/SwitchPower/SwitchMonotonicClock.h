@@ -22,6 +22,7 @@ bool switch_monotonic_clock_read(uint64_t *usec, uint64_t *mach_time);
 // The calendar (SwitchRTC's UTC) minus the monotonic clock, in microseconds; false before a successful start or without
 // the RTC service.
 bool switch_monotonic_clock_offset(int64_t *usec);
+void switch_monotonic_clock_set_offset(int64_t usec);
 
 // SwitchRTC's calendar time (SwitchPMIC.cpp); kIOReturnNotReady without the RTC service.
 IOReturn switch_rtc_utc_usec(uint64_t *usec);

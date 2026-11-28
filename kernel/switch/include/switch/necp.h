@@ -199,7 +199,7 @@ static inline bool switch_necp_policy_account(struct switch_necp_timeline *timel
     return false;
 }
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_DIAG_NECP) && SWITCH_DIAG_NECP
 /* Runs under NECP's policy lock (shared) and the caller's socket or client locks, where NECP itself logs and reads the
  * same process fields; it walks `policies` (necp_kernel_socket_policies) under that lock. */
 void switch_necp_local_drop(const struct switch_necp_drop *drop);

@@ -67,7 +67,7 @@ int switch_vic_transform(const TegraVICSurface *source, const TegraVICSurface *d
     return transformResult;
 }
 
-int tegra_host1x_syncpt_alloc(uint32_t *id)
+int tegra_host1x_syncpt_alloc_named(uint32_t *id, const char *)
 {
     ++allocations;
     *id = 175;

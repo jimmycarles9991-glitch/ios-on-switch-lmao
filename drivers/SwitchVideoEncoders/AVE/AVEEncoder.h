@@ -5,18 +5,23 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <os/log.h>
 #include <pthread.h>
+#include "AVEEmitter.h"
+#include "AVEReorder.h"
 #include "H264NVENC.h"
 #include "HEVCNVENC.h"
 #include "NVENCClient.h"
-#include "AVEReorder.h"
 #include "RateControl.h"
 #include "VTEncoderSPI.h"
 
 typedef struct {
     pthread_mutex_t lock;
+    pthread_cond_t busyCond;
+    bool encoding;  // single-owner guard across unlocked NVENC submits/waits/emits
+    uint32_t busyWaiters;
     VTVideoEncoderSession session;
     VTTileEncoderSession tileSession;  // a tile session (HEIC grids) instead of a frame session
     NVENCClient *client;
+    AVEEmitter *emitter;
     TegraNVENCInfo info;
     CMVideoDimensions size;  // a tile session's: the size every tile picture is coded at
     CMVideoCodecType codec;  // 'avc1', or 'hvc1': every picture an IDR (HEVCNVENC.h has no P pictures)
@@ -26,14 +31,16 @@ typedef struct {
     H264EncLayout layout;
     H264EncHandles handles;
     uint8_t *inputVA, *bitstreamVA, *auxVA;
-    uint32_t buffers[12];  // every buffer allocated, reordering's frames among them
+    AVETileSlot tileSlots[AVE_TILE_SLOTS];
+    uint32_t tileSlotCount;
+    uint32_t buffers[24];  // every buffer allocated, reordering and pipelined tile buffers among them
     unsigned bufferCount;
     CMVideoFormatDescriptionRef format;
     uint8_t *avcc;  // AVCC scratch for one picture
     size_t avccCap;
     int32_t maxKeyInterval, averageBitRate, constantBitRate;
     double maxKeyDuration, quality, expectedFrameRate, limitBytes, limitSeconds;
-    bool allowTemporal, realTime, allowReordering;
+    bool allowTemporal, realTime, prioritizeSpeed, allowReordering;
     int32_t maxFrameDelay;  // MaxFrameDelayCount: frames held at most, -1 unlimited
     CFStringRef profileLevel, entropy, primaries, transfer, matrix;
     bool haveRef, keyPending;
@@ -59,12 +66,19 @@ typedef struct {
 
 extern os_log_t gLog;
 
+void ave_begin_encode(Encoder *e);
+void ave_end_encode(Encoder *e);
+
 // The TegraNVENC client for a session of e->size and e->codec, or kVTCouldNotFindVideoEncoderErr with the refusal
 // logged once (a size NVENC cannot code, the process refused, no H.265 on this kernel).
 OSStatus ave_open_engine(Encoder *e);
 // The stream the first picture fixes (full range or not and its colour tags): buffers, parameter sets, the format
 // description every sample carries, the rate control.
 OSStatus ave_configure(Encoder *e, CVPixelBufferRef image);
+// Called OFF e->lock. Waits via the completion port when listening (zero Wait ioctls), else one Wait ioctl (plus a
+// legacy bitstream Wait only when the kernel lacks TEGRA_NVENC_FEATURE_COMPLETION).
+bool ave_wait_job(Encoder *e, uint32_t fence, uint32_t auxHandle, const uint8_t *auxVA, uint32_t bitsHandle,
+                  uint32_t bitsLimit, AVEJobStatus *out);
 
 // One picture of a reordering session (AVEReorder.c), its type, references, frame number and POC stated: coded,
 // then emitted with `dts`. NVENC refusing it sets `refused` and emits nothing; any other failure returns an error and
@@ -82,6 +96,7 @@ OSStatus ave_encode_planned(Encoder *e, AVEPlan *plan);
 // Whether the next picture is a key frame: `since` pictures in display order since the last one.
 bool ave_wants_key(const Encoder *e, CMTime pts, CFDictionaryRef options, uint32_t since);
 int ave_alloc_buffer(Encoder *e, uint64_t size, uint32_t *handle);
+void ave_tile_record_stats(void *context, OSStatus status, size_t bytes, uint64_t copyTicks, uint64_t encodeTicks);
 
 // AVEReorder.c: B pictures for H.264 frame sessions that allow reordering.
 bool ave_reorder_wanted(const Encoder *e);
@@ -93,16 +108,13 @@ OSStatus ave_reorder_frame(Encoder *e, VTVideoEncoderFrame frame, CVPixelBufferR
 void ave_reorder_flush(Encoder *e);
 void ave_reorder_release(Encoder *e);
 
-// AVEInput.c: how a picture reaches NVENC's input buffer. The layout the session's input buffer takes (block linear for
-// VIC when the kernel writes IOSurfaces in, else the CPU copy's), and the pixel buffer attributes asked of VideoToolbox
-// (NV12; rows and planes VIC reads; `width` and `height` 0 for none).
+// AVEInput.c: how a picture reaches NVENC's input buffer.
 uint32_t ave_input_layout(const Encoder *e);
 CFDictionaryRef ave_copy_input_attributes(const Encoder *e, int32_t width, int32_t height);
-// `region` of `image` into the submit's input, at the origin of the coded picture: VIC's (the submit names the surface),
-// or the CPU's copy in a session without surface input. False when the picture cannot reach NVENC: its frame fails.
-bool ave_input_put(Encoder *e, CVPixelBufferRef image, const AVERegion *region, TegraNVENCSubmit *submit);
-// Submits and counts the input's route; a surface the kernel refuses is one line and a failed frame. 0 or the IOReturn.
-int ave_input_submit(Encoder *e, const TegraNVENCSubmit *submit, uint32_t *fence);
+bool ave_input_put_buffer(const Encoder *e, CVPixelBufferRef image, const AVERegion *region, uint32_t inputHandle,
+                          uint8_t *inputVA, TegraNVENCSubmit *submit, bool *refused);
+int ave_input_submit_raw(NVENCClient *client, const TegraNVENCSubmit *submit, uint32_t *fence, uint32_t *route);
+void ave_input_record_route(Encoder *e, const TegraNVENCSubmit *submit, int status, uint32_t route);
 
 // AVETiles.c: the encoder class's version 3 slots.
 OSStatus ave_start_tile_session(VTVideoEncoderRef ref, VTTileEncoderSession session, CFDictionaryRef specification,

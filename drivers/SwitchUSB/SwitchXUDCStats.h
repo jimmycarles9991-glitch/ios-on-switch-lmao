@@ -8,7 +8,7 @@
 
 namespace xudc {
 
-#if DEVELOPMENT || DEBUG
+#if SWITCH_STATS_IO
 struct XudcStats {
     // Bytes, requests, failed requests and bounced bytes per direction (0 OUT, 1 IN), requests by the serial path, why
     // packets were bounced (XudcTransfer.h PlanStats), events, time in the event drain and queueing (the filter's is
@@ -26,9 +26,10 @@ struct XudcStats {
     Counts now, logged;
     uint64_t at, window;
     uint32_t interruptsLogged;
-    uint32_t mostTrbs[2];          // the most TRBs one request took per direction since the last stats line
-    volatile uint32_t interrupts;  // ST.IP acknowledged by the filter
-    volatile uint64_t filterTicks;
+    uint64_t filterTicksLogged;
+    uint32_t mostTrbs[2];  // the most TRBs one request took per direction since the last stats line
+    uint32_t interrupts;   // ST.IP acknowledged by the filter (single-SPI writer)
+    uint64_t filterTicks;
 
     static uint64_t clock()
     {
@@ -37,8 +38,9 @@ struct XudcStats {
 
     void filtered(uint64_t entered)
     {
-        __atomic_fetch_add(&interrupts, 1, __ATOMIC_RELAXED);
-        __atomic_fetch_add(&filterTicks, clock() - entered, __ATOMIC_RELAXED);
+        __atomic_store_n(&interrupts, __atomic_load_n(&interrupts, __ATOMIC_RELAXED) + 1u, __ATOMIC_RELAXED);
+        __atomic_store_n(&filterTicks, __atomic_load_n(&filterTicks, __ATOMIC_RELAXED) + (clock() - entered),
+                         __ATOMIC_RELAXED);
     }
 
     void busy(uint64_t entered)

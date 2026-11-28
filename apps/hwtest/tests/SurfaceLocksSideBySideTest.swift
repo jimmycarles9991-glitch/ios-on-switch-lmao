@@ -1,6 +1,8 @@
 import Foundation
+import HWTestCommon
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import IOSurface
 import Metal
 
@@ -131,7 +133,8 @@ struct SurfaceLocksSideBySideTest: GPUPathTest {
         metrics.set("lock_b_ms", lockB.waitedMs, digits: 1)
         metrics.set("overlap_ms", overlap, digits: 1)
         metrics.set("b_ahead_ms", ahead, digits: 1)
-        metrics.set("a_gpu_ms", max(0, writeA.gpuEndTime - writeA.gpuStartTime) * 1000, digits: 1)
+        let aGpuMs = max(0, writeA.gpuEndTime - writeA.gpuStartTime) * 1000
+        metrics.set("a_gpu_ms", aGpuMs, digits: 1)
         var failures: [String] = []
         for (label, locker, colour) in [("A", lockA, Self.colourA), ("B", lockB, Self.colourB)] {
             if locker.result != KERN_SUCCESS {
@@ -145,9 +148,14 @@ struct SurfaceLocksSideBySideTest: GPUPathTest {
         } else if lockB.askedMs >= ends["b"] || lockA.askedMs >= ends["a"] {
             failures.append("a lock was asked after its writer ended: nothing measured")
         }
-        if ahead < jobMs / 2 {
+        let required = LockAheadBound.requiredMs(aGpuMs: aGpuMs, calibratedMs: jobMs)
+        if ahead < required {
             failures.append(
-                String(format: "B's lock was %.1f ms ahead of A's, under half of A's %.1f ms render", ahead, jobMs)
+                String(
+                    format: "B's lock was %.1f ms ahead of A's, under half of A's %.1f ms render",
+                    ahead,
+                    required * 2
+                )
             )
         }
         if let connection = GPUConnection() {

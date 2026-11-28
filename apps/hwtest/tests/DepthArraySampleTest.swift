@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import HWTestGPU
+import HWTestKit
 import Metal
 
 /// A depth 2D array sampled whole by a draw (enc.notic before: a stored depth array had no texture header, its samples

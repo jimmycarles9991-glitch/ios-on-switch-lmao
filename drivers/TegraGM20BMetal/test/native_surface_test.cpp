@@ -36,7 +36,7 @@ struct Texture {
     uint32_t type = fx::kTexTwoD, width = 1280, height = 720, format = 10, bpp = 1;
     uint64_t va = 0, layerBytes = 0, nativeGeneration = 0;
     uint32_t pitch = 0, tic = 0, blockHeight = 0;
-    bool blockLinear = false, renderable = false;
+    bool blockLinear = false, renderable = false, shadowTarget = false;
     uint8_t swizzle[4] = {2, 3, 4, 5};
 };
 
@@ -47,7 +47,7 @@ struct NativeSurface {
     std::map<Key, Texture> textures;
     uint64_t channelGeneration = 0, generation = 0;
     uint32_t lastUse = 0, encodingReferences = 0, seed = 0;
-    bool cached = true;
+    bool cached = true, writable = false;
 };
 
 // A view's guard is the surface's representation word as the kernel made the view (nativeSurfaceView), which the reply
@@ -55,8 +55,8 @@ struct NativeSurface {
 struct Kernel {
     TegraGM20BAbiNativeSurfaceViewReply next = {};
     int result = KERN_SUCCESS;
-    unsigned queries = 0, frees = 0, jobs = 0, refused = 0;
-    bool views = true;
+    unsigned queries = 0, writableQueries = 0, frees = 0, jobs = 0, refused = 0;
+    bool views = true, publishOnWrite = false;
     IOSurfaceRef surface = nullptr;
     uint64_t representation = 1;
 
@@ -65,9 +65,12 @@ struct Kernel {
         return views;
     }
 
-    int nativeSurfaceView(const Bo &, Bo &bo, TegraGM20BAbiNativeSurfaceViewReply &layout)
+    int nativeSurfaceView(const Bo &, Bo &bo, TegraGM20BAbiNativeSurfaceViewReply &layout, bool writable = false)
     {
         ++queries;
+        writableQueries += writable;
+        if (writable && publishOnWrite)
+            publish();
         layout = next;
         layout.representation_generation = representation;
         bo = {next.handle, next.handle << 24, next.bytes};
@@ -135,6 +138,7 @@ struct Device {
     }
 
     const Texture *nativeRead(const Texture &, NativeSurface *&, int &);
+    const Texture *nativeWrite(const Texture &, NativeSurface *&, int &);
     void reapNativeSurfaces(std::vector<Bo> &, bool = false);
 
     void reapNativeSurfaces(bool all = false)
@@ -150,12 +154,14 @@ struct CommandBuffer {
     Device *dev_ = nullptr;
     int nativeError = 0;
     std::map<const Texture *, const Texture *> nativeReads_;
+    std::map<const Texture *, const Texture *> nativeWrites_;
     std::vector<NativeSurface *> nativeSurfaces_;
     std::vector<const Import *> pitchImports_;
     void requirePitch(const Import *, bool);
     bool pitchAfterNativeRead() const;
     bool nativeReadsCurrent() const;
     const Texture *readTexture(const Texture *);
+    const Texture *writeTexture(const Texture *);
     void invalidateNativeReads();
     void releaseNativeReads();
 };
@@ -491,6 +497,43 @@ TEST_F(GM20BNativeSurface, IdleReclamationCannotFreeAnUnsubmittedView)
     EXPECT_EQ(device.k_.frees, 1u);
 }
 
+TEST_F(GM20BNativeSurface, WritableNativePublicationProvidesRenderableBlockLinearPlanesAndTracksSeed)
+{
+    y.renderable = true;
+    device.k_.publishOnWrite = true;
+    const auto *target = cb.writeTexture(&y);
+    ASSERT_NE(target, &y);
+    EXPECT_TRUE(target->blockLinear);
+    EXPECT_TRUE(target->renderable);
+    EXPECT_EQ(device.k_.writableQueries, 1u);
+    EXPECT_TRUE(cb.nativeReadsCurrent());
+    EXPECT_EQ(cb.readTexture(&y), target);
+    ASSERT_EQ(submit(device, cb), KERN_SUCCESS);
+
+    gm20b::CommandBuffer next;
+    next.dev_ = &device;
+    EXPECT_EQ(next.writeTexture(&y), target) << "recycled surface reuses cached writable view without requery";
+    EXPECT_EQ(device.k_.writableQueries, 1u);
+    next.requirePitch(&source, false);
+    EXPECT_TRUE(next.pitchAfterNativeRead());
+    next.releaseNativeReads();
+}
+
+TEST_F(GM20BNativeSurface, WritableNativeFallbackOnUnsupportedOrPitchViewKeepsSource)
+{
+    y.renderable = true;
+    device.k_.result = kIOReturnUnsupported;
+    EXPECT_EQ(cb.writeTexture(&y), &y);
+    EXPECT_EQ(cb.nativeError, 0);
+
+    gm20b::CommandBuffer next;
+    next.dev_ = &device;
+    device.k_.result = KERN_SUCCESS;
+    device.k_.next = layout(0);
+    EXPECT_EQ(next.writeTexture(&y), &y);
+    EXPECT_EQ(device.k_.frees, 1u);
+}
+
 // A Main 10 picture ('x420', 'xf20'): its 16-bit luma and 32-bit interleaved chroma texels read in place as r16Unorm
 // and rg16Unorm planes, as the 8-bit picture's are
 TEST(GM20BNativePlane, QualifiesAMainTenPicturesSixteenBitPlanes)
@@ -526,5 +569,20 @@ TEST(GM20BNativePlane, QualifiesHardwareStrideCropBlockHeightAndBounds)
     EXPECT_TRUE(gm20b::nativePlaneFits(view, 0, 1200, 720, 1));
     view.planes[0].pitch += 16;
     EXPECT_FALSE(gm20b::nativePlaneFits(view, 0, 1200, 720, 1));
+}
+
+// HW Test gpu.gm20b.ycbcr_texel_buffer_wide: a 500 texel buffer of 20000 over a '420v' 20000x2 (rows of 20224) reads
+// its luma as a 16384x2 image, rows 20224 apart: a texture narrower than its pitch plane
+TEST(GM20BNativePlane, QualifiesATextureNarrowerThanItsPitchPlane)
+{
+    auto view = layout(0);
+    view.crop_width = 20000;
+    view.crop_height = 2;
+    view.planes[0] = {0, 20224 * 2, 20000, 2, 20224, 1, 0, 0};
+    view.planes[1] = {20224 * 2, 20224, 10000, 1, 20224, 2, 0, 0};
+    view.bytes = view.planes[0].bytes + view.planes[1].bytes;
+    EXPECT_TRUE(gm20b::nativePlaneFits(view, 0, 16384, 2, 1));
+    EXPECT_TRUE(gm20b::nativePlaneFits(view, 1, 8192, 1, 2));
+    EXPECT_FALSE(gm20b::nativePlaneFits(view, 0, 16384, 3, 1));
 }
 }  // namespace

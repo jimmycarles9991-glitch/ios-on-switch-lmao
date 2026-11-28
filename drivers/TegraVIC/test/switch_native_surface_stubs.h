@@ -10,6 +10,8 @@
 #include <switch/memory_attachment.h>
 
 using IOReturn = int32_t;
+using IOOptionBits = uint32_t;
+class IOBufferMemoryDescriptor;
 #ifndef PAGE_SIZE
 #define PAGE_SIZE 16384
 #endif

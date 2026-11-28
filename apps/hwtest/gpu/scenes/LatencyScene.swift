@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 
 /// What one small command buffer costs on the host clock: encoding it on the CPU, and from just before its commit to

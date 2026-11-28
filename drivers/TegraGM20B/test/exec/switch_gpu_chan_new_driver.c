@@ -121,6 +121,11 @@ void switch_chan_new_set_level(int high, int critical)
 	tgm_chan_set_level(made, high ? TGM_LEVEL_HIGH : TGM_LEVEL_FOREGROUND, critical);
 }
 
+void switch_chan_new_set_raw_level(uint32_t level, int critical)
+{
+	tgm_chan_set_level(made, level, critical);
+}
+
 int switch_chan_new_high(void)
 {
 	return made->high;
@@ -129,6 +134,17 @@ int switch_chan_new_high(void)
 int switch_chan_new_critical(void)
 {
 	return made->critical;
+}
+
+int switch_chan_new_busy_low(void)
+{
+	const uint64_t bit = UINT64_C(1) << (made->chid % 64u);
+	return (tgm_busy.low[made->chid / 64u] & bit) != 0 ? 1 : 0;
+}
+
+void switch_chan_new_ramfc_due(void)
+{
+	tgm_chan_ramfc_due(made);
 }
 
 static void host_save(void)
@@ -447,14 +463,6 @@ void switch_gpu_chan_named(const struct tgm_chan *chan)
 {
 }
 
-void tgm_stats_gr_bind(struct tgm_chan *chan)
-{
-}
-
-void tgm_stats_gr_unbind(struct tgm_chan *chan)
-{
-}
-
 uint32_t tgm_chan_waiter(struct tgm_chan *chan)
 {
 	return 0;
@@ -496,10 +504,6 @@ void nvxnu_wake(void)
 }
 
 void switch_gpu_compositor_job(uint64_t ns)
-{
-}
-
-void switch_gpu_compositor_sync(uint32_t syncs, uint64_t ns, int behind)
 {
 }
 
@@ -584,10 +588,6 @@ int tgm_mem_new(struct tgm_vm *vm_, const uint64_t *pas, uint32_t npages, struct
 void *tgm_pool_alloc(uint64_t bytes, uint64_t align, uint64_t *pa)
 {
 	return NULL;
-}
-
-void tgm_stats_gr_context(void)
-{
 }
 
 int tgm_vm_kmap_raw(struct tgm_vm *vm_, struct tgm_mem *mem, uint64_t bytes, int read_only,
